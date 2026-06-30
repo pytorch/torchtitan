@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import replace
+
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -26,6 +29,12 @@ def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_deepseek_v3_debugmodel_ep() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
@@ -43,6 +52,26 @@ def graph_trainer_deepseek_v3_debugmodel_minimal_async_ep() -> GraphTrainer.Conf
         model_registry,
     )
     config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_flex_attn() -> GraphTrainer.Config:
+    return graph_trainer_deepseek_v3_debugmodel()
+
+
+def graph_trainer_deepseek_v3_debugmodel_flex_attn_ep() -> GraphTrainer.Config:
+    return graph_trainer_deepseek_v3_debugmodel_ep()
+
+
+def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
+    """Test-only FlexAttention baseline that runs through eager pipeline parallelism."""
+    config = graph_trainer_deepseek_v3_debugmodel()
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        components=["loss"],
+        mode=None,
+    )
+    config.model_spec = replace(config.model_spec, pipelining_fn=pipeline_llm)
     return config
 
 

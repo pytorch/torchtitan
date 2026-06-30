@@ -6,7 +6,7 @@
 
 from dataclasses import fields
 
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.experiments.graph_trainer.graph_pp.pipeline import graph_pp_llm
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -39,7 +39,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=_parallelize_fn,
-        pipelining_fn=pipeline_llm,
+        pipelining_fn=graph_pp_llm,
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
     )

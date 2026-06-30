@@ -6,8 +6,9 @@
 
 import fnmatch
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -95,6 +96,41 @@ _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def compute_annotated_loss(
+    loss_fn: Callable[..., torch.Tensor],
+    pred: Any,
+    labels: Any,
+    loss_kwargs: dict[str, Any] | None = None,
+) -> torch.Tensor:
+    """Compute the loss tensor with the same FX metadata convention as GraphTrainer."""
+    annotated_loss_fn = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)
+    result = annotated_loss_fn(pred, labels, **(loss_kwargs or {}))
+    if isinstance(result, tuple):
+        if len(result) != 2:
+            raise ValueError(
+                "GraphTrainer loss functions must return a loss tensor or "
+                "(loss tensor, metrics)."
+            )
+        loss, _metrics = result
+        return loss
+    return result
+
+
+def accumulate_param_grads_(
+    params: Iterable[torch.Tensor],
+    grads: Iterable[torch.Tensor | None],
+) -> None:
+    """Accumulate explicit graph-produced gradients into live parameters."""
+    for param, grad in zip(params, grads, strict=True):
+        if grad is None:
+            continue
+        grad = _maybe_materialize_grad_for_param_layout(param, grad)
+        if param.grad is None:
+            param.grad = grad
+        else:
+            param.grad += grad
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:

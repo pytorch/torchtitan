@@ -18,6 +18,8 @@ from torch.fx.passes.regional_inductor import regional_inductor
 
 from torchtitan.tools.logging import logger
 
+BOXED_CODEGEN_META = "graph_trainer_boxed_codegen"
+
 
 def _ops_filter_with_distributed(name: str) -> bool:
     """Ops filter that allows distributed collective ops for serialization.
@@ -58,6 +60,7 @@ def regional_inductor_pass(
     example_inputs: tuple,
     *,
     serializable: bool = False,
+    boxed_codegen: bool = False,
 ) -> torch.fx.GraphModule:
     """Compile tagged graph regions with ``regional_inductor``.
 
@@ -76,9 +79,19 @@ def regional_inductor_pass(
             ``force_autograd_cache`` so that ``regional_inductor`` wraps
             its output in ``RegionalOutputCode``, and overrides the ops
             filter to allow distributed collective ops.
+        boxed_codegen: When True, compile the returned FX graph with boxed
+            calling convention so its mutable runtime arg list is cleared after
+            placeholder extraction.
     """
     import torch._inductor.config as ic
     from torch._subclasses.fake_tensor import FakeTensor
+
+    if serializable and boxed_codegen:
+        raise ValueError(
+            "regional_inductor_pass cannot use boxed_codegen with "
+            "serializable=True because precompile returns RegionalOutputCode, "
+            "not a normal FX GraphModule callable."
+        )
 
     def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
         """Extract the FakeTensorMode from a graph module's placeholder metadata."""
@@ -130,10 +143,14 @@ def regional_inductor_pass(
     with torch._guards.tracing(tracing_ctx):
         gm = regional_inductor(gm, example_inputs)
 
-    # regional_inductor may switch to boxed calling convention; reset to
-    # default so the graph can be called with positional args as usual.
-    gm.graph.set_codegen(torch.fx.graph.CodeGen())
+    # FX has no public boxed-codegen setter. GraphPP opts into the private
+    # codegen so compiled stage callables can clear their runtime arg lists.
+    codegen = (
+        torch.fx.graph._BoxedCodeGen() if boxed_codegen else torch.fx.graph.CodeGen()
+    )
+    gm.graph.set_codegen(codegen)
     gm.recompile()
+    gm.meta[BOXED_CODEGEN_META] = boxed_codegen
     return gm
 
 
@@ -216,7 +233,10 @@ def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
 
 
 def full_inductor_compilation_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    boxed_codegen: bool = False,
 ) -> torch.fx.GraphModule:
     """Apply full Inductor compilation by tagging every node and delegating
     to :func:`regional_inductor_pass`.
@@ -237,6 +257,12 @@ def full_inductor_compilation_pass(
     Must be the **terminal** pass — no FX-graph-level passes (e.g.
     ``custom_codegen_pass``, ``insert_kernel_annotations_pass``) can
     run after this because the FX graph is no longer authoritative.
+
+    Args:
+        gm: The graph module to compile.
+        example_inputs: Example inputs for shape propagation.
+        boxed_codegen: When True, the returned FX graph uses boxed calling
+            convention and clears its mutable runtime arg list.
     """
     import torch._inductor.config as ic
 
@@ -259,7 +285,11 @@ def full_inductor_compilation_pass(
     # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
     # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
     with ic.patch(reorder_for_peak_memory=True):
-        result = regional_inductor_pass(gm, example_inputs)
+        result = regional_inductor_pass(
+            gm,
+            example_inputs,
+            boxed_codegen=boxed_codegen,
+        )
 
     # Carry the pre-collapse cudagraph verdict forward via gm.meta. The
     # collapse is information-destroying; this is how downstream passes
