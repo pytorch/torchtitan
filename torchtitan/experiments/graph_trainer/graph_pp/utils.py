@@ -22,7 +22,6 @@ import torch
 import torch.fx as fx
 import torch.fx.node
 import torch.utils._pytree as pytree
-from torch.distributed.pipelining.microbatch import _split_block_mask
 from torch.distributed.pipelining.schedules import (
     _Action,
     BACKWARD_INPUT,
@@ -324,17 +323,16 @@ def _wrap_unwrapped_values(
     return _wrap_subclasses(values, num_values, layouts)
 
 
-def _resplit_block_mask_with_torch_pipelining(
+def _graphable_split_block_mask(
     block_mask: BlockMask,
-    *,
-    num_microbatches: int,
 ) -> BlockMask:
-    """Use PyTorch PP's BlockMask splitter for GraphPP microbatch inputs.
+    """Make a PyTorch PP-split BlockMask replayable by one traced graph.
 
-    Older split BlockMask objects can carry a closure pointing back to the
-    original full-batch BlockMask plus this microbatch's index. Re-split that
-    original value with PyTorch PP's splitter instead of maintaining a separate
-    GraphPP BlockMask construction path.
+    ``_split_block_mask`` correctly creates per-microbatch tensor metadata, but
+    its ``mask_mod`` closure captures the batch offset as a Python int. ``make_fx``
+    specializes that int, so a graph traced on microbatch 0 would replay every
+    later microbatch with offset 0. Rebuild only the closure so the offset is a
+    scalar tensor leaf while preserving PyTorch PP's split tensor metadata.
     """
     mask_mod = block_mask.mask_mod
     if not inspect.isfunction(mask_mod) or mask_mod.__closure__ is None:
@@ -345,17 +343,50 @@ def _resplit_block_mask_with_torch_pipelining(
         for name, cell in zip(mask_mod.__code__.co_freevars, mask_mod.__closure__)
     }
     base_block_mask = closure_values.get("block_mask")
-    microbatch_index = closure_values.get("idx")
+    batch_offset_index = closure_values.get("idx")
     if not isinstance(base_block_mask, BlockMask) or not isinstance(
-        microbatch_index, int
+        batch_offset_index, int
     ):
         return block_mask
-    if microbatch_index >= num_microbatches:
+    base_batch_size = base_block_mask.kv_num_blocks.size(0)
+    if batch_offset_index < 0 or batch_offset_index >= base_batch_size:
         raise ValueError(
-            "Split BlockMask microbatch index is outside the schedule: "
-            f"index={microbatch_index}, num_microbatches={num_microbatches}"
+            "Split BlockMask batch offset is outside the base BlockMask: "
+            f"offset={batch_offset_index}, batch_size={base_batch_size}"
         )
-    return _split_block_mask(base_block_mask, num_microbatches)[microbatch_index]
+    batch_offset = torch.tensor(
+        batch_offset_index,
+        device=block_mask.kv_num_blocks.device,
+        dtype=torch.int64,
+    )
+    base_mask_mod = base_block_mask.mask_mod
+
+    def graphable_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        offset = batch_offset.to(device=b.device, dtype=b.dtype)
+        return base_mask_mod(b + offset, h, q_idx, kv_idx)
+
+    return BlockMask(
+        kv_num_blocks=block_mask.kv_num_blocks,
+        kv_indices=block_mask.kv_indices,
+        full_kv_num_blocks=block_mask.full_kv_num_blocks,
+        full_kv_indices=block_mask.full_kv_indices,
+        q_num_blocks=block_mask.q_num_blocks,
+        q_indices=block_mask.q_indices,
+        full_q_num_blocks=block_mask.full_q_num_blocks,
+        full_q_indices=block_mask.full_q_indices,
+        BLOCK_SIZE=block_mask.BLOCK_SIZE,
+        mask_mod=graphable_mask_mod,
+        seq_lengths=block_mask.seq_lengths,
+        dq_write_order=block_mask.dq_write_order,
+        dq_write_order_full=block_mask.dq_write_order_full,
+        dq_kv_order=block_mask.dq_kv_order,
+        dq_kv_order_spt=block_mask.dq_kv_order_spt,
+    )
 
 
 def normalize_graph_pp_microbatch_inputs(
@@ -368,14 +399,9 @@ def normalize_graph_pp_microbatch_inputs(
             "GraphPP expected args_split and kwargs_split to have the same "
             f"microbatch count, got {len(args_split)} and {len(kwargs_split)}"
         )
-    num_microbatches = len(args_split)
-
     def normalize_leaf(value: Any) -> Any:
         if isinstance(value, BlockMask):
-            return _resplit_block_mask_with_torch_pipelining(
-                value,
-                num_microbatches=num_microbatches,
-            )
+            return _graphable_split_block_mask(value)
         return value
 
     def normalize_tree(value: Any) -> Any:

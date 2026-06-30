@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.fx.experimental.symbolic_shapes
 import torch.nn as nn
 import torch.utils._pytree as pytree
 from torch._guards import tracing, TracingContext

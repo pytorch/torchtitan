@@ -272,6 +272,52 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
     )
 
 
+GRAPH_PP_DSV3_PP_OPTIONS = (
+    "--parallelism.pipeline_parallel_degree=2"
+    " --parallelism.data_parallel_shard_degree=4"
+    " --parallelism.expert_parallel_degree=2"
+    " --training.local_batch_size=8"
+    " --training.global_batch_size=32"
+    # Eager PP cannot be the baseline for ZBVZeroBubble or DualPipeV here:
+    # FlexAttention needs torch.compile, and torch.compile is incompatible with
+    # those eager PP schedules. Compare GraphPP schedules against eager
+    # Interleaved1F1B instead. TorchTitan gradient clipping is applied per
+    # local rank, so different PP schedules can produce different clip
+    # coefficients even when pre-clip grads are bitwise equal. Disable clipping
+    # to isolate GraphPP graph execution from that schedule-level effect.
+    " --training.max_norm=inf"
+)
+
+
+GRAPH_PP_DSV3_TEST_PARALLELISM = (
+    "--compile.mode aot_fx_trace"
+    " --compile.inductor_compilation regional"
+    f" {GRAPH_PP_DSV3_PP_OPTIONS}"
+)
+
+
+def _run_graph_pp_deepseek_v3_loss_compare(schedule: str) -> bool:
+    """Run exact loss_compare for eager Interleaved1F1B PP vs GraphPP."""
+    baseline_options = (
+        f"{GRAPH_PP_DSV3_PP_OPTIONS}"
+        " --parallelism.pipeline_parallel_schedule=Interleaved1F1B"
+    )
+    test_options = (
+        f"{GRAPH_PP_DSV3_TEST_PARALLELISM}"
+        f" --parallelism.pipeline_parallel_schedule={schedule}"
+    )
+    return run_loss_compare(
+        baseline_module="graph_trainer.deepseek_v3",
+        baseline_config="graph_trainer_deepseek_v3_debugmodel_eager_pp",
+        test_module="graph_trainer.deepseek_v3",
+        test_config="graph_trainer_deepseek_v3_debugmodel",
+        baseline_options=baseline_options,
+        test_options=test_options,
+        baseline_ngpus=8,
+        test_ngpus=8,
+    )
+
+
 QWEN3_PARALLELISM = (
     "--parallelism.tensor_parallel_degree=2"
     " --parallelism.data_parallel_shard_degree=4"
@@ -437,6 +483,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_dsv3_ep_overlap_moe_batch_aot_fx_trace_vs_eager_chunked(self):
         self.assertTrue(_run_deepseek_v3_ep_overlap_moe_batch_loss_compare())
+
+    def test_graph_pp_moe_dsv3_aot_fx_trace_vs_eager(self):
+        for schedule in ("Interleaved1F1B", "ZBVZeroBubble"):
+            with self.subTest(schedule=schedule):
+                self.assertTrue(_run_graph_pp_deepseek_v3_loss_compare(schedule))
 
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(

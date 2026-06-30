@@ -141,6 +141,7 @@ def compile_time_passes(
     *,
     use_cudagraph: bool = False,
     parallel_dims=None,
+    include_inductor: bool = True,
 ) -> list[Callable]:
     """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
@@ -155,12 +156,15 @@ def compile_time_passes(
     collectives on dedicated process groups / streams (bucketing then inherits
     the new PGs). Disable with
     ``--compile.disable_passes reassign_collective_pgs_pass``.
+
+    ``include_inductor=False`` leaves the graph in FX form after the
+    metadata-preserving passes. GraphPP uses that mode before it calls its
+    standalone partitioner and compiles the extracted graphs.
     """
     from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
-    from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
     loss_config = getattr(config, "loss", None)
@@ -321,12 +325,38 @@ def compile_time_passes(
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
+    if not include_inductor:
+        return passes
+
+    passes.extend(
+        final_inductor_compile_passes(
+            config,
+            use_cudagraph=use_cudagraph,
+        )
+    )
+    return passes
+
+
+def final_inductor_compile_passes(
+    config: "GraphTrainer.Config",
+    *,
+    use_cudagraph: bool = False,
+) -> list[Callable]:
+    """Return the terminal Inductor passes for a traced graph.
+
+    GraphTrainer applies these to the full train-step graph. GraphPP applies
+    the same pass list to each extracted stage callable after its PP-specific
+    partitioning has chosen the callable boundary.
+    """
+    from torchtitan.models.common.attention import FlexAttention
+
+    passes: list[Callable] = []
     inductor_compilation = config.compile.inductor_compilation
     if inductor_compilation == "full":
         # Compile the entire graph into optimized Triton kernels. Must be
         # terminal; the FX graph is no longer authoritative after this pass.
         passes.append(full_inductor_compilation_pass)
-    if inductor_compilation == "regional":
+    elif inductor_compilation == "regional":
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         passes.append(
@@ -344,6 +374,11 @@ def compile_time_passes(
         passes.append(regional_inductor_pass)
         if use_cudagraph:
             passes.append(insert_kernel_annotations_pass)
+    else:
+        raise ValueError(
+            "--compile.inductor_compilation must be 'regional' or 'full', "
+            f"got {inductor_compilation!r}"
+        )
     return passes
 
 
