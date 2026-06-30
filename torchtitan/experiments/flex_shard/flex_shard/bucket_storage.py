@@ -9,9 +9,10 @@ from __future__ import annotations
 import fnmatch
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 
@@ -32,16 +33,7 @@ PlacementFn = Callable[
     dict[str, tuple["Placement", ...]],
 ]
 
-GradientReduceOp = Literal["avg", "sum"]
-
-
-def validate_gradient_reduce_op(op: str) -> GradientReduceOp:
-    if op not in ("avg", "sum"):
-        raise ValueError(
-            "FlexShard gradient_reduce_op must be either 'avg' or 'sum', "
-            f"but got {op!r}."
-        )
-    return cast(GradientReduceOp, op)
+GradientReduceOp = Literal[dist.ReduceOp.AVG, dist.ReduceOp.SUM]
 
 
 def gradient_reduce_op_from_infos(infos: list[ParamInfo]) -> GradientReduceOp:
@@ -55,7 +47,7 @@ def gradient_reduce_op_from_infos(infos: list[ParamInfo]) -> GradientReduceOp:
                 f"bucket, but {infos[0].fqn!r} uses {op!r} and {info.fqn!r} "
                 f"uses {info.gradient_reduce_op!r}."
             )
-    return validate_gradient_reduce_op(op)
+    return op
 
 
 @dataclass(frozen=True)
@@ -116,10 +108,10 @@ class BucketSpec:
             behavior when multiple buckets share the same hooked module.
         offload_policy: CPU offload policy for this bucket. TODO: implement
             and test CPU offload before allowing this in flex_shard().
-        gradient_reduce_op: Gradient reduction semantics. ``"avg"`` preserves
-            FlexShard's historical average-gradient behavior. ``"sum"``
-            matches FSDP2's no-gradient-division mode, where the training loop
-            owns global gradient scaling.
+        gradient_reduce_op: Gradient reduction semantics. ``dist.ReduceOp.AVG``
+            preserves FlexShard's historical average-gradient behavior.
+            ``dist.ReduceOp.SUM`` matches FSDP2's no-gradient-division mode,
+            where the training loop owns global gradient scaling.
         reshard_after_forward: Whether to free this bucket's unsharded
             parameters after forward and recompute them in backward. This
             defaults to True. Buckets that reshard after forward must have
@@ -132,7 +124,7 @@ class BucketSpec:
     mesh: DeviceMesh
     mp_policy: MixedPrecisionPolicy | None = None
     offload_policy: OffloadPolicy | None = None
-    gradient_reduce_op: GradientReduceOp = "avg"
+    gradient_reduce_op: GradientReduceOp = dist.ReduceOp.AVG
     reshard_after_forward: bool = True
 
 
@@ -167,7 +159,7 @@ class ParamInfo:
     placements: tuple[Placement, ...]
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
-    gradient_reduce_op: GradientReduceOp = "avg"
+    gradient_reduce_op: GradientReduceOp = dist.ReduceOp.AVG
     local_shape: torch.Size = field(default_factory=lambda: torch.Size([]))
     local_numel: int = 0
     byte_offset: int = 0  # byte offset into the sharded storage
@@ -212,7 +204,7 @@ class ShardedBucketStorage:
         total_bytes: int,
         module: nn.Module,
         reshard_after_forward: bool = True,
-        gradient_reduce_op: GradientReduceOp = "avg",
+        gradient_reduce_op: GradientReduceOp = dist.ReduceOp.AVG,
     ) -> None:
         if byte_storage.dtype != torch.uint8:
             raise ValueError(f"Expected uint8 storage, got {byte_storage.dtype}")
@@ -222,7 +214,7 @@ class ShardedBucketStorage:
         self._total_bytes = total_bytes
         self._module = module
         self._reshard_after_forward = reshard_after_forward
-        self._gradient_reduce_op = validate_gradient_reduce_op(gradient_reduce_op)
+        self._gradient_reduce_op = gradient_reduce_op
         for info in self._param_infos.values():
             info.gradient_reduce_op = self._gradient_reduce_op
         self._reshard_after_forward_recompute_state: (
@@ -280,7 +272,7 @@ class ShardedBucketStorage:
         mesh: DeviceMesh,
         param_placements: dict[str, tuple[Placement, ...]],
         mp_policy: MixedPrecisionPolicy | None = None,
-        gradient_reduce_op: GradientReduceOp = "avg",
+        gradient_reduce_op: GradientReduceOp = dist.ReduceOp.AVG,
     ) -> tuple[dict[str, ParamInfo], int]:
         """
         Create ParamInfo for each parameter, computing local layout and byte offsets.
@@ -480,7 +472,7 @@ class ShardedBucketStorage:
         storage_nbytes: int,
         bucket_layout: BucketLayout | None = None,
         mp_policy: MixedPrecisionPolicy | None = None,
-        gradient_reduce_op: GradientReduceOp = "avg",
+        gradient_reduce_op: GradientReduceOp = dist.ReduceOp.AVG,
     ) -> ParamInfo:
         return ParamInfo(
             fqn=fqn,
@@ -489,7 +481,7 @@ class ShardedBucketStorage:
             dtype=param.dtype,
             param_dtype=mp_policy.param_dtype if mp_policy is not None else None,
             reduce_dtype=mp_policy.reduce_dtype if mp_policy is not None else None,
-            gradient_reduce_op=validate_gradient_reduce_op(gradient_reduce_op),
+            gradient_reduce_op=gradient_reduce_op,
             requires_grad=param.requires_grad,
             placements=placements,
             local_shape=local_shape,
@@ -573,12 +565,11 @@ class ShardedBucketStorage:
         """Gradient reduction semantics for this bucket."""
         return self._gradient_reduce_op
 
-    def set_gradient_reduce_op(self, op: str) -> None:
+    def set_gradient_reduce_op(self, op: GradientReduceOp) -> None:
         """Set gradient reduction semantics for this bucket and its params."""
-        validated_op = validate_gradient_reduce_op(op)
-        self._gradient_reduce_op = validated_op
+        self._gradient_reduce_op = op
         for info in self._param_infos.values():
-            info.gradient_reduce_op = validated_op
+            info.gradient_reduce_op = op
 
     @property
     def world_size(self) -> int:

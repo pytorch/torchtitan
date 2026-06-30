@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
@@ -17,10 +18,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.experiments.flex_shard import (
-    disable_flex_shard_gradient_division,
-    flex_shard,
-)
+from torchtitan.experiments.flex_shard import flex_shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     MixedPrecisionPolicy,
 )
@@ -143,5 +141,5 @@ def _apply_flex_shard(
     )
 
     flex_shard(model, buckets=buckets)
-    disable_flex_shard_gradient_division(model)
+    model.set_gradient_reduce_op(dist.ReduceOp.SUM)
     install_flex_shard_grad_norm_clipping()
