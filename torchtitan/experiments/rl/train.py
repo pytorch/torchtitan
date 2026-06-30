@@ -23,8 +23,10 @@ python3 -m torchtitan.experiments.rl.train \
 """
 
 import asyncio
+import datetime
 import logging
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -199,6 +201,21 @@ def spawn_proc_mesh(
 async def main():
     config = ConfigManager().parse_args()
     assert isinstance(config, Controller.Config)
+
+    # Give each local run its own dump_folder so rollouts / metrics / structured
+    # logs from different runs (and different configs) don't pile into one shared
+    # directory (the recorder appends, so a shared dir mixes runs). Append
+    # "<config>-<timestamp>" to whatever dump_folder is configured.
+    _cfg_name = "run"
+    for _i, _a in enumerate(sys.argv):
+        if _a == "--config" and _i + 1 < len(sys.argv):
+            _cfg_name = sys.argv[_i + 1]
+        elif _a.startswith("--config="):
+            _cfg_name = _a.split("=", 1)[1]
+    _run_id = f"{_cfg_name}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+    config.dump_folder = os.path.join(config.dump_folder, _run_id)
+    print(f"[train] this run's dump_folder: {config.dump_folder}")
+
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
