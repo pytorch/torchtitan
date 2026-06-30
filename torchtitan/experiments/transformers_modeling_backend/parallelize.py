@@ -108,6 +108,7 @@ def parallelize_hf_transformers(
                 flex_modules.append(layer.self_attn._flex_kernel)
         if flex_modules:
             from torchtitan.distributed.context_parallel import apply_cp_to_forward
+
             apply_cp_to_forward(flex_modules, parallel_dims.get_mesh("cp"))
         logger.info("Applied Context Parallel to the model")
 

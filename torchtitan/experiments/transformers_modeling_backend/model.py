@@ -13,12 +13,12 @@ import torch
 from torch import nn
 from torch.nn import init
 
+from torch.nn.attention.flex_attention import BlockMask
+
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
-
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
@@ -262,6 +262,7 @@ class HFTransformerModel(BaseModel):
                 # HF model code has more dynamo guards than native TorchTitan,
                 # causing extra recompilations during TP warmup.
                 import torch._dynamo.config
+
                 torch._dynamo.config.cache_size_limit = 64
                 AttentionInterface._global_mapping[
                     attn_implementation
@@ -465,7 +466,10 @@ class HFTransformerModel(BaseModel):
             layer.moe_enabled = False
             # Attach FlexAttention kernel module to each attention layer
             # so apply_cp_to_forward can find and wrap it for CP.
-            if hasattr(layer, "self_attn") and config.attn_implementation == "flex_torchtitan":
+            if (
+                hasattr(layer, "self_attn")
+                and config.attn_implementation == "flex_torchtitan"
+            ):
                 layer.self_attn.register_module(
                     "_flex_kernel", HFFlexAttention(config=HFFlexAttention.Config())
                 )
