@@ -89,6 +89,12 @@ def _patch_vllm_all_reduce() -> None:
        buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at the
        cost of one staging copy per AR.
 
+    3. (spmd_types) spmd.redistribute issues an in-place dist.all_reduce that the
+       point-1 swap can't see, so route its Partial -> {R,I} reduce straight to
+       the same custom AR. Guarded on no-grad: the generator is inference-only and
+       the custom AR is sum-only/forward-only; under grad we keep spmd.redistribute
+       (its dst-dependent backward is correct).
+
     TODO: this is a stopgap to close the generator's TP all-reduce perf gap.
     Improve our native (DTensor) all-reduce path and remove this patch.
     """
@@ -127,6 +133,15 @@ def _patch_vllm_all_reduce() -> None:
             return ca.all_reduce(input, registered=False)
 
         ca.custom_all_reduce = custom_all_reduce
+
+    original_redistribute = spmd.redistribute
+
+    def redistribute(x, group, *, src, dst, **kwargs):
+        if src == spmd.P and dst in (spmd.R, spmd.I) and not torch.is_grad_enabled():
+            return tensor_model_parallel_all_reduce(x)
+        return original_redistribute(x, group, src=src, dst=dst, **kwargs)
+
+    spmd.redistribute = redistribute
 
     _tp_all_reduce_patched = True
     logger.info(
