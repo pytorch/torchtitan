@@ -23,6 +23,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.graph_pp import (
     partition_joint_graph,
+    split_di_dw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
 from torchtitan.experiments.graph_trainer.llama3 import (
@@ -365,6 +366,66 @@ class GraphPPPartitionTest(unittest.TestCase):
             )
 
 
+class GraphPPSplitDiDwTest(unittest.TestCase):
+    def test_real_flex_decoder_block_split_reconstructs_backward(self) -> None:
+        traced_block = _trace_flex_decoder_block_stage()
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced_block.traced,
+            num_fwd_outputs=1,
+            backward_only_input_indices=(len(traced_block.traced.example_inputs) - 1,),
+        )
+        split = split_di_dw_graph(
+            bw_module,
+            num_param_grads=traced_block.num_param_grads,
+        )
+
+        self.assertIsNotNone(split)
+        if split is None:
+            self.fail("Expected dI/dW split for decoder block with input grad")
+        self.assertEqual(split.num_input_grads, 1)
+        self.assertGreater(len(split.bw_dw_input_names), 0)
+
+        fw_args = [
+            traced_block.flat_inputs[index] for index in meta.fwd_flat_input_indices
+        ]
+        fw_outputs = _boxed_run(fw_module, list(fw_args))
+        bw_args = _backward_args_from_partition(
+            meta,
+            fw_outputs,
+            (traced_block.output_grad,),
+        )
+        full_bw_outputs = _boxed_run(bw_module, list(bw_args))
+
+        di_outputs = _boxed_run(split.bw_di_module, list(bw_args))
+        input_grads_to_prev = di_outputs[: split.num_input_grads]
+        dw_live_ins = di_outputs[split.num_input_grads :]
+        dw_outputs = _boxed_run(split.bw_dw_module, list(dw_live_ins))
+
+        _assert_tensor_sequence_equal(
+            self,
+            input_grads_to_prev,
+            full_bw_outputs[traced_block.num_param_grads :],
+        )
+        _assert_tensor_sequence_equal(
+            self,
+            dw_outputs,
+            full_bw_outputs[: traced_block.num_param_grads],
+        )
+
+    def test_real_flex_decoder_block_without_input_grad_skips_split(self) -> None:
+        traced_block = _trace_flex_decoder_block_stage(include_input_grad=False)
+        _, bw_module, _ = partition_joint_graph(
+            traced_block.traced,
+            num_fwd_outputs=1,
+            backward_only_input_indices=(len(traced_block.traced.example_inputs) - 1,),
+        )
+
+        split = split_di_dw_graph(
+            bw_module,
+            num_param_grads=traced_block.num_param_grads,
+        )
+
+        self.assertIsNone(split)
 
 
 if __name__ == "__main__":
