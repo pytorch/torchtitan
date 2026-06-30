@@ -23,7 +23,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.graph_pp import (
     partition_joint_graph,
+    split_backward_fsdp_collectives,
     split_di_dw_graph,
+    split_forward_fsdp_collectives,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
 from torchtitan.experiments.graph_trainer.llama3 import (
@@ -426,6 +428,212 @@ class GraphPPSplitDiDwTest(unittest.TestCase):
         )
 
         self.assertIsNone(split)
+
+
+_FAKE_PG = "graph_pp_test_pg"
+
+
+def _call_targets(gm: fx.GraphModule) -> set[object]:
+    return {node.target for node in gm.graph.nodes if node.op == "call_function"}
+
+
+def _placeholder_names(gm: fx.GraphModule) -> tuple[str, ...]:
+    return tuple(node.name for node in gm.graph.find_nodes(op="placeholder"))
+
+
+def _make_graph_module(graph: fx.Graph) -> fx.GraphModule:
+    gm = fx.GraphModule({}, graph)
+    gm.graph.lint()
+    gm.recompile()
+    return gm
+
+
+def _make_forward_graph_with_unshard_and_replicated_param() -> fx.GraphModule:
+    graph = fx.Graph()
+    sharded_param = graph.placeholder("sharded_param")
+    replicated_param = graph.placeholder("replicated_param")
+    x = graph.placeholder("x")
+    all_gather = graph.call_function(
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        args=(sharded_param, 1, _FAKE_PG),
+    )
+    wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(all_gather,),
+    )
+    split = graph.call_function(torch.ops.aten.split.Tensor, args=(wait, 2, 0))
+    left = graph.call_function(operator.getitem, args=(split, 0))
+    right = graph.call_function(operator.getitem, args=(split, 1))
+    unsharded_param = graph.call_function(
+        torch.ops.aten.cat.default,
+        args=([left, right], 0),
+    )
+    params = graph.call_function(
+        torch.ops.aten.add.Tensor,
+        args=(unsharded_param, replicated_param),
+    )
+    out = graph.call_function(torch.ops.aten.add.Tensor, args=(params, x))
+    graph.output((out,))
+    return _make_graph_module(graph)
+
+
+def _make_forward_graph_without_fsdp() -> fx.GraphModule:
+    graph = fx.Graph()
+    param = graph.placeholder("param")
+    x = graph.placeholder("x")
+    out = graph.call_function(torch.ops.aten.add.Tensor, args=(param, x))
+    graph.output((out,))
+    return _make_graph_module(graph)
+
+
+def _make_forward_graph_without_wait() -> fx.GraphModule:
+    graph = fx.Graph()
+    param = graph.placeholder("param")
+    x = graph.placeholder("x")
+    all_gather = graph.call_function(
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        args=(param, 1, _FAKE_PG),
+    )
+    out = graph.call_function(torch.ops.aten.add.Tensor, args=(all_gather, x))
+    graph.output((out,))
+    return _make_graph_module(graph)
+
+
+def _make_backward_graph_with_reduce_grad_epilogues() -> fx.GraphModule:
+    graph = fx.Graph()
+    fsdp_grad = graph.placeholder("fsdp_grad")
+    ddp_grad = graph.placeholder("ddp_grad")
+    input_grad = graph.placeholder("input_grad")
+    cast = graph.call_function(
+        torch.ops.aten._to_copy.default,
+        args=(fsdp_grad,),
+        kwargs={"dtype": torch.float32},
+    )
+    reduce_scatter = graph.call_function(
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        args=(cast, "sum", 1, _FAKE_PG),
+    )
+    reduce_scatter_wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(reduce_scatter,),
+    )
+    all_reduce = graph.call_function(
+        torch.ops._c10d_functional.all_reduce.default,
+        args=(ddp_grad, "sum", _FAKE_PG),
+    )
+    all_reduce_wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(all_reduce,),
+    )
+    graph.output((reduce_scatter_wait, all_reduce_wait, None, input_grad))
+    return _make_graph_module(graph)
+
+
+def _make_backward_graph_without_fsdp() -> fx.GraphModule:
+    graph = fx.Graph()
+    grad = graph.placeholder("grad")
+    out = graph.call_function(torch.ops.aten.neg.default, args=(grad,))
+    graph.output((out,))
+    return _make_graph_module(graph)
+
+
+class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
+    def test_forward_split_extracts_unshard_and_replicated_params(self) -> None:
+        split = split_forward_fsdp_collectives(
+            _make_forward_graph_with_unshard_and_replicated_param(),
+            num_params=2,
+            fwd_input_names=("sharded_param", "replicated_param", "x"),
+            fwd_flat_input_indices=(0, 1, 2),
+        )
+
+        self.assertIsNotNone(split.unshard_module)
+        if split.unshard_module is None:
+            self.fail("Expected forward FSDP split to extract an unshard graph")
+        self.assertEqual(
+            _placeholder_names(split.unshard_module),
+            ("sharded_param", "replicated_param"),
+        )
+        self.assertEqual(split.unshard_flat_param_indices, (0, 1))
+        self.assertEqual(split.num_fw_unsharded_param_inputs, 2)
+        self.assertEqual(split.fw_no_fsdp_flat_input_indices, (2,))
+        self.assertIn(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            _call_targets(split.unshard_module),
+        )
+        self.assertIn(torch.ops.aten.cat.default, _call_targets(split.unshard_module))
+        self.assertNotIn(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            _call_targets(split.fw_no_fsdp_module),
+        )
+
+    def test_forward_split_no_fsdp_is_noop(self) -> None:
+        gm = _make_forward_graph_without_fsdp()
+        split = split_forward_fsdp_collectives(
+            gm,
+            num_params=1,
+            fwd_input_names=("param", "x"),
+            fwd_flat_input_indices=(0, 1),
+        )
+
+        self.assertIsNone(split.unshard_module)
+        self.assertIs(split.fw_no_fsdp_module, gm)
+        self.assertEqual(split.fw_no_fsdp_input_names, ("param", "x"))
+        self.assertEqual(split.fw_no_fsdp_flat_input_indices, (0, 1))
+
+    def test_forward_split_requires_wait_after_all_gather(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Expected wait_tensor"):
+            split_forward_fsdp_collectives(
+                _make_forward_graph_without_wait(),
+                num_params=1,
+                fwd_input_names=("param", "x"),
+                fwd_flat_input_indices=(0, 1),
+            )
+
+    def test_backward_split_extracts_reduce_grad_epilogues(self) -> None:
+        split = split_backward_fsdp_collectives(
+            _make_backward_graph_with_reduce_grad_epilogues(),
+            num_param_grads=3,
+        )
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected backward FSDP split to extract reduce-grad graph")
+        bw_no_fsdp_targets = _call_targets(split.bw_no_fsdp_module)
+        reduce_grad_targets = _call_targets(split.reduce_grad_module)
+        self.assertIn(torch.ops.aten._to_copy.default, bw_no_fsdp_targets)
+        self.assertNotIn(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            bw_no_fsdp_targets,
+        )
+        self.assertNotIn(
+            torch.ops._c10d_functional.all_reduce.default,
+            bw_no_fsdp_targets,
+        )
+        self.assertNotIn(torch.ops.aten._to_copy.default, reduce_grad_targets)
+        self.assertIn(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            reduce_grad_targets,
+        )
+        self.assertIn(
+            torch.ops._c10d_functional.all_reduce.default,
+            reduce_grad_targets,
+        )
+        self.assertEqual(
+            split.reduce_grad_input_names,
+            split.bw_no_fsdp_output_names[:2],
+        )
+        self.assertEqual(len(split.bw_no_fsdp_output_names), 4)
+        self.assertEqual(split.bw_no_fsdp_output_names[-1], "input_grad")
+
+    def test_backward_split_no_fsdp_is_noop_and_validates_grad_count(self) -> None:
+        gm = _make_backward_graph_without_fsdp()
+        split = split_backward_fsdp_collectives(gm, num_param_grads=1)
+
+        self.assertIsNone(split.reduce_grad_module)
+        self.assertIs(split.bw_no_fsdp_module, gm)
+
+        with self.assertRaisesRegex(ValueError, "num_param_grads cannot exceed"):
+            split_backward_fsdp_collectives(gm, num_param_grads=2)
 
 
 if __name__ == "__main__":
