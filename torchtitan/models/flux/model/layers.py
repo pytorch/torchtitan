@@ -18,17 +18,6 @@ from torchtitan.protocols.module import Module, Sequential
 
 
 @spmd.local_map(
-    in_types=(
-        spmd.PartitionSpec("dp", "cp", None),
-        spmd.PartitionSpec("dp", "cp", None),
-    ),
-    out_types=spmd.PartitionSpec("dp", "cp", None),
-)
-def local_concat_text_image(text: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
-    return torch.cat((text, image), dim=1)
-
-
-@spmd.local_map(
     in_types=(spmd.PartitionSpec("dp", "cp", None), None),
     out_types=(
         spmd.PartitionSpec("dp", "cp", None),
@@ -40,20 +29,6 @@ def local_split_text_image(
     text_seq_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return combined[:, :text_seq_len], combined[:, text_seq_len:]
-
-
-@spmd.local_map(
-    in_types=(
-        spmd.PartitionSpec("dp", "cp", None, None),
-        spmd.PartitionSpec("dp", "cp", None, None),
-    ),
-    out_types=spmd.PartitionSpec("dp", "cp", None, None),
-)
-def local_concat_text_image_attention_states(
-    text: torch.Tensor,
-    image: torch.Tensor,
-) -> torch.Tensor:
-    return torch.cat((text, image), dim=1)
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -281,6 +256,20 @@ class DoubleStreamBlock(Module):
 
         self.inner_attention = config.inner_attention.build()
 
+    @staticmethod
+    @spmd.local_map(
+        in_types=(
+            spmd.PartitionSpec("dp", "cp", None, None),
+            spmd.PartitionSpec("dp", "cp", None, None),
+        ),
+        out_types=spmd.PartitionSpec("dp", "cp", None, None),
+    )
+    def local_concat_text_image_attention_states(
+        text: torch.Tensor,
+        image: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.cat((text, image), dim=1)
+
     def forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
     ) -> tuple[Tensor, Tensor]:
@@ -308,9 +297,9 @@ class DoubleStreamBlock(Module):
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
-        q = local_concat_text_image_attention_states(txt_q, img_q)
-        k = local_concat_text_image_attention_states(txt_k, img_k)
-        v = local_concat_text_image_attention_states(txt_v, img_v)
+        q = self.local_concat_text_image_attention_states(txt_q, img_q)
+        k = self.local_concat_text_image_attention_states(txt_k, img_k)
+        v = self.local_concat_text_image_attention_states(txt_v, img_v)
 
         q, k = apply_rope(q, k, pe)
         attn = self.inner_attention(q, k, v, is_causal=False)

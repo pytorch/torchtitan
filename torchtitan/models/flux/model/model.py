@@ -6,6 +6,8 @@
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
+import torch
 from torch import nn, Tensor
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
@@ -19,7 +21,6 @@ from torchtitan.models.flux.model.layers import (
     LastLayer,
     MLPEmbedder,
     SingleStreamBlock,
-    local_concat_text_image,
     local_split_text_image,
     timestep_embedding,
 )
@@ -146,6 +147,17 @@ class FluxModel(BaseModel):
 
         self.final_layer = config.final_layer_config.build()
 
+    @staticmethod
+    @spmd.local_map(
+        in_types=(
+            spmd.PartitionSpec("dp", "cp", None),
+            spmd.PartitionSpec("dp", "cp", None),
+        ),
+        out_types=spmd.PartitionSpec("dp", "cp", None),
+    )
+    def local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
+        return torch.cat((text, image), dim=1)
+
     def forward(
         self,
         img: Tensor,
@@ -164,13 +176,13 @@ class FluxModel(BaseModel):
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 
-        ids = local_concat_text_image(txt_ids, img_ids)
+        ids = self.local_concat_text_image(txt_ids, img_ids)
         pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
-        img = local_concat_text_image(txt, img)
+        img = self.local_concat_text_image(txt, img)
         for block in self.single_blocks:
             img = block(img, vec=vec, pe=pe)
         _, img = local_split_text_image(img, txt.shape[1])
