@@ -981,11 +981,11 @@ class HFTransformerModel(BaseModel):
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a document-causal flex BlockMask for packed sequences.
 
-        Returns None unless flex attention is enabled (``use_flex_attn``); the
-        trainer's capability-based gate calls this and threads the result into
-        ``forward`` as ``attention_masks``. The mask is causal AND same-document,
-        so packed samples don't attend across boundaries — which ``is_causal``
-        alone (the SDPA path) cannot express.
+        Returns None unless flex attention is enabled (``use_flex_attn``).
+        ``forward`` calls this and passes the result through as the HF
+        ``attention_mask``. The mask is causal AND same-document, so packed
+        samples don't attend across boundaries -- which ``is_causal`` alone
+        (the SDPA path) cannot express.
         """
         if not getattr(self.model.config, "use_flex_attn", False):
             return None
@@ -1014,6 +1014,14 @@ class HFTransformerModel(BaseModel):
             # Per-document positions (reset at packed-sample boundaries) drive
             # RoPE under flex; the BlockMask handles cross-sample masking.
             kwargs["position_ids"] = positions
+            # Build the document-causal BlockMask here rather than in the core
+            # trainer: the trainer only builds masks for Decoder.Config models,
+            # so this backend opts in by building its own (keeps trainer.py free
+            # of HF-backend special-casing). This outer forward runs eager (only
+            # the inner transformer blocks are compiled), so BlockMask creation
+            # here is safe.
+            if attention_masks is None:
+                attention_masks = self.get_attention_masks(positions)
         else:
             local_seq_len = self.max_seq_len
             local_seq_len //= (

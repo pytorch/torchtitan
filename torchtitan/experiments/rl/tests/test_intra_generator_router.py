@@ -91,6 +91,6 @@ def test_sticky_pins_session_to_dp_rank():
 @pytest.mark.parametrize("dp_degree", [0, 1])
 def test_rejects_dp_degree_without_routing(dp_degree: int):
     with pytest.raises(ValueError, match="dp_degree must be > 1"):
-        IntraGeneratorRouter.Config(strategy=RoundRobinRoutingStrategy.Config()).build(
-            dp_degree=dp_degree
-        )
+        IntraGeneratorRouter.Config(
+            strategy=RoundRobinRoutingStrategy.Config()
+        ).build(dp_degree=dp_degree)
