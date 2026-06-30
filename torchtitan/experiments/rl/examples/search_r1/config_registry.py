@@ -35,6 +35,9 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.training_sample_builder import (
+    TrainingSampleBuilder,
+)
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -161,7 +164,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     keeps the compact (host-synced, backward-able) DeepEP path; the generator applies the
     ``deepep_inference`` override to switch its dispatchers to the cudagraph-able EXPAND
     layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
-    as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
+    as ``rl_grpo_qwen3_30b_a3b_varlen_perf``. The generator graphs pure-decode batches
+    (FULL_DECODE_ONLY) and runs prefill / mixed batches eager (see the ``cudagraph`` knob).
     """
     model_spec = model_registry(
         "30B-A3B", attn_backend="varlen", moe_comm_backend="deepep"
@@ -177,15 +181,36 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     config = Controller.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
-        num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
+        # Generation is the async-loop bottleneck; run several generators (the
+        # GeneratorRouter load-balances rollouts). Each is one host (TP=4/EP=4); the
+        # single controller retrieval server caps how far this scales.
+        num_generators=4,
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
-            num_groups_per_train_step=32,  # TODO: TBD
-            group_size=8,  # TODO: TBD
-            validation=ValidationConfig(num_samples=500),
+            # GRPO grouping: 8 groups/step x group_size=8 = 64 rollouts/step. With
+            # FULL_DECODE_ONLY the model already scores ~25% nonzero from cold start, so
+            # drop_zero_std=True is safe and important: it drops all-same-reward
+            # (zero-advantage) groups. Keeping them (False) left ~1/3 of steps with
+            # grad_norm==0 and diluted the rest -> reward stayed flat; dropping them gives
+            # the full gradient from the useful groups.
+            num_groups_per_train_step=8,
+            group_size=8,
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=True
+            ),
+            # Periodic held-out validation every `interval` steps so the validation_reward
+            # curve shows whether the policy actually improves (the per-step train reward
+            # is too noisy to read a trend). It runs on the otherwise-idle generators.
+            validation=ValidationConfig(num_samples=500, interval=20),
+            # local_batch_size>1 packs several rows per forward pass, so a step splits
+            # into fewer microbatches -> the inter-node EP all-to-all (48 layers x
+            # microbatch) runs fewer rounds and the experts see more tokens per dispatch.
+            # That all-to-all (not generation) gates the 2-host trainer, so this is the
+            # main throughput lever. local_batch_size=4 tripped a CUDA "unspecified launch
+            # failure" (memory edge) on the first fwd/bwd; 2 is the headroom-safe step up
+            # from 1. seq_len=4096 holds a full rollout (max 3072 tokens).
             batcher=Batcher.Config(
-                # TODO: TBD local_batch_size, seq_len
-                batch=BatchConfig(local_batch_size=1, seq_len=4096),
+                batch=BatchConfig(local_batch_size=2, seq_len=4096),
             ),
         ),
         compile=CompileConfig(enable=False),
@@ -199,10 +224,14 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
             ),
+            # FSDP=16/EP=16 (two H100 hosts). FSDP=32/EP=8 over four hosts kept the EP
+            # all-to-all intra-node but moved the FSDP all-gather inter-node across four
+            # nodes -- net no speedup and 2 extra hosts, so reverted. FSDP=8/EP=8 on one
+            # host OOM'd, hence 16.
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=8,  # TODO: TBD
+                data_parallel_shard_degree=16,
                 tensor_parallel_degree=1,
-                expert_parallel_degree=8,
+                expert_parallel_degree=16,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -211,7 +240,13 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 last_save_model_only=False,
                 keep_latest_k=3,
             ),
-            loss=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
+            # Chunked loss: a bare DAPOLoss materializes the full-vocab (151936) x seq_len
+            # logits/logprobs in one shot -> forward_backward OOMs on 80GB. Slicing into
+            # num_chunks bounds that transient (same DAPO clip params).
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=16,
+                loss_fn=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
+            ),
             override=OverrideConfig(imports=list(perf_imports)),
         ),
         generator=VLLMGenerator.Config(
@@ -221,16 +256,20 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            # varlen attention -> FULL_AND_PIECEWISE (decode captured FULL, prefill
-            # piecewise).
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            # FULL_DECODE_ONLY: graph pure-decode batches, run prefill / mixed eager.
+            # FULL_AND_PIECEWISE (graphs prefill / mixed too) corrupted the DeepEP EXPAND
+            # MoE forward -> garbage output, no search, 0 reward. Decode-only graphing
+            # avoids it (#3668, as the 1.7B/8B/dense configs) and is far faster than eager.
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_DECODE_ONLY"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            # Generator-only: the DeepEP cudagraph EXPAND override on top of the perf
-            # overrides; the trainer keeps the compact path.
+            # Generator override: helion_rope + the DeepEP EXPAND inference override, but
+            # NOT fused_swiglu -- its fused_grouped_experts claims `moe.experts` while
+            # deepep_inference claims the descendant `moe.experts.token_dispatcher`, a
+            # nested-override conflict (#3778). The trainer keeps fused_swiglu.
             override=OverrideConfig(
                 imports=[
-                    *perf_imports,
+                    "torchtitan.overrides.helion_rope",
                     "torchtitan.distributed.deepep.inference_override",
                 ]
             ),

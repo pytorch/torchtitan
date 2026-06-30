@@ -496,23 +496,32 @@ class PolicyTrainer(Actor, Configurable):
         """
         state_dict = self.model.state_dict()
         if self._transfer_dtype is not None:
-            # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
-            # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
-            # Exclude buffers from the cast: FSDP mixed precision casts params to the compute dtype but
-            # leaves buffers at their registered dtype (same as pretraining), e.g. the fp32
-            # expert_bias_E load-balance bias in MoE. The generator keeps those buffers at the same
-            # registered dtype, so casting them here would mismatch its state dict and fail torchstore's
-            # dtype check on weight sync.
-            # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
-            #   CPU-staged path.
-            buffer_names = {name for name, _ in self.model.named_buffers()}
+            # torchstore only applies `transfer_dtype` on the RDMA path, so under
+            # direct_rdma=False cast to the generator dtype here (else the generator reads
+            # fp32 into its bf16 state dict). Exclude buffers from the cast: FSDP mixed
+            # precision casts params to the compute dtype but leaves buffers at their
+            # registered dtype (e.g. the fp32 expert_bias_E load-balance bias in MoE),
+            # which the bf16 generator also keeps fp32 -- casting them would fail
+            # torchstore's get-side dtype check. named_buffers() FQNs carry module-wrapper
+            # segments (activation checkpoint's `._checkpoint_wrapped_module`, compile's
+            # `._orig_mod`) that state_dict() strips, so normalize both before matching,
+            # else a wrapped buffer is misclassified as a param and wrongly cast.
+            # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype
+            #   on the CPU-staged path.
+            def _clean(n: str) -> str:
+                return n.replace("._checkpoint_wrapped_module", "").replace(
+                    "._orig_mod", ""
+                )
+
+            buffer_names = {_clean(name) for name, _ in self.model.named_buffers()}
             state_dict = {
                 name: (
-                    tensor if name in buffer_names else tensor.to(self._transfer_dtype)
+                    tensor
+                    if _clean(name) in buffer_names
+                    else tensor.to(self._transfer_dtype)
                 )
                 for name, tensor in state_dict.items()
             }
-
         await ts.put_state_dict(
             state_dict,
             "model_state_dict",
