@@ -191,6 +191,10 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
 def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
+
+    Trainer keeps fp32 master weights; FSDP mixed precision
+    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
     """
     config = rl_grpo_qwen3_0_6b_flex()
     config.model_spec = _qwen3_rl_model_registry(
@@ -205,6 +209,8 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
+        # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
+        training=TrainingConfig(),
         parallelism=dataclasses.replace(
             config.trainer.parallelism, enable_sequence_parallel=False
         ),
@@ -332,7 +338,12 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
 
 
 def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
-    """Small GPT-OSS debug config in deterministic + batch-invariant mode."""
+    """Small GPT-OSS debug config in deterministic + batch-invariant mode.
+
+    Trainer keeps fp32 master weights; FSDP mixed precision
+    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
+    """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
     return Controller.Config(
@@ -360,7 +371,9 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            # fp32 master weights; FSDP mixed precision casts to bf16 for the
+            # forward (mixed_precision_param="bfloat16" is the default).
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
@@ -623,10 +636,11 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     MoE layers use EP=4.
 
     Parity: trainer FSDP2 TP2 EP4 matches generator DP2 TP2 EP4 bitwise
-    (verified ``bit_wise/logprob_diff/max == 0``). Plain FSDP works ONLY because the FSDP all-gather runs in bf16
-    (``training.mixed_precision_param == "bfloat16"``, the default): it gathers
-    the full bf16 params before the forward, so the dense forward is numerically
-    identical to the generator's replicated bf16 dense DP.
+    (verified ``bit_wise/logprob_diff/max == 0``). The trainer holds fp32 master
+    weights; FSDP mixed precision (``training.mixed_precision_param ==
+    "bfloat16"``, the default) all-gathers the full params in bf16 before the
+    forward, so the forward is numerically identical to the generator's
+    replicated bf16 dense DP.
 
     """
     group_size = 8
@@ -656,7 +670,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            # fp32 master weights; FSDP mixed precision casts to bf16 for the
+            # forward (mixed_precision_param="bfloat16" is the default).
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
@@ -791,6 +807,12 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
     """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
+
+    Trainer keeps fp32 master weights; FSDP mixed precision
+    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    forward (the cast happens even at data_parallel_shard_degree=1, where FSDP
+    wraps the model purely as a mixed-precision boundary), so the trainer
+    forward is bitwise identical to the bf16 generator.
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
@@ -816,9 +838,10 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            # bfloat16 is needed for trainer to align with generator dtype
-            # TODO: replace bfloat16 enablement with FSDP2+TP2
-            training=TrainingConfig(dtype="bfloat16"),
+            # fp32 master weights; FSDP mixed precision casts to bf16 for the
+            # forward (mixed_precision_param="bfloat16" is the TrainingConfig
+            # default), aligning the trainer forward with the bf16 generator.
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
