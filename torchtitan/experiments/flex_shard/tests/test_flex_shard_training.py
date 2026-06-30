@@ -296,7 +296,9 @@ class TestFlexShardTraining(FSDPTest):
         composed_context_fn = model.layers[0].checkpoint_fn.keywords["context_fn"]
         self.assertIsNot(composed_context_fn, _prefer_recompute_context_fn)
         forward_ctx, _ = composed_context_fn()
-        from torchtitan.experiments.flex_shard.flex_shard.ops import UNSHARD_BUCKET_OP
+        from torchtitan.experiments.flex_shard.flex_shard.unshard_op import (
+            UNSHARD_BUCKET_OP,
+        )
 
         self.assertEqual(
             forward_ctx.policy_fn(

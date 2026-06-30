@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from .bucket_storage import ShardedBucketStorage
-from .ops import is_unshard_bucket_op
+from .unshard_op import is_unshard_bucket_op
 from .utils import (
     _module_path_common_prefix,
     _strip_checkpoint_wrapped_module_path,

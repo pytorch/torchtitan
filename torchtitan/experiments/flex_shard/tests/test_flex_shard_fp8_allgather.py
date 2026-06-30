@@ -118,7 +118,7 @@ class TestFp8AllGatherLayout(TestCase):
         self.assertEqual(bucket_layout.global_numel % (block * block), 0)
 
     def test_semantic_unshard_marker_preserves_autograd(self) -> None:
-        from torchtitan.experiments.flex_shard.flex_shard.ops import (
+        from torchtitan.experiments.flex_shard.flex_shard.unshard_op import (
             is_unshard_bucket_op,
             mark_unshard_bucket,
             UNSHARD_BUCKET_OP,

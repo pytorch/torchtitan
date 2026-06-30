@@ -24,7 +24,7 @@ from .bucket_comm import (
     ReduceGradHandle,
     UnshardHandle,
 )
-from .ops import mark_unshard_bucket
+from .unshard_op import mark_unshard_bucket
 from .bucket_storage import BucketSpec, ParamInfo, ShardedBucketStorage
 from .unsharded_param_getters import UnshardedParamSlot
 from .utils import (
