@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchtitan.distributed.aux_loss import inject_aux_loss
+from torchtitan.distributed.utils import dist_max, dist_mean
 from torchtitan.models.common.attention import (
     BaseAttention,
     create_attention_mask,
@@ -21,12 +23,149 @@ from torchtitan.protocols.module import Module
 from .compressor import Compressor, Indexer
 
 
+class DSAIndexerAuxLoss(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        num_heads: int
+        softmax_scale: float
+        window_size: int
+        eps: float = 1e-10
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.num_heads = config.num_heads
+        self.softmax_scale = config.softmax_scale
+        self.window_size = config.window_size
+        self.eps = config.eps
+        self.register_buffer(
+            "loss_value",
+            torch.zeros((), dtype=torch.float32),
+            persistent=False,
+        )
+
+    def _init_self_buffers(self, *, buffer_device=None):
+        if buffer_device is None:
+            buffer_device = self.loss_value.device
+        with torch.device(buffer_device):
+            self.loss_value = torch.zeros((), dtype=torch.float32)
+
+    def _selected_main_attn_dist(
+        self,
+        q,
+        kv_compress,
+        compress_topk_idxs,
+        attn_lse,
+    ) -> torch.Tensor:
+        _, seqlen, _, head_dim = q.size()
+        gather_idxs = compress_topk_idxs.clamp(min=0)
+        selected_kv = torch.gather(
+            kv_compress.unsqueeze(1).expand(-1, seqlen, -1, -1),
+            dim=2,
+            index=gather_idxs.unsqueeze(-1).expand(-1, -1, -1, head_dim),
+        )
+
+        selected_score = (
+            torch.einsum("bshd,bskd->bhsk", q, selected_kv) * self.softmax_scale
+        )
+        selected_prob = torch.exp(
+            selected_score.float() - attn_lse.transpose(1, 2).unsqueeze(-1).float()
+        )
+        selected_prob = selected_prob.masked_fill(
+            compress_topk_idxs.unsqueeze(1) < 0, 0.0
+        )
+        return selected_prob.sum(dim=1) / self.num_heads
+
+    def _indexer_loss(
+        self,
+        selected_main_attn_dist,
+        index_score,
+        compress_topk_idxs,
+    ) -> torch.Tensor:
+        selected_main_attn_dist = selected_main_attn_dist.float().clamp_min(0)
+        target_sum = selected_main_attn_dist.sum(dim=-1, keepdim=True)
+        valid_target = target_sum > self.eps
+
+        index_score = torch.where(
+            valid_target,
+            index_score,
+            torch.zeros_like(index_score),
+        )
+        index_score = F.log_softmax(index_score, dim=-1, dtype=torch.float32)
+
+        selected_main_attn_dist = selected_main_attn_dist / target_sum.clamp_min(
+            self.eps
+        )
+        positive_target = selected_main_attn_dist > 0
+        index_score = torch.where(
+            positive_target,
+            index_score,
+            torch.zeros_like(index_score),
+        )
+        log_selected_main_attn_dist = selected_main_attn_dist.clamp_min(
+            self.eps
+        ).log()
+        loss = (
+            selected_main_attn_dist * (log_selected_main_attn_dist - index_score)
+        ).sum(dim=-1)
+        loss = (target_sum.squeeze(-1) * loss).mean()
+        return loss * self.softmax_scale
+
+    def forward(
+        self,
+        carrier,
+        q,
+        kv_compress,
+        compress_topk_idxs,
+        index_score,
+        attn_lse,
+    ):
+        if index_score.numel() == 0:
+            return carrier
+        compress_topk_idxs = torch.where(
+            compress_topk_idxs < 0,
+            compress_topk_idxs,
+            compress_topk_idxs - q.size(1),
+        )
+        selected_main_attn_dist = self._selected_main_attn_dist(
+            q,
+            kv_compress,
+            compress_topk_idxs,
+            attn_lse,
+        )
+        loss = self._indexer_loss(
+            selected_main_attn_dist,
+            index_score,
+            compress_topk_idxs,
+        )
+        if self.training:
+            self.loss_value.copy_(loss.detach().float())
+        return inject_aux_loss(carrier, loss)
+
+
+def collect_dsa_indexer_loss_metrics(model_parts, parallel_dims) -> dict[str, float]:
+    modules = [
+        m
+        for model_part in model_parts
+        for m in model_part.modules()
+        if isinstance(m, DSAIndexerAuxLoss)
+    ]
+    if not modules:
+        return {}
+    batch_mesh = parallel_dims.get_optional_mesh("batch")
+    layer_values = torch.stack([m.loss_value.detach() for m in modules])
+    return {
+        "dsa_indexer_loss/mean": dist_mean(layer_values.mean(), batch_mesh),
+        "dsa_indexer_loss/max": dist_max(layer_values.max(), batch_mesh),
+    }
+
+
 class DSAFlexAttention(FlexAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(FlexAttention.Config):
         window_size: int
         compress_ratio: int
         softmax_scale: float
+        return_lse: bool = False
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -34,6 +173,7 @@ class DSAFlexAttention(FlexAttention):
         self.compress_ratio = config.compress_ratio
         self.softmax_scale = config.softmax_scale
         self.block_size = config.block_size
+        self.return_lse = config.return_lse
 
     def _create_window_mask(
         self,
@@ -198,6 +338,9 @@ class DSAFlexAttention(FlexAttention):
         def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
             return torch.where(kv_idx == sink_idx, attn_sink[h], score)
 
+        def maybe_return_lse(out, lse):
+            return out, lse
+
         return super().forward(
             query_states,
             key_value_states,
@@ -206,26 +349,8 @@ class DSAFlexAttention(FlexAttention):
             score_mod=v4_sink_score_mod,
             scale=self.softmax_scale,
             enable_gqa=True,
+            out_transform=maybe_return_lse if self.return_lse else None,
         )
-
-
-class GetAttnScores(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        pass
-
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-
-    def forward(self, query, key, attention_masks, num_attn_heads, attn_scale):
-        if num_attn_heads > 1:
-            key = key.repeat_interleave(num_attn_heads, dim=1)
-        attn = (query @ key.transpose(-1, -2)) * attn_scale
-        if attention_masks is not None:
-            attn.masked_fill_(attention_masks, float("-inf"))
-        attn = F.softmax(attn.float(), dim=-1)
-        attn = attn.sum(dim=1)
-        return attn
 
 
 class Attention(BaseAttention):
@@ -265,7 +390,7 @@ class Attention(BaseAttention):
         compressor: Compressor.Config | None = None
         compressor_128: Compressor.Config | None = None
         indexer: Indexer.Config | None = None
-        sparse_attn: DSAFlexAttention.Config | None = None
+        indexer_aux_loss: DSAIndexerAuxLoss.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -298,10 +423,12 @@ class Attention(BaseAttention):
             self.compressor = cfg.compressor.build()
         if cfg.indexer is not None:
             self.indexer = cfg.indexer.build()
+        if cfg.indexer_aux_loss is not None:
+            self.indexer_aux_loss = cfg.indexer_aux_loss.build()
         if cfg.compressor_128 is not None:
             self.compressor_128 = cfg.compressor_128.build()
 
-        self.sparse_attn = cfg.sparse_attn.build()
+        self.inner_attention = cfg.inner_attention.build()
         self._dsa_loss_tracker = None
 
     def set_dsa_loss_tracker(self, tracker):
@@ -324,7 +451,7 @@ class Attention(BaseAttention):
         q = torch.cat([q_nope, q_rope], dim=-1)
         kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
 
-        kv_compress = compress_topk_idxs = None
+        kv_compress = compress_topk_idxs = index_score = None
 
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
             base = torch.arange(seqlen, device=x.device).unsqueeze(1)
@@ -335,7 +462,7 @@ class Attention(BaseAttention):
                 ).unsqueeze(0)
                 >= compress_causal_limit
             )
-            compress_topk_idxs, _ = self.indexer(
+            compress_topk_idxs, index_score = self.indexer(
                 x.detach(), qr.detach(),
                 compress_causal_mask, compress_causal_limit,
                 positions=positions,
@@ -354,9 +481,27 @@ class Attention(BaseAttention):
             compress_topk_idxs = torch.empty(
                 (bsz, seqlen, 0), dtype=torch.int64, device=x.device
             )
-        o = self.sparse_attn(
+        attn_out = self.inner_attention(
             q, kv, attn_sink_param, kv_compress, compress_topk_idxs,
         )
+        if isinstance(attn_out, tuple):
+            o, attn_lse = attn_out
+        else:
+            o, attn_lse = attn_out, None
+        if (
+            self.training
+            and hasattr(self, "indexer_aux_loss")
+            and index_score is not None
+            and attn_lse is not None
+        ):
+            o = self.indexer_aux_loss(
+                o,
+                q.detach(),
+                kv_compress.detach(),
+                compress_topk_idxs,
+                index_score,
+                attn_lse.detach(),
+            )
 
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
         o_rope = self.rope(o_rope, o_rope, positions)[0]

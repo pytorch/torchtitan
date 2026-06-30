@@ -57,7 +57,9 @@ def dense_token_ids_sequence_parallel_placement() -> SpmdLayout:
     )
 
 
-def set_dsa_flex_attention_sharding(sparse_attn_cfg, *, compress_ratio: int) -> None:
+def set_dsa_flex_attention_sharding(
+    inner_attention_cfg, *, compress_ratio: int
+) -> None:
     query_states = dense_activation_placement(tp=spmd.S(2))
     replicated_activation = dense_activation_placement(tp=spmd.R)
 
@@ -76,12 +78,49 @@ def set_dsa_flex_attention_sharding(sparse_attn_cfg, *, compress_ratio: int) -> 
         replicated_activation,
     ]
 
-    sparse_attn_cfg.sharding_config = ShardingConfig(
+    returns_lse = getattr(inner_attention_cfg, "return_lse", False)
+    out_src_shardings = (query_states, query_states) if returns_lse else query_states
+    out_dst_shardings = None if returns_lse else query_states
+
+    inner_attention_cfg.sharding_config = ShardingConfig(
+        in_src_shardings=input_shardings,
+        in_dst_shardings=dict(input_shardings),
+        out_src_shardings=out_src_shardings,
+        out_dst_shardings=out_dst_shardings,
+        local_map=LocalMapConfig(in_grad_placements=tuple(grad_placements)),
+    )
+
+
+def set_dsa_indexer_aux_loss_sharding(indexer_aux_loss_cfg) -> None:
+    query_states = dense_activation_placement(tp=spmd.S(2))
+    replicated_activation = dense_activation_placement(tp=spmd.R)
+    partial_activation = dense_activation_placement(tp=spmd.P)
+
+    input_shardings = {
+        "carrier": query_states,
+        "q": query_states,
+        "kv_compress": replicated_activation,
+        "compress_topk_idxs": replicated_activation,
+        "index_score": replicated_activation,
+        "attn_lse": query_states,
+    }
+
+    indexer_aux_loss_cfg.sharding_config = ShardingConfig(
+        state_shardings={"loss_value": _dense_param_rep},
         in_src_shardings=input_shardings,
         in_dst_shardings=dict(input_shardings),
         out_src_shardings=query_states,
         out_dst_shardings=query_states,
-        local_map=LocalMapConfig(in_grad_placements=tuple(grad_placements)),
+        local_map=LocalMapConfig(
+            in_grad_placements=(
+                query_states,
+                query_states,
+                replicated_activation,
+                replicated_activation,
+                partial_activation,
+                query_states,
+            )
+        ),
     )
 
 
@@ -103,7 +142,7 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
     )
 
     set_dsa_flex_attention_sharding(
-        at.sparse_attn, compress_ratio=at.compress_ratio
+        at.inner_attention, compress_ratio=at.compress_ratio
     )
 
     # Sub-module configs are declared as fields on Attention.Config, so we
@@ -132,6 +171,8 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
         set_compressor_sharding(at.compressor_128)
     if at.indexer is not None:
         set_indexer_sharding(at.indexer)
+    if at.indexer_aux_loss is not None:
+        set_dsa_indexer_aux_loss_sharding(at.indexer_aux_loss)
 
 
 def set_compressor_sharding(compressor_cfg):
@@ -188,8 +229,9 @@ def set_deepseek_v4_layer_sharding(
     )
     layer_cfg.sharding_config = hc_rep
 
-    layer_cfg.attention_norm.sharding_config = norm_config(enable_sp=False)
-    layer_cfg.ffn_norm.sharding_config = norm_config(enable_sp=False)
+    norm = norm_config(enable_sp=enable_sp)
+    layer_cfg.attention_norm.sharding_config = norm
+    layer_cfg.ffn_norm.sharding_config = norm
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
@@ -231,13 +273,10 @@ def set_deepseek_v4_layer_sharding(
 def set_deepseek_v4_sharding_config(
     config: "DeepSeekV4Model.Config",
     *,
-    loss_parallel: bool,
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
-    set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
-    )
+    set_decoder_sharding_config(config, enable_sp=enable_sp)
 
     hc_rep = ShardingConfig(
         state_shardings={
@@ -250,4 +289,6 @@ def set_deepseek_v4_sharding_config(
     config.sharding_config = model_sharding
 
     for layer_cfg in config.layers:
-        set_deepseek_v4_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
+        set_deepseek_v4_layer_sharding(
+            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
+        )
