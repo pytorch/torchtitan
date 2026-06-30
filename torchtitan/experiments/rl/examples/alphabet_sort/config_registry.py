@@ -577,57 +577,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
-    """Debug MoE config on the DeepEP v2 backend with a cudagraph-capturable generator
-    (8 GPUs: 4 gen + 4 train).
-
-    Same EP/TP/DP layout as ``rl_grpo_qwen3_moe_debug_varlen`` (trainer FSDP=2/TP=2/EP=4,
-    generator DP=2/TP=2/EP=4), but the MoE uses the DeepEP v2 comm backend. Unlike the
-    standard all-to-all -- whose unpinned D2H split-size copy blocks CUDA graph capture, so
-    that config disables it -- DeepEP v2's inference dispatch is a static, host-sync-free
-    EXPAND layout, so this generator enables CUDA graph capture.
-
-    Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
-    host-synced, backward-able DeepEP path), while the generator applies the per-actor
-    ``deepep_inference`` override (``generator.override``) to its own copy, switching its
-    DeepEP dispatchers to the cudagraph-able EXPAND layout (``cudagraphable=True``). The
-    override touches only the generator's spec, so the trainer and weight sync are unaffected.
-    (This mirrors how converters are config-time/shared while overrides are per-actor.)
-    """
-    config = rl_grpo_qwen3_moe_debug_varlen()
-    config.model_spec = model_registry(
-        "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
-    )
-    # Generator-only override -> DeepEP cudagraph-able EXPAND dispatch; trainer keeps compact.
-    # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
-    config.generator.override = OverrideConfig(
-        imports=["torchtitan.distributed.deepep.inference_override"]
-    )
-    config.generator.cudagraph = VLLMCudagraphConfig(
-        enable=True, mode="FULL_AND_PIECEWISE"
-    )
-    # Two inference knobs to set per workload (no golden default; here EP=4):
-    #  * max_num_batched_tokens: vLLM's per-step token budget. We expose the knob (default
-    #    None -> vLLM's own default of 2048). Decide it from your input/rollout sequence
-    #    length -- it is effectively the longest input sequence length the engine batches
-    #    (vLLM's 2048 default is just a stand-in for knowing that).
-    #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
-    #    deepep_inference override. For a dropless model (highest memory) set it to
-    #    longest_sequence_length // sp == max_num_batched_tokens // sp; lower it gradually to
-    #    save memory (trading off dropped tokens).
-    config.generator.max_num_batched_tokens = 2048
-    num_max_tokens_per_rank = (
-        config.generator.max_num_batched_tokens
-        // config.generator.parallelism.expert_parallel_degree
-    )
-    for block in config.model_spec.model.layers:
-        moe = getattr(block, "moe", None)
-        if moe is None:
-            continue
-        moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
-    return config
-
-
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
