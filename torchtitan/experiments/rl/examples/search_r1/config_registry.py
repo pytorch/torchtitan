@@ -197,9 +197,15 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 drop_zero_std_reward_groups=False
             ),
             validation=ValidationConfig(num_samples=500),
+            # local_batch_size>1 packs several rows per forward pass, so a step splits
+            # into fewer microbatches -> the inter-node EP all-to-all (48 layers x
+            # microbatch) runs fewer rounds and the experts see more tokens per dispatch.
+            # That all-to-all (not generation) gates the 2-host trainer, so this is the
+            # main throughput lever. local_batch_size=4 tripped a CUDA "unspecified launch
+            # failure" (memory edge) on the first fwd/bwd; 2 is the headroom-safe step up
+            # from 1. seq_len=4096 holds a full rollout (max 3072 tokens).
             batcher=Batcher.Config(
-                # TODO: TBD local_batch_size, seq_len
-                batch=BatchConfig(local_batch_size=1, seq_len=4096),
+                batch=BatchConfig(local_batch_size=2, seq_len=4096),
             ),
         ),
         compile=CompileConfig(enable=False),
