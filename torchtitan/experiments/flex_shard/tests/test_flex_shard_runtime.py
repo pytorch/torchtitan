@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
@@ -16,6 +17,10 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import is_flex_shard_param
+from torchtitan.experiments.flex_shard.example.owned import (
+    _ReduceScratchPool,
+    _ReduceScratchSlot,
+)
 from torchtitan.experiments.flex_shard.flex_shard.bucket_comm import AsyncUnshardResult
 from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     _accumulate_sharded_grads,
@@ -26,8 +31,13 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     BucketCommContext,
     ParamOwnerRef,
     PendingReduceGrad,
+    PendingUnshard,
+    PendingUnshardKey,
 )
-from torchtitan.experiments.flex_shard.flex_shard.flex_shard import FlexShardModule
+from torchtitan.experiments.flex_shard.flex_shard.flex_shard import (
+    FlexShardModule,
+    _SHARDED_BUCKET_STORAGES_ATTR,
+)
 from torchtitan.experiments.flex_shard.flex_shard.placement_contract import (
     PlacementPreparedUnshard,
     PlacementUnshardResult,
@@ -111,6 +121,20 @@ class TestFlexShardEagerRuntime(TestCase):
         def stream(self, stream):
             return nullcontext()
 
+    class _FakeEvent:
+        def query(self) -> bool:
+            return False
+
+        def synchronize(self) -> None:
+            raise AssertionError("scratch pool must not host-synchronize")
+
+    class _FakeStream:
+        def __init__(self) -> None:
+            self.waited_event = None
+
+        def wait_event(self, event) -> None:
+            self.waited_event = event
+
     class _FakeReduceGradResult:
         def __init__(self) -> None:
             self.wait_count = 0
@@ -126,6 +150,58 @@ class TestFlexShardEagerRuntime(TestCase):
         def release_buffers(self, release_sharded_grads: bool) -> None:
             self.release_count += 1
             self.released_sharded_grads = release_sharded_grads
+
+    class _FakeUnshardResult:
+        def __init__(self) -> None:
+            self.wait_count = 0
+            self.release_count = 0
+
+        def wait(self) -> None:
+            self.wait_count += 1
+
+        def release_buffers(self) -> None:
+            self.release_count += 1
+
+    def test_reduce_scratch_pool_reuses_pending_slot_with_stream_wait(self):
+        pool = _ReduceScratchPool(max_slots=1)
+        event = self._FakeEvent()
+        slot = _ReduceScratchSlot(
+            send=torch.empty(4),
+            in_use=False,
+            ready_event=event,
+        )
+        pool._slots.append(slot)
+        stream = self._FakeStream()
+
+        with (
+            patch.object(_ReduceScratchPool, "_slot_can_satisfy", return_value=True),
+            patch("torch.cuda.current_stream", return_value=stream),
+        ):
+            reused = pool._find_pending_compatible_slot(
+                4,
+                torch.float32,
+                torch.device("cuda"),
+            )
+
+        self.assertIs(reused, slot)
+        self.assertIs(stream.waited_event, event)
+        self.assertIsNone(slot.ready_event)
+
+    def test_reduce_scratch_pool_allocates_overflow_slot_under_pressure(self):
+        pool = _ReduceScratchPool(max_slots=1)
+        first = pool.acquire(
+            send_numel=4,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        second = pool.acquire(
+            send_numel=4,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(len(pool._slots), 1)
+        self.assertNotEqual(first.send.data_ptr(), second.send.data_ptr())
 
     def test_async_unshard_finish_materializes_only_when_consumed(self):
         class _Placement:
@@ -182,6 +258,30 @@ class TestFlexShardEagerRuntime(TestCase):
         self.assertEqual(active.synchronize_count, 0)
         self.assertEqual(context.reduce_grad_states, [])
         self.assertEqual(context.retired_reduce_grad_states, [])
+
+    def test_pending_unshard_cleanup_waits_and_releases(self):
+        result = self._FakeUnshardResult()
+        key = PendingUnshardKey(bucket_id=1, recompute=True)
+        context = BucketCommContext(
+            device_handle=self._FakeDeviceHandle(),
+            unshard_stream=object(),
+            reduce_grad_stream=object(),
+            reduce_grad_release_stream=object(),
+            max_pending_reduce_grads=2,
+            pending_unshards={
+                key: PendingUnshard(
+                    bucket=object(),
+                    result=result,
+                    recompute=True,
+                )
+            },
+        )
+
+        context.wait_and_clear_pending_unshards(debug_fqn=None)
+
+        self.assertEqual(result.wait_count, 1)
+        self.assertEqual(result.release_count, 1)
+        self.assertEqual(context.pending_unshards, {})
 
     def test_reduce_grad_retention_releases_buffers_without_final_stream_wait(self):
         result = self._FakeReduceGradResult()
@@ -271,6 +371,36 @@ class TestFlexShardEagerRuntime(TestCase):
                 torch.device("cuda"),
             )
         self.assertEqual(future_context.max_pending_reduce_grads, 5)
+
+    def test_set_gradient_reduce_op_updates_bucket_storages(self):
+        class _Module(FlexShardModule, nn.Module):
+            pass
+
+        class _BucketStorage:
+            def __init__(self) -> None:
+                self.ops = []
+
+            def set_gradient_reduce_op(self, op) -> None:
+                self.ops.append(op)
+
+        root = _Module()
+        child = _Module()
+        root.child = child
+
+        root_bucket = _BucketStorage()
+        child_bucket = _BucketStorage()
+        setattr(root, _SHARDED_BUCKET_STORAGES_ATTR, [root_bucket])
+        setattr(child, _SHARDED_BUCKET_STORAGES_ATTR, [child_bucket])
+
+        root.set_gradient_reduce_op(dist.ReduceOp.SUM)
+
+        self.assertEqual(root_bucket.ops, [dist.ReduceOp.SUM])
+        self.assertEqual(child_bucket.ops, [dist.ReduceOp.SUM])
+
+        root.set_gradient_reduce_op(dist.ReduceOp.AVG, recurse=False)
+
+        self.assertEqual(root_bucket.ops, [dist.ReduceOp.SUM, dist.ReduceOp.AVG])
+        self.assertEqual(child_bucket.ops, [dist.ReduceOp.SUM])
 
     def test_bucket_unshard_backward_releases_raf_saved_unshard_cache(self):
         class _BucketStorage:

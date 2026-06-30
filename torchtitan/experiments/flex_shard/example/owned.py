@@ -75,10 +75,9 @@ class _ReduceScratchLease:
 class _ReduceScratchPool:
     """Bounded reusable scratch for GroupedOwned packed reduce-scatter sends.
 
-    Phase 2a deliberately stops at bounding temporary send buffers with explicit
-    stream lifetime. Defer direct owner-layout and optimizer aliasing until the
-    current Triton packed RS path is accepted and profiler/memory evidence shows
-    temporary memory is the limiting issue.
+    The reusable pool is bounded, but acquire may return a temporary overflow
+    slot under pressure. That avoids blocking the host when all reusable slots
+    are still pending on a CUDA stream.
     """
 
     def __init__(self, max_slots: int = 1) -> None:
@@ -103,7 +102,9 @@ class _ReduceScratchPool:
             slot = self._make_slot(send_numel, dtype, device)
             self._slots.append(slot)
         if slot is None:
-            slot = self._wait_for_released_slot(send_numel, dtype, device)
+            slot = self._find_pending_compatible_slot(send_numel, dtype, device)
+        if slot is None:
+            slot = self._make_slot(send_numel, dtype, device)
 
         slot.in_use = True
         slot.ready_event = None
@@ -127,24 +128,24 @@ class _ReduceScratchPool:
         self._resize_slot(fallback, send_numel, dtype, device)
         return fallback
 
-    def _wait_for_released_slot(
+    def _find_pending_compatible_slot(
         self,
         send_numel: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> _ReduceScratchSlot:
+    ) -> _ReduceScratchSlot | None:
+        if device.type != "cuda":
+            return None
         for slot in self._slots:
-            if not slot.in_use:
-                if slot.ready_event is not None:
-                    slot.ready_event.synchronize()
-                    slot.ready_event = None
-                self._resize_slot(slot, send_numel, dtype, device)
+            if (
+                not slot.in_use
+                and slot.ready_event is not None
+                and self._slot_can_satisfy(slot, send_numel, dtype, device)
+            ):
+                torch.cuda.current_stream(device).wait_event(slot.ready_event)
+                slot.ready_event = None
                 return slot
-        raise RuntimeError(
-            "No released GroupedOwned reduce scratch slot is available. "
-            "Call _ReduceScratchLease.release() before launching more than "
-            "max_slots in-flight reduce-scatter operations."
-        )
+        return None
 
     @staticmethod
     def _make_slot(
