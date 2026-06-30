@@ -13,7 +13,6 @@ from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.nn_modules import Linear, RMSNorm, Embedding
 
 from .mhc import HcHead, HcPost, HcPre
 
@@ -174,7 +173,6 @@ class DeepSeekV4Model(Decoder):
             from .sharding import set_deepseek_v4_sharding_config
             set_deepseek_v4_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
