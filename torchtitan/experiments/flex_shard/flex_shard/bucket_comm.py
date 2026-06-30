@@ -6,14 +6,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import ModuleType
 from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed.device_mesh import _get_device_handle
 
-from .placement_contract import PlacementPreparedReduceGrad, PlacementPreparedUnshard
+from .placement_contract import (
+    PlacementPreparedReduceGrad,
+    PlacementPreparedUnshard,
+    PlacementUnshardResult,
+)
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -103,12 +107,11 @@ def begin_bucket_unshard(
     with device_handle.stream(unshard_stream):
         unshard_stream.wait_event(copy_in_done)
         prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, debug_fqn)
-        result = _run_and_finish_unshard(prepared)
+        prepared.placement.run_prepared_unshard(prepared)
         event = device_handle.Event()
         event.record(unshard_stream)
     return AsyncUnshardResult(
-        full_params=result.full_params,
-        buffers=result.buffers,
+        prepared=prepared,
         event=event,
         device_handle=device_handle,
     )
@@ -210,37 +213,49 @@ class SyncUnshardResult(UnshardHandle):
 class AsyncUnshardResult(UnshardHandle):
     """State needed to finish an async unshard launched on a side stream."""
 
-    full_params: list[torch.Tensor]
-    buffers: list[torch.Tensor]
+    prepared: PlacementPreparedUnshard
     event: torch.Event | None
     device_handle: ModuleType
+    _result: PlacementUnshardResult | None = field(default=None, init=False)
+    _device: torch.device | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        if self.prepared.buffers:
+            self._device = self.prepared.buffers[0].device
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
-        results = self.full_params
+        if self._result is None:
+            self._result = self.prepared.placement.finish_prepared_unshard(
+                self.prepared
+            )
+            if self._result.full_params:
+                self._device = self._result.full_params[0].device
+        results = self._result.full_params
         self.release_buffers()
         return results
 
     def wait(self) -> None:
-        if self.full_params:
-            device = self.full_params[0].device
-        elif self.buffers:
-            device = self.buffers[0].device
-        else:
+        if self._device is None:
             return
         if self.event is not None:
-            self.device_handle.current_stream(device).wait_event(self.event)
+            self.device_handle.current_stream(self._device).wait_event(self.event)
 
     def release_buffers(self) -> None:
         """Release raw unshard buffers after current-stream work is queued."""
-        if not self.buffers:
+        tensors = list(self.prepared.buffers)
+        self.prepared.buffers.clear()
+        if self._result is not None:
+            tensors.extend(self._result.buffers)
+            self._result.buffers.clear()
+        if not tensors:
             return
 
-        device = self.buffers[0].device
+        device = tensors[0].device
         stream = self.device_handle.current_stream(device)
         event = self.device_handle.Event()
         event.record(stream)
-        handoff = StreamHandoff(self.buffers, event, stream, self.device_handle)
+        handoff = StreamHandoff(tensors, event, stream, self.device_handle)
         handoff.release()
 
 
@@ -279,20 +294,23 @@ class AsyncReduceGradResult(ReduceGradHandle):
     event: torch.Event | None
     buffers: list[torch.Tensor]
     device_handle: ModuleType
+    _device: torch.device | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        if self.sharded_grads:
+            self._device = self.sharded_grads[0].device
+        elif self.buffers:
+            self._device = self.buffers[0].device
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
         return self.sharded_grads
 
     def wait(self) -> None:
-        if self.sharded_grads:
-            device = self.sharded_grads[0].device
-        elif self.buffers:
-            device = self.buffers[0].device
-        else:
+        if self._device is None:
             return
         if self.event is not None:
-            self.device_handle.current_stream(device).wait_event(self.event)
+            self.device_handle.current_stream(self._device).wait_event(self.event)
 
     def synchronize(self) -> None:
         if self.event is not None:
@@ -321,6 +339,8 @@ class AsyncReduceGradResult(ReduceGradHandle):
         stream: torch.Stream,
     ) -> None:
         self.sharded_grads = sharded_grads
+        if self.sharded_grads:
+            self._device = self.sharded_grads[0].device
         self.event = self.device_handle.Event()
         self.event.record(stream)
 
