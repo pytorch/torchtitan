@@ -11,24 +11,29 @@ slice metadata for values that cross PP boundaries; internal saved values,
 FSDP params, and raw grad leaves stay in the flat tracer calling convention.
 """
 
+import copy
+import hashlib
 import inspect
 import operator
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+import sympy
 import torch
 import torch.fx as fx
 import torch.fx.node
 import torch.utils._pytree as pytree
+from torch._dynamo.source import ConstantSource
+from torch._logging import trace_structured
+from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 from torch.distributed.pipelining.schedules import (
     _Action,
     BACKWARD_INPUT,
     FORWARD,
     FULL_BACKWARD,
 )
-from torch._logging import trace_structured
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -55,6 +60,182 @@ def trace_graph_pp_graph(name: str, gm: fx.GraphModule) -> None:
             include_device=True,
         ),
     )
+
+
+def _iter_meta_leaves(value: Any):
+    if isinstance(value, Mapping):
+        for key, val in value.items():
+            yield from _iter_meta_leaves(key)
+            yield from _iter_meta_leaves(val)
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        for item in value:
+            yield from _iter_meta_leaves(item)
+    else:
+        yield value
+
+
+def _find_fake_mode(gm: fx.GraphModule) -> FakeTensorMode | None:
+    """Return the first FakeTensorMode referenced by graph node metadata."""
+
+    for node in gm.graph.nodes:
+        for value in node.meta.values():
+            for leaf in _iter_meta_leaves(value):
+                if isinstance(leaf, FakeTensor):
+                    return leaf.fake_mode
+    return None
+
+
+class _MetaShapeEnvTransfer:
+    """Move copied FX metadata into a destination ShapeEnv.
+
+    Contract:
+      A copied FX graph must expose metadata owned by one FakeTensorMode and one
+      ShapeEnv before full Inductor sees it. Callers pick the destination graph
+      whose ShapeEnv must be preserved, then copy foreign metadata into it.
+
+      PyTorch owns FakeTensor metadata transfer. GraphPP only pre-seeds foreign
+      unbacked base symbols from FakeTensor sizes/strides/offsets and raw
+      SymInt/SymExpr leaves stored directly in node.meta. Derived expressions
+      are copied after those bases exist in the destination ShapeEnv, preserving
+      relations such as ``u0 + u1`` instead of turning the whole expression into
+      one opaque unbacked symbol.
+
+    TODO(sanketpurandare): Replace this class when PyTorch exposes a metadata
+    tree transfer utility that first seeds raw foreign unbacked base symbols and
+    then rewrites derived SymPy expressions while preserving bindings.
+    """
+
+    def __init__(self, dst_fake_mode: FakeTensorMode | None) -> None:
+        self.dst_fake_mode = dst_fake_mode
+        self.dst_shape_env = None if dst_fake_mode is None else dst_fake_mode.shape_env
+        self._symbol_sources: dict[sympy.Symbol, object] = {}
+
+    def collect(self, meta: dict[str, Any]) -> None:
+        if self.dst_shape_env is None:
+            return
+        for leaf in _iter_meta_leaves(meta):
+            if isinstance(leaf, FakeTensor):
+                self._collect_fake_tensor(leaf)
+            elif isinstance(leaf, torch.SymInt):
+                self._collect_symint(leaf)
+
+    def seed(self) -> None:
+        if self.dst_shape_env is None:
+            return
+        for symbol, src_shape_env in sorted(
+            self._symbol_sources.items(), key=lambda item: str(item[0])
+        ):
+            cache_key = (id(src_shape_env), symbol)
+            if cache_key in self.dst_shape_env.foreign_unbacked_symbol_cache:
+                continue
+            symint = src_shape_env.create_symintnode(symbol, hint=None)
+            self.dst_shape_env._transfer_foreign_expr_as_unbacked(
+                symint,
+                source=self._source(src_shape_env, symbol),
+            )
+
+    def copy_meta(self, meta: dict[str, Any]) -> dict[str, Any]:
+        if self.dst_fake_mode is None or self.dst_shape_env is None:
+            return copy.copy(meta)
+        return self._copy_value(meta)
+
+    def _source(self, src_shape_env: object, expr: sympy.Expr) -> ConstantSource:
+        source_hash = hashlib.sha1(f"{id(src_shape_env)}:{expr!s}".encode()).hexdigest()
+        return ConstantSource(f"graph_pp_multiplex_meta_{source_hash}")
+
+    def _collect_fake_tensor(self, value: FakeTensor) -> None:
+        if value.fake_mode is self.dst_fake_mode:
+            return
+        for dim in (*value.size(), *value.stride(), value.storage_offset()):
+            if isinstance(dim, torch.SymInt):
+                self._collect_symint(dim)
+
+    def _collect_symint(self, value: torch.SymInt) -> None:
+        src_shape_env = value.node.shape_env
+        if src_shape_env is None or src_shape_env is self.dst_shape_env:
+            return
+        for symbol in value.node.expr.free_symbols:
+            if src_shape_env.has_guarding_hint(symbol):
+                continue
+            existing = self._symbol_sources.get(symbol)
+            if existing is not None and existing is not src_shape_env:
+                raise RuntimeError(
+                    "GraphPP cannot disambiguate same-named SymInt metadata "
+                    "symbols from multiple foreign ShapeEnvs."
+                )
+            self._symbol_sources[symbol] = src_shape_env
+
+    def _copy_value(self, value: Any) -> Any:
+        if isinstance(value, FakeTensor):
+            return self._copy_fake_tensor(value)
+        if isinstance(value, torch.SymInt):
+            return self._copy_symint(value)
+        if isinstance(value, sympy.Expr):
+            return self._copy_sympy_expr(value)
+        if isinstance(value, Mapping):
+            return {
+                self._copy_value(key): self._copy_value(val)
+                for key, val in value.items()
+            }
+        if isinstance(value, tuple):
+            return tuple(self._copy_value(item) for item in value)
+        if isinstance(value, list):
+            return [self._copy_value(item) for item in value]
+        if isinstance(value, set):
+            return {self._copy_value(item) for item in value}
+        if isinstance(value, frozenset):
+            return frozenset(self._copy_value(item) for item in value)
+        return value
+
+    def _copy_fake_tensor(self, value: FakeTensor) -> FakeTensor:
+        if value.fake_mode is self.dst_fake_mode:
+            return value
+        try:
+            with self.dst_fake_mode:
+                # Delegate tensor shape metadata transfer to PyTorch.
+                return self.dst_fake_mode.from_tensor(value)
+        except Exception as exc:
+            raise RuntimeError(
+                "GraphPP failed to transfer multiplexed graph FakeTensor "
+                "metadata into the destination graph FakeTensorMode."
+            ) from exc
+
+    def _copy_symint(self, value: torch.SymInt) -> torch.SymInt:
+        src_shape_env = value.node.shape_env
+        if src_shape_env is None or src_shape_env is self.dst_shape_env:
+            return value
+        try:
+            expr = self.dst_shape_env._transfer_foreign_expr_as_unbacked(
+                value,
+                source=self._source(src_shape_env, value.node.expr),
+            )
+            return self.dst_shape_env.create_symintnode(
+                expr,
+                hint=None,
+                source=self._source(src_shape_env, value.node.expr),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "GraphPP failed to transfer multiplexed graph SymInt metadata "
+                "into the destination graph ShapeEnv."
+            ) from exc
+
+    def _copy_sympy_expr(self, value: sympy.Expr) -> sympy.Expr:
+        replacements = {}
+        for symbol in value.free_symbols:
+            src_shape_env = self._symbol_sources.get(symbol)
+            if src_shape_env is None:
+                continue
+            cache_key = (id(src_shape_env), symbol)
+            if cache_key not in self.dst_shape_env.foreign_unbacked_symbol_cache:
+                raise RuntimeError(
+                    "GraphPP missing seeded ShapeEnv symbol while copying "
+                    f"multiplexed metadata: {symbol}"
+                )
+            replacements[symbol] = self.dst_shape_env.foreign_unbacked_symbol_cache[
+                cache_key
+            ]
+        return value.xreplace(replacements) if replacements else value
 
 
 def graph_outputs(graph: fx.Graph) -> tuple[Any, ...]:
@@ -333,6 +514,11 @@ def _graphable_split_block_mask(
     specializes that int, so a graph traced on microbatch 0 would replay every
     later microbatch with offset 0. Rebuild only the closure so the offset is a
     scalar tensor leaf while preserving PyTorch PP's split tensor metadata.
+
+    TODO(sanketpurandare): Delete this shim once upstream PP ``_split_block_mask``
+    captures the microbatch batch offset as a scalar tensor closure leaf instead
+    of a Python int. Then normal ``BlockMask._flatten`` will expose all
+    replay-varying state to GraphPP tracing.
     """
     mask_mod = block_mask.mask_mod
     if not inspect.isfunction(mask_mod) or mask_mod.__closure__ is None:
@@ -399,6 +585,7 @@ def normalize_graph_pp_microbatch_inputs(
             "GraphPP expected args_split and kwargs_split to have the same "
             f"microbatch count, got {len(args_split)} and {len(kwargs_split)}"
         )
+
     def normalize_leaf(value: Any) -> Any:
         if isinstance(value, BlockMask):
             return _graphable_split_block_mask(value)
