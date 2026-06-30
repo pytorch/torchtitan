@@ -559,7 +559,7 @@ def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
 def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
     base = XXPathDatasetConfig(fps=SUPERCOMBO_FPS, plan_only=True)
     return PathDataLoader.Config(
-        dataset=os.path.join(XX_BASEDIR, "datasets/lists/prune10m_random10k_seed0.txt"),
+        dataset=os.path.join(XX_BASEDIR, "datasets/lists/prune10m_random100k_seed0.txt"),
         split=split,
         shuffle_size=_si_int(base.shuffle_size),
         min_mixing=base.min_mixing,
