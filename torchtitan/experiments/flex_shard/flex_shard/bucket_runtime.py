@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any
@@ -41,20 +40,8 @@ logger = logging.getLogger(__name__)
 
 
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
-
-
-def _max_pending_reduce_grads_from_env() -> int:
-    raw = os.environ.get("FLEX_SHARD_MAX_PENDING_REDUCE_GRADS")
-    if raw is None:
-        return 1
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning(
-            "Ignoring invalid FLEX_SHARD_MAX_PENDING_REDUCE_GRADS=%r; using 1.",
-            raw,
-        )
-        return 1
+_MAX_PENDING_REDUCE_GRADS_ATTR = "_flex_shard_max_pending_reduce_grads"
+_DEFAULT_MAX_PENDING_REDUCE_GRADS = 1
 
 
 @dataclass
@@ -150,9 +137,7 @@ class BucketCommContext:
         default_factory=list
     )
     reduce_grad_states: list[PendingReduceGrad] = field(default_factory=list)
-    max_pending_reduce_grads: int = field(
-        default_factory=_max_pending_reduce_grads_from_env
-    )
+    max_pending_reduce_grads: int = _DEFAULT_MAX_PENDING_REDUCE_GRADS
     reduce_grad_callback_queued: bool = False
     raf_saved_unshard_cache: dict[int, list[torch.Tensor]] = field(default_factory=dict)
     raf_saved_unshard_cache_callback_queued: bool = False
@@ -303,6 +288,11 @@ class BucketCommContext:
             unshard_stream=device_handle.Stream(priority=-1),
             reduce_grad_stream=device_handle.Stream(priority=-1),
             reduce_grad_release_stream=device_handle.Stream(priority=-1),
+            max_pending_reduce_grads=getattr(
+                root_module,
+                _MAX_PENDING_REDUCE_GRADS_ATTR,
+                _DEFAULT_MAX_PENDING_REDUCE_GRADS,
+            ),
         )
         contexts[device] = context
         return context

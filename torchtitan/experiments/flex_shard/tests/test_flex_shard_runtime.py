@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from unittest.mock import patch
+
 import torch
 import torch.nn as nn
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -12,10 +14,13 @@ from torchtitan.experiments.flex_shard import is_flex_shard_param
 from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     _accumulate_sharded_grads,
     _BucketUnshard,
+    _EAGER_COMM_CONTEXTS_ATTR,
     _get_raf_saved_full_params,
+    _MAX_PENDING_REDUCE_GRADS_ATTR,
     BucketCommContext,
     ParamOwnerRef,
 )
+from torchtitan.experiments.flex_shard.flex_shard.flex_shard import FlexShardModule
 from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_getters import (
     _RafSavedTensorContext,
 )
@@ -90,6 +95,61 @@ class TestRafSavedTensorContext(TestCase):
 
 
 class TestFlexShardEagerRuntime(TestCase):
+    def test_set_max_pending_reduce_grads_updates_existing_contexts(self):
+        class _Module(FlexShardModule, nn.Module):
+            pass
+
+        class _Context:
+            def __init__(self, max_pending_reduce_grads: int) -> None:
+                self.max_pending_reduce_grads = max_pending_reduce_grads
+
+        root = _Module()
+        child = _Module()
+        root.child = child
+
+        root_context = _Context(1)
+        child_context = _Context(1)
+        setattr(root, _EAGER_COMM_CONTEXTS_ATTR, {torch.device("cuda"): root_context})
+        setattr(child, _EAGER_COMM_CONTEXTS_ATTR, {torch.device("cuda"): child_context})
+
+        root.set_max_pending_reduce_grads(3)
+
+        self.assertEqual(root_context.max_pending_reduce_grads, 3)
+        self.assertEqual(child_context.max_pending_reduce_grads, 3)
+        self.assertEqual(getattr(root, _MAX_PENDING_REDUCE_GRADS_ATTR), 3)
+        self.assertEqual(getattr(child, _MAX_PENDING_REDUCE_GRADS_ATTR), 3)
+
+        root.set_max_pending_reduce_grads(0, recurse=False)
+
+        self.assertEqual(root_context.max_pending_reduce_grads, 0)
+        self.assertEqual(child_context.max_pending_reduce_grads, 3)
+        self.assertEqual(getattr(root, _MAX_PENDING_REDUCE_GRADS_ATTR), 0)
+        self.assertEqual(getattr(child, _MAX_PENDING_REDUCE_GRADS_ATTR), 3)
+
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            root.set_max_pending_reduce_grads(-1)
+
+        with self.assertRaisesRegex(ValueError, "non-negative int"):
+            root.set_max_pending_reduce_grads(True)
+
+        future_root = _Module()
+        future_root.set_max_pending_reduce_grads(5)
+
+        class _DeviceHandle:
+            def Stream(self, priority: int):
+                return object()
+
+        with patch(
+            "torchtitan.experiments.flex_shard.flex_shard.bucket_runtime."
+            "_get_device_handle",
+            return_value=_DeviceHandle(),
+        ):
+            future_context = BucketCommContext.create(
+                future_root,
+                torch.device("cuda"),
+            )
+        self.assertEqual(future_context.max_pending_reduce_grads, 5)
+
     def test_bucket_unshard_backward_releases_raf_saved_unshard_cache(self):
         class _BucketStorage:
             _reshard_after_forward = True
