@@ -81,7 +81,7 @@ def _model_config(
     hidden: int = 2304,
     heads: int = 36,
     layers: int = 56,
-    plan_layers: int = -1,
+    plan_layers: int = 4,
     mlp_multiple_of: int = 256,
     attention_impl: str = "FLEX",
     attention_mask: str = "LAST_FRAME_CAUSAL",
