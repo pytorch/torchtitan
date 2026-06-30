@@ -307,7 +307,10 @@ class BucketCommContext:
                 self.wait_and_clear_reduce_grad_states(debug_fqn=None)
             finally:
                 self.pending_reduce_grad_launches.clear()
-                self.reduce_grad_callback_queued = False
+                try:
+                    self.wait_and_clear_pending_unshards(debug_fqn=None)
+                finally:
+                    self.reduce_grad_callback_queued = False
 
         torch.autograd.Variable._execution_engine.queue_callback(_wait_for_reduce_grad)
 
@@ -340,6 +343,23 @@ class BucketCommContext:
     def release_raf_saved_unshard_cache(self, bucket_id: int) -> None:
         """Release one bucket's RAF saved-tensor recompute cache."""
         self.raf_saved_unshard_cache.pop(bucket_id, None)
+
+    def wait_and_clear_pending_unshards(
+        self,
+        debug_fqn: str | None,
+    ) -> None:
+        """Release unconsumed prefetches before the next training step."""
+        if not self.pending_unshards:
+            return
+        with _record_function_if_eager(
+            "FlexShard::post_backward_pending_unshard_clear",
+            debug_fqn,
+        ):
+            pending_unshards = list(self.pending_unshards.values())
+            self.pending_unshards.clear()
+            for pending in pending_unshards:
+                pending.result.wait()
+                pending.result.release_buffers()
 
     def wait_and_clear_reduce_grad_states(
         self,
@@ -780,9 +800,7 @@ class BucketRuntime:
 
     def clear_stale_pending_unshards(self) -> None:
         """Drain unused pending unshards so stale work cannot cross phases."""
-        for pending in self.context.pending_unshards.values():
-            self.wait_pending(pending.result)
-        self.context.pending_unshards.clear()
+        self.context.wait_and_clear_pending_unshards(self.debug_fqn)
 
     def in_reshard_after_forward_recompute(self) -> bool:
         """Return whether this bucket is in reshard-after-forward recompute."""
