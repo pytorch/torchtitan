@@ -391,12 +391,15 @@ def compute_logprobs(
         # ids, so cross_entropy needs full-vocab logits.
         mesh = current_spmd_mesh()
         assert mesh is not None
+        # dst=I, not R: the vocab all-gather's grad is the replicated upstream
+        # grad sliced back to this rank's vocab shard (I's backward), not an
+        # all-reduce (R's backward). The latter over-counts by tp_degree and
+        # diverges from the DTensor path above, whose redistribute grad slices.
         logits = spmd.redistribute(
             logits,
             mesh.get_group("tp"),
             src=spmd.S(-1),
-            dst=spmd.R,
-            backward_options={"op_dtype": logits.dtype},
+            dst=spmd.I,
         )
 
     B, L, V = logits.shape
