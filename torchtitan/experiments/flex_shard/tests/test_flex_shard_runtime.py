@@ -8,6 +8,10 @@ from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper,
+    CheckpointWrapper,
+)
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import is_flex_shard_param
@@ -29,6 +33,7 @@ from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_transformer_model,
     make_transformer_model,
     single_rank_cuda_mesh,
+    transformer_bucket_specs,
     transformer_inputs,
 )
 
@@ -345,6 +350,30 @@ class TestFlexShardEagerRuntime(TestCase):
             compiled_model = torch.compile(model, backend="eager")
 
             loss = compiled_model(transformer_inputs(args, device="cuda")).sum()
+            loss.backward()
+
+            for param in model.parameters():
+                self.assertIsNotNone(param.grad)
+
+    def test_reshard_after_forward_preserves_full_activation_checkpointing(self):
+        with single_rank_cuda_mesh() as mesh:
+            args, model = make_transformer_model()
+            model.layers[0] = checkpoint_wrapper(model.layers[0])
+
+            flex_shard_cuda(
+                model,
+                mesh,
+                buckets=transformer_bucket_specs(
+                    args.n_layers,
+                    mesh,
+                    reshard_after_forward=True,
+                ),
+            )
+
+            self.assertIsInstance(model.layers[0], CheckpointWrapper)
+            self.assertIn("context_fn", model.layers[0].checkpoint_fn.keywords)
+
+            loss = model(transformer_inputs(args, device="cuda")).sum()
             loss.backward()
 
             for param in model.parameters():
