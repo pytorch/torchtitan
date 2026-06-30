@@ -597,7 +597,6 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
             "autoparallel llama3 FSDP+TP",
             "autoparallel_llama3_fsdp_tp",
             ngpu=4,
-            disabled=False,
         ),
     ]
 
