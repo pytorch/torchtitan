@@ -220,9 +220,9 @@ place FlexShard couples to an fp8 consumer; everything else is placement-interna
 
 - `grad_x = grad_output @ weight` reuses the gathered fp8 weight → backward needs
   the fp8 unshard too. With `reshard_after_forward`, free the fp8 buffer after
-  forward and **re-quantize+all-gather** the bf16 master in backward; tag the fp8
-  `all_gather` op `MUST_RECOMPUTE` in `reshard_after_forward.py`'s
-  `_FLEX_SHARD_COLLECTIVE_OPS` (same pattern as the existing collectives).
+  forward and **re-quantize+all-gather** the bf16 master in backward; FlexShard
+  emits a semantic unshard marker for bucket materialization, and activation
+  checkpointing recomputes that marker instead of matching raw `all_gather` ops.
 - `grad_weight` does not need the weight; the **grad reduce-scatter stays bf16/
   fp32** (master-precision). fp8 gradient reduce-scatter is **future work**.
 
