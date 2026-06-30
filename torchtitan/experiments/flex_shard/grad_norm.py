@@ -121,18 +121,6 @@ def _clip_grad_norm_with_flex_shard(
             non_ep_params.append(param)
             non_ep_grads.append(param.grad)
 
-    ep_total_norm = _full_tensor_norm(
-        ep_grads,
-        norm_type,
-        error_if_nonfinite,
-        foreach,
-    )
-    non_ep_total_norm = _full_tensor_norm(
-        non_ep_grads,
-        norm_type,
-        error_if_nonfinite,
-        foreach,
-    )
     flex_shard_total_norm = torch.nn.utils.get_total_norm(
         flex_shard_grads,
         norm_type,
@@ -142,8 +130,27 @@ def _clip_grad_norm_with_flex_shard(
     flex_shard_total_norm = _reduce_flex_shard_norm(flex_shard_total_norm, norm_type)
 
     norm_device = flex_shard_total_norm.device
-    ep_total_norm = ep_total_norm.to(norm_device)
-    non_ep_total_norm = non_ep_total_norm.to(norm_device)
+    norm_dtype = flex_shard_total_norm.dtype
+    ep_total_norm = _full_tensor_norm(
+        ep_grads,
+        norm_type,
+        error_if_nonfinite,
+        foreach,
+        empty_device=norm_device,
+        empty_dtype=norm_dtype,
+    )
+    non_ep_total_norm = _full_tensor_norm(
+        non_ep_grads,
+        norm_type,
+        error_if_nonfinite,
+        foreach,
+        empty_device=norm_device,
+        empty_dtype=norm_dtype,
+    )
+    if ep_total_norm.device != norm_device:
+        ep_total_norm = ep_total_norm.to(norm_device)
+    if non_ep_total_norm.device != norm_device:
+        non_ep_total_norm = non_ep_total_norm.to(norm_device)
 
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_total_norm, non_ep_total_norm)
@@ -180,7 +187,12 @@ def _full_tensor_norm(
     norm_type: float,
     error_if_nonfinite: bool,
     foreach: bool | None,
+    *,
+    empty_device: torch.device | None = None,
+    empty_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
+    if not grads and empty_device is not None:
+        return torch.zeros((), device=empty_device, dtype=empty_dtype)
     total_norm = torch.nn.utils.get_total_norm(
         grads,
         norm_type,

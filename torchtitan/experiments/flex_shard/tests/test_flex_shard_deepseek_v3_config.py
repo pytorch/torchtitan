@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -30,6 +31,7 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     MixedPrecisionPolicy,
 )
 from torchtitan.experiments.flex_shard.grad_norm import (
+    _full_tensor_norm,
     install_flex_shard_grad_norm_clipping,
 )
 
@@ -231,6 +233,24 @@ class TestFlexShardDeepSeekV3Config(TestCase):
             self.assertEqual(param.grad, torch.tensor([0.6, 0.8]))
         finally:
             dist_utils.clip_grad_norm_ = original_clip_grad_norm
+
+    def test_flex_shard_empty_grad_norm_uses_target_device(self):
+        with mock.patch(
+            "torch.nn.utils.get_total_norm",
+            side_effect=AssertionError("empty norm should not call get_total_norm"),
+        ):
+            total_norm = _full_tensor_norm(
+                [],
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+                empty_device=torch.device("cpu"),
+                empty_dtype=torch.float64,
+            )
+
+        self.assertEqual(total_norm.device, torch.device("cpu"))
+        self.assertEqual(total_norm.dtype, torch.float64)
+        self.assertEqual(total_norm, torch.zeros((), dtype=torch.float64))
 
 
 if __name__ == "__main__":

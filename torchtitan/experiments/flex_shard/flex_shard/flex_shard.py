@@ -130,11 +130,11 @@ class FlexShardModule:
 
     def set_max_pending_reduce_grads(
         self,
-        max_pending_reduce_grads: int,
+        max_pending_reduce_grads: int = 2,
         *,
         recurse: bool = True,
     ) -> None:
-        """Set the number of in-flight reduce-grad results retained by FlexShard."""
+        """Set retained reduce-grad results; 0 keeps all until post-backward."""
         if not isinstance(max_pending_reduce_grads, int) or isinstance(
             max_pending_reduce_grads, bool
         ):
@@ -242,6 +242,7 @@ def flex_shard(
     )
 
     flex_shard_module = _attach_flex_shard_module_state(module, bucket_storages)
+    flex_shard_module.set_max_pending_reduce_grads()
 
     module_param_slots = _create_unsharded_param_slots(
         module,
