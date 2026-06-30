@@ -463,15 +463,7 @@ class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     # correctly). It is unsupported on the default FlexAttention backend (dynamo
     # export flattens the BlockMask to (Fake)Tensors and flex_attention fails on
     # missing BLOCK_SIZE), so both eager baseline and AutoParallel test use SDPA.
-    # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
-    # #186754 (2026-06-24) removed propagate_single_input_strategy in favor of
-    # propagate_single_input_single_dim_strategy, but AutoParallel's
-    # convert_element_type_rule still imports the old name, so the sharding
-    # optimizer fails with ImportError. Re-enable once AutoParallel migrates.
-    # https://github.com/pytorch/torchtitan/issues/3699
-    @unittest.skip(
-        "upstream AutoParallel imports removed propagate_single_input_strategy"
-    )
+
     def test_llama3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_llama3_loss_compare())
 
