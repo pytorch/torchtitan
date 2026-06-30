@@ -33,6 +33,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     tag_all_offloadable_activations,
 )
+from torchtitan.experiments.graph_trainer.fsdp_patterns import (
+    find_fsdp_unshard_save_node,
+)
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
 )
@@ -43,16 +46,10 @@ from torchtitan.experiments.graph_trainer.registry import (
 from torchtitan.tools.logging import logger
 
 
-def _make_default_memory_policy(
-    save_ops: set | None = None,
-    *,
-    fsdp_reshard_after_forward: bool = True,
-) -> Callable:
+def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
     """Create a SAC policy function from a set of op targets to save."""
     if save_ops is None:
         save_ops = _get_default_save_ops()
-        if not fsdp_reshard_after_forward:
-            save_ops.add(torch.ops._c10d_functional.all_gather_into_tensor.default)
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if node.target in save_ops:
@@ -60,6 +57,15 @@ def _make_default_memory_policy(
         return CheckpointPolicy.PREFER_RECOMPUTE
 
     return policy_fn
+
+
+def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node]:
+    save_nodes: set[torch.fx.Node] = set()
+    for node in gm.graph.find_nodes(op="placeholder"):
+        save_node = find_fsdp_unshard_save_node(node)
+        if save_node is not None:
+            save_nodes.add(save_node)
+    return save_nodes
 
 
 def _make_full_memory_policy() -> Callable:
@@ -126,6 +132,7 @@ def tag_sac_policy(
     example_inputs: tuple | None = None,
     *,
     policy_fn: Callable[[torch.fx.Node], CheckpointPolicy] | None = None,
+    force_save_nodes: set[torch.fx.Node] | None = None,
 ) -> torch.fx.GraphModule:
     """Apply selective activation checkpointing on the joint graph.
 
@@ -144,12 +151,17 @@ def tag_sac_policy(
         gm: The joint forward-backward graph module.
         policy_fn: Callable that takes a node and returns a CheckpointPolicy.
             Defaults to ``_make_default_memory_policy()`` if None.
+        force_save_nodes: Nodes that must be saved independent of ``policy_fn``.
+            Used for graph-structure constraints such as FSDP unshards with
+            ``reshard_after_forward=False``.
 
     Returns:
         The annotated graph module
     """
     if policy_fn is None:
         policy_fn = _make_default_memory_policy()
+    if force_save_nodes is None:
+        force_save_nodes = set()
 
     # Pass 1: Tag each forward node with a recompute policy.
     for node in gm.graph.nodes:
@@ -166,6 +178,10 @@ def tag_sac_policy(
         # remat pass only supports one region with must_recompute deps.
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
         if fqn.startswith(("lm_head", "loss")):
+            continue
+
+        if node in force_save_nodes:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
 
         if node.target in (
@@ -260,15 +276,19 @@ def _default_memory_policy_pass(
     *,
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
-    """SAC policy that saves all compute-intensive ops and FSDP all_gathers."""
+    """SAC policy that saves compute-intensive ops and required FSDP unshards."""
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         config.parallelism.fsdp_reshard_after_forward,
         pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
     )
-    policy_fn = _make_default_memory_policy(
-        fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+    force_save_nodes = (
+        _find_fsdp_unshard_save_nodes(gm) if not fsdp_reshard_after_forward else None
     )
-    tag_sac_policy(gm, policy_fn=policy_fn)
+    tag_sac_policy(
+        gm,
+        policy_fn=_make_default_memory_policy(),
+        force_save_nodes=force_save_nodes,
+    )
     return gm
 
 
