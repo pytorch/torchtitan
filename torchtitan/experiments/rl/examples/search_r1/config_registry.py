@@ -187,16 +187,21 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         num_generators=4,
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
-            # Cold-start GRPO grouping: group_size=32 gives more diverse siblings per
-            # prompt -> fewer zero-std groups (256 rollouts/step). Keep zero-std groups
-            # (drop_zero_std=False) so a step still lands at cold start, where most groups
-            # are all-wrong under pure exact-match; the rare nonzero group drives gradient.
+            # GRPO grouping: 8 groups/step x group_size=8 = 64 rollouts/step. With
+            # FULL_DECODE_ONLY the model already scores ~25% nonzero from cold start, so
+            # drop_zero_std=True is safe and important: it drops all-same-reward
+            # (zero-advantage) groups. Keeping them (False) left ~1/3 of steps with
+            # grad_norm==0 and diluted the rest -> reward stayed flat; dropping them gives
+            # the full gradient from the useful groups.
             num_groups_per_train_step=8,
-            group_size=32,
+            group_size=8,
             training_sample_builder=TrainingSampleBuilder.Config(
-                drop_zero_std_reward_groups=False
+                drop_zero_std_reward_groups=True
             ),
-            validation=ValidationConfig(num_samples=500),
+            # Periodic held-out validation every `interval` steps so the validation_reward
+            # curve shows whether the policy actually improves (the per-step train reward
+            # is too noisy to read a trend). It runs on the otherwise-idle generators.
+            validation=ValidationConfig(num_samples=500, interval=20),
             # local_batch_size>1 packs several rows per forward pass, so a step splits
             # into fewer microbatches -> the inter-node EP all-to-all (48 layers x
             # microbatch) runs fewer rounds and the experts see more tokens per dispatch.
@@ -219,10 +224,10 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
             ),
-            # FSDP=16/EP=16 (two H100 hosts): FSDP=8/EP=8 sits at the 80GB edge and a
-            # step-2 forward/backward tripped a CUDA "unspecified launch failure" there;
-            # sharding across 16 ranks (128 experts -> 8 per rank; DeepEP all-to-all goes
-            # inter-node over IB/RoCE) roughly halves per-GPU memory.
+            # FSDP=16/EP=16 (two H100 hosts). FSDP=32/EP=8 over four hosts kept the EP
+            # all-to-all intra-node but moved the FSDP all-gather inter-node across four
+            # nodes -- net no speedup and 2 extra hosts, so reverted. FSDP=8/EP=8 on one
+            # host OOM'd, hence 16.
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=16,
                 tensor_parallel_degree=1,
