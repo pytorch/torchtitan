@@ -18,7 +18,6 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .flux_datasets import FluxDataLoader
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
-from .model.model import FluxModel
 from .model.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -29,6 +28,7 @@ from .model.layers import (
     SelfAttention,
     SingleStreamBlock,
 )
+from .model.model import FluxModel
 from .model.state_dict_adapter import FluxStateDictAdapter
 from .parallelize import parallelize_flux
 

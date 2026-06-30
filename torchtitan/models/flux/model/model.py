@@ -6,8 +6,6 @@
 
 from dataclasses import dataclass, field
 
-import spmd_types as spmd
-import torch
 from torch import nn, Tensor
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
@@ -15,43 +13,14 @@ from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.module import ModuleList
 
-
-@spmd.local_map(
-    out_types=spmd.PartitionSpec("dp", "cp", None)
-)
-def local_concat_text_image(text: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
-    return torch.cat((text, image), dim=1)
-
-
-@spmd.local_map(
-    out_types=(
-        spmd.PartitionSpec("dp", "cp", None),
-        spmd.PartitionSpec("dp", "cp", None),
-    )
-)
-def local_split_text_image(
-    combined: torch.Tensor,
-    text_seq_len: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return combined[:, :text_seq_len], combined[:, text_seq_len:]
-
-
-@spmd.local_map(
-    out_types=spmd.PartitionSpec("dp", "cp", None, None)
-)
-def local_concat_text_image_attention_states(
-    text: torch.Tensor,
-    image: torch.Tensor,
-) -> torch.Tensor:
-    return torch.cat((text, image), dim=1)
-
-
-from torchtitan.models.flux.model.layers import (  # noqa: E402
+from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
     MLPEmbedder,
     SingleStreamBlock,
+    local_concat_text_image,
+    local_split_text_image,
     timestep_embedding,
 )
 

@@ -30,12 +30,14 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
 )
 from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
+from torchtitan.models.flux.model.model import FluxModel
 from torchtitan.tools.logging import logger
 
 
@@ -47,7 +49,7 @@ def annotate_dp_cp_params_as_r(model: nn.Module, parallel_dims: ParallelDims) ->
 
 
 def parallelize_flux(
-    model: nn.Module,
+    model: FluxModel,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
@@ -230,8 +232,8 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
 
 
 def parallelize_encoders(
-    t5_model: nn.Module,
-    clip_model: nn.Module,
+    t5_model: FluxEmbedder,
+    clip_model: FluxEmbedder,
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
@@ -259,21 +261,23 @@ def parallelize_encoders(
 
     # NOTE: only apply FSDP to the T5 encoder, not the CLIP text encoder.
     # CLIP Text encoder has low computation / communication ratio, so it's not necessary to apply FSDP to it.
+    hf_module = t5_model.hf_module
+    assert isinstance(hf_module, nn.Module)
     if parallel_dims.spmd_backend == "spmd_types":
-        annotate_dp_cp_params_as_r(t5_model.hf_module, parallel_dims)
+        annotate_dp_cp_params_as_r(hf_module, parallel_dims)
     # pyrefly: ignore [missing-attribute]
-    for block in t5_model.hf_module.encoder.block:
+    for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)
     # pyrefly: ignore [no-matching-overload]
-    fully_shard(t5_model.hf_module, **fsdp_config)
+    fully_shard(hf_module, **fsdp_config)
 
     if enable_symm_mem:
         # pyrefly: ignore [bad-argument-type]
-        enable_fsdp_symm_mem(t5_model.hf_module)
+        enable_fsdp_symm_mem(hf_module)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     # pyrefly: ignore [bad-argument-type]
-    disable_fsdp_gradient_division(t5_model.hf_module)
+    disable_fsdp_gradient_division(hf_module)
 
     logger.info("Applied fully_shard to the T5 encoder model")
 

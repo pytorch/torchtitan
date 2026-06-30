@@ -8,16 +8,52 @@
 import math
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from einops import rearrange
 from torch import nn, Tensor
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, Linear, RMSNorm, SiLU
-from torchtitan.models.flux.model.model import (
-    local_concat_text_image_attention_states,
-    local_split_text_image,
-)
 from torchtitan.protocols.module import Module, Sequential
+
+
+@spmd.local_map(
+    in_types=(
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
+    ),
+    out_types=spmd.PartitionSpec("dp", "cp", None),
+)
+def local_concat_text_image(text: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    return torch.cat((text, image), dim=1)
+
+
+@spmd.local_map(
+    in_types=(spmd.PartitionSpec("dp", "cp", None), None),
+    out_types=(
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
+    ),
+)
+def local_split_text_image(
+    combined: torch.Tensor,
+    text_seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return combined[:, :text_seq_len], combined[:, text_seq_len:]
+
+
+@spmd.local_map(
+    in_types=(
+        spmd.PartitionSpec("dp", "cp", None, None),
+        spmd.PartitionSpec("dp", "cp", None, None),
+    ),
+    out_types=spmd.PartitionSpec("dp", "cp", None, None),
+)
+def local_concat_text_image_attention_states(
+    text: torch.Tensor,
+    image: torch.Tensor,
+) -> torch.Tensor:
+    return torch.cat((text, image), dim=1)
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
