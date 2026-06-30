@@ -432,38 +432,63 @@ class TestCommFreeMuonHelpers(TestCase):
         # Ragged Muon maps params by FQN, so reshard-after-forward must stay off.
         self.assertTrue(all(not b.reshard_after_forward for b in buckets))
 
-    def test_reshard_policy_recomputes_unshard_collectives(self) -> None:
-        from torch.utils.checkpoint import CheckpointPolicy
-
-        from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
-            _reshard_after_forward_policy,
+    def test_reshard_policy_only_overrides_semantic_unshard(self) -> None:
+        from torch.utils.checkpoint import (
+            CheckpointPolicy,
+            create_selective_checkpoint_contexts,
         )
 
+        from torchtitan.experiments.flex_shard.flex_shard.ops import UNSHARD_BUCKET_OP
+        from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
+            _compose_with_ac_policy,
+            _ReshardAfterForwardRecomputeState,
+        )
+
+        def user_context_fn():
+            def user_policy(ctx, func, *args, **kwargs):
+                return CheckpointPolicy.PREFER_SAVE
+
+            return create_selective_checkpoint_contexts(user_policy)
+
+        merged_context_fn = _compose_with_ac_policy(
+            user_context_fn,
+            _ReshardAfterForwardRecomputeState(),
+            frozenset({1}),
+        )
+        forward_ctx, _ = merged_context_fn()
+        self.assertEqual(
+            forward_ctx.policy_fn(None, UNSHARD_BUCKET_OP),
+            CheckpointPolicy.MUST_RECOMPUTE,
+        )
         for op in (
-            torch.ops.c10d.broadcast_.default,
-            torch.ops._c10d_functional.broadcast.default,
-            torch.ops.c10d.allgather_.default,
-            torch.ops.c10d._allgather_base_.default,
+            torch.ops.aten.mm.default,
+            torch.ops.aten.add.Tensor,
+            torch.ops._c10d_functional.all_to_all_single.default,
         ):
             self.assertEqual(
-                _reshard_after_forward_policy(None, op),
-                CheckpointPolicy.MUST_RECOMPUTE,
+                forward_ctx.policy_fn(None, op),
+                CheckpointPolicy.PREFER_SAVE,
             )
-        self.assertEqual(
-            _reshard_after_forward_policy(None, torch.ops.aten.mm.default),
-            CheckpointPolicy.PREFER_SAVE,
+
+    def test_full_ac_recompute_context_marks_raf_recompute(self) -> None:
+        from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
+            _make_full_ac_recompute_context_fn,
+            _ReshardAfterForwardRecomputeState,
         )
-        self.assertEqual(
-            _reshard_after_forward_policy(None, torch.ops.aten.add_.Tensor),
-            CheckpointPolicy.PREFER_RECOMPUTE,
+
+        bucket_id = 123
+        recompute_state = _ReshardAfterForwardRecomputeState()
+        context_fn = _make_full_ac_recompute_context_fn(
+            recompute_state,
+            frozenset({bucket_id}),
         )
-        self.assertEqual(
-            _reshard_after_forward_policy(
-                None,
-                torch.ops.aten.empty.memory_format,
-            ),
-            CheckpointPolicy.PREFER_RECOMPUTE,
-        )
+        forward_ctx, recompute_ctx = context_fn()
+
+        with forward_ctx:
+            self.assertFalse(recompute_state.is_recomputing(bucket_id))
+        with recompute_ctx:
+            self.assertTrue(recompute_state.is_recomputing(bucket_id))
+        self.assertFalse(recompute_state.is_recomputing(bucket_id))
 
     def test_grouped_muon_matches_per_expert_torch_muon(self) -> None:
         # GroupedMuon on a (num_experts, m, n) stack must equal running

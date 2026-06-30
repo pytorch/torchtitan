@@ -24,11 +24,13 @@ from .bucket_comm import (
     ReduceGradHandle,
     UnshardHandle,
 )
+from .ops import mark_unshard_bucket
 from .bucket_storage import BucketSpec, ParamInfo, ShardedBucketStorage
 from .unsharded_param_getters import UnshardedParamSlot
 from .utils import (
     _disable_selective_checkpoint_dispatch,
     _get_bucket_storage_debug_fqn,
+    _inside_selective_checkpoint_dispatch,
     _record_function_if_eager,
     _strip_checkpoint_wrapped_module_path,
     _suppress_eager_profiling,
@@ -892,6 +894,8 @@ class BucketRuntime:
                 self.prefetch_next()
             if not is_compiling and not is_recompute:
                 self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
+        if _inside_selective_checkpoint_dispatch():
+            full_params = mark_unshard_bucket(full_params)
         for param_index, (bucket_param, full_param) in enumerate(
             zip(self.bucket_params, full_params, strict=True)
         ):

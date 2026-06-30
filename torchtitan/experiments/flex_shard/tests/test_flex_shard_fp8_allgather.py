@@ -117,20 +117,21 @@ class TestFp8AllGatherLayout(TestCase):
             self.assertEqual(rank_numel % tile_row, 0)
         self.assertEqual(bucket_layout.global_numel % (block * block), 0)
 
-    def test_reshard_policy_recomputes_fp8_allgather(self) -> None:
-        from torch.utils.checkpoint import CheckpointPolicy
-
-        from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
-            _reshard_after_forward_policy,
+    def test_semantic_unshard_marker_preserves_autograd(self) -> None:
+        from torchtitan.experiments.flex_shard.flex_shard.ops import (
+            is_unshard_bucket_op,
+            mark_unshard_bucket,
+            UNSHARD_BUCKET_OP,
         )
 
-        # The fp8 unshard uses the list all_gather op (c10d.allgather_); the reshard
-        # policy must tag it MUST_RECOMPUTE so the fp8 buffer is freed after forward
-        # and re-quantized + re-gathered in backward.
-        self.assertEqual(
-            _reshard_after_forward_policy(None, torch.ops.c10d.allgather_.default),
-            CheckpointPolicy.MUST_RECOMPUTE,
-        )
+        tensor = torch.randn(3, requires_grad=True)
+        (marked,) = mark_unshard_bucket([tensor])
+        self.assertIsNot(marked, tensor)
+        self.assertIs(marked._base, tensor)
+        self.assertTrue(is_unshard_bucket_op(UNSHARD_BUCKET_OP))
+
+        marked.sum().backward()
+        self.assertEqual(tensor.grad, torch.ones_like(tensor))
 
     def test_blockwise_transpose_invariance(self) -> None:
         # Square block x block tiling makes quant commute with transpose:

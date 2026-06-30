@@ -373,13 +373,12 @@ Phases 1–4 are **implemented** (`example/owned.py`, `example/muon.py`,
    `comm_free_muon_buckets(...)`, `build_muon_param_groups(...)`,
    `build_comm_free_muon_optimizers(...)`, and the `CombinedOptimizer`
    convenience. All in the experiment folder.
-3. **Reshard-after-forward for `Owned`** *(done)* — the eager unshard issues the
-   *legacy in-place* collectives `c10d.broadcast_` (Owned) / `c10d.allgather_`
-   (Shard); torch.compile lowers to the *functional* `_c10d_functional.*` forms.
-   `_FLEX_SHARD_COLLECTIVE_OPS` in `reshard_after_forward.py` now tags **both
-   spellings of broadcast and all-gather** (plus `_c10d_functional.wait_tensor`)
-   as `MUST_RECOMPUTE`, so the Owned broadcast is freed after forward and
-   rebroadcast in backward, and composes with user activation checkpointing.
+3. **Reshard-after-forward for `Owned`** *(done)* — FlexShard emits a semantic
+   unshard marker for bucket materialization, so activation checkpointing
+   recomputes the marker instead of matching raw c10d collectives. The eager
+   unshard still issues `c10d.broadcast_` (Owned) / `c10d.allgather_` (Shard),
+   while torch.compile lowers to the functional `_c10d_functional.*` forms; the
+   marker keeps those placement details out of the checkpoint policy.
    `comm_free_muon_buckets` defaults `reshard_after_forward=True` and emits one
    bucket **per** rest pattern (a grouped embeddings/LM-head/norm bucket resolves
    to the root module and is rejected by the reshard hook installer).

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from contextvars import ContextVar
 from typing import Any
 
@@ -14,6 +15,7 @@ import torch.nn as nn
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .bucket_storage import ShardedBucketStorage
+from .ops import is_unshard_bucket_op
 from .utils import (
     _module_path_common_prefix,
     _strip_checkpoint_wrapped_module_path,
@@ -47,76 +49,16 @@ class _ReshardAfterForwardRecomputeState:
         self._bucket_ids.reset(token)
 
 
-# Collective ops that produce the unsharded parameter tensors we want freed after
-# forward and recomputed in backward. Both spellings are listed so the policy fires
-# on either path: torch.compile lowers to functional collectives, while the eager
-# runtime issues legacy in-place collectives. Shard unshards with all-gather; Owned
-# unshards with broadcast.
-_FLEX_SHARD_COLLECTIVE_OPS = {
-    # torch.compile path (functional collectives).
-    torch.ops._c10d_functional.all_gather_into_tensor.default,
-    torch.ops._c10d_functional.broadcast.default,
-    torch.ops._c10d_functional.wait_tensor.default,
-    # Eager path (legacy in-place collectives).
-    torch.ops.c10d._allgather_base_.default,
-    torch.ops.c10d.allgather_.default,
-    torch.ops.c10d.broadcast_.default,
-}
-
-# Non-FlexShard collectives inside a RAF-wrapped module should not be replayed
-# just because parameter unshards are recomputed. In DeepSeek V3 MoE layers,
-# replaying token-dispatch all-to-all creates extra backward-window A2A launches
-# versus FSDP, which only re-unshards parameters.
-_FLEX_SHARD_MUST_SAVE_OPS = {
-    torch.ops._c10d_functional.all_to_all_single.default,
-    torch.ops.c10d.alltoall_base_.default,
-    torch.ops.c10d.alltoall_.default,
-}
-
-_FLEX_SHARD_PREFER_SAVE_OPS = {
-    torch.ops.aten._fused_rms_norm.default,
-    torch.ops.aten._grouped_mm.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten.add.Tensor,
-    torch.ops.aten.bmm.default,
-    torch.ops.aten.linear.default,
-    torch.ops.aten.matmul.default,
-    torch.ops.aten.mm.default,
-    torch.ops.aten.mul.Tensor,
-    torch.ops.aten.rms_norm.default,
-    torch.ops.aten.scaled_dot_product_attention.default,
-    torch.ops.aten.silu.default,
-}
-
-
-def _is_mutating_op(func: Any) -> bool:
-    schema = getattr(func, "_schema", None)
-    if schema is None:
-        return False
-    for argument in schema.arguments:
-        alias_info = argument.alias_info
-        if alias_info is not None and alias_info.is_write:
-            return True
-    return False
-
-
 def _apply_reshard_after_forward(
     module: nn.Module,
     reshard_bucket_storages: list[ShardedBucketStorage],
 ) -> None:
     """Wrap FlexShard-managed bucket modules for reshard-after-forward.
 
-    Each selected bucket's owning module gets wrapped with an activation
-    recompute policy that marks collective ops (all-gather, broadcast,
-    wait_tensor) as MUST_RECOMPUTE so unsharded params are freed after each
-    layer's forward.
-
-    Composes with activation checkpointing: if a child is already wrapped
-    by AC's CheckpointWrapper, the two policies are merged into a single
-    wrapper (FlexShard collectives -> MUST_RECOMPUTE, token-dispatch
-    collectives -> MUST_SAVE, selected compute-heavy ops -> PREFER_SAVE unless
-    an existing activation-checkpointing policy is present).
+    Each selected bucket's owning module either gets saved-tensor hooks
+    (RAF-only path) or composes with the user's activation checkpointing
+    wrapper. In the AC path, FlexShard only marks its semantic unshard op as
+    MUST_RECOMPUTE and leaves normal module compute policy to the user's AC.
     """
     recompute_state = _ReshardAfterForwardRecomputeState()
     bucket_ids_by_path: dict[str, set[int]] = {}
@@ -142,32 +84,6 @@ def _apply_reshard_after_forward(
         )
 
 
-def _reshard_after_forward_policy(ctx, func, *args, **kwargs):
-    """Activation recompute policy for per-layer reshard-after-forward.
-
-    Marks FlexShard unshard collectives (all-gather, broadcast, wait_tensor)
-    for recomputation; activation checkpointing discards their outputs after
-    each layer's forward. MoE token-dispatch all-to-all outputs are saved so
-    RAF recompute does not replay non-FlexShard communication.
-    """
-    from torch.utils.checkpoint import CheckpointPolicy
-
-    if func in _FLEX_SHARD_COLLECTIVE_OPS:
-        return CheckpointPolicy.MUST_RECOMPUTE
-    if func in _FLEX_SHARD_MUST_SAVE_OPS:
-        return CheckpointPolicy.MUST_SAVE
-    if _is_mutating_op(func):
-        return CheckpointPolicy.PREFER_RECOMPUTE
-    if func in _FLEX_SHARD_PREFER_SAVE_OPS:
-        return CheckpointPolicy.PREFER_SAVE
-    # RAF-only should replay parameter unshards, not the wrapped module's
-    # compute-heavy ops. Factory and indexing ops are still recomputed since
-    # selective checkpointing rejects cached tensors that are mutated. If
-    # activation checkpointing is already present, the composed policy below
-    # delegates non-FlexShard ops to that original AC policy.
-    return CheckpointPolicy.PREFER_RECOMPUTE
-
-
 def _compose_with_ac_policy(
     ac_context_fn,
     recompute_state: _ReshardAfterForwardRecomputeState,
@@ -175,9 +91,9 @@ def _compose_with_ac_policy(
 ):
     """Compose FlexShard reshard policy with an existing AC context_fn.
 
-    Returns a new context_fn that wraps the AC policy: FlexShard collective
-    ops are forced to MUST_RECOMPUTE, everything else delegates to the
-    original AC policy. The two op sets are disjoint so no conflicts arise.
+    Returns a new context_fn that wraps the AC policy: FlexShard semantic
+    unshard ops are forced to MUST_RECOMPUTE, and everything else delegates to
+    the original AC policy.
     """
 
     def merged_context_fn():
@@ -190,10 +106,8 @@ def _compose_with_ac_policy(
                 continue
 
             def merged_policy(sctx, func, *args, _orig=original_policy, **kwargs):
-                if func in _FLEX_SHARD_COLLECTIVE_OPS:
+                if is_unshard_bucket_op(func):
                     return CheckpointPolicy.MUST_RECOMPUTE
-                if func in _FLEX_SHARD_MUST_SAVE_OPS:
-                    return CheckpointPolicy.MUST_SAVE
                 return _orig(sctx, func, *args, **kwargs)
 
             ctx.policy_fn = merged_policy
@@ -207,23 +121,18 @@ def _compose_with_ac_policy(
     return merged_context_fn
 
 
-def _make_reshard_only_context_fn(
+def _make_full_ac_recompute_context_fn(
     recompute_state: _ReshardAfterForwardRecomputeState,
     recompute_bucket_ids: frozenset[int],
 ):
-    def reshard_only_context_fn():
-        from torch.utils.checkpoint import create_selective_checkpoint_contexts
-
-        forward_ctx, recompute_ctx = create_selective_checkpoint_contexts(
-            _reshard_after_forward_policy
-        )
-        return forward_ctx, _MarkRecomputeTorchDispatchMode(
-            recompute_ctx,
+    def full_ac_recompute_context_fn():
+        return nullcontext(), _MarkRecomputeTorchDispatchMode(
+            nullcontext(),
             recompute_state,
             recompute_bucket_ids,
         )
 
-    return reshard_only_context_fn
+    return full_ac_recompute_context_fn
 
 
 class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
@@ -300,8 +209,8 @@ def _wrap_module(
                 recompute_bucket_ids,
             )
         else:
-            # Full AC: add reshard policy via selective context.
-            merged_fn = _make_reshard_only_context_fn(
+            # Full AC: preserve full recomputation and only mark RAF replay.
+            merged_fn = _make_full_ac_recompute_context_fn(
                 recompute_state,
                 recompute_bucket_ids,
             )
