@@ -84,7 +84,7 @@ def _build_deepseekv3_kimi_model() -> nn.Module:
     experts) alongside torch.optim.Muon (the 2D attention / FFN matrices).
     """
     config = _deepseekv3_configs["debugmodel"](
-        attn_backend="sdpa", moe_comm_backend="standard"
+        attn_backend="flex", moe_comm_backend="standard"
     )
     return config.build()
 

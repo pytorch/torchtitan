@@ -24,7 +24,6 @@ from torch.utils.checkpoint import (
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
-    disable_flex_shard_gradient_division,
     flex_shard,
     MixedPrecisionPolicy,
 )
@@ -246,12 +245,12 @@ class TestFlexShardTraining(FSDPTest):
                 reshard_after_forward=False,
             ),
         )
-        disable_flex_shard_gradient_division(sum_model)
+        sum_model.set_gradient_reduce_op(dist.ReduceOp.SUM)
 
         for bucket_storage in sum_model.sharded_bucket_storages:
-            self.assertEqual(bucket_storage.gradient_reduce_op, "sum")
+            self.assertEqual(bucket_storage.gradient_reduce_op, dist.ReduceOp.SUM)
             for info in bucket_storage.param_infos.values():
-                self.assertEqual(info.gradient_reduce_op, "sum")
+                self.assertEqual(info.gradient_reduce_op, dist.ReduceOp.SUM)
 
         torch.manual_seed(42 + self.rank + 1)
         x = transformer_inputs(args, batch_size=2, device=device_type)

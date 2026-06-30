@@ -41,7 +41,6 @@ from .utils import (
     pack_tensors_into_flat_buffer,
     pack_tensors_into_flat_buffer_with_scratch,
     pack_segments_into_flat_buffer_triton_if_supported,
-    _to_dist_reduce_op,
 )
 
 if TYPE_CHECKING:
@@ -572,7 +571,7 @@ class Owned(Placement):
                 group=prepared.placement_state.pg,
             )
         if prepared.placement_state.rank == self.owner_rank:
-            if prepared.placement_state.gradient_reduce_op == "avg":
+            if prepared.placement_state.gradient_reduce_op == dist.ReduceOp.AVG:
                 flat.div_(prepared.placement_state.world_size)
             sharded_grads = self._views_from_flat(
                 flat,
@@ -1584,7 +1583,7 @@ class GroupedOwned(Placement):
                 dist.reduce_scatter_tensor(
                     output=recv,
                     input=send,
-                    op=_to_dist_reduce_op(state.gradient_reduce_op),
+                    op=state.gradient_reduce_op,
                     group=state.pg,
                 )
             finally:
