@@ -7,9 +7,21 @@
 import unittest
 import unittest.mock
 
+import spmd_types as spmd
 import torch
+from spmd_types.checker import typecheck
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
+from torchtitan.distributed.utils import set_spmd_backend
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    LocalTokenDispatcher,
+)
 
 
 class TestPermute(unittest.TestCase):
@@ -143,6 +155,106 @@ class TestPermute(unittest.TestCase):
             set(permuted_indices.tolist()),
             set(range(total)),
         )
+
+
+class TestAllToAllTokenDispatcherSpmdTypes(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @with_comms
+    def test_dispatch_combine_typechecked_matches_local_dispatcher(self):
+        ep_mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        dense_mesh = init_device_mesh(
+            self.device_type,
+            (1, 1, self.world_size),
+            mesh_dim_names=("dp", "cp", "tp"),
+        )
+        dispatcher = AllToAllTokenDispatcher(
+            AllToAllTokenDispatcher.Config(num_experts=2, top_k=1)
+        )
+        dispatcher.wire_meshes(ep_mesh=ep_mesh, tp_mesh=None)
+
+        x_TD = torch.tensor(
+            [
+                [1.0, 2.0, 3.0],
+                [4.0, 5.0, 6.0],
+                [7.0, 8.0, 9.0],
+                [10.0, 11.0, 12.0],
+            ],
+            device=self.device_type,
+        )
+        topk_scores_TK = torch.tensor(
+            [[0.5], [1.5], [2.0], [0.25]],
+            device=self.device_type,
+        )
+        topk_expert_ids_TK = torch.tensor(
+            [[0], [1], [0], [1]],
+            device=self.device_type,
+            dtype=torch.long,
+        )
+        num_local_tokens_per_expert_E = torch.bincount(
+            topk_expert_ids_TK.flatten(),
+            minlength=2,
+        )
+
+        local_dispatcher = LocalTokenDispatcher(
+            LocalTokenDispatcher.Config(num_experts=2, top_k=1)
+        )
+        local_routed_input, _, local_metadata = local_dispatcher.dispatch(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        local_output = local_dispatcher.combine(
+            local_routed_input,
+            local_metadata,
+            x_TD,
+            num_local_tokens_after_padding=x_TD.shape[0],
+            local_seq_len_after_padding=x_TD.shape[0],
+        )
+
+        set_spmd_backend("spmd_types")
+        try:
+            set_spmd_meshes(dense_mesh=dense_mesh, sparse_mesh=ep_mesh)
+            typed_x_TD = x_TD.detach().clone()
+            token_type = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V}
+            count_type = {"dp": spmd.P, "cp": spmd.P, "tp": spmd.P}
+            with set_current_spmd_mesh(dense_mesh):
+                with typecheck(strict_mode="strict", local=True):
+                    typed_x_TD = spmd.assert_type(typed_x_TD, token_type)
+                    typed_topk_scores_TK = spmd.assert_type(
+                        topk_scores_TK, token_type
+                    )
+                    typed_topk_expert_ids_TK = spmd.assert_type(
+                        topk_expert_ids_TK, token_type
+                    )
+                    typed_num_tokens_E = spmd.assert_type(
+                        num_local_tokens_per_expert_E, count_type
+                    )
+                    routed_input, _, metadata = dispatcher.dispatch(
+                        typed_x_TD,
+                        typed_topk_scores_TK,
+                        typed_topk_expert_ids_TK,
+                        typed_num_tokens_E,
+                    )
+                    output = dispatcher.combine(
+                        routed_input,
+                        metadata,
+                        typed_x_TD,
+                        num_local_tokens_after_padding=x_TD.shape[0],
+                        local_seq_len_after_padding=x_TD.shape[0],
+                    )
+                    spmd.assert_type(output, token_type)
+        finally:
+            set_spmd_backend("default")
+
+        self.assertTrue(torch.equal(output, local_output))
 
 
 if __name__ == "__main__":
