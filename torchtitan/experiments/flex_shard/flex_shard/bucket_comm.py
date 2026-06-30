@@ -78,6 +78,13 @@ class PreparedReduceGrad:
     device_handle: ModuleType | None
 
 
+def _first_tensor_device(*tensor_groups: list[torch.Tensor]) -> torch.device | None:
+    for tensors in tensor_groups:
+        if tensors:
+            return tensors[0].device
+    return None
+
+
 def begin_bucket_unshard(
     tensors: list[torch.Tensor],
     infos: list[ParamInfo],
@@ -220,8 +227,7 @@ class AsyncUnshardResult(UnshardHandle):
     _device: torch.device | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        if self.prepared.buffers:
-            self._device = self.prepared.buffers[0].device
+        self._device = _first_tensor_device(self.prepared.buffers)
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
@@ -229,8 +235,14 @@ class AsyncUnshardResult(UnshardHandle):
             self._result = self.prepared.placement.finish_prepared_unshard(
                 self.prepared
             )
-            if self._result.full_params:
-                self._device = self._result.full_params[0].device
+        self._device = (
+            _first_tensor_device(
+                self._result.full_params,
+                self.prepared.buffers,
+                self._result.buffers,
+            )
+            or self._device
+        )
         results = self._result.full_params
         self.release_buffers()
         return results
@@ -297,10 +309,7 @@ class AsyncReduceGradResult(ReduceGradHandle):
     _device: torch.device | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        if self.sharded_grads:
-            self._device = self.sharded_grads[0].device
-        elif self.buffers:
-            self._device = self.buffers[0].device
+        self._device = _first_tensor_device(self.sharded_grads, self.buffers)
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
@@ -339,8 +348,9 @@ class AsyncReduceGradResult(ReduceGradHandle):
         stream: torch.Stream,
     ) -> None:
         self.sharded_grads = sharded_grads
-        if self.sharded_grads:
-            self._device = self.sharded_grads[0].device
+        self._device = (
+            _first_tensor_device(self.sharded_grads, self.buffers) or self._device
+        )
         self.event = self.device_handle.Event()
         self.event.record(stream)
 

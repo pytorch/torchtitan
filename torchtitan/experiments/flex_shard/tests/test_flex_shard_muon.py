@@ -439,7 +439,9 @@ class TestCommFreeMuonHelpers(TestCase):
         )
         from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
 
-        from torchtitan.experiments.flex_shard.flex_shard.ops import UNSHARD_BUCKET_OP
+        from torchtitan.experiments.flex_shard.flex_shard.unshard_op import (
+            UNSHARD_BUCKET_OP,
+        )
         from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
             _compose_with_ac_policy,
             _ReshardAfterForwardRecomputeState,
