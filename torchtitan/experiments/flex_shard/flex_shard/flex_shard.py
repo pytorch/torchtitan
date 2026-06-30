@@ -19,7 +19,6 @@ from .bucket_storage import (
     BucketSpec,
     GradientReduceOp,
     ShardedBucketStorage,
-    validate_gradient_reduce_op,
 )
 from .reshard_after_forward import _apply_reshard_after_forward
 from .sharded_param import is_flex_shard_param
@@ -39,9 +38,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "disable_flex_shard_gradient_division",
     "flex_shard",
-    "set_flex_shard_gradient_reduce_op",
 ]
 
 
@@ -64,29 +61,20 @@ class FlexShardModule:
         _materialize_flex_shard_after_to_empty(self)
         return result
 
-
-def set_flex_shard_gradient_reduce_op(
-    model: nn.Module,
-    op: GradientReduceOp,
-) -> None:
-    """Set gradient reduction semantics for all FlexShard bucket storages."""
-    validated_op = validate_gradient_reduce_op(op)
-    for module in model.modules():
-        bucket_storages = getattr(module, _SHARDED_BUCKET_STORAGES_ATTR, None)
-        if bucket_storages is None:
-            continue
-        for bucket_storage in bucket_storages:
-            bucket_storage.set_gradient_reduce_op(validated_op)
-
-
-def disable_flex_shard_gradient_division(model: nn.Module) -> None:
-    """
-    Disable FlexShard's automatic gradient division for all FlexShard buckets.
-
-    This mirrors ``disable_fsdp_gradient_division()``: gradients are reduced
-    with SUM semantics and global gradient scaling is left to the training loop.
-    """
-    set_flex_shard_gradient_reduce_op(model, "sum")
+    def set_gradient_reduce_op(
+        self,
+        op: GradientReduceOp,
+        *,
+        recurse: bool = True,
+    ) -> None:
+        """Set gradient reduction semantics for this module's FlexShard buckets."""
+        modules = self.modules() if recurse else [self]
+        for module in modules:
+            bucket_storages = getattr(module, _SHARDED_BUCKET_STORAGES_ATTR, None)
+            if bucket_storages is None:
+                continue
+            for bucket_storage in bucket_storages:
+                bucket_storage.set_gradient_reduce_op(op)
 
 
 def flex_shard(

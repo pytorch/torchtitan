@@ -12,6 +12,7 @@ from torchtitan.experiments.flex_shard import is_flex_shard_param
 from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     _accumulate_sharded_grads,
     _BucketUnshard,
+    _get_raf_saved_full_params,
     BucketCommContext,
     ParamOwnerRef,
 )
@@ -121,6 +122,79 @@ class TestFlexShardEagerRuntime(TestCase):
         result = _BucketUnshard.backward(ctx)
         self.assertEqual(result, (None,))
         self.assertNotIn(bucket_id, ctx.runtime.bucket.context.raf_saved_unshard_cache)
+
+    def test_raf_saved_unshard_cache_keeps_delayed_multi_bucket_unpacks_until_release(
+        self,
+    ):
+        class _BucketStorage:
+            _reshard_after_forward = True
+            _reshard_after_forward_recompute_state = None
+
+        class _Context:
+            set_raf_saved_unshard_cache = (
+                BucketCommContext.set_raf_saved_unshard_cache
+            )
+            release_raf_saved_unshard_cache = (
+                BucketCommContext.release_raf_saved_unshard_cache
+            )
+
+            def __init__(self) -> None:
+                self.raf_saved_unshard_cache = {}
+                self.peak_cache_entries = 0
+                self.clear_requests = 0
+
+            def queue_raf_saved_unshard_cache_clear(self) -> None:
+                self.clear_requests += 1
+                self.peak_cache_entries = max(
+                    self.peak_cache_entries,
+                    len(self.raf_saved_unshard_cache),
+                )
+
+        class _Bucket:
+            def __init__(self, context: _Context, value: int) -> None:
+                self.context = context
+                self.bucket_storage = _BucketStorage()
+                self.bucket_params = []
+                self.full_params = [torch.tensor([value])]
+                self.recompute_count = 0
+
+            def recompute_unshard_for_saved_tensor(self) -> list[torch.Tensor]:
+                self.recompute_count += 1
+                return self.full_params
+
+        def _make_backward_ctx(bucket: _Bucket):
+            ctx = type("_Ctx", (), {})()
+            ctx.runtime = type("_Runtime", (), {"bucket": bucket})()
+            ctx.num_inputs = 0
+            ctx.local_shard_dtypes = ()
+            return ctx
+
+        context = _Context()
+        buckets = [_Bucket(context, idx) for idx in range(3)]
+        bucket_ids = [id(bucket.bucket_storage) for bucket in buckets]
+
+        full_params = [_get_raf_saved_full_params(bucket) for bucket in buckets]
+
+        self.assertEqual(len(context.raf_saved_unshard_cache), 3)
+        self.assertEqual(context.peak_cache_entries, 3)
+        self.assertEqual(context.clear_requests, 3)
+        self.assertEqual([bucket.recompute_count for bucket in buckets], [1, 1, 1])
+        for bucket_id in bucket_ids:
+            self.assertIn(bucket_id, context.raf_saved_unshard_cache)
+
+        self.assertIs(_get_raf_saved_full_params(buckets[0]), full_params[0])
+        self.assertEqual(buckets[0].recompute_count, 1)
+
+        for bucket, bucket_id, expected_entries in zip(
+            buckets,
+            bucket_ids,
+            [2, 1, 0],
+            strict=True,
+        ):
+            result = _BucketUnshard.backward(_make_backward_ctx(bucket))
+            self.assertEqual(result, (None,))
+            self.assertNotIn(bucket_id, context.raf_saved_unshard_cache)
+            self.assertEqual(len(context.raf_saved_unshard_cache), expected_entries)
 
     def test_accumulate_sharded_grads_matches_param_layout_for_fused_optimizer(self):
         if not torch.cuda.is_available():
