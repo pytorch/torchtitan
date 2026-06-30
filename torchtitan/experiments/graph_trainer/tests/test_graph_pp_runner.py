@@ -801,6 +801,7 @@ class GraphPPRunnerTraceTest(unittest.TestCase):
         multiplexed = multiplex_fw_bw_graph(
             stage.graphs.modules.fw,
             stage.graphs.modules.full_bw,
+            overlap=True,
         )
 
         multiplexed_outputs = _boxed_run(
