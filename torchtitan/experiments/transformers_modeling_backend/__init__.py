@@ -10,7 +10,6 @@ from .model import HFTransformerModel
 
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
-from .state_dict_adapter import HFTransformerStateDictAdapter
 
 __all__ = [
     "HFTransformerModel",
@@ -19,31 +18,17 @@ __all__ = [
 
 @dataclass
 class TitanDenseModelConfig:
-    """Arguments for the base TorchTitan model.
+    """Arguments for the base TorchTitan model."""
 
-    Two kinds of fields (see the groups below): those that mirror an HF config
-    key default to None so AutoConfig's value is used; TorchTitan-only fields
-    keep concrete defaults since they don't override anything from the HF config.
-    """
-
-    # Fields that map to an HF config key: default None so the value from
-    # AutoConfig.from_pretrained is kept. A non-None default would be injected
-    # over the HF config and force the wrong architecture (e.g. rope_theta).
-    # Set explicitly only to intentionally override (e.g. debugmodel sizes).
-    dim: int | None = None
-    n_layers: int | None = None
-    n_heads: int | None = None
+    dim: int = 4096
+    n_layers: int = 32
+    n_heads: int = 32
     n_kv_heads: int | None = None
     vocab_size: int | None = None
-    norm_eps: float | None = None
-    rope_theta: float | None = None
-
-    # TorchTitan-only fields with no HF equivalent: they don't override anything
-    # from the HF config, so they keep concrete defaults. (multiple_of and
-    # ffn_dim_multiplier are only used when deriving FFN size from an explicitly
-    # overridden dim; max_seq_len is set from training.seq_len.)
     multiple_of: int = 256
     ffn_dim_multiplier: float | None = None
+    norm_eps: float = 1e-5
+    rope_theta: float = 10000
     max_seq_len: int = 2048
     depth_init: bool = True
     use_flex_attn: bool = False
@@ -73,5 +58,5 @@ def model_registry(flavor: str) -> ModelSpec:
         parallelize_fn=parallelize_hf_transformers,
         pipelining_fn=pipeline_hf_transformers,
         post_optimizer_build_fn=None,
-        state_dict_adapter=HFTransformerStateDictAdapter,
+        state_dict_adapter=None,
     )
