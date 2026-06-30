@@ -60,6 +60,48 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
 NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh --parallelism.data_parallel_shard_degree=4 --parallelism.tensor_parallel_degree=2 --parallelism.expert_parallel_degree=2
 ```
 
+### GraphPP Pipeline Parallelism
+
+GraphPP is the `aot_fx_trace` pipeline-parallel path for GraphTrainer models.
+It reuses TorchTitan's eager PP module splitting and PyTorch PP schedules, then
+traces one representative microbatch per local stage with GraphTrainer's
+`minimal_fx_tracer`. The resulting per-stage graph bundles are reused for later
+microbatches; `GraphPPRunner` only executes the prebuilt callable for each PP
+schedule action.
+
+```bash
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel ./run_train.sh \
+  --compile.mode aot_fx_trace \
+  --parallelism.pipeline_parallel_degree 2 \
+  --parallelism.pipeline_parallel_schedule Interleaved1F1B \
+  --parallelism.data_parallel_shard_degree 4 \
+  --parallelism.expert_parallel_degree 2
+```
+
+Supported runtime schedules include `Interleaved1F1B`, `ZBVZeroBubble`, and
+`DualPipeV`. GraphPP builds stage-local forward/backward graphs, optional FSDP
+`UNSHARD` / `REDUCE_GRAD` graphs, optional dI/dW graphs for split backward
+schedules, and multiplexed graphs for `OVERLAP_F_B` actions. Regional and full
+Inductor compilation reuse the existing GraphTrainer compilation passes on the
+extracted GraphPP callables; GraphPP-specific handling stays in the GraphPP
+stack before those passes are invoked. Multiplexed graphs keep the forward graph
+as the destination module and ShapeEnv, insert backward placeholders/compute
+before it, and transfer backward metadata into that ShapeEnv. This preserves
+forward collective-size provenance for full Inductor without changing the shared
+compiler passes.
+
+GraphPP follows the same subclass boundary as the non-PP GraphTrainer tracer.
+Extracted graphs run on flat plain tensor leaves. Values exposed to the PP
+runtime are rewrapped from tracer metadata: stage forward outputs, input
+gradients sent to previous stages, and parameter gradients before assignment to
+live `param.grad`. Internal values remain flat because they never leave GraphPP
+graph execution: saved-for-backward tensors, unsharded FSDP params, raw grad
+leaves, reduce-grad inputs, and multiplexed intermediate outputs.
+
+Current limitations: GraphPP does not load precompile artifacts yet, CUDA graph
+capture should target the `GraphPPRunner` steady-state path in a future change,
+and EP-overlap annotations will be composed with GraphPP in a later PR.
+
 ### Compiler Optimizations
 
 The `aot_fx_trace` mode has a built-in pass pipeline controlled by dedicated flags.
