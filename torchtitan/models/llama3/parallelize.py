@@ -40,14 +40,7 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
-
-    if parallelism.spmd_backend == "full_dtensor":
+    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:
@@ -75,7 +68,7 @@ def parallelize_llama(
 
     # Always run apply_fsdp_to_decoder -- with shard_degree=1 it is a no-op for
     # the all-gather but still installs the MixedPrecisionPolicy.
-    if parallelism.spmd_backend == "full_dtensor":
+    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
     else:
         names = (

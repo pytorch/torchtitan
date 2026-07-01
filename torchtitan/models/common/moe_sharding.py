@@ -231,6 +231,7 @@ def set_moe_sharding_config(
     """
     # Always set sharding configs regardless of whether TP is enabled.
     # ``resolve_mesh`` filters out disabled axes at runtime.
+    moe_cfg.seq_dim_tp_sharded = enable_ep and enable_sp
     moe_cfg.sharding_config = _moe_sharding_config(
         enable_ep=enable_ep, enable_sp=enable_sp
     )
@@ -317,6 +318,8 @@ def set_moe_sharding_config(
                 # num_local_tokens_per_expert_E is routing metadata, but it is
                 # still a DTensor input to local_map and must have placements.
                 _tokens_per_expert_placement(enable_ep=enable_ep),
-            ),
+            )
+            if enable_ep
+            else None,
         ),
     )

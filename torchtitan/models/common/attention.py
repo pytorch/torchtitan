@@ -16,8 +16,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
+import spmd_types as spmd
+
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -36,7 +40,7 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_attn
 
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -163,29 +167,38 @@ class VarlenAttention(Module):
         if out_transform is not None:
             varlen_kwargs["return_aux"] = VarlenAuxRequest(lse=True)
 
-        result = varlen_attn(
-            q_TNH,
-            k_TNH,
-            v_TNH,
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            scale=scale,
-            window_size=self.window_size,
-            **varlen_kwargs,
-        )
+        # FA3 varlen attention takes rank-local metadata tensors.
+        # TODO(pianpwk): Move this op contract into pytorch/spmd_types.
+        with spmd.no_typecheck():
+            result = varlen_attn(
+                q_TNH,
+                k_TNH,
+                v_TNH,
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                scale=scale,
+                window_size=self.window_size,
+                **varlen_kwargs,
+            )
 
         # varlen_attn returns the packed output (T, N, H), plus the LSE when an
         # out_transform epilogue was requested.
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                # exclude CP from typecheck as varlen + CP is not yet supported.
+                spmd.assert_type(result, spmd.V, spmd.PartitionSpec("dp", "tp", None))
             out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
-        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            spmd.assert_type(out_TNH, spmd.V, spmd.PartitionSpec("dp", "tp", None))
+            spmd.assert_type(lse_NT, spmd.V, spmd.PartitionSpec("tp", "dp"))
 
+        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
         # out_transform can broadcast per (token, head).
         lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
@@ -235,6 +248,43 @@ class FlexAttention(Module):
         super().__init__()
         self.kernel_options = config.kernel_options
 
+    @staticmethod
+    def compiled_flex_attn(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        score_mod: _score_mod_signature | None,
+        block_mask: BlockMask | None,
+        scale: float | None,
+        enable_gqa: bool,
+        return_aux: AuxRequest,
+        kernel_options: dict,
+    ):
+        """Run compiled FlexAttention outside SPMD typechecking.
+
+        Compiled regions are not currently compatible with SPMD typechecking,
+        so propagate types at the boundary instead of typechecking into Flex.
+        TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
+        """
+        with spmd.no_typecheck():
+            out, aux = FlexAttention._compiled_flex_attn(
+                q,
+                k,
+                v,
+                score_mod=score_mod,
+                block_mask=block_mask,
+                scale=scale,
+                enable_gqa=enable_gqa,
+                return_aux=return_aux,
+                kernel_options=kernel_options,
+            )
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "tp", "cp", None))
+            if return_aux.lse:
+                spmd.assert_type(aux.lse, spmd.V, spmd.PartitionSpec("dp", "tp", "cp"))
+        return out, aux
+
     def forward(
         self,
         q_BLNH: torch.Tensor,
@@ -270,10 +320,11 @@ class FlexAttention(Module):
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
         with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out_BNLH, aux = FlexAttention._compiled_flex_attn(
+            out_BNLH, aux = FlexAttention.compiled_flex_attn(
                 q_BNLH,
                 k_BNLH,
                 v_BNLH,
+                score_mod=score_mod,
                 block_mask=attention_masks,
                 scale=scale,
                 enable_gqa=enable_gqa,
@@ -643,9 +694,23 @@ class QKVLinear(BaseQKVLinear):
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+
+        def local_qkv_head_split(x):
+            # Drop into local region, we can't propagate S(2) -> qkv head unflatten.
+            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
+            with spmd.local():
+                x_ = x.view(bs, seqlen, -1, self.head_dim)
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        x_, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
+                    )
+            return x_
+
+        xq, xk, xv = (
+            local_qkv_head_split(xq),
+            local_qkv_head_split(xk),
+            local_qkv_head_split(xv),
+        )
         return xq, xk, xv
 
 
@@ -682,7 +747,10 @@ class FusedQKVLinear(BaseQKVLinear):
         self.register_state_dict_post_hook(self._split_qkv_on_save)
         self.register_load_state_dict_pre_hook(self._merge_qkv_on_load)
 
-    def forward(
+    @spmd.local_map(
+        out_types=({"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},) * 3
+    )
+    def forward(  # pyrefly: ignore[bad-override]
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bs, seqlen, _ = x.shape
@@ -690,18 +758,49 @@ class FusedQKVLinear(BaseQKVLinear):
         # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
-        qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
-        # torch.split returns contiguous views for size-1 splits (xk, xv).
-        # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
-        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        xq = xq.reshape(bs, seqlen, -1, self.head_dim)
-        xk = xk.reshape(bs, seqlen, -1, self.head_dim)
-        xv = xv.reshape(bs, seqlen, -1, self.head_dim)
-        return xq, xk, xv
+        with spmd.local():  # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
+            qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
+            if get_spmd_backend() == "spmd_types":
+                spmd.assert_type(
+                    qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None)
+                )
+
+        hpk, hd = self.heads_per_kv, self.head_dim
+
+        def _split(t):
+            # Use the (possibly local) tensor's own B/L so this is correct both
+            # for a plain tensor and inside local_map, where ``t`` is the local
+            # (e.g. CP-sharded) shard rather than the global tensor.
+            b, s = t.shape[0], t.shape[1]
+            xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
+            # split leaves xk/xv as strided views into the fused buffer; vLLM
+            # attention/KV-cache kernels read raw memory assuming a contiguous
+            # head-major layout, so materialize all three contiguously here.
+            return (
+                xq.reshape(b, s, -1, hd).contiguous(),
+                xk.reshape(b, s, -1, hd).contiguous(),
+                xv.reshape(b, s, -1, hd).contiguous(),
+            )
+
+        if isinstance(qkv, DTensor):
+            # TEMPORARY: run the split on local tensors so its backward (cat)
+            # does not mix DTensor and plain grads under CP+PP. The asymmetric
+            # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
+            # cat() inconsistent grad types in PP's backward metadata inference.
+            # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
+            # head axis, CP shards seq). TODO: remove it after spmd_types/full_dtensor
+            _split = local_map(
+                _split,
+                out_placements=(qkv.placements,) * 3,
+                in_placements=(qkv.placements,),
+                in_grad_placements=(qkv.placements,),
+                device_mesh=qkv.device_mesh,
+            )
+        return _split(qkv)
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Split fused ``wqkv`` into stock ``wq.weight``/``wk.weight``/``wv.weight``."""
+        """Split fused ``wqkv`` into stock ``wq``/``wk``/``wv`` (weight and bias)."""
         hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
 
         for param, ndim in (("weight", 4), ("bias", 3)):
@@ -709,6 +808,13 @@ class FusedQKVLinear(BaseQKVLinear):
             if key not in state_dict:
                 continue
             tensor = state_dict.pop(key)
+            # Gather to Replicate so the n_kv-leading reshape is local (dim 0
+            # unsharded) when a Shard(0) split would not divide n_kv_heads
+            # (e.g. dp_shard=8, n_kv_heads=4); stays a DTensor for the copy.
+            if isinstance(tensor, DTensor):
+                tensor = tensor.redistribute(
+                    tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
+                )
             n_kv = tensor.shape[0] // (r * hd)
             tail = (tensor.shape[1],) if ndim == 4 else ()
             w = tensor.reshape(n_kv, r, hd, *tail)
@@ -724,7 +830,7 @@ class FusedQKVLinear(BaseQKVLinear):
 
     @staticmethod
     def _merge_qkv_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge stock ``wq.weight``/``wk.weight``/``wv.weight`` back into ``wqkv``."""
+        """Merge stock ``wq``/``wk``/``wv`` back into fused ``wqkv`` (weight and bias)."""
         hd, hpk = module.head_dim, module.heads_per_kv
 
         for param, ndim in (("weight", 4), ("bias", 3)):
@@ -732,6 +838,14 @@ class FusedQKVLinear(BaseQKVLinear):
             if not all(k in state_dict for k in keys):
                 continue
             wq, wk, wv = (state_dict.pop(k) for k in keys)
+            # TODO: check if we could avoid this All-gather
+            # Gather to Replicate so the n_kv reshape is local; stays a DTensor so the
+            # fused result can be copied into the sharded wqkv param.
+            if isinstance(wq, DTensor):
+                wq, wk, wv = (
+                    t.redistribute(t.device_mesh, [Replicate()] * t.device_mesh.ndim)
+                    for t in (wq, wk, wv)
+                )
             n_kv = wk.shape[0] // hd
             tail = (wq.shape[1],) if ndim == 4 else ()
             q = wq.reshape(n_kv, hpk, hd, *tail)

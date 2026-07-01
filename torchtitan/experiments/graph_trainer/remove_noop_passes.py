@@ -20,6 +20,7 @@ single pass-list entry; the sub-passes remain public so they can be tested
 import sys
 
 import torch
+from torch.fx.experimental.symbolic_shapes import guard_or_false
 
 from torchtitan.tools.logging import logger
 
@@ -138,6 +139,12 @@ _IDENTITY_VIEW_TARGETS = {
 }
 
 
+def _same_shape(shape1: torch.Size, shape2: torch.Size) -> bool:
+    return len(shape1) == len(shape2) and all(
+        guard_or_false(dim1 == dim2) for dim1, dim2 in zip(shape1, shape2)
+    )
+
+
 def remove_identity_view_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:
@@ -170,7 +177,7 @@ def remove_identity_view_pass(
         ):
             continue
 
-        if inp_val.shape == out_val.shape:
+        if _same_shape(inp_val.shape, out_val.shape):
             node.replace_all_uses_with(inp)
             gm.graph.erase_node(node)
             count += 1
@@ -277,7 +284,7 @@ def remove_identity_slice_pass(
         shape = val.shape
         dim_size = shape[dim]
 
-        if end >= dim_size:
+        if guard_or_false(end >= dim_size):
             node.replace_all_uses_with(input_node)
             gm.graph.erase_node(node)
             count += 1

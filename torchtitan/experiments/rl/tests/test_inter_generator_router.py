@@ -8,14 +8,16 @@ import asyncio
 
 import pytest
 
-from torchtitan.experiments.rl.generator_router import (
+from torchtitan.experiments.rl.routing.inter_generator_router import (
     _GeneratorState,
-    GeneratorRouter,
+    InterGeneratorRouter,
+)
+from torchtitan.experiments.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
-    RoutingContext,
     StickySessionRoutingStrategy,
 )
+from torchtitan.experiments.rl.routing.types import RoutingContext
 
 
 class _Endpoint:
@@ -50,9 +52,9 @@ class _Actor:
         self.pull_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
 
 
-def _router(actors, *, strategy=None, hot_swap=False) -> GeneratorRouter:
-    return GeneratorRouter(
-        GeneratorRouter.Config(
+def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
+    return InterGeneratorRouter(
+        InterGeneratorRouter.Config(
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
         ),

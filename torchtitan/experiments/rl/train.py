@@ -35,12 +35,34 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
+from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
-from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.observability import structured_logger as sl
 
 
 logger = logging.getLogger(__name__)
+
+
+def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
+    """Per-proc launch env a FULL_AND_PIECEWISE generator needs: ``VLLM_USE_BREAKABLE_CUDAGRAPH``.
+
+    rl/models/attention.py's ``@eager_break_during_capture`` reads this env at MODULE IMPORT and
+    makes prefill attention a cudagraph break (run eager at replay). The import happens before the
+    generator actor's ``__init__`` and in the vLLM EngineCore worker subprocesses -- which do NOT
+    inherit a runtime-set ``os.environ`` -- so setting it at runtime is too late. It must go in the
+    proc's LAUNCH env (the spawn bootstrap, or the MAST role.env). Without it the decorator no-ops
+    and prefill attention is captured as ``output.fill_(0)`` (zeroed) -> the model never reads the
+    prompt -> coherent-but-unrelated output. FULL_DECODE_ONLY never captures prefill so it needs
+    nothing. Shared so the OSS spawn path and the fbcode MAST launcher use one source of truth.
+    """
+    cg = getattr(generator_cfg, "cudagraph", None)
+    if (
+        cg is not None
+        and getattr(cg, "enable", False)
+        and getattr(cg, "mode", "") == "FULL_AND_PIECEWISE"
+    ):
+        return {"VLLM_USE_BREAKABLE_CUDAGRAPH": "1"}
+    return {}
 
 
 class PerHostProvisioner:
@@ -62,7 +84,9 @@ class PerHostProvisioner:
     def available(self) -> int:
         return self.total_gpus - self.next_gpu
 
-    def allocate(self, num_gpus: int) -> Callable[[], None]:
+    def allocate(
+        self, num_gpus: int, *, extra_env: dict[str, str] | None = None
+    ) -> Callable[[], None]:
         if num_gpus > self.available:
             raise RuntimeError(
                 f"Requested {num_gpus} GPUs but only {self.available} "
@@ -73,6 +97,12 @@ class PerHostProvisioner:
 
         def _bootstrap():
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+            # Per-proc LAUNCH env. Set here (in the bootstrap) -- not at runtime in the actor's
+            # __init__ -- because rl/models/attention.py's @eager_break_during_capture reads
+            # VLLM_USE_BREAKABLE_CUDAGRAPH at MODULE IMPORT, which happens before __init__ and
+            # in the vLLM EngineCore worker subprocs (which do not inherit a runtime-set env).
+            if extra_env:
+                os.environ.update(extra_env)
             # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
             import torch  # noqa: F401
 
@@ -109,9 +139,10 @@ def _spawn_proc_mesh(
     gpus_per_node: int,
     *,
     role: str,
+    extra_env: dict[str, str] | None = None,
 ) -> ProcMesh:
     """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
-    evenly across the mesh's hosts.
+    evenly across the mesh's hosts. ``extra_env`` is applied in each proc's bootstrap.
     """
     nodes = len(host_mesh)
     assert role_world_size % nodes == 0, (
@@ -122,7 +153,7 @@ def _spawn_proc_mesh(
     provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
-        bootstrap=provisioner.allocate(role_gpus_per_node),
+        bootstrap=provisioner.allocate(role_gpus_per_node, extra_env=extra_env),
     )
 
 
@@ -132,6 +163,7 @@ def spawn_proc_mesh(
     host_meshes: HostMeshes | None = None,
     *,
     num_generators: int = 1,
+    generator_env: dict[str, str] | None = None,
 ) -> tuple[ProcMesh, list[ProcMesh]]:
     """Spawn the trainer and generator proc meshes.
 
@@ -173,6 +205,7 @@ def spawn_proc_mesh(
                 per_generator_world_size,
                 gpus_per_node,
                 role="generator",
+                extra_env=generator_env,
             )
             for gen_host_mesh in generator_host_meshes
         ]
@@ -188,7 +221,9 @@ def spawn_proc_mesh(
         generator_meshes = [
             host_mesh.spawn_procs(
                 per_host={"gpus": per_generator_world_size},
-                bootstrap=provisioner.allocate(per_generator_world_size),
+                bootstrap=provisioner.allocate(
+                    per_generator_world_size, extra_env=generator_env
+                ),
             )
             for _ in range(num_generators)
         ]
@@ -197,8 +232,17 @@ def spawn_proc_mesh(
 
 
 async def main():
+    # Monarch is making breaking changes to its message dispatching mechanism.
+    # The recommended way to maintain the current behavior, which is what we want,
+    # is to use @concurrent_endpoint. But that decorator is not available in
+    # monarch's stable release yet. So we pin this env var for now, until the
+    # new release is cut. More details can be found in:
+    # https://github.com/meta-pytorch/monarch/pull/4243
+    # https://github.com/meta-pytorch/monarch/pull/4211
+    os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
+
     config = ConfigManager().parse_args()
-    assert isinstance(config, RLTrainer.Config)
+    assert isinstance(config, Controller.Config)
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
@@ -207,7 +251,7 @@ async def main():
     )
     sl.log_trace_instant("structured_logger_started")
 
-    rl_trainer: RLTrainer = config.build()
+    rl_trainer: Controller = config.build()
     try:
         trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
         per_generator_world_size = _compute_generator_world_size(
@@ -218,12 +262,13 @@ async def main():
             per_generator_world_size,
             host_meshes=None,
             num_generators=config.num_generators,
+            generator_env=breakable_cudagraph_env(config.generator),
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,
             generator_meshes=generator_meshes,
         )
-        await rl_trainer.train()
+        await rl_trainer.run()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted; attempting graceful shutdown...")
     finally:

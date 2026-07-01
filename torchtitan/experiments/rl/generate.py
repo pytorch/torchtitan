@@ -81,13 +81,22 @@ def generate() -> None:
         raise ValueError(f"Unknown RL config {args.config!r}")
     config = config_factory()
     gen_config = config.generator
+    model_spec = config.model_spec
     model_path = config.hf_assets_path
     max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
+    # FULL_AND_PIECEWISE reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time (the
+    # @eager_break_during_capture decorator in rl/models/attention.py).
+    if (
+        gen_config.cudagraph.enable
+        and gen_config.cudagraph.mode == "FULL_AND_PIECEWISE"
+    ):
+        os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+
     # Register TorchTitan model with vLLM before engine creation
     register_to_vllm(
-        config.model_spec,
+        model_spec,
         parallelism=gen_config.parallelism,
         compile_config=config.compile,
         checkpoint_config=CheckpointManager.Config(
@@ -95,10 +104,11 @@ def generate() -> None:
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
+        override=config.generator.override,
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    inner_attn = config.model_spec.model.layers[0].attention.inner_attention
+    inner_attn = model_spec.model.layers[0].attention.inner_attention
     if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
@@ -147,12 +157,15 @@ def generate() -> None:
         ),
         disable_log_stats=False,
     )
-    engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
+    engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
     engine_kwargs["max_num_seqs"] = max_num_seqs
+    if gen_config.max_num_batched_tokens is not None:
+        engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=gen_config.max_num_batched_tokens,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config

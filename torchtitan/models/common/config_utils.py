@@ -14,6 +14,10 @@ import dataclasses
 from collections.abc import Callable
 from typing import Literal
 
+import torch
+from torch.distributed.tensor import DTensor
+
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
@@ -21,6 +25,7 @@ from torchtitan.models.common.attention import (
     QKVLinear,
     VarlenAttention,
 )
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
@@ -32,7 +37,15 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+
+
+def decoder_vocab_size(model_spec: ModelSpec) -> int:
+    """Assert Decoder.Config type so lint is not annoyed."""
+    model_config = model_spec.model
+    assert isinstance(model_config, Decoder.Config)
+    return model_config.vocab_size
 
 
 def get_attention_config(
@@ -70,6 +83,87 @@ def get_attention_config(
         raise ValueError(f"Unknown backend: {backend}")
 
 
+def _fused_qkv_param_init(
+    base_param_init: dict[str, Callable],
+    *,
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+) -> dict[str, Callable]:
+    """Init for the fused ``wqkv`` that is bit-identical to the stock separate
+    ``wq``/``wk``/``wv`` and independent of the sharding degree.
+
+    The non-fused module initializes ``wq``/``wk``/``wv`` as three separate
+    contiguous parameters. This reproduces those exact draws: it initializes q,
+    k, v as three contiguous tensors of the stock-weight shapes (in
+    ``QKVLinear``'s ``wq``/``wk``/``wv`` build order), then assembles them into
+    the fused ``(n_kv_heads, R, head_dim, dim)`` layout (``R = heads_per_kv + 2``)
+    -- the same concatenation ``_merge_qkv_on_load`` uses -- and copies into the
+    buffer.
+
+    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) param --
+    e.g. a ``Shard(0)`` DTensor for the colwise wqkv. ``t.new_empty(...)``
+    returns ``Replicate`` DTensors, so each ``base_init`` runs on the full tensor
+    and draws the same values on every rank (the weights do not depend on the
+    TP/FSDP degree). ``cat`` of ``Replicate`` stays ``Replicate``, and the final
+    ``copy_`` scatters it into the sharded ``t`` (each rank keeps its shard). So
+    the path is "init replicated, then shard," which both matches the non-fused
+    module and keeps RNG independent of the parallelism.
+    """
+    heads_per_kv = n_heads // n_kv_heads
+
+    def _make_init(base_init: Callable) -> Callable:
+        # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
+        # Building q/k/v with the exact stock shapes and drawing them in
+        # wq/wk/wv order keeps the RNG sequence identical to the non-fused module.
+        def _init(t):
+            tail = t.shape[1:]
+            # If t is a sharded DTensor, new_empty (with the full stock shape)
+            # returns Replicate DTensors, so base_init runs replicated and draws
+            # the same values on every rank (parallelism-agnostic RNG).
+            q = t.new_empty(n_heads * head_dim, *tail)
+            k = t.new_empty(n_kv_heads * head_dim, *tail)
+            v = t.new_empty(n_kv_heads * head_dim, *tail)
+            base_init(q)
+            base_init(k)
+            base_init(v)
+            fused = torch.cat(
+                [
+                    q.view(n_kv_heads, heads_per_kv, head_dim, *tail),
+                    k.view(n_kv_heads, 1, head_dim, *tail),
+                    v.view(n_kv_heads, 1, head_dim, *tail),
+                ],
+                dim=1,
+            ).view(-1, *tail)
+            with torch.no_grad():
+                # fused is Replicate (cat of Replicates). Flatten it to t's native
+                # 2D [(n_kv_heads*r_dim*head_dim), *tail] shape and copy_ into t,
+                # which scatters each rank's own shard. Reshaping the Replicate
+                # source (instead of t.view(n_kv_heads, ...) on the sharded t)
+                # avoids the "unflatten unevenly sharded" error when dp_shard*tp
+                # does not divide n_kv_heads (e.g. dp_shard=8, n_kv_heads=4); no
+                # gather, since fused is already replicated.
+                if not isinstance(t, DTensor) and (tp_size := spmd_mesh_size("tp")) > 1:
+                    # RL generator init_weights() only needs non-persistent
+                    # buffers; weights come from trainer state dict. Until it has
+                    # a DTensor static state dict path, copy this TP shard here.
+                    # TODO: Remove once RL can init buffers without weight init.
+                    mesh = current_spmd_mesh()
+                    assert mesh is not None
+                    tp_rank = mesh.get_local_rank("tp")
+                    fused = fused.chunk(tp_size, dim=0)[tp_rank]
+                t.copy_(fused)
+
+        return _init
+
+    out: dict[str, Callable] = {}
+    for param in ("weight", "bias"):
+        base_init = base_param_init.get(param)
+        if base_init is not None:
+            out[param] = _make_init(base_init)
+    return out
+
+
 def make_gqa_config(
     *,
     dim: int,
@@ -96,7 +190,14 @@ def make_gqa_config(
             wqkv=Linear.Config(
                 in_features=dim,
                 out_features=(n_heads + 2 * n_kv) * per_head_dim,
-                param_init=wqkv_param_init,
+                # Per-slice init so the fused wqkv is bit-identical to the stock
+                # separate wq/wk/wv (see _fused_qkv_param_init).
+                param_init=_fused_qkv_param_init(
+                    wqkv_param_init,
+                    n_heads=n_heads,
+                    n_kv_heads=n_kv,
+                    head_dim=per_head_dim,
+                ),
             ),
         )
     else:
@@ -207,6 +308,9 @@ def make_token_dispatcher_config(
     top_k: int,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    hidden_dim: int | None = None,
+    num_max_tokens_per_rank: int | None = None,
+    cudagraphable: bool = False,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -224,10 +328,21 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
+    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/cudagraph knobs --
+    # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
     if comm_backend == "deepep":
+        # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
+        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
+        # selects the static no-host-sync expand layout (set on the generator by the
+        # deepep_inference override). ``num_max_tokens_per_rank`` is the per-rank EXPAND
+        # capacity: training infers it (the compact path auto-sizes), inference must set it
+        # >= the largest per-rank token count for droplessness.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            hidden_dim=hidden_dim,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            cudagraphable=cudagraphable,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
@@ -261,6 +376,8 @@ def make_experts_config(
     param_init: dict[str, Callable],
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    num_max_tokens_per_rank: int | None = None,
+    cudagraphable: bool = False,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -273,5 +390,8 @@ def make_experts_config(
             top_k=top_k,
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+            hidden_dim=dim,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            cudagraphable=cudagraphable,
         ),
     )

@@ -52,14 +52,14 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.experiments.rl.actors.trainer import compute_logprobs
+from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
@@ -71,7 +71,6 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.common.attention import (
     create_attention_mask,
     FlexAttention,
@@ -92,7 +91,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: directly testing against PolicyTrainer with debug model to avoid OOM
 def build_trainer_model(
-    config: RLTrainer.Config,
+    config: Controller.Config,
 ) -> tuple[torch.nn.Module, torch.device]:
     """Build, parallelize, and load weights for the trainer model.
 
@@ -191,7 +190,7 @@ def _set_generator_determinism(debug) -> None:
         torch.manual_seed(debug.seed)
 
 
-def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
+def build_inference_engine(config: Controller.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
@@ -248,7 +247,18 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
-    max_num_seqs = config.num_groups_per_rollout_batch * config.group_size
+    # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
+    # (the active-buffer capacity num_group_workers, or the validation pass).
+    async_loop = config.async_loop
+    gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
+    num_group_workers = (
+        async_loop.max_offpolicy_steps + 1
+    ) * async_loop.num_groups_per_train_step
+    rollout_concurrency = max(
+        num_group_workers * async_loop.group_size,
+        async_loop.validation.num_samples,
+    )
+    max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
@@ -346,8 +356,6 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
 
-    if inner_attn.mask_mod is not None:
-        mask_mods.append(inner_attn.mask_mod.build().get_mask_mod())
     attention_masks = create_attention_mask(
         and_masks(*mask_mods),
         1,
@@ -638,6 +646,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
             checkpoint_config=generator_checkpoint,
+            override=config.generator.override,
         )
 
         # Test runs trainer and generator in the same process, so limit

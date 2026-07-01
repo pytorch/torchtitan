@@ -15,14 +15,15 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from monarch.actor import Actor, current_rank, endpoint
-from monarch.rdma import is_rdma_available
+from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, Configurable, DebugConfig
-from torchtitan.distributed.utils import set_batch_invariance
+from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
+from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
     patch_bmm_for_batch_invariance,
@@ -33,14 +34,22 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.observability import metrics as m
+from torchtitan.experiments.rl.routing.intra_generator_router import (
+    IntraGeneratorRouter,
+)
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import (
+    FlexAttention,
+    FusedQKVLinear,
+    VarlenAttention,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.sharding import resolve_placements, SpmdLayout
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig, CompilationConfig
+from vllm.config import AttentionConfig, CompilationConfig, ParallelConfig
 from vllm.config.compilation import CompilationMode
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -48,20 +57,59 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
+# TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
+
+
+@dataclass(kw_only=True, slots=True)
+class _RequestMetricsInputs:
+    """Raw inputs needed to build a request's vLLM metrics. Used to pass
+    metric related information when fan-in from DPs to rank 0.
+    """
+
+    num_cached_tokens: int | None
+    has_stats: bool
+    queued_ts: float = 0.0
+    scheduled_ts: float = 0.0
+    first_token_ts: float = 0.0
+    last_token_ts: float = 0.0
+    first_token_latency: float = 0.0
+    num_generation_tokens: int = 0
+
+
+def _extract_request_metrics_inputs(
+    request_output: RequestOutput,
+) -> _RequestMetricsInputs:
+    """Pull the raw metric inputs off a finished ``RequestOutput``."""
+    stats = request_output.metrics
+    if stats is None:
+        return _RequestMetricsInputs(
+            num_cached_tokens=request_output.num_cached_tokens, has_stats=False
+        )
+    return _RequestMetricsInputs(
+        num_cached_tokens=request_output.num_cached_tokens,
+        has_stats=True,
+        queued_ts=stats.queued_ts,
+        scheduled_ts=stats.scheduled_ts,
+        first_token_ts=stats.first_token_ts,
+        last_token_ts=stats.last_token_ts,
+        first_token_latency=stats.first_token_latency,
+        num_generation_tokens=stats.num_generation_tokens,
+    )
+
 
 def _prepare_generation_request_metrics(
-    request_output: RequestOutput, *, prefix: str
+    inputs: _RequestMetricsInputs, *, prefix: str
 ) -> list[m.Metric]:
-    """Prepare vLLM metrics from a RequestOutput.
+    """Prepare vLLM per-request metrics from the raw inputs.
 
-    For `add_request` call, vLLM returns RequestOutput carrying
-    a single `RequestStateStats` on `.metrics` field.
+    For `add_request` call, vLLM returns a RequestOutput carrying
+    a single `RequestStateStats` (captured into `_RequestMetricsInputs`).
 
     Caveat under `SamplingParams.n > 1`: vLLM stores one `RequestStateStats`
     per child request; the parent output exposes the **last-finishing**
     child's timeline. `arrival_time` is shared across siblings, but
     [`queued_ts`, `scheduled_ts`, `first_token_ts`, `last_token_ts`,
-    `num_generation_tokens`] describe one specific child — not an aggregate,
+    `num_generation_tokens`] describe one specific child - not an aggregate,
     not the first sibling's. The other `n-1` siblings' stats are dropped by
     vLLM at ``output_processor._finish_request``.
     """
@@ -74,29 +122,30 @@ def _prepare_generation_request_metrics(
     # LLMEngine.from_engine_args(..., stat_loggers=[...]).
 
     metric_values: dict[str, float] = {}
-    if request_output.num_cached_tokens is not None:
-        metric_values[f"{prefix}/num_cached_tokens"] = request_output.num_cached_tokens
+    if inputs.num_cached_tokens is not None:
+        metric_values[f"{prefix}/num_cached_tokens"] = inputs.num_cached_tokens
 
-    stats = request_output.metrics
-    if stats is not None:
+    if inputs.has_stats:
         metric_values[f"{prefix}/queue_time_ms"] = (
-            stats.scheduled_ts - stats.queued_ts
+            inputs.scheduled_ts - inputs.queued_ts
         ) * 1000
 
-        if stats.num_generation_tokens > 0:
+        if inputs.num_generation_tokens > 0:
             metric_values[f"{prefix}/time_to_first_token_ms"] = (
-                stats.first_token_latency * 1000
+                inputs.first_token_latency * 1000
             )
             metric_values[f"{prefix}/prefill_time_ms"] = (
-                stats.first_token_ts - stats.scheduled_ts
+                inputs.first_token_ts - inputs.scheduled_ts
             ) * 1000
 
-        if stats.num_generation_tokens > 1:
-            first_to_last_token_ms = (stats.last_token_ts - stats.first_token_ts) * 1000
+        if inputs.num_generation_tokens > 1:
+            first_to_last_token_ms = (
+                inputs.last_token_ts - inputs.first_token_ts
+            ) * 1000
             metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
             metric_values[
                 f"{prefix}/inter_token_latency_ms"
-            ] = first_to_last_token_ms / (stats.num_generation_tokens - 1)
+            ] = first_to_last_token_ms / (inputs.num_generation_tokens - 1)
 
     # Emit each value with both Mean and Max aggregators.
     return [
@@ -106,13 +155,13 @@ def _prepare_generation_request_metrics(
     ]
 
 
-# vLLM's chunked-prefill chunk size (max_num_batched_tokens). "FULL" also graphs
-# prefill, whose per-step token count is bounded by this, so its capture sizes
-# must reach it (else prefill falls back to eager). The generator does not
-# override max_num_batched_tokens, so this is vLLM's default.
-# TODO: this value still needs discussion -- ideally read the engine's actual
-# max_num_batched_tokens rather than hardcoding the default.
-_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+# vLLM's default max_num_batched_tokens (vllm's per-step budget:
+# prefill + decode tokens summed over the batch). Used as the cudagraph capture
+# cap for "FULL" / "FULL_AND_PIECEWISE" (which graph prefill / mixed batches, so
+# capture sizes must reach the per-step budget or those batches fall back to
+# eager) when ``Config.max_num_batched_tokens`` is unset; when that field is set,
+# its value is used instead (and also drives the vLLM engine).
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
 @dataclass(kw_only=True, slots=True)
@@ -120,7 +169,7 @@ class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
     torch.compile is configured separately via ``CompileConfig`` at the
-    ``RLTrainer`` level, shared by both trainer and generator.  Only CUDA
+    ``Controller`` level, shared by both trainer and generator.  Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
     ``mode`` selects which vLLM cudagraph mode to capture; see that field and
@@ -132,20 +181,27 @@ class VLLMCudagraphConfig:
     enable: bool = True
     """Whether to enable CUDA graph capture."""
 
-    mode: Literal["FULL_DECODE_ONLY", "FULL"] = "FULL_DECODE_ONLY"
+    mode: Literal["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "FULL"] = "FULL_DECODE_ONLY"
     """Which vLLM cudagraph mode to capture (when ``enable``):
 
     - ``"FULL_DECODE_ONLY"`` (default): graph pure-decode batches; prefill / mixed
-      batches run eager. Cheap (no inductor compile) and the only mode that is
-      correct with our varlen/FA3 attention backend (#3668).
-    - ``"FULL"``: graph the whole forward, prefill included. Corrupts generation
-      with our varlen backend (#3668); kept for experiments / repro only.
-
-    FULL_AND_PIECEWISE (graph prefill piecewise around attention) is not offered:
-    the only correct path is vLLM's slow whole-model inductor compile, and the
-    cheap path (breakable cudagraph) corrupts because our varlen attention op
-    lacks an eager break-point. See #3709.
+      batches run eager. Cheap (no inductor compile) and correct with our
+      varlen/FA3 attention backend (#3668).
+    - ``"FULL_AND_PIECEWISE"``: FULL graph for pure single-token decode (whole
+      forward incl. attention -- safe because decode has a fixed query_len==1
+      layout) AND breakable PIECEWISE for prefill / mixed batches (attention runs
+      eager at a stream-capture break). Best coverage: the common decode path
+      gets a full graph while only mixed batches pay the eager-break cost.
+      Requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1``.
+    - ``"FULL"``: graph the whole forward, prefill included, attention captured
+      too. Only valid with the flex attention backend, which survives FULL
+      capture of mixed prefill+decode batches
     """
+
+    capture_sizes: list[int] | None = None
+    """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
+    auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
+    exact sizes. When set, exactly these sizes are captured (deduped and sorted)."""
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
@@ -157,30 +213,54 @@ class VLLMCudagraphConfig:
     # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
-        self, *, max_num_seqs: int
+        self, *, max_num_seqs: int, max_num_batched_tokens: int | None = None
     ) -> CompilationConfig | None:
         """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
         when CUDA graphs are disabled.
 
-        Capture sizes are powers of 2 up to the cap, plus ``max_num_seqs`` itself
-        so the decode batch is captured exactly. The cap is ``max_num_seqs`` for
-        ``FULL_DECODE_ONLY`` (decode batch == num_seqs); ``FULL`` also graphs
-        prefill, so it extends to the prefill chunk size.
+        When ``capture_sizes`` is set, those exact sizes are captured. Otherwise
+        sizes are auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and
+        the cap itself as exact sizes so the largest capture size is always the cap
+        (even when it is not a power of 2). The cap is ``max_num_seqs`` for
+        ``FULL_DECODE_ONLY`` (decode batch == num_seqs). ``FULL`` and
+        ``FULL_AND_PIECEWISE`` also graph prefill, whose per-step token count is
+        bounded by ``max_num_batched_tokens`` (the configured value, else
+        ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it
+        -- otherwise prefill chunks larger than the cap fall back to eager.
 
-        ``mode=CompilationMode.NONE`` captures cudagraphs without vLLM's
-        whole-model inductor compile, which we never use (#3709).
+        All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
+        ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
+        cudagraph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
+        also forces ``mode=NONE`` when that env is set) (#3709).
         """
         if not self.enable:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
+        if max_num_batched_tokens is not None:
+            _max_cudagraph_capture_size = max_num_batched_tokens
+        else:
+            _max_cudagraph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
-        if self.mode == "FULL":
-            cap = max(cap, _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS)
-        sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
-        if max_num_seqs not in sizes:
-            sizes.append(max_num_seqs)
-        sizes = sorted(sizes)
+        if self.mode in ("FULL", "FULL_AND_PIECEWISE"):
+            cap = max(cap, _max_cudagraph_capture_size)
+        if self.capture_sizes is not None:
+            if not self.capture_sizes or any(s <= 0 for s in self.capture_sizes):
+                raise ValueError(
+                    "cudagraph.capture_sizes must be a non-empty list of positive "
+                    f"ints, got {self.capture_sizes}"
+                )
+            sizes = sorted(set(self.capture_sizes))
+        else:
+            sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
+            # Always include max_num_seqs (decode batch) and the cap (largest
+            # prefill chunk) as exact sizes so the largest capture size is the cap
+            # even when it is not a power of 2
+            if max_num_seqs not in sizes:
+                sizes.append(max_num_seqs)
+            if cap not in sizes:
+                sizes.append(cap)
+            sizes = sorted(sizes)
 
         return CompilationConfig(
             cudagraph_mode=self.mode,
@@ -210,6 +290,325 @@ class SamplingConfig:
     """Renderer role-boundary stop tokens; filled by the controller."""
 
 
+class RequestDispatcher:
+    """Owns the generator's DP/TP request dispatch, hiding the rank layout behind
+    a small interface so ``VLLMGenerator`` does not deal with it directly.
+
+    Every rank holds one dispatcher; methods act according to the rank's role:
+    - Rank 0 is the coordinator (and DP0's tp_rank=0): it holds the generation
+      futures, routes requests, opens the fan-in port, and resolves every
+      completion -- its own replica's locally, peers' via the drain task. State
+      and methods only ever used on rank 0 are prefixed ``rank0_``.
+    - Other DP's tp_rank=0 build finished completions and fan them in
+      to rank 0 over the port.
+    - tp_rank!=0 hold no outputs; their dispatcher only carries the layout.
+
+    Supported rank layout:
+
+        global_rank = dp_rank * tp_degree + tp_rank
+
+    EP reuses the same global-rank -> (dp, tp) mapping, so it needs no special
+    handling here.
+
+    Data flow:
+
+    Take DP=2, TP=2 for example. Only rank 0 holds futures and talks to the
+    controller, so completions produced by any other DP replica must be sent
+    back ("fanned in") to rank 0:
+
+        controller --generate--> rank 0  (registers a future)
+                                   |
+            rank0_route(): pick a DP rank for the queued requests
+                                   |   (broadcast in the LoopDecision, elsewhere)
+              +--------------------+--------------------+
+              v                                         v
+        DP0's tp_rank=0 (i.e. rank 0)               DP1's tp_rank=0 (i.e. rank 2)
+          engine.step()                             engine.step()
+          build (completion, metrics_inputs)        build (completion, metrics_inputs)
+          resolve own futures locally   <--port--   send completions to rank 0
+                                                    (tp_rank!=0: hold no outputs)
+        rank 0 background drain task: recv from port -> resolve those futures
+    """
+
+    def __init__(
+        self,
+        *,
+        rank: int,
+        parallelism: InferenceParallelismConfig,
+        broadcast_group: dist.ProcessGroup,
+        vllm_parallel_config: ParallelConfig,
+        intra_generator_router: IntraGeneratorRouter.Config,
+    ):
+        self._rank = rank
+        # Only DP and TP are supported, so ``tp_degree`` ranks make up one DP
+        # replica. EP does not change the global-rank -> (dp, tp) mapping, so it
+        # needs no handling here. TODO: revisit if PP/CP are ever added.
+        self._dp_degree = parallelism.data_parallel_degree
+        tp_degree = parallelism.tensor_parallel_degree
+        # Which DP replica this rank belongs to (== vLLM's data_parallel_rank).
+        self._dp_rank = rank // tp_degree
+        # Rank within the DP replica
+        self._tp_rank = rank % tp_degree
+        # Reused for the one-time result-port broadcast (see ``setup``).
+        self._broadcast_group = broadcast_group
+
+        # Confirm our derived layout matches what vLLM computed independently.
+        assert vllm_parallel_config.data_parallel_size == self._dp_degree, (
+            f"DP layout mismatch on rank {self._rank}: our dp_size "
+            f"({self._dp_degree}) != vLLM data_parallel_size "
+            f"({vllm_parallel_config.data_parallel_size})"
+        )
+        assert vllm_parallel_config.data_parallel_rank == self._dp_rank, (
+            f"DP layout mismatch on rank {self._rank}: our dp_rank "
+            f"({self._dp_rank}) != vLLM data_parallel_rank "
+            f"({vllm_parallel_config.data_parallel_rank})"
+        )
+
+        # RANK-0 OUTBOX: futures the engine loop resolves so the awaiting endpoint
+        # returns. Only rank 0 ever populates this.
+        self._rank0_generation_futures: dict[str, GenerationFuture] = {}
+
+        # --- Result fan-in (only when DP>1) ---
+        # rank 0 opens the channel, keeps the receiving end, and its drain task
+        # resolves whatever peer tp_rank=0 send. ``_result_port`` is the sending
+        # end, held only by peer tp_rank=0; it stays None on rank 0 (resolves
+        # locally) and on tp_rank!=0 (no outputs). All None for DP=1 since there
+        # is no peer DP to send from.
+        self._result_port: Port | None = None
+        self._rank0_result_receiver: PortReceiver | None = None
+        self._rank0_drain_task: asyncio.Task | None = None
+
+        # --- DP routing ---
+        # RANK-0 DP routing: pick a DP rank per request, reserving its load until
+        # the completion resolves.
+        self._rank0_dp_router: IntraGeneratorRouter | None = (
+            intra_generator_router.build(dp_degree=self._dp_degree)
+            if self._rank == 0 and self._dp_degree > 1
+            else None
+        )
+
+    def rank0_register_future(
+        self, request_id: str, metrics_prefix: str
+    ) -> asyncio.Future[Completion]:
+        """RANK 0: register a future for ``request_id`` and return it to await."""
+        if request_id in self._rank0_generation_futures:
+            raise ValueError(f"request_id {request_id!r} is already in flight")
+        future: asyncio.Future[Completion] = asyncio.get_running_loop().create_future()
+        self._rank0_generation_futures[request_id] = GenerationFuture(
+            future=future, metrics_prefix=metrics_prefix
+        )
+        return future
+
+    def rank0_has_pending_futures(self) -> bool:
+        """RANK 0: whether any request is still in flight (future unresolved).
+
+        A future stays registered until its completion comes back, so this stays
+        True while any peer DP rank is still running.
+        """
+        return bool(self._rank0_generation_futures)
+
+    def rank0_route(
+        self, requests: list[GenerationRequest]
+    ) -> list[list[GenerationRequest]]:
+        """RANK 0: pick which DP rank serves each queued request.
+
+        Returns a fixed-length (``dp_degree``) list; index == DP rank. Each rank
+        later admits only its own slice. With a single DP rank, everything goes
+        to DP rank 0; otherwise ``IntraGeneratorRouter`` reserves a DP rank per
+        request and that reservation is released when the request's completion
+        resolves.
+        """
+        requests_per_dp_rank: list[list[GenerationRequest]] = [
+            [] for _ in range(self._dp_degree)
+        ]
+        for request in requests:
+            if self._rank0_dp_router is None:
+                dp_rank = 0
+            else:
+                # Pick a DP rank for this request, and increment this DP rank's
+                # load by 1 (i.e. measured by request count).
+                dp_rank = self._rank0_dp_router.reserve(
+                    request.request_id,
+                    routing_session_id=request.routing_session_id,
+                )
+            requests_per_dp_rank[dp_rank].append(request)
+
+        return requests_per_dp_rank
+
+    def rank0_stamp_min_policy_version(
+        self,
+        requests_per_dp_rank: list[list[GenerationRequest]],
+        policy_version: int,
+    ) -> None:
+        """RANK 0: stamp the admitted (sampling) version on every future in this STEP
+        decision, across all DP ranks. Rank 0 owns the futures regardless of which DP
+        rank serves the request, so it stamps them all here."""
+        for dp_requests in requests_per_dp_rank:
+            for request in dp_requests:
+                self._rank0_generation_futures[
+                    request.request_id
+                ].min_policy_version = policy_version
+
+    def setup(self) -> None:
+        """One-time setup before the engine loop starts (DP>1): distribute rank 0's
+        result-fan-in port and start rank 0's drain task.
+
+        All ranks call this so the broadcast over the all-ranks ``_broadcast_group``
+        completes; only TP rank 0 keep the port.
+        """
+        if self._dp_degree == 1:
+            return
+
+        # rank 0 opens the channel and keeps the receiving end; it broadcasts only
+        # the sending port to the peers.
+        if self._rank == 0:
+            port, self._rank0_result_receiver = Channel.open()
+            # Monarch Port objects need cloudpickle, so we cloudpickle it into bytes
+            # first. Otherwise, broadcast_object_list will attempt to pickle the
+            # port object with stdlib pickle and result in error.
+            container = [cloudpickle.dumps(port)]
+        else:
+            container = [None]
+        dist.broadcast_object_list(
+            container, src=0, group=self._broadcast_group, device=torch.device("cpu")
+        )
+        assert container[0] is not None
+        # Only peer TP rank 0s send completions to global rank 0, so only they
+        # keep the port. Global rank 0 resolves locally and tp_rank!=0 produce
+        # no outputs.
+        if self._rank != 0 and self._tp_rank == 0:
+            self._result_port = cloudpickle.loads(container[0])
+        if self._rank == 0:
+            self._rank0_drain_task = asyncio.create_task(self._rank0_drain_results())
+
+    def process_finished_requests(
+        self, request_outputs: list[RequestOutput], policy_version: int
+    ) -> None:
+        """TP rank 0s send finished completions to global rank 0 after each
+        ``engine.step()``:
+          - Global Rank 0 resolves its own DP replica's completions locally;
+          - every other TP rank 0 sends them over the port to global rank 0's drain
+            task.
+          - Other ranks hold no finished outputs and do nothing.
+        """
+        if self._tp_rank != 0:
+            return
+
+        completions = self._build_completions(request_outputs, policy_version)
+        if self._rank == 0:
+            self._rank0_resolve_futures(completions)
+        elif completions:
+            self._result_port.send(completions)
+
+    def _build_completions(
+        self, request_outputs: list[RequestOutput], policy_version: int
+    ) -> list[tuple[str, Completion, _RequestMetricsInputs]]:
+        """Turn finished ``RequestOutput``s into ``(request_id, Completion, metrics_inputs)``."""
+        completions: list[tuple[str, Completion, _RequestMetricsInputs]] = []
+        for request_output in request_outputs:
+            # We enforce n=1 in sampling params -> exactly one CompletionOutput per finished request
+            # Here we just sanity check it (a single engine.step may still finish several requests).
+            if len(request_output.outputs) != 1:
+                raise ValueError(
+                    f"expected n=1 (one sample per request), got "
+                    f"{len(request_output.outputs)} for {request_output.request_id}"
+                )
+
+            # get logprobs
+            completion_output = request_output.outputs[0]
+            token_logprobs = [
+                next(iter(logprob_dict.values())).logprob
+                for logprob_dict in completion_output.logprobs
+            ]
+
+            completions.append(
+                (
+                    request_output.request_id,
+                    Completion(
+                        # NOTE: min_policy_version is a PLACEHOLDER here, set equal to max (the finish
+                        # version). The serving rank has no access to the future that holds the true
+                        # admitted version, so rank 0 REPLACES this with the real value in
+                        # _rank0_resolve_futures. min == max here ONLY until that replacement.
+                        min_policy_version=policy_version,
+                        max_policy_version=policy_version,
+                        request_id=request_output.request_id,
+                        token_ids=list(completion_output.token_ids),
+                        token_logprobs=token_logprobs,
+                        finish_reason=completion_output.finish_reason,
+                    ),
+                    _extract_request_metrics_inputs(request_output),
+                )
+            )
+        return completions
+
+    def _rank0_resolve_futures(
+        self, completions: list[tuple[str, Completion, _RequestMetricsInputs]]
+    ) -> None:
+        """RANK 0: build each completion's metrics (the only place that knows the
+        request's ``metrics_prefix``), then resolve its future.
+
+        TODO: metrics are built in two phases -- a DP-leader produces the raw
+        ``_RequestMetricsInputs`` alongside the ``Completion``, and rank 0
+        finalizes ``completion.metrics`` in place here, where it has the
+        ``inflight_requests_at_completion`` count. Consider unifying into a
+        single build step once that count can travel with (or be derived
+        without) the rank-0 future bookkeeping.
+        """
+        for request_id, completion, metrics_inputs in completions:
+            # in flight when this one finished (includes itself; counted before the pop)
+            inflight_requests_at_completion = float(len(self._rank0_generation_futures))
+            generation_future = self._rank0_generation_futures.pop(request_id)
+
+            # Replace the placeholder min (the builder set min == max) with the true admitted
+            # version stamped on the future at admission.
+            completion.min_policy_version = generation_future.min_policy_version
+            metrics_prefix = generation_future.metrics_prefix
+
+            metrics = _prepare_generation_request_metrics(
+                metrics_inputs, prefix=metrics_prefix
+            )
+            for metric_type in [m.Max, m.Mean]:
+                metrics.append(
+                    m.Metric(
+                        f"{metrics_prefix}/inflight_requests_at_completion",
+                        metric_type(inflight_requests_at_completion),
+                    )
+                )
+            completion.metrics = metrics
+
+            generation_future.future.set_result(completion)
+            # Free the request's reserved load on its DP rank so load-aware
+            # routing sees the accurate loads on DPs.
+            if self._rank0_dp_router is not None:
+                self._rank0_dp_router.release(request_id)
+
+    async def _rank0_drain_results(self) -> None:
+        """RANK 0 background task which receives and resolves completions pushed
+        by peer TP rank 0s.
+        """
+        while True:
+            completions = await self._rank0_result_receiver.recv()
+            self._rank0_resolve_futures(completions)
+
+    def fail_generation_futures(self, exc: BaseException) -> None:
+        """RANK 0: fail every unresolved generation future after an exception or
+        teardown (no-op elsewhere, where the map is empty)."""
+        for generation_future in self._rank0_generation_futures.values():
+            if not generation_future.future.done():
+                generation_future.future.set_exception(exc)
+        self._rank0_generation_futures.clear()
+
+    async def shutdown(self) -> None:
+        """Stop rank 0's drain task, if any (no-op elsewhere)."""
+        if self._rank0_drain_task is not None:
+            self._rank0_drain_task.cancel()
+            try:
+                await self._rank0_drain_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._rank0_drain_task = None
+
+
 class VLLMGenerator(Actor, Configurable):
     """vLLM engine to drive concurrent `generate` calls through one SPMD engine loop.
 
@@ -221,7 +620,8 @@ class VLLMGenerator(Actor, Configurable):
     Notice that vLLM `engine.step`, which is a TP collective, and the request-intake are decoupled, so a new request
     can join mid-flight, instead of waiting for the current batch to drain.
 
-    One loop iteration, TP=2, after the controller fired generate(prompt_0) and generate(prompt_1):
+    One loop iteration, RequestDispatcher is used to dispatch requests to different ranks, and collect results.
+    Take DP=1, TP=2 for example, after the controller fired generate(prompt_0) and generate(prompt_1):
 
         # request intake in `generate` takes a prompt, puts in a queue, releases control back to the controller
         generate(prompt_0): enqueue prompt_0, await gen_future_0   ┐ rank 0 owns the queue + futures
@@ -237,8 +637,10 @@ class VLLMGenerator(Actor, Configurable):
 
         # resolve the future, waking up `generate` so it returns the result to the controller.
         # Note that prompt_1 can be done before prompt_0. The result is per request, not per batch.
-        rank 0   _process_finished_requests -> prompt_1 done? gen_future_1.set_result(Completion)
-        rank 1   _process_finished_requests -> no-op (holds no futures)
+        rank 0   request_dispatcher.process_finished_requests -> prompt_1 done? gen_future_1.set_result(Completion)
+        rank 1   request_dispatcher.process_finished_requests -> no-op (tp_rank != 0, holds no futures)
+
+    For DP>1, the requests will be routed among DPs first. See RequestDispatcher's docstring for more details.
 
     A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied
     between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
@@ -250,7 +652,8 @@ class VLLMGenerator(Actor, Configurable):
         model_path: Path to the HF model checkpoint.
         compile_config: Per-layer torch.compile config shared with the
             trainer so both sides compile identically.
-        max_num_seqs: vLLM's max concurrent sequences (KV budget + CUDA-graph sizes).
+        max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
+            is tight); also sets the CUDA-graph capture sizes.
         output_dir: Structured-logger output directory.
     """
 
@@ -276,14 +679,31 @@ class VLLMGenerator(Actor, Configurable):
         )
         """Parallelism configuration for the vLLM engine."""
 
+        intra_generator_router: IntraGeneratorRouter.Config = field(
+            default_factory=IntraGeneratorRouter.Config
+        )
+        """In-mesh DP routing config: how rank 0 partitions requests across the
+        engine's data-parallel ranks (no effect when data_parallel_degree == 1,
+        where there is a single DP rank)."""
+
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
+
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied to
+        this generator's model spec after ``update_from_config`` and before build.
+        Separate from the trainer's override so the two can differ."""
 
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
+
+        max_num_batched_tokens: int | None = None
+        """vLLM chunked-prefill chunk size: max tokens scheduled per engine step
+        (prefill + decode, summed over the batch). ``None`` (default) leaves
+        vLLM's own engine default in place."""
 
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
@@ -309,9 +729,10 @@ class VLLMGenerator(Actor, Configurable):
         """Drop the prefix cache when weights change so new requests don't reuse KV computed under the old
         weights. vLLM only clears it while the engine is idle (true under sync training)."""
 
-        reset_running_requests_on_weight_sync: bool = False
+        reset_running_requests_on_weight_sync: bool = True
         """Affects requests ALREADY running at the pull: preempts them and recomputes their KV under
-        the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
+        the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
+        Default True to avoid reusing stale-weight KV."""
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
@@ -365,11 +786,6 @@ class VLLMGenerator(Actor, Configurable):
         self.config = config
         self.model_spec = model_spec
 
-        # max_num_seqs controls vLLM's maximum batch dimension: it sets
-        # the upper bound for concurrent sequences, determines KV-cache
-        # block allocation (and therefore GPU memory usage), and bounds
-        # the CUDA graph capture sizes.  Always computed by the caller
-        # (RLTrainer) as num_groups_per_rollout_batch * group_size.
         self._max_num_seqs = max_num_seqs
 
         self._backend = config.backend
@@ -388,12 +804,23 @@ class VLLMGenerator(Actor, Configurable):
                 hf_assets_path=model_path,
             )
         else:
+            # FULL_AND_PIECEWISE runs prefill/mixed-batch attention eager via the
+            # @eager_break_during_capture decorator in rl/models/attention.py, which
+            # reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time -- so the env must be
+            # set before register_to_vllm imports that module (#3709).
+            if (
+                config.cudagraph.enable
+                and config.cudagraph.mode == "FULL_AND_PIECEWISE"
+            ):
+                os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+
             # Register TorchTitan model + parser with vLLM
             register_to_vllm(
                 model_spec,
                 parallelism=config.parallelism,
                 compile_config=compile_config,
                 checkpoint_config=config.checkpoint,
+                override=config.override,
             )
 
             # `first_attention` handles hybrid models (linear + full attention).
@@ -471,6 +898,8 @@ class VLLMGenerator(Actor, Configurable):
             )
         engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
+        if config.max_num_batched_tokens is not None:
+            engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
@@ -482,6 +911,7 @@ class VLLMGenerator(Actor, Configurable):
         if not native:
             vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
                 max_num_seqs=self._max_num_seqs,
+                max_num_batched_tokens=config.max_num_batched_tokens,
             )
             if vllm_compilation_config is not None:
                 engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -491,6 +921,8 @@ class VLLMGenerator(Actor, Configurable):
 
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")
+            # TODO(async-rl): capture engine-aggregate stats (KV-cache util, queue depth, preemptions,
+            #   prefix-cache hit rate) via a `StatLoggerBase` in `from_engine_args`;
             self._engine = LLMEngine.from_engine_args(engine_args)
             logger.info("vLLM rollout engine initialized")
 
@@ -503,14 +935,22 @@ class VLLMGenerator(Actor, Configurable):
             asyncio.Condition()
         )  # Signals to wake up when there is work
 
+        # --- Request dispatch ---
+        # The dispatcher owns the DP/TP rank layout and the request dispatch /
+        # completion fan-in (see its docstring).
+        self._request_dispatcher = RequestDispatcher(
+            rank=self._rank,
+            parallelism=config.parallelism,
+            broadcast_group=self._broadcast_group,
+            vllm_parallel_config=self._engine.vllm_config.parallel_config,
+            intra_generator_router=config.intra_generator_router,
+        )
+
         # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
         self._queued_generation_requests: list[GenerationRequest] = []
         self._model_state_dict_pull_request: ModelStateDictPullRequest | None = None
         self._close_request: CloseRequest | None = None
 
-        # RANK-0 OUTBOX: futures the loop resolves so the awaiting endpoint returns.
-        # (close has no future here: its completion handle is `_engine_loop_task`.)
-        self._generation_futures: dict[str, GenerationFuture] = {}
         self._pull_model_state_dict_future: asyncio.Future[int] | None = None
 
         # Background asyncio.Task running _engine_loop; None until the first generate/pull starts it.
@@ -556,6 +996,7 @@ class VLLMGenerator(Actor, Configurable):
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> Completion | None:
@@ -568,6 +1009,7 @@ class VLLMGenerator(Actor, Configurable):
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
+            routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
             metrics_prefix: Namespace prepended to every metric key on the returned
@@ -597,17 +1039,9 @@ class VLLMGenerator(Actor, Configurable):
 
         # `_engine_loop_condition` wakes the engine loop, if asleep, when a new request is added.
         async with self._engine_loop_condition:
-            if request_id in self._generation_futures:
-                raise ValueError(f"request_id {request_id!r} is already in flight")
-
-            # A placeholder future for the engine loop to resolve with this request's Completion.
-            generation_future: asyncio.Future[
-                Completion
-            ] = asyncio.get_running_loop().create_future()
-
             # Register the future before enqueueing; the engine loop resolves it.
-            self._generation_futures[request_id] = GenerationFuture(
-                future=generation_future, metrics_prefix=metrics_prefix
+            generation_future = self._request_dispatcher.rank0_register_future(
+                request_id, metrics_prefix
             )
 
             # Add the request to the queue; the engine loop will admit + process it.
@@ -616,6 +1050,7 @@ class VLLMGenerator(Actor, Configurable):
                     request_id=request_id,
                     prompt_token_ids=prompt_token_ids,
                     sampling=sampling,
+                    routing_session_id=routing_session_id,
                 )
             )
             # Wakes the engine loop only if it is idle in `_decide_next_action`.
@@ -647,6 +1082,8 @@ class VLLMGenerator(Actor, Configurable):
             check `_decide_next_action` --> "CLOSE"        --> stop
         """
         try:
+            # One-time dispatcher setup before the loop starts.
+            self._request_dispatcher.setup()
             while True:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = await self._decide_next_action() if self._rank == 0 else None
@@ -678,18 +1115,30 @@ class VLLMGenerator(Actor, Configurable):
                     continue  # back to the start for the next decision
 
                 if decision.action is LoopAction.STEP:
-                    # Add any newly-queued requests; all ranks add the identical set in FCFS order.
-                    if decision.requests:
+                    # Rank 0 owns all futures, so it stamps the admitted (min) version for the whole decision.
+                    # TODO: move under the engine_step call (register at generation_start, not admission).
+                    # The way to do it is probably to change to RequestOutputKind.CUMULATIVE and mark per token.
+                    if self._rank == 0:
+                        self._request_dispatcher.rank0_stamp_min_policy_version(
+                            decision.requests_per_dp_rank, self.policy_version
+                        )
+                    # Admit only this rank's DP replica slice. TP ranks in the same
+                    # replica compute the same _dp_rank, so they add the identical
+                    # set in the same FCFS order.
+                    local_requests = decision.requests_per_dp_rank[
+                        self._request_dispatcher._dp_rank
+                    ]
+                    if local_requests:
                         # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized prompts);
                         # the high-level entry stays resilient to vLLM internals vs vllm.inputs.tokens_input.
                         engine_inputs = self._engine.renderer.render_cmpl(
                             [
                                 {"prompt_token_ids": request.prompt_token_ids}
-                                for request in decision.requests
+                                for request in local_requests
                             ]
                         )
                         for request, engine_input in zip(
-                            decision.requests, engine_inputs, strict=True
+                            local_requests, engine_inputs, strict=True
                         ):
                             self._engine.add_request(
                                 request_id=request.request_id,
@@ -707,7 +1156,9 @@ class VLLMGenerator(Actor, Configurable):
                         with torch.no_grad():
                             with sl.log_trace_span("vllm_engine_step"):
                                 request_outputs = self._engine.step()
-                        self._process_finished_requests(request_outputs)
+                        self._request_dispatcher.process_finished_requests(
+                            request_outputs, self.policy_version
+                        )
                         await asyncio.sleep(0)  # let pending generate() calls enqueue
 
         except Exception as exc:
@@ -725,85 +1176,34 @@ class VLLMGenerator(Actor, Configurable):
                 lambda: self._close_request is not None
                 or self._model_state_dict_pull_request is not None
                 or self._queued_generation_requests
-                # rank-0-only decision: use the local (no DP all-reduce) check;
-                or self._engine.output_processor.has_unfinished_requests()
+                # In-flight requests (on any DP rank) keep rank 0 issuing STEP.
+                or self._request_dispatcher.rank0_has_pending_futures()
             )
 
             if self._close_request is not None:
-                return LoopDecision(action=LoopAction.CLOSE, requests=[])
+                return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
 
             # A weight pull takes priority over admitting new requests.
             if self._model_state_dict_pull_request is not None:
                 return LoopDecision(
                     action=LoopAction.PULL_MODEL_STATE_DICT,
-                    requests=[],
+                    requests_per_dp_rank=[],
                     pull_version=self._model_state_dict_pull_request.version,
                 )
 
             # STEP: admit whatever is queued (may be empty -> just keep stepping in-flight work).
-            requests, self._queued_generation_requests = (
+            queued, self._queued_generation_requests = (
                 self._queued_generation_requests,
                 [],
             )
-            return LoopDecision(action=LoopAction.STEP, requests=requests)
-
-    def _process_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
-        """RANK 0: resolve each finished request's future with its `Completion` (metrics included)."""
-        if self._rank != 0:
-            return  # other ranks hold no futures
-
-        for request_output in request_outputs:
-            # We enforce n=1 in sampling params -> exactly one CompletionOutput per finished request
-            # Here we just sanity check it (a single engine.step may still finish several requests).
-            if len(request_output.outputs) != 1:
-                raise ValueError(
-                    f"expected n=1 (one sample per request), got "
-                    f"{len(request_output.outputs)} for {request_output.request_id}"
-                )
-
-            # in flight when this one finished (includes itself; counted before the pop)
-            inflight_requests_at_completion = float(len(self._generation_futures))
-            generation_future = self._generation_futures.pop(request_output.request_id)
-
-            # get logprobs
-            completion_output = request_output.outputs[0]
-            token_logprobs = [
-                next(iter(logprob_dict.values())).logprob
-                for logprob_dict in completion_output.logprobs
-            ]
-
-            # prepare metrics
-            metrics_prefix = generation_future.metrics_prefix
-            metrics = _prepare_generation_request_metrics(
-                request_output, prefix=metrics_prefix
-            )
-
-            for metric_type in [m.Max, m.Mean]:
-                metrics.append(
-                    m.Metric(
-                        f"{metrics_prefix}/inflight_requests_at_completion",
-                        metric_type(inflight_requests_at_completion),
-                    )
-                )
-
-            # resolve the future
-            generation_future.future.set_result(
-                Completion(
-                    policy_version=self.policy_version,
-                    request_id=request_output.request_id,
-                    token_ids=list(completion_output.token_ids),
-                    token_logprobs=token_logprobs,
-                    finish_reason=completion_output.finish_reason,
-                    metrics=metrics,
-                )
+            return LoopDecision(
+                action=LoopAction.STEP,
+                requests_per_dp_rank=self._request_dispatcher.rank0_route(queued),
             )
 
     def _fail_outstanding_futures(self, exc: BaseException) -> None:
         """Fail every unresolved future after an exception or engine teardown."""
-        for generation_future in self._generation_futures.values():
-            if not generation_future.future.done():
-                generation_future.future.set_exception(exc)
-        self._generation_futures.clear()
+        self._request_dispatcher.fail_generation_futures(exc)
 
         if self._pull_model_state_dict_future is not None:
             if not self._pull_model_state_dict_future.done():
@@ -829,6 +1229,8 @@ class VLLMGenerator(Actor, Configurable):
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Return each request's result once, when it is fully done, instead of streaming partial
             # outputs as tokens arrive.
+            # TODO(async-rl): use RequestOutputKind.CUMULATIVE for exact per-token
+            #   (start_token, version) boundaries; today we keep only the per-turn min/max.
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
@@ -886,19 +1288,32 @@ class VLLMGenerator(Actor, Configurable):
             hf_state_dict = self._sd_adapter.to_hf(tt_state_dict)
             self._get_model().load_weights(hf_state_dict.items())
         else:
-            # TODO: with >1 generator, trainer should probably use direct_rdma=False (CPU-staged, fanout-safe)
-            # is_rdma_available() is a hardware probe, not a fanout signal.
-            model_sd = self._get_model().model.state_dict()
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=model_sd,
-                strict=False,
-                direct_rdma=is_rdma_available(),
-            )
+            # Async RL uses a StorageVolume snapshot so generators do not read
+            # live trainer GPU tensors while optimizer steps may be mutating them.
+            model = self._get_model()
+            model_sd = model.model.state_dict()
+            if get_spmd_backend() == "spmd_types":
+                await self._get_spmd_state_dict(model_sd, model=model)
+            else:
+                await ts.get_state_dict(
+                    "model_state_dict",
+                    user_state_dict=model_sd,
+                    strict=False,
+                    direct_rdma=False,
+                )
+            # state_dict() returns hook-produced copies for fused modules (e.g.
+            # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
+            # reaches the real param. Re-apply via load_state_dict to run the merge hook.
+            # Non-fused params share storage with model_sd, so reloading them is a
+            # harmless self-copy; only the fused wqkv is actually rebuilt.
+            # TODO: investigate can we avoid the copy and properly load fused qkv weights
+            model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
-            # TODO(async): under hot-swap, prefer per-token weight-version tracking over a full
-            # cache drop (see the version_intervals TODO in rollout/utils.py:rollout_to_episodes).
+            # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
+            #   (helps long generations that span many steps).
+            # TODO(async-rl): salt the prefix cache per NEW rollout so a new rollout can't reuse stale-weight
+            #   KV, while an in-flight rollout keeps reusing its own KV (avoids the full drop).
             self._engine.reset_prefix_cache(
                 reset_running_requests=self.config.reset_running_requests_on_weight_sync,
             )
@@ -910,6 +1325,110 @@ class VLLMGenerator(Actor, Configurable):
             self._pull_model_state_dict_future.set_result(version)
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
+
+    async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
+        """Fetch trainer-pushed weights into a spmd_types generator state dict.
+
+        spmd_types generators hold plain local tensors, but TorchStore already
+        knows how to fill DTensor state-dict entries. Wrap each local tensor as
+        a DTensor using its declared SPMD layout, fetch through the normal
+        state-dict path, then put the local tensors back before load_state_dict.
+        """
+
+        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
+            layouts: dict[str, SpmdLayout] = {}
+
+            for module_fqn, module in model.named_modules():
+                sharding_config = getattr(module, "_sharding_config", None)
+                if sharding_config is not None:
+                    for state_name, layout in sharding_config.state_shardings.items():
+                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
+                        layouts[fqn] = layout
+
+                    # FusedSwiGLU keeps its sharding on the fused w13 parameter,
+                    # but its state dict exposes split w1.weight/w3.weight
+                    # (_split_w13_on_save). Mirror w13's layout onto the split
+                    # keys -- slicing the gate/up dim of an S(0) w13 yields S(0)
+                    # w1/w3, which is what the DTensor path gets implicitly.
+                    w13_layout = sharding_config.state_shardings.get("w13")
+                    if w13_layout is not None:
+                        for proj_name in ("w1", "w3"):
+                            layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
+
+                if isinstance(module, FusedQKVLinear):
+                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+                    # the sharding layout lives on the fused wqkv parameter.
+                    # TODO: This assumes fused and split QKV layouts stay
+                    # equivalent. The load hook all-gathers anyway, so replace
+                    # this with a less fragile fused-QKV state-dict path.
+                    wqkv_sharding_config = getattr(
+                        module.wqkv, "_sharding_config", None
+                    )
+                    if wqkv_sharding_config is None:
+                        continue
+                    for (
+                        state_name,
+                        layout,
+                    ) in wqkv_sharding_config.state_shardings.items():
+                        for proj_name in ("wq", "wk", "wv"):
+                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
+
+            return layouts
+
+        layouts = _fqn_to_spmd_layout(model.model)
+
+        dtensor_model_sd = dict(model_sd)
+        with torch.no_grad():
+            for name, target in model_sd.items():
+                if not isinstance(target, torch.Tensor):
+                    continue
+
+                layout = layouts.get(name)
+                if layout is None:
+                    if name.endswith(
+                        (
+                            ".vllm_attn._k_scale",
+                            ".vllm_attn._prob_scale",
+                            ".vllm_attn._q_scale",
+                            ".vllm_attn._v_scale",
+                        )
+                    ):
+                        # vLLM attention scale buffers are backend-owned plain
+                        # replicated state with no TorchTitan ShardingConfig.
+                        continue
+                    raise KeyError(f"{name} is missing SPMD layout metadata")
+
+                mesh = model.parallel_dims.resolve_mesh(layout.axes())
+                if mesh is None:
+                    active_axes = [
+                        axis
+                        for axis in layout.axes()
+                        if model.parallel_dims.get_optional_mesh(axis) is not None
+                    ]
+                    if active_axes:
+                        raise RuntimeError(
+                            f"{name} has active SPMD layout axes but no resolved mesh"
+                        )
+                    continue
+
+                dtensor_model_sd[name] = DTensor.from_local(
+                    target,
+                    mesh,
+                    resolve_placements(layout, mesh),
+                    run_check=False,
+                )
+
+        await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=dtensor_model_sd,
+            strict=False,
+            direct_rdma=False,
+        )
+
+        with torch.no_grad():
+            for name, value in dtensor_model_sd.items():
+                if isinstance(value, DTensor):
+                    model_sd[name] = value.to_local()
 
     @endpoint
     async def close(self) -> None:
@@ -936,6 +1455,9 @@ class VLLMGenerator(Actor, Configurable):
             except Exception:
                 logger.exception("engine loop raised during shutdown")
             self._engine_loop_task = None
+
+        # Stop the result-drain task on rank 0.
+        await self._request_dispatcher.shutdown()
 
         # The loop has stopped; fail any futures it left unresolved so awaiting callers get an
         # exception instead of hanging.
@@ -965,6 +1487,7 @@ class GenerationRequest:
     request_id: str
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
+    routing_session_id: str
 
 
 @dataclass(kw_only=True, slots=True)
@@ -984,12 +1507,13 @@ class CloseRequest:
 
 @dataclass(kw_only=True, slots=True)
 class GenerationFuture:
-    """A generation request's future the loop resolves with its `Completion`. `metrics_prefix`
-    namespaces the per-generation metrics built at completion (e.g. "generator" vs
-    "validation_generator")."""
+    """A generation request's future the loop resolves with its `Completion`."""
 
     future: asyncio.Future[Completion]
     metrics_prefix: str
+    """Namespaces this generation's metrics (e.g. `generator` vs `validation_generator`)."""
+    min_policy_version: int = field(init=False)
+    """Policy version the request was admitted (sampled) under; the max is read at finish (see `Completion`)."""
 
 
 class LoopAction(enum.Enum):
@@ -1012,8 +1536,10 @@ class LoopDecision:
 
     action: LoopAction
 
-    requests: list[GenerationRequest] | None = None
-    # requests to admit before a STEP burst (empty unless any queued)
+    requests_per_dp_rank: list[list[GenerationRequest]] | None = None
+    # Per-DP-rank requests to admit before a STEP burst; index == DP rank, fixed
+    # length data_parallel_degree. Each rank admits only its own DP-rank slice.
+    # (empty unless any queued)
 
     pull_version: int | None = None
     # set iff action is PULL_MODEL_STATE_DICT

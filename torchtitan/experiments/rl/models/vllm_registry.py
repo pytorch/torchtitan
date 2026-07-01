@@ -28,10 +28,10 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, ParallelismConfig
+from torchtitan.config import CompileConfig, OverrideConfig, ParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 
 
@@ -68,6 +68,9 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. 1 means disabled."""
 
+    spmd_backend: Literal["default", "spmd_types"] = "default"
+    """SPMD backend used by TorchTitan model parallelization in the generator."""
+
     def to_training(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
         the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
@@ -89,6 +92,7 @@ class InferenceParallelismConfig:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
             enable_sequence_parallel=False,
+            spmd_backend=self.spmd_backend,
         )
 
 
@@ -184,6 +188,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     compile_config: CompileConfig,
     checkpoint_config: CheckpointManager.Config,
+    override: OverrideConfig,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -217,6 +222,9 @@ def register_to_vllm(
             weight loading. Set ``enable=True`` with ``initial_load_in_hf``
             and ``initial_load_path`` for standalone inference. Set
             ``enable=False`` to skip loading (RL loop, weights from TorchStore).
+        override: Config overrides applied to the generator's model spec after
+            ``update_from_config`` and before build (empty ``OverrideConfig`` for
+            no overrides).
     """
     from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
@@ -242,6 +250,7 @@ def register_to_vllm(
                 checkpoint_config=checkpoint_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
+                override=override,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME

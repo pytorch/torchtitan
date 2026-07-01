@@ -64,6 +64,7 @@ _TT_TO_HF_MAPPINGS = {
         "n_layers": "num_hidden_layers",
         "n_heads": "num_attention_heads",
         "n_kv_heads": "num_key_value_heads",
+        "vocab_size": "vocab_size",
         "norm_eps": "rms_norm_eps",
         "max_seq_len": "max_position_embeddings",
         "eos_id": "eos_token_id",
@@ -203,6 +204,11 @@ class HFTransformerModel(BaseModel):
                 self._tt_to_hf_attribute_map.update(_TT_TO_HF_MAPPINGS["moe"])
 
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
+                # A self-mapped name (e.g. vocab_size -> vocab_size) is already
+                # stored under the correct name; creating an alias property would
+                # make its setter call setattr() on itself and recurse forever.
+                if titan_name == hf_name:
+                    continue
                 # Create getter/setter for attribute that don't already exist
                 if not hasattr(self.__class__, titan_name):
                     setattr(self.__class__, titan_name, _create_property(hf_name))
@@ -259,16 +265,25 @@ class HFTransformerModel(BaseModel):
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
 
-            if not hasattr(self, "inter_dim"):  # Only for llama model
-                ffn_hidden_size = 4 * self.dim
-                ffn_hidden_size = int(2 * ffn_hidden_size / 3)
-                if self.ffn_dim_multiplier is not None:
-                    ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
-                self.intermediate_size = self.multiple_of * (
-                    (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
-                )
-
-            self.head_dim = self.dim // self.num_attention_heads
+            # When dim is explicitly overridden (e.g. debugmodel), derive the
+            # dependent sizes from it. Otherwise keep what AutoConfig loaded from
+            # the HF config -- models like Qwen3 decouple head_dim and
+            # intermediate_size from hidden_size/num_heads, so deriving them here
+            # would silently build the wrong architecture.
+            dim_overridden = self._titan_injected_model_args.get("dim") is not None
+            if dim_overridden:
+                if not hasattr(self, "inter_dim"):  # Only for llama model
+                    ffn_hidden_size = 4 * self.dim
+                    ffn_hidden_size = int(2 * ffn_hidden_size / 3)
+                    if self.ffn_dim_multiplier is not None:
+                        ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
+                    self.intermediate_size = self.multiple_of * (
+                        (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
+                    )
+                self.head_dim = self.dim // self.num_attention_heads
+            elif not getattr(self, "head_dim", None):
+                # HF config did not provide head_dim; use the standard derivation.
+                self.head_dim = self.dim // self.num_attention_heads
 
             return self
 
@@ -688,6 +703,21 @@ class HFTransformerModel(BaseModel):
                 logger.info("Skipping nn.Identity module during weight initialization.")
 
         self.model.apply(selective_init)
+
+        # HF rotary embeddings compute their `inv_freq` buffer in __init__, not in
+        # `_init_weights`. With meta-device init + `to_empty()`, that buffer is
+        # left uninitialized (zeros), which silently disables RoPE (no positional
+        # information -> near-random outputs). Recompute it from each rotary
+        # module's `rope_init_fn` so positions work after materialization.
+        for module in self.model.modules():
+            rope_init_fn = getattr(module, "rope_init_fn", None)
+            if rope_init_fn is not None and hasattr(module, "inv_freq"):
+                device = module.inv_freq.device
+                inv_freq, attention_scaling = rope_init_fn(module.config, device)
+                module.inv_freq.copy_(
+                    inv_freq.to(device=device, dtype=module.inv_freq.dtype)
+                )
+                module.attention_scaling = attention_scaling
 
         # TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
         # Maybe better way of handling this?

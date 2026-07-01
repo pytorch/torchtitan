@@ -11,6 +11,7 @@ from typing import Literal
 import spmd_types as spmd
 import torch
 from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.fx.experimental.symbolic_shapes import guard_or_false
 
 from torchtitan.protocols.module import Module
 
@@ -21,6 +22,7 @@ __all__ = [
 ]
 
 
+@spmd.no_typecheck()
 def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
     """Async bounds check: verify all position values <= max_valid_pos.
 
@@ -335,8 +337,8 @@ class CosSinRoPE(RoPE):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply cos/sin RoPE using the rotate-half convention."""
         head_dim = query.shape[-1]
-        cos = rope_cache[..., :head_dim].to(device=query.device)
-        sin = rope_cache[..., head_dim:].to(device=query.device)
+        cos = rope_cache[..., :head_dim]
+        sin = rope_cache[..., head_dim:]
         query_f = query.float()
         key_f = key.float()
         xq_out = (query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)
@@ -363,24 +365,33 @@ def _reshape_for_broadcast(
     # cache_width is `head_dim * 2` for CosSinRoPE, and `head_dim // 2` for ComplexRoPE
     cache_width = rope_cache.shape[-1]
     if positions is None:
+        # No explicit positions: use the prefix cache and broadcast it over batch.
         rope_cache = rope_cache[0:seqlen]
-        assert rope_cache.shape == (seqlen, cache_width)
+        # assert rope_cache.shape == (seqlen, cache_width)
         shape = [
             d if i == 1 else cache_width if i == ndim - 1 else 1
             for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
+
+    # TODO(pianpwk): Remove this vLLM inference compatibility branch once
+    # singleton positions can use the general gather path; see PR #3750.
+    # Concrete/provable singleton positions can use the cheaper prefix-shaped
+    # view path. If singleton-ness is symbolic, fall through to gather below.
+    if guard_or_false(positions.size(0) == 1):
+        # assert positions.shape == (1, seqlen)
         rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, cache_width)
+        # assert rope_cache.shape == (seqlen, cache_width)
         shape = [
             d if i == 1 else cache_width if i == ndim - 1 else 1
             for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
     else:
-        assert positions.shape == (bsz, seqlen)
+        # Per-batch positions, plus singleton positions whose first dimension was
+        # not statically provable above, use the general gather path.
+        # assert positions.shape == (bsz, seqlen)
+        positions = positions.expand(bsz, -1)
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
         rope_cache = torch.gather(
             rope_cache_expanded,

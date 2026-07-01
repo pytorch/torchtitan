@@ -7,7 +7,7 @@
 import contextlib
 import copy
 from collections.abc import Callable, Generator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,8 +24,7 @@ from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 from torchtitan.experiments.graph_trainer.dynamic_shapes import (
     _fakeify_input,
     _insert_runtime_asserts as _insert_runtime_asserts_pass,
-    _tensor_has_mark_unbacked,
-    _wrapper_subclass_has_mark_unbacked,
+    _wrapper_subclass_has_marked_dynamic_dims,
 )
 
 # Tensors and make_fx-safe primitives are allowed as pytree leaves in args.
@@ -337,6 +336,12 @@ def minimal_fx_tracer(
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
     *,
+    prepare_inputs: Callable[[tuple[Any, ...], dict[str, Any]], None] | None = None,
+    prepare_call_inputs: Callable[
+        [tuple[Any, ...], dict[str, Any]],
+        tuple[tuple[Any, ...], dict[str, Any]] | None,
+    ]
+    | None = None,
     _insert_runtime_asserts: bool = False,
 ) -> Callable[..., TracedResult]:
     """Return a tracer that captures ``fn`` with implicit module/optimizer state.
@@ -378,6 +383,9 @@ def minimal_fx_tracer(
     _check_optimizer_has_module(module, optimizer)
 
     def _trace_with_args(*args: Any, **kwargs: Any) -> TracedResult:
+        if prepare_inputs is not None:
+            prepare_inputs(args, kwargs)
+
         model_state, optim_state = extract_train_state(module, optimizer)
         state_fqns = list(model_state.keys())
 
@@ -410,40 +418,23 @@ def minimal_fx_tracer(
         for arg in full_args:
             if not isinstance(arg, torch.Tensor):
                 continue
-            if getattr(arg, "_dynamo_dynamic_indices", None) or getattr(
-                arg, "_dynamo_dynamic_range", None
-            ):
-                raise ValueError("minimal_fx_tracer only supports mark_unbacked()")
-            if _wrapper_subclass_has_mark_unbacked(arg):
+            if _wrapper_subclass_has_marked_dynamic_dims(arg):
                 raise ValueError(
-                    "minimal_fx_tracer only supports mark_unbacked() on plain tensor "
-                    "inputs; wrapper subclasses such as DTensor are not supported"
+                    "minimal_fx_tracer only supports marked dynamic dims on plain "
+                    "tensor inputs; wrapper subclasses such as DTensor are not "
+                    "supported"
                 )
         unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
-        has_mark_unbacked = any(
-            isinstance(a, torch.Tensor) and _tensor_has_mark_unbacked(a)
-            for a in unwrapped_args
-        )
-
         fake_mode = FakeTensorMode(
             allow_non_fake_inputs=True,
             shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
         )
-        # Fresh unbacked symbols allocated when fakeifying mark_unbacked() inputs
-        # are wired to placeholders via the symbolic context, so they must not
-        # land in the ShapeEnv's pending_fresh_unbacked_symbols list.
-        ignore_ctx = (
-            fake_mode.shape_env.ignore_fresh_unbacked_symbols()
-            if has_mark_unbacked
-            else nullcontext()
+        fake_args = tuple(
+            _fakeify_input(fake_mode, a, input_name=f"input_{i}")
+            if isinstance(a, torch.Tensor)
+            else a
+            for i, a in enumerate(unwrapped_args)
         )
-        with ignore_ctx:
-            fake_args = tuple(
-                _fakeify_input(fake_mode, a, input_name=f"input_{i}")
-                if isinstance(a, torch.Tensor)
-                else a
-                for i, a in enumerate(unwrapped_args)
-            )
 
         output_layouts: dict[int, SubclassLayout] = {}
         num_flat_outputs: int = 0
@@ -463,6 +454,10 @@ def minimal_fx_tracer(
             user_args, user_kwargs = pytree.tree_unflatten(
                 list(user_flat), user_inputs_spec
             )
+            if prepare_call_inputs is not None:
+                prepared = prepare_call_inputs(user_args, user_kwargs)
+                if prepared is not None:
+                    user_args, user_kwargs = prepared
 
             with _reparametrize_train_state(
                 module, optimizer, model_state_t, optim_state_t

@@ -107,7 +107,7 @@ class TestFusedQKVCheckpointInterop(unittest.TestCase):
             ("qwen3", qwen3_configs, Qwen3StateDictAdapter),
         ):
             with self.subTest(model=config_name):
-                model_config = configs["debugmodel_fused_qkv"](attn_backend="flex")
+                model_config = configs["debugmodel"](attn_backend="flex")
                 model = model_config.build()
                 model.eval()
 
@@ -124,6 +124,74 @@ class TestFusedQKVCheckpointInterop(unittest.TestCase):
                 self.assertEqual(set(sd_original.keys()), set(sd_after.keys()))
                 for k in sd_original:
                     self.assertTrue(torch.equal(sd_original[k], sd_after[k]), k)
+
+
+class TestFusedQKVForwardContiguity(unittest.TestCase):
+    """The forward must emit contiguous, head-major q/k/v.
+
+    Splitting the fused ``wqkv`` output along the R dim leaves xk/xv as strided
+    views into the fused buffer. PyTorch ops respect strides, but vLLM's
+    attention/KV-cache CUDA kernels index q/k/v by raw ``data_ptr()`` assuming a
+    contiguous head-major layout, so the forward must materialize them
+    contiguously. These run on CPU.
+    """
+
+    def test_forward_outputs_are_contiguous_and_correct(self):
+        """q/k/v are contiguous and match an independent per-projection matmul."""
+        fused = _build_fused()
+        x = torch.randn(2, 3, _DIM)
+        xq, xk, xv = fused(x)
+
+        # The fix: all three are contiguous.
+        self.assertTrue(xq.is_contiguous())
+        self.assertTrue(xk.is_contiguous())
+        self.assertTrue(xv.is_contiguous())
+
+        # Correctness: compare against an independent reference computed from the
+        # stock-layout weights the state_dict hook produces (wq/wk/wv) via plain
+        # matmul -- this does not reuse the fused forward's split logic.
+        sd = fused.state_dict()
+        ref_q = (x @ sd["wq.weight"].T).view(2, 3, _N_HEADS, _HEAD_DIM)
+        ref_k = (x @ sd["wk.weight"].T).view(2, 3, _N_KV_HEADS, _HEAD_DIM)
+        ref_v = (x @ sd["wv.weight"].T).view(2, 3, _N_KV_HEADS, _HEAD_DIM)
+        torch.testing.assert_close(xq, ref_q)
+        torch.testing.assert_close(xk, ref_k)
+        torch.testing.assert_close(xv, ref_v)
+
+    def test_raw_pointer_read_needs_contiguous(self):
+        """A consumer reading the base pointer with contiguous head-major strides
+        (what vLLM's kernels do) gets the wrong bytes from the strided split, and
+        the correct bytes only after the forward's ``.contiguous()``.
+        """
+        fused = _build_fused()
+        x = torch.randn(2, 3, _DIM)
+        bs, seqlen, _ = x.shape
+
+        # Reconstruct the pre-fix strided split (no .contiguous()).
+        qkv = fused.wqkv(x).view(bs, seqlen, _N_KV_HEADS, _R_DIM, _HEAD_DIM)
+        _, xk_strided, _ = torch.split(qkv, [_HPK, 1, 1], dim=-2)
+        xk_strided = xk_strided.reshape(bs, seqlen, _N_KV_HEADS, _HEAD_DIM)
+        self.assertFalse(xk_strided.is_contiguous())  # the bug precondition
+
+        # Strides a contiguous tensor of this shape would have.
+        contig_strides = torch.empty(xk_strided.shape).stride()
+
+        # Simulate a raw-pointer kernel: read xk's storage with contiguous
+        # strides. Because consecutive KV groups are R*head_dim apart in the
+        # fused buffer, this lands on interleaved Q bytes -> wrong values.
+        raw = xk_strided.as_strided(
+            xk_strided.shape, contig_strides, xk_strided.storage_offset()
+        )
+        self.assertFalse(torch.equal(raw, xk_strided))
+
+        # The fix: the real forward returns contiguous xk, so the same raw read
+        # now lands on the correct values.
+        xk_fixed = fused(x)[1]
+        self.assertTrue(xk_fixed.is_contiguous())
+        raw_fixed = xk_fixed.as_strided(
+            xk_fixed.shape, contig_strides, xk_fixed.storage_offset()
+        )
+        self.assertTrue(torch.equal(raw_fixed, xk_fixed))
 
 
 if __name__ == "__main__":

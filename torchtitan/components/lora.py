@@ -12,10 +12,10 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 
-from torchtitan.config import Configurable
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.model import ModelConfigConverter
+from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
 
@@ -25,11 +25,12 @@ def _lora_adapter_sharding(
 ) -> tuple[ShardingConfig | None, ShardingConfig | None]:
     """Derive LoRA adapter sharding from the base linear's TP sharding.
 
-    ``lora_b`` mirrors the base weight's TP shard so its output matches
-    ``base_out``'s placement (Shard(-1) for colwise, Partial for rowwise).
+    For colwise base linears, ``lora_a`` is TP-replicated and ``lora_b``
+    mirrors the base output-dim shard.
 
-    ``lora_a`` weight is Replicate (small rank dim, no benefit from TP
-    sharding).
+    For rowwise base linears, ``lora_a`` mirrors the base input-dim shard and
+    ``lora_b`` is TP-replicated, producing the same partial-output shape as the
+    base linear.
     """
     base_weight_sharding = (
         base_sharding.state_shardings.get("weight") if base_sharding else None
@@ -37,17 +38,24 @@ def _lora_adapter_sharding(
     if base_weight_sharding is None:
         return None, None
 
-    replicate_weight = ShardingConfig(
+    replicated_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
-    # lora_b: same TP shard as base weight → output matches base_out
-    lora_b_sharding = ShardingConfig(
-        state_shardings={"weight": base_weight_sharding},
-    )
-    return replicate_weight, lora_b_sharding
+    if base_weight_sharding == dense_param_placement(tp=spmd.S(0)):
+        lora_b_sharding = ShardingConfig(
+            state_shardings={"weight": base_weight_sharding},
+        )
+        return replicated_weight, lora_b_sharding
+    else:
+        assert base_weight_sharding == dense_param_placement(tp=spmd.S(1))
+        lora_a_sharding = ShardingConfig(
+            state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
+        )
+        return lora_a_sharding, replicated_weight
 
 
 _lora_class_cache: dict[type, type] = {}
+_frozen_config_class_cache: dict[type, type] = {}
 
 
 def _get_lora_cls(parent_cls: type) -> type:
@@ -104,33 +112,30 @@ def _get_lora_cls(parent_cls: type) -> type:
     return LoRALinear
 
 
-@dataclass(kw_only=True, slots=True)
-class FrozenConfig(Configurable.Config):
-    """Config wrapper that freezes all parameters at build time.
+def _get_frozen_config_cls(
+    config_cls: type[Module.Config],
+) -> type[Module.Config]:
+    """Get or create a config subclass that freezes direct build parameters."""
+    if config_cls in _frozen_config_class_cache:
+        return _frozen_config_class_cache[config_cls]
 
-    Works with any ``Module.Config`` — used by ``LoRAConverter`` to freeze
-    non-target Linear modules.
-    """
+    class FrozenConfig(config_cls):  # type: ignore[valid-type, misc]
+        def build(self, **kwargs):
+            instance = config_cls.build(self, **kwargs)
+            for param in instance.parameters(recurse=False):
+                param.requires_grad_(False)
+            return instance
 
-    inner: Configurable.Config
+    FrozenConfig.__name__ = f"Frozen{config_cls.__name__}"
+    FrozenConfig.__qualname__ = f"Frozen{config_cls.__qualname__}"
+    _frozen_config_class_cache[config_cls] = FrozenConfig
+    return FrozenConfig
 
-    def __getattr__(self, name: str):
-        try:
-            inner = object.__getattribute__(self, "inner")
-        except AttributeError:
-            raise AttributeError(name) from None
-        return getattr(inner, name)
 
-    def __setattr__(self, name: str, value) -> None:
-        if name in type(self).__slots__:
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self.inner, name, value)
-
-    def build(self, **kwargs):
-        instance = self.inner.build(**kwargs)
-        instance.requires_grad_(False)
-        return instance
+def _make_frozen_config(cfg: Module.Config) -> Module.Config:
+    """Create a frozen config that still passes checks for the original type."""
+    frozen_cls = _get_frozen_config_cls(type(cfg))
+    return frozen_cls(**{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init})
 
 
 class LoRAConverter(ModelConfigConverter):
@@ -138,8 +143,8 @@ class LoRAConverter(ModelConfigConverter):
 
     Operates on the model config tree: target Linear configs are replaced
     with ``LoRALinear.Config`` (which builds a LoRA subclass with frozen base
-    and trainable adapters). Non-target Linear modules are wrapped with
-    ``FrozenConfig``.
+    and trainable adapters). Non-target modules are replaced with dynamic
+    frozen config subclasses that freeze direct parameters at build time.
 
     When ``target_modules`` is None (default), every ``Linear.Config`` is
     converted.  When specified, only configs whose FQN's last segment matches
@@ -183,35 +188,42 @@ class LoRAConverter(ModelConfigConverter):
         assert cfg._owner is not None
         lora_cls = _get_lora_cls(cfg._owner)
         return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
-            **{f.name: getattr(cfg, f.name) for f in fields(cfg)},
+            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
             rank=self.rank,
             alpha=self.alpha,
         )
 
-    def convert(self, model_config) -> None:
-        """Walk the model config tree for Linear modules.
+    def convert(self, model_config: Module.Config) -> Module.Config:
+        """Walk the module config tree from leaves to root.
 
         Target Linear modules get their config replaced with
-        ``LoRALinear.Config``.  Non-target Linear modules are wrapped
-        with ``FrozenConfig``.
+        ``LoRALinear.Config``. All other module configs become frozen config
+        subclasses so LoRA training updates only adapter parameters.
         """
+        converted_root = model_config
         matched = set()
+        configs = list(model_config.traverse(Module.Config, recurse=True))
 
-        # First pass: replace target Linears with LoRA, freeze non-targets
-        for fqn, cfg, parent, attr in model_config.traverse(Linear.Config):
+        for fqn, cfg, parent, attr in reversed(configs):
+            assert isinstance(cfg, Module.Config)
             last_segment = fqn.rsplit(".", 1)[-1]
-            is_target = (
+            is_target = isinstance(cfg, Linear.Config) and (
                 self.target_modules is None or last_segment in self.target_modules
             )
+
             if is_target:
                 new_cfg = self._make_lora_config(cfg)
                 matched.add(last_segment)
             else:
-                new_cfg = FrozenConfig(inner=cfg)
+                new_cfg = _make_frozen_config(cfg)
 
-            if isinstance(parent, list):
+            if parent is None:
+                converted_root = new_cfg
+            elif isinstance(parent, list):
+                assert isinstance(attr, int)
                 parent[attr] = new_cfg
             else:
+                assert isinstance(attr, str)
                 setattr(parent, attr, new_cfg)
 
         unmatched = (self.target_modules or set()) - matched
@@ -220,3 +232,4 @@ class LoRAConverter(ModelConfigConverter):
                 f"LoRA target_modules {sorted(unmatched)} did not match any "
                 f"Linear.Config in the model config tree."
             )
+        return converted_root

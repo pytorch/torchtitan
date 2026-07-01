@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Any, TYPE_CHECKING
 
+import spmd_types as spmd
+
 import torch
 from torch.distributed.tensor import DTensor
 
@@ -493,7 +495,22 @@ if _HELION_IMPORT_ERROR is None:
         # and skipped under torch.compile -- same semantics as the PyTorch path.
         _maybe_check_max_pos(pos, max_valid_pos=cache.shape[0] - 1)
 
-        xq_out, xk_out = _helion_rope_fwd(xq, xk, cache, pos)
+        # TODO(pianpwk): Migrate this local_map workaround to a custom op SPMD
+        # propagation rule registration system.
+        xq_out, xk_out = spmd.local_map(
+            in_types=(
+                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xq_BLNH
+                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xk_BLNH
+                {"dp": spmd.R, "cp": spmd.R, "tp": spmd.R},  # rope_cache_MD
+                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},  # positions_BL
+            ),
+            out_types=(
+                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xq_out_BLNH
+                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xk_out_BLNH
+            ),
+        )(lambda xq, xk, cache, pos: _helion_rope_fwd(xq, xk, cache, pos))(
+            xq, xk, cache, pos
+        )
         return _from_local(xq_out, query), _from_local(xk_out, key)
 
 else:
