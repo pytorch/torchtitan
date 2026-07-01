@@ -6,14 +6,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import ModuleType
 from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed.device_mesh import _get_device_handle
 
-from .placement_contract import PlacementPreparedReduceGrad, PlacementPreparedUnshard
+from .placement_contract import (
+    PlacementPreparedReduceGrad,
+    PlacementPreparedUnshard,
+    PlacementUnshardResult,
+)
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -48,6 +52,10 @@ class ReduceGradHandle:
         """Wait until the reduce-grad result is usable on the current stream."""
         raise NotImplementedError
 
+    def synchronize(self) -> None:
+        """Block the host until the reduce-grad result is complete."""
+        raise NotImplementedError
+
     def release_buffers(self, release_sharded_grads: bool) -> None:
         """Release temporary buffers owned by the reduce-grad operation."""
         raise NotImplementedError
@@ -68,6 +76,13 @@ class PreparedReduceGrad:
     prepared: PlacementPreparedReduceGrad
     copy_in_done: torch.Event | None
     device_handle: ModuleType | None
+
+
+def _first_tensor_device(*tensor_groups: list[torch.Tensor]) -> torch.device | None:
+    for tensors in tensor_groups:
+        if tensors:
+            return tensors[0].device
+    return None
 
 
 def begin_bucket_unshard(
@@ -99,12 +114,11 @@ def begin_bucket_unshard(
     with device_handle.stream(unshard_stream):
         unshard_stream.wait_event(copy_in_done)
         prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, debug_fqn)
-        result = _run_and_finish_unshard(prepared)
+        prepared.placement.run_prepared_unshard(prepared)
         event = device_handle.Event()
         event.record(unshard_stream)
     return AsyncUnshardResult(
-        full_params=result.full_params,
-        buffers=result.buffers,
+        prepared=prepared,
         event=event,
         device_handle=device_handle,
     )
@@ -206,43 +220,55 @@ class SyncUnshardResult(UnshardHandle):
 class AsyncUnshardResult(UnshardHandle):
     """State needed to finish an async unshard launched on a side stream."""
 
-    full_params: list[torch.Tensor]
-    buffers: list[torch.Tensor]
+    prepared: PlacementPreparedUnshard
     event: torch.Event | None
     device_handle: ModuleType
+    _result: PlacementUnshardResult | None = field(default=None, init=False)
+    _device: torch.device | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        self._device = _first_tensor_device(self.prepared.buffers)
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
-        results = self.full_params
+        if self._result is None:
+            self._result = self.prepared.placement.finish_prepared_unshard(
+                self.prepared
+            )
+        self._device = (
+            _first_tensor_device(
+                self._result.full_params,
+                self.prepared.buffers,
+                self._result.buffers,
+            )
+            or self._device
+        )
+        results = self._result.full_params
         self.release_buffers()
         return results
 
     def wait(self) -> None:
-        if self.full_params:
-            device = self.full_params[0].device
-        elif self.buffers:
-            device = self.buffers[0].device
-        else:
+        if self._device is None:
             return
         if self.event is not None:
-            self.device_handle.current_stream(device).wait_event(self.event)
+            self.device_handle.current_stream(self._device).wait_event(self.event)
 
     def release_buffers(self) -> None:
         """Release raw unshard buffers after current-stream work is queued."""
-        if not self.buffers:
+        tensors = list(self.prepared.buffers)
+        self.prepared.buffers.clear()
+        if self._result is not None:
+            tensors.extend(self._result.buffers)
+            self._result.buffers.clear()
+        if not tensors:
             return
 
-        device = self.buffers[0].device
+        device = tensors[0].device
         stream = self.device_handle.current_stream(device)
         event = self.device_handle.Event()
         event.record(stream)
-        handoffs = [
-            StreamHandoff(tensor, event, stream, self.device_handle)
-            for tensor in self.buffers
-        ]
-        self.buffers.clear()
-        for handoff in handoffs:
-            handoff.release()
+        handoff = StreamHandoff(tensors, event, stream, self.device_handle)
+        handoff.release()
 
 
 @dataclass
@@ -255,6 +281,9 @@ class SyncReduceGradResult(ReduceGradHandle):
         return self.sharded_grads
 
     def wait(self) -> None:
+        return
+
+    def synchronize(self) -> None:
         return
 
     def release_buffers(self, release_sharded_grads: bool) -> None:
@@ -277,20 +306,24 @@ class AsyncReduceGradResult(ReduceGradHandle):
     event: torch.Event | None
     buffers: list[torch.Tensor]
     device_handle: ModuleType
+    _device: torch.device | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        self._device = _first_tensor_device(self.sharded_grads, self.buffers)
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
         return self.sharded_grads
 
     def wait(self) -> None:
-        if self.sharded_grads:
-            device = self.sharded_grads[0].device
-        elif self.buffers:
-            device = self.buffers[0].device
-        else:
+        if self._device is None:
             return
         if self.event is not None:
-            self.device_handle.current_stream(device).wait_event(self.event)
+            self.device_handle.current_stream(self._device).wait_event(self.event)
+
+    def synchronize(self) -> None:
+        if self.event is not None:
+            self.event.synchronize()
 
     def release_buffers(self, release_sharded_grads: bool) -> None:
         """Release pending reduce-grad buffers after its completion wait."""
@@ -306,13 +339,8 @@ class AsyncReduceGradResult(ReduceGradHandle):
         stream = self.device_handle.current_stream(device)
         event = self.device_handle.Event()
         event.record(stream)
-        handoffs = [
-            StreamHandoff(tensor, event, stream, self.device_handle)
-            for tensor in tensors
-        ]
-        tensors.clear()
-        for handoff in handoffs:
-            handoff.release()
+        handoff = StreamHandoff(tensors, event, stream, self.device_handle)
+        handoff.release()
 
     def record_sharded_grads(
         self,
@@ -320,6 +348,9 @@ class AsyncReduceGradResult(ReduceGradHandle):
         stream: torch.Stream,
     ) -> None:
         self.sharded_grads = sharded_grads
+        self._device = (
+            _first_tensor_device(self.sharded_grads, self.buffers) or self._device
+        )
         self.event = self.device_handle.Event()
         self.event.record(stream)
 
@@ -330,10 +361,10 @@ def _run_and_finish_unshard(prepared: PlacementPreparedUnshard):
 
 
 class StreamHandoff:
-    """Hold a tensor until it is safe to release on a target stream."""
+    """Hold tensors until it is safe to release them on a target stream."""
 
     __slots__ = (
-        "_tensor",
+        "_tensors",
         "_event",
         "_release_stream",
         "_device_handle",
@@ -342,14 +373,14 @@ class StreamHandoff:
 
     def __init__(
         self,
-        tensor: torch.Tensor,
+        tensors: list[torch.Tensor],
         ready_event: torch.Event | None,
         release_stream: torch.Stream,
         device_handle: ModuleType | None = None,
     ) -> None:
         if device_handle is None:
-            device_handle = _get_device_handle(tensor.device.type)
-        self._tensor: torch.Tensor | None = tensor
+            device_handle = _get_device_handle(tensors[0].device.type)
+        self._tensors = tensors
         self._event = ready_event
         self._release_stream = release_stream
         self._device_handle = device_handle
@@ -364,12 +395,12 @@ class StreamHandoff:
         if self._released:
             return
         self._released = True
-        if self._tensor is None:
+        if not self._tensors:
             return
         if self._event is not None:
             self._release_stream.wait_event(self._event)
         with self._device_handle.stream(self._release_stream):
-            self._tensor = None
+            self._tensors.clear()
 
     def __del__(self) -> None:
         try:

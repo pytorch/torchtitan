@@ -7,16 +7,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
-from .bucket_runtime import _create_unsharded_param_slots, _install_bucket_unshard_hooks
+from .bucket_runtime import (
+    _create_unsharded_param_slots,
+    _EAGER_COMM_CONTEXTS_ATTR,
+    _install_bucket_unshard_hooks,
+    _MAX_PENDING_REDUCE_GRADS_ATTR,
+)
 from .bucket_storage import (
     _assign_params_to_buckets,
     BucketParamFQNsByIndex,
     BucketSpec,
+    GradientReduceOp,
     ShardedBucketStorage,
 )
 from .reshard_after_forward import _apply_reshard_after_forward
@@ -25,6 +32,7 @@ from .unsharded_param_getters import _install_unsharded_param_getters
 from .utils import (
     _get_device_from_mesh,
     _get_managed_named_params,
+    _set_param_on_module,
     _validate_bucket_uniform_dtype_and_placement,
     _validate_eager_params,
     _validate_flex_shard_mesh,
@@ -41,6 +49,8 @@ __all__ = [
 
 
 _SHARDED_BUCKET_STORAGES_ATTR = "_sharded_bucket_storages"
+_MODULE_PARAM_SLOTS_ATTR = "_flex_shard_module_param_slots"
+_EAGER_HOOKS_INSTALLED_ATTR = "_flex_shard_eager_hooks_installed"
 
 
 class FlexShardModule:
@@ -50,6 +60,108 @@ class FlexShardModule:
     def sharded_bucket_storages(self) -> list[ShardedBucketStorage]:
         """All bucket storage objects, one per bucket."""
         return getattr(self, _SHARDED_BUCKET_STORAGES_ATTR)
+
+    def to_empty(self, *, device, recurse: bool = True):
+        """Materialize FlexShard bucket storage when meta modules are initialized."""
+        result = super().to_empty(device=device, recurse=recurse)
+        self._materialize_after_to_empty()
+        return result
+
+    def _materialize_after_to_empty(self) -> None:
+        """Rebuild sharded param views after nn.Module.to_empty()."""
+        bucket_storages = getattr(self, _SHARDED_BUCKET_STORAGES_ATTR, None)
+        if bucket_storages is None:
+            return
+
+        materialized_device: torch.device | None = None
+        for _, param in self.named_parameters(recurse=True):
+            if param.device.type != "meta":
+                materialized_device = param.device
+                break
+        if materialized_device is None:
+            return
+
+        for bucket_storage in bucket_storages:
+            if bucket_storage.byte_storage.device.type == "meta":
+                bucket_storage._byte_storage = torch.empty(
+                    bucket_storage.total_bytes,
+                    dtype=torch.uint8,
+                    device=materialized_device,
+                )
+            elif bucket_storage.byte_storage.device != materialized_device:
+                bucket_storage._byte_storage = torch.empty(
+                    bucket_storage.total_bytes,
+                    dtype=torch.uint8,
+                    device=materialized_device,
+                )
+            bucket_storage.install_sharded_params(bucket_storage.byte_storage.device)
+
+        self._install_runtime_if_materialized()
+
+    def _install_runtime_if_materialized(self) -> None:
+        """Install eager hooks once all bucket storage has real CUDA backing."""
+        if getattr(self, _EAGER_HOOKS_INSTALLED_ATTR, False):
+            return
+
+        bucket_storages = getattr(self, _SHARDED_BUCKET_STORAGES_ATTR)
+        if any(
+            storage.byte_storage.device.type == "meta" for storage in bucket_storages
+        ):
+            return
+
+        module_param_slots = getattr(self, _MODULE_PARAM_SLOTS_ATTR)
+        _install_bucket_unshard_hooks(bucket_storages, module_param_slots)
+        setattr(self, _EAGER_HOOKS_INSTALLED_ATTR, True)
+
+    def set_gradient_reduce_op(
+        self,
+        op: GradientReduceOp,
+        *,
+        recurse: bool = True,
+    ) -> None:
+        """Set gradient reduction semantics for this module's FlexShard buckets."""
+        modules = self.modules() if recurse else [self]
+        for module in modules:
+            bucket_storages = getattr(module, _SHARDED_BUCKET_STORAGES_ATTR, None)
+            if bucket_storages is None:
+                continue
+            for bucket_storage in bucket_storages:
+                bucket_storage.set_gradient_reduce_op(op)
+
+    def set_max_pending_reduce_grads(
+        self,
+        max_pending_reduce_grads: int = 2,
+        *,
+        recurse: bool = True,
+    ) -> None:
+        """Set retained reduce-grad results; 0 keeps all until post-backward."""
+        if not isinstance(max_pending_reduce_grads, int) or isinstance(
+            max_pending_reduce_grads, bool
+        ):
+            raise ValueError(
+                "max_pending_reduce_grads must be a non-negative int, "
+                f"got {type(max_pending_reduce_grads).__name__}."
+            )
+        if max_pending_reduce_grads < 0:
+            raise ValueError(
+                "max_pending_reduce_grads must be non-negative, "
+                f"got {max_pending_reduce_grads}."
+            )
+
+        modules = self.modules() if recurse else [self]
+        for module in modules:
+            if not isinstance(module, FlexShardModule):
+                continue
+            setattr(
+                module,
+                _MAX_PENDING_REDUCE_GRADS_ATTR,
+                max_pending_reduce_grads,
+            )
+            contexts = getattr(module, _EAGER_COMM_CONTEXTS_ATTR, None)
+            if contexts is None:
+                continue
+            for context in contexts.values():
+                context.max_pending_reduce_grads = max_pending_reduce_grads
 
 
 def flex_shard(
@@ -129,7 +241,8 @@ def flex_shard(
         buckets,
     )
 
-    _attach_flex_shard_module_state(module, bucket_storages)
+    flex_shard_module = _attach_flex_shard_module_state(module, bucket_storages)
+    flex_shard_module.set_max_pending_reduce_grads()
 
     module_param_slots = _create_unsharded_param_slots(
         module,
@@ -137,6 +250,7 @@ def flex_shard(
         fqn_to_bucket_spec,
         inputs.device,
     )
+    setattr(module, _MODULE_PARAM_SLOTS_ATTR, module_param_slots)
     _install_unsharded_param_getters(module_param_slots)
 
     # Reshard-after-forward: in eager mode, wrap each layer in checkpoint with
@@ -147,10 +261,11 @@ def flex_shard(
         _apply_reshard_after_forward(module, reshard_bucket_storages)
 
     # Install bucket unshard hooks for eager mode when the storage layout
-    # supports one collective per bucket.
-    _install_bucket_unshard_hooks(bucket_storages, module_param_slots)
+    # supports one collective per bucket. Meta modules are materialized later by
+    # TorchTitan's Trainer.to_empty() path, so defer hook installation until then.
+    flex_shard_module._install_runtime_if_materialized()
 
-    return module
+    return flex_shard_module
 
 
 def _check_not_already_flex_sharded(module: nn.Module) -> None:
@@ -184,13 +299,15 @@ def _check_not_already_flex_sharded(module: nn.Module) -> None:
 def _attach_flex_shard_module_state(
     module: nn.Module,
     bucket_storages: list[ShardedBucketStorage],
-) -> None:
+) -> FlexShardModule:
     """Attach FlexShard ownership state and mixin accessors to a module."""
     setattr(module, _SHARDED_BUCKET_STORAGES_ATTR, bucket_storages)
+    setattr(module, _EAGER_HOOKS_INSTALLED_ATTR, False)
 
     cls = type(module)
     if not issubclass(cls, FlexShardModule):
-        module.__class__ = type(cls.__name__, (cls, FlexShardModule), {})
+        module.__class__ = type(cls.__name__, (FlexShardModule, cls), {})
+    return cast(FlexShardModule, module)
 
 
 @dataclass(frozen=True)
@@ -267,6 +384,7 @@ def _prepare_flex_shard_inputs(
 ) -> PreparedFlexShardInputs:
     """Validate inputs and derive setup state for flex_shard()."""
     _check_not_already_flex_sharded(module)
+    _unwrap_dtensor_params_to_local(module)
 
     if not buckets:
         raise ValueError("flex_shard requires at least one BucketSpec in buckets.")
@@ -334,3 +452,19 @@ def _prepare_flex_shard_inputs(
         param_placements=param_placements,
         bucket_assignments=bucket_assignments,
     )
+
+
+def _unwrap_dtensor_params_to_local(module: nn.Module) -> None:
+    """Replace DTensor parameters with their local shards before bucket sharding.
+
+    FlexShard owns the data-parallel bucket dimension. When a model has already
+    applied expert parallelism, those DTensor parameters represent an outer EP
+    shard; FlexShard should bucket-shard the local EP payload, not the global
+    pre-EP tensor.
+    """
+    for fqn, param in list(module.named_parameters(remove_duplicate=False)):
+        if not isinstance(param, DTensor):
+            continue
+        local_tensor = param.to_local().detach().contiguous()
+        local_param = nn.Parameter(local_tensor, requires_grad=param.requires_grad)
+        _set_param_on_module(module, fqn, local_param)

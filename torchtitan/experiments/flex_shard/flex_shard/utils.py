@@ -6,11 +6,11 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextvars import ContextVar
 from typing import Any, TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 
@@ -19,6 +19,22 @@ if TYPE_CHECKING:
 
     from .bucket_storage import BucketParamFQNsByIndex, ShardedBucketStorage
     from .placement_contract import Placement
+
+
+_SUPPRESS_EAGER_PROFILING: ContextVar[bool] = ContextVar(
+    "_flex_shard_suppress_eager_profiling",
+    default=False,
+)
+
+
+@contextmanager
+def _suppress_eager_profiling():
+    """Temporarily suppress eager profiler ranges for SAC-hidden physical work."""
+    token = _SUPPRESS_EAGER_PROFILING.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_EAGER_PROFILING.reset(token)
 
 
 def _with_fqn(label: str, fqn: str | None) -> str:
@@ -59,19 +75,42 @@ def _record_function_if_eager(
     fqn: str | None,
 ) -> AbstractContextManager[Any]:
     """Return a profiler range in eager and a no-op context during compile."""
-    if torch.compiler.is_compiling() or _inside_selective_checkpoint_dispatch():
+    if (
+        torch.compiler.is_compiling()
+        or _SUPPRESS_EAGER_PROFILING.get()
+        or _inside_selective_checkpoint_dispatch()
+    ):
         return nullcontext()
     return torch.profiler.record_function(_with_fqn(label, fqn))
+
+
+def _record_copy_in_if_eager() -> AbstractContextManager[Any]:
+    """Record unshard copy-in even when physical unshard profiling is suppressed."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return torch.profiler.record_function("FlexShard::copy_in")
+
+
+def _record_copy_out_if_eager() -> AbstractContextManager[Any]:
+    """Record unshard copy-out even when physical unshard profiling is suppressed."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return torch.profiler.record_function("FlexShard::copy_out")
+
+
+def _record_view_out_if_eager() -> AbstractContextManager[Any]:
+    """Record unshard view-out even when physical unshard profiling is suppressed."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return torch.profiler.record_function("FlexShard::view_out")
 
 
 def _record_comm_if_eager(
     label: str,
     fqn: str | None,
 ) -> AbstractContextManager[Any]:
-    """Return a c10d profiler range in eager and a no-op during compile."""
-    if torch.compiler.is_compiling() or _inside_selective_checkpoint_dispatch():
-        return nullcontext()
-    return dist.record_comm(_with_fqn(label, fqn))
+    """Return an eager profiler range for communication launch code."""
+    return _record_function_if_eager(label, fqn)
 
 
 def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
@@ -159,7 +198,14 @@ def _set_param_on_module(
     module = root_module
     for part in parts[:-1]:
         module = getattr(module, part)
-    setattr(module, parts[-1], param)
+    param_name = parts[-1]
+    wrapped = module._modules.get("_checkpoint_wrapped_module")
+    if wrapped is not None and param_name not in module._parameters:
+        module = wrapped
+    if param_name in module._parameters:
+        module._parameters[param_name] = param
+    else:
+        setattr(module, param_name, param)
 
 
 def _get_managed_named_params(
