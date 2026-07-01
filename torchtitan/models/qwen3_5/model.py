@@ -22,6 +22,10 @@ from torch.distributed.tensor.experimental import local_map
 from torchtitan.models.common import Conv1d, FeedForward, Linear
 from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.multimodal import (
+    get_vision_positions,
+    scatter_vision_embeds,
+)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
@@ -288,11 +292,10 @@ class GatedDeltaNet(Module):
             # restores DTensor-ness, with explicit gradient placements.
             x_plc = x.placements
             w = conv.weight
-            w_plc = w.placements  # pyrefly: ignore [missing-attribute]
+            w_plc = w.placements
 
             def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
                 # groups == local out-channels (depthwise, channel-sharded)
-                # pyrefly: ignore [no-matching-overload]
                 return F.conv1d(
                     x_local,
                     w_local,
@@ -578,6 +581,9 @@ class Qwen35Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
+            # The shared helper excludes the vision encoder from the per-token
+            # FLOP term (ViT cost scales with patches, not seq_len), so this MFU
+            # is decoder-only. TODO: add a per-batch vision FLOP term for VLMs.
             attn_cfg = self.first_attention
             # pyrefly: ignore [missing-attribute]
             n_heads = attn_cfg.n_heads
@@ -597,40 +603,6 @@ class Qwen35Model(Decoder):
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
-    def _get_vision_positions(
-        self,
-        tokens: torch.Tensor,
-        num_tokens_per_item: torch.Tensor,
-        vision_token_id: int,
-    ) -> list[tuple[int, int, int, int]]:
-        """Compute (item_idx, sample_idx, vision_start, n_tokens) for each vision item.
-
-        Finds where each contiguous run of vision placeholder tokens starts
-        in the text sequence.
-
-        Args:
-            tokens: Token IDs (batch, seq_len)
-            num_tokens_per_item: (num_items,) actual tokens per vision item
-            vision_token_id: Placeholder token ID
-
-        Returns:
-            List of (item_idx, sample_idx, vision_start, n_tokens) tuples
-        """
-        vision_mask = tokens == vision_token_id
-        flat_mask = vision_mask.view(-1)
-        prev_mask = torch.cat(
-            [torch.zeros(1, dtype=torch.bool, device=flat_mask.device), flat_mask[:-1]]
-        )
-        region_starts = torch.where(flat_mask & ~prev_mask)[0]
-        seq_len = tokens.shape[1]
-
-        positions = []
-        for i in range(num_tokens_per_item.shape[0]):
-            start = int(region_starts[i].item())
-            n_tokens = int(num_tokens_per_item[i].item())
-            positions.append((i, start // seq_len, start % seq_len, n_tokens))
-        return positions
-
     def _get_vision_embeds(
         self,
         pixel_values: torch.Tensor,
@@ -644,42 +616,16 @@ class Qwen35Model(Decoder):
             grid_thw: Grid dimensions (num_items, 3) for [t, h, w]
 
         Returns:
-            merged_embeds: (num_items, max_tokens, dim) padded vision embeddings
+            vision_embeds: (num_items, max_tokens, dim) padded vision embeddings
             num_tokens_per_item: (num_items,) actual token count per item
         """
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
-        merged_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
 
         merge_unit = self.vision_encoder.spatial_merge_unit
         num_tokens_per_item = grid_thw.prod(-1) // merge_unit
 
-        return merged_embeds, num_tokens_per_item
-
-    def _scatter_vision_embeds(
-        self,
-        inputs_embeds: torch.Tensor,
-        *,
-        merged_embeds: torch.Tensor,
-        vision_positions: list[tuple[int, int, int, int]],
-    ) -> torch.Tensor:
-        """Scatter vision embeddings into text embeddings at placeholder positions.
-
-        Copies directly from the padded vision encoder output into the text
-        sequence.
-
-        Args:
-            inputs_embeds: Text embeddings (batch, seq_len, dim)
-            merged_embeds: Padded vision embeddings (num_items, max_tokens, dim)
-            vision_positions: List of (item_idx, sample_idx, vision_start, n_tokens)
-
-        Returns:
-            Updated embeddings
-        """
-        for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            inputs_embeds[
-                sample_idx, vision_start : vision_start + n_tokens, :
-            ] = merged_embeds[item_idx, :n_tokens, :]
-        return inputs_embeds
+        return vision_embeds, num_tokens_per_item
 
     def _prepare_multimodal_embeds(
         self,
@@ -712,30 +658,26 @@ class Qwen35Model(Decoder):
         )
 
         if pixel_values is not None and grid_thw is not None:
-            merged_embeds, num_tokens = self._get_vision_embeds(
+            vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
-            image_positions = self._get_vision_positions(
-                tokens, num_tokens, image_token_id
-            )
+            image_positions = get_vision_positions(tokens, num_tokens, image_token_id)
             if image_positions:
-                inputs_embeds = self._scatter_vision_embeds(
+                inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
-                    merged_embeds=merged_embeds,
+                    vision_embeds=vision_embeds,
                     vision_positions=image_positions,
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
-            merged_embeds, num_tokens = self._get_vision_embeds(
+            vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )
-            video_positions = self._get_vision_positions(
-                tokens, num_tokens, video_token_id
-            )
+            video_positions = get_vision_positions(tokens, num_tokens, video_token_id)
             if video_positions:
-                inputs_embeds = self._scatter_vision_embeds(
+                inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
-                    merged_embeds=merged_embeds,
+                    vision_embeds=vision_embeds,
                     vision_positions=video_positions,
                 )
 
