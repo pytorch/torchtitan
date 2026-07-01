@@ -12,6 +12,7 @@ import os
 import re
 import sys
 from collections import defaultdict
+from itertools import count
 from urllib.request import urlopen
 
 from torchtitan.tools.logging import logger
@@ -42,8 +43,9 @@ def run_config(run):
     except (OSError, ValueError):
         return None
     cmd = d.get("command", "")
+    selected = cmd.rsplit("selected_args:", 1)[-1]
     width = re.search(r"CONFIG=vit_mup_w(\d+)", cmd)
-    lr = re.search(r"--optimizer\.lr=([0-9.eE+-]+)", cmd)
+    lr = re.search(r"--optimizer\.lr=([0-9.eE+-]+)", selected)
     return {
         "width": int(width.group(1)) if width else None,
         "lr": lr.group(1) if lr else None,
@@ -111,11 +113,29 @@ def read_manifest(path):
 
 def collect(spec, manifest_path=None):
     path = manifest_path or spec.manifest_path
-    seeded = defaultdict(list)
+    declared = defaultdict(set)
     for param, width, _seed, lrs, array_job_id in read_manifest(path):
-        for task_index, lr in enumerate(lrs):
+        declared[(param, width, array_job_id)].update(lrs)
+    seeded = defaultdict(list)
+    for (param, width, array_job_id), lrs in declared.items():
+        seen = set()
+        for task_index in count():
             rid = run_id(array_job_id, task_index)
-            seeded[(param, width, lr)].append((final_loss(rid, spec.loss_key), rid))
+            cfg = run_config(rid)
+            if cfg is None or cfg["lr"] is None:
+                break
+            seen.add(cfg["lr"])
+            seeded[(param, width, cfg["lr"])].append(
+                (final_loss(rid, spec.loss_key), rid)
+            )
+        if seen != lrs:
+            logger.warning(
+                "job %s ran lrs %s but manifest %s declares %s",
+                array_job_id,
+                sorted(seen),
+                path,
+                sorted(lrs),
+            )
     results = []
     for (param, width, lr), hits in seeded.items():
         losses = [x for x, _ in hits if x is not None]
