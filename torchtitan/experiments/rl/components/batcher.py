@@ -10,7 +10,7 @@
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 
@@ -113,6 +113,36 @@ class Batcher(Configurable):
             batcher.add_training_samples(training_sample_group=group0)  # -> None
             batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
         """
+        # Drop samples longer than seq_len before they enter a batch: a single
+        # oversized sample (e.g. a long multi-turn rollout) cannot fill one packed
+        # row, and left in would make collate concatenate rows of differing
+        # lengths. Advantages are computed per group upstream, so dropping only
+        # removes trained-on rows; a group left with none becomes metric-only.
+        kept = [
+            sample
+            for sample in training_sample_group.training_samples
+            if self.num_tokens_to_pack(sample) <= self.seq_len
+        ]
+        num_dropped = len(training_sample_group.training_samples) - len(kept)
+        if num_dropped:
+            logger.warning(
+                "Batcher dropped %d/%d training sample(s) exceeding seq_len=%d; "
+                "increase seq_len or reduce generation length to keep them.",
+                num_dropped,
+                len(training_sample_group.training_samples),
+                self.seq_len,
+            )
+            training_sample_group = replace(
+                training_sample_group,
+                training_samples=kept,
+                metrics=[
+                    *training_sample_group.metrics,
+                    m.Metric(
+                        "batcher/num_samples_dropped_oversized",
+                        m.Sum(float(num_dropped)),
+                    ),
+                ],
+            )
         self._groups_for_next_batch.append(training_sample_group)
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
