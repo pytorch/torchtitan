@@ -219,6 +219,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                         f"lr; use lr_mult to scale from the base lr instead"
                     )
                 group_kwargs["lr"] = base_lr * pg.lr_mult
+            elif pg.lr_mult != 1.0:
+                raise ValueError(
+                    f"Optimizer param_groups pattern '{pg.pattern}' sets lr_mult "
+                    f"but the optimizer Config sets no base lr; lr_mult only "
+                    f"applies when the Config sets a base lr"
+                )
 
             groups[pg.optimizer_name].append(
                 {

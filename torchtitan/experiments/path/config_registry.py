@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 from functools import partial
@@ -25,6 +26,7 @@ from xx.training.path.config import DatasetConfig as XXPathDatasetConfig
 from xx.training.path.hydra_configs import (
     DRIVING_HEADS,
     META_HEADS,
+    PLAN_HEAD_SIZE,
     POSE_HEADS,
     TEMPORAL_META_HEADS,
 )
@@ -78,16 +80,14 @@ _LINEAR_INIT = {
 }
 _NORM_INIT = {"weight": nn.init.ones_, "bias": nn.init.zeros_}
 
-# PlanViT (single-frame plan ViT) architecture and muP constants
-HEAD_DIM = 64
-NUM_LAYERS = 8
-INPUT_SIZE = (1, 128, 256)
-PATCH_SIZE = (1, 16, 8)
-IN_CHANNELS = 24
-PLAN_SIZE = 15 * 33 * 2
-BASE_WIDTH = 256
+VIT_HEAD_DIM = 64
+VIT_NUM_LAYERS = 8
+VIT_INPUT_SIZE = (1, 128, 256)
+VIT_PATCH_SIZE = (1, 16, 8)
+VIT_IN_CHANNELS = 24
+VIT_BASE_WIDTH = 256
 VIT_WIDTHS = {"w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
-STEPS = 512
+VIT_STEPS = 512
 MUP_PATTERN = (
     r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
     r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj)\.weight$"
@@ -474,24 +474,18 @@ def _lin(in_f: int, out_f: int, *, std: float, bias: bool = True) -> Linear.Conf
 
 
 def _hidden_std(fan_in: int, *, mup: bool) -> float:
-    return fan_in**-0.5 if mup else BASE_WIDTH**-0.5
+    return fan_in**-0.5 if mup else VIT_BASE_WIDTH**-0.5
 
 
-def _vit_attention(
-    dim: int, *, n_head: int, mup: bool, qk_norm: bool = True
-) -> PathSelfAttention.Config:
+def _vit_attention(dim: int, *, n_head: int, mup: bool) -> PathSelfAttention.Config:
     head_dim = dim // n_head
     return PathSelfAttention.Config(
         norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        q_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT)
-        if qk_norm
-        else None,
-        k_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT)
-        if qk_norm
-        else None,
+        q_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT),
+        k_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT),
         c_attn=_lin(dim, 3 * dim, std=_hidden_std(dim, mup=mup)),
         c_proj=_lin(
-            dim, dim, std=_hidden_std(dim, mup=mup) / math.sqrt(2 * NUM_LAYERS)
+            dim, dim, std=_hidden_std(dim, mup=mup) / math.sqrt(2 * VIT_NUM_LAYERS)
         ),
         inner_attention=ScaledDotProductAttention.Config(),
         n_head=n_head,
@@ -507,44 +501,44 @@ def _vit_mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PathMLP.Config:
         norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
         c_fc=_lin(dim, hidden, std=_hidden_std(dim, mup=mup)),
         c_proj=_lin(
-            hidden, dim, std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * NUM_LAYERS)
+            hidden,
+            dim,
+            std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * VIT_NUM_LAYERS),
         ),
         act="gelu_tanh",
         dropout=0.0,
     )
 
 
-def _vit_model_config(
-    flavor: str, *, mup: bool, qk_norm: bool = True
-) -> PlanViT.Config:
+def _vit_model_config(flavor: str, *, mup: bool) -> PlanViT.Config:
     dim = VIT_WIDTHS[flavor]
-    n_head = dim // HEAD_DIM
-    pt, ph, pw = PATCH_SIZE
-    patch_dim = pt * IN_CHANNELS * ph * pw
-    t, h, w = INPUT_SIZE
+    n_head = dim // VIT_HEAD_DIM
+    pt, ph, pw = VIT_PATCH_SIZE
+    patch_dim = pt * VIT_IN_CHANNELS * ph * pw
+    t, h, w = VIT_INPUT_SIZE
     num_patches = (t // pt) * (h // ph) * (w // pw)
     return PlanViT.Config(
-        output_mult=(BASE_WIDTH / dim) if mup else 1.0,
+        output_mult=(VIT_BASE_WIDTH / dim) if mup else 1.0,
         mean=255 / 2,
         std=255 / 4,
         patch_embed=PatchEmbed.Config(
             proj=_lin(patch_dim, dim, std=patch_dim**-0.5),
-            patch_size=PATCH_SIZE,
+            patch_size=VIT_PATCH_SIZE,
         ),
         pos_embedding=Embedding.Config(
             num_embeddings=num_patches, embedding_dim=dim, param_init=_LINEAR_INIT
         ),
         blocks=[
             PathTransformerBlock.Config(
-                attention=_vit_attention(dim, n_head=n_head, mup=mup, qk_norm=qk_norm),
+                attention=_vit_attention(dim, n_head=n_head, mup=mup),
                 mlp=_vit_mlp(dim, mup=mup),
             )
-            for _ in range(NUM_LAYERS)
+            for _ in range(VIT_NUM_LAYERS)
         ],
         norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
         plan_head=PlanHead.Config(
             norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-            head=_lin(dim, PLAN_SIZE, std=BASE_WIDTH**-0.5),
+            head=_lin(dim, PLAN_HEAD_SIZE, std=VIT_BASE_WIDTH**-0.5),
         ),
     )
 
@@ -562,39 +556,25 @@ def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
 
 
 def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
-    base = XXPathDatasetConfig(fps=SUPERCOMBO_FPS, plan_only=True)
-    return PathDataLoader.Config(
+    return dataclasses.replace(
+        _dataloader_config(split=split, fps=SUPERCOMBO_FPS, plan_only=True),
         dataset=os.path.join(
             XX_BASEDIR, "datasets/lists/prune10m_random100k_seed0.txt"
         ),
-        split=split,
-        shuffle_size=_si_int(base.shuffle_size),
-        min_mixing=base.min_mixing,
-        num_writers=base.num_writers,
-        num_readers=base.num_readers,
-        fps=base.fps,
         pipeline_dir=BASE_DIR_GT_10M,
-        plan_only=base.plan_only,
-        limit=base.limit,
-        n_frames=base.n_frames,
-        rgb=base.rgb,
-        unvision=base.unvision,
     )
 
 
 def _vit_optimizer_config(
     flavor: str, *, mup: bool, lr: float, wd: float
 ) -> OptimizersContainer.Config:
-    # base lr is carried on the container so --optimizer.lr can sweep every group
-    # at once; muP scales the hidden matmuls down by lr_mult = 1/m (m = width ratio).
-    m = VIT_WIDTHS[flavor] / BASE_WIDTH
+    m = VIT_WIDTHS[flavor] / VIT_BASE_WIDTH
     common = {"betas": (0.9, 0.95), "eps": 1e-8, "weight_decay": wd}
     catch_all = ParamGroupConfig(
         pattern=r".*",
         optimizer_name="AdamW",
         optimizer_kwargs=common,
     )
-    # first-match-wins: scale hidden matmuls by lr_mult = 1/m before the catch-all
     mup_group = ParamGroupConfig(
         pattern=MUP_PATTERN,
         optimizer_name="AdamW",
@@ -618,7 +598,7 @@ def _vit(
         dataloader=_vit_dataloader_config(split="train"),
         optimizer=_vit_optimizer_config(flavor, mup=mup, lr=lr, wd=wd),
         lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=round(STEPS * 0.1),
+            warmup_steps=round(VIT_STEPS * 0.1),
             total_steps=None,
             decay_ratio=0.8,
             decay_type="cosine",
@@ -628,7 +608,7 @@ def _vit(
             local_batch_size=16,
             global_batch_size=-1,
             seq_len=1,
-            steps=STEPS,
+            steps=VIT_STEPS,
             max_norm=1.0,
             dtype="float32",
             mixed_precision_param="bfloat16",
@@ -640,7 +620,7 @@ def _vit(
         ),
         checkpoint=CheckpointManager.Config(enable=False),
         metrics=MetricsProcessor.Config(
-            log_freq=10, enable_reporterv2=True, save_freq=STEPS
+            log_freq=10, enable_reporterv2=True, save_freq=VIT_STEPS
         ),
         validator=PathValidator.Config(
             enable=False,

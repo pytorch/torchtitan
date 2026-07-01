@@ -112,12 +112,6 @@ class PlanViT(BaseModel):
 
 
 class PlanViTLoss(PathLoss):
-    """PathLoss for the single-frame plan ViT.
-
-    PlanViT predicts one frame, so the temporal plan target is reduced to its
-    last frame before scoring. Everything else matches PathLoss.
-    """
-
     @dataclass(kw_only=True, slots=True)
     class Config(PathLoss.Config):
         pass
