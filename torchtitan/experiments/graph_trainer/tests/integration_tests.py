@@ -583,12 +583,6 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
         # positions before attention_masks.
         # TODO: re-test on FlexAttention once BlockMask survives AutoParallel
         # graph capture.
-        # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
-        # #186754 (2026-06-24) removed propagate_single_input_strategy in favor
-        # of propagate_single_input_single_dim_strategy, but AutoParallel's
-        # convert_element_type_rule still imports the old name, so the sharding
-        # optimizer fails with ImportError. Re-enable once AutoParallel migrates.
-        # https://github.com/pytorch/torchtitan/issues/3699
         OverrideDefinitions(
             [
                 [
@@ -603,7 +597,6 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
             "autoparallel llama3 FSDP+TP",
             "autoparallel_llama3_fsdp_tp",
             ngpu=4,
-            disabled=True,
         ),
     ]
 
