@@ -96,5 +96,25 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module deepseek_v3 "
+                    "--config deepseek_v3_debugmodel_minimal_async_ep",
+                    "--parallelism.spmd_backend spmd_types",
+                    "--debug.spmd_typechecking",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 4",
+                    # MinimalAsyncEP requires full recompute.
+                    "activation-checkpoint:full",
+                ],
+            ],
+            "DeepSeek V3 FSDP+MinimalAsyncEP+spmd_types+typecheck",
+            "deepseek_v3_fsdp+minimal_async_ep+spmd_types_typecheck",
+            ngpu=4,
+            # MinimalAsyncEP uses PyTorch symmetric memory (CUDA-only), so skip
+            # on ROCm.
+            skip_rocm_test=True,
+        ),
     ]
     return integration_tests_flavors

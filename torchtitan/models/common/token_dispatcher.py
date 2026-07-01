@@ -448,7 +448,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 if get_spmd_backend() == "spmd_types"
                 else self.ep_mesh.get_group()
             )
-            if get_spmd_backend() == "spmd_types":
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 num_local_tokens_per_expert_E = spmd.reinterpret_mesh(
                     num_local_tokens_per_expert_E, spmd.current_mesh()
                 )
@@ -844,16 +844,26 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
         from torchtitan.distributed.deepep.deepep import dispatch_tokens
 
-        hidden_states_RD, num_global_tokens_per_local_expert_e, state = dispatch_tokens(
-            x_TD,
-            topk_expert_ids_TK,
-            topk_scores_TK,
-            num_local_experts,
-            self.num_experts,
-            ep_group,
-            num_max_tokens_per_rank=self.num_max_tokens_per_rank,
-            cudagraphable=self.cudagraphable,
-        )
+        with spmd.no_typecheck():
+            (
+                hidden_states_RD,
+                num_global_tokens_per_local_expert_e,
+                state,
+            ) = dispatch_tokens(
+                x_TD,
+                topk_expert_ids_TK,
+                topk_scores_TK,
+                num_local_experts,
+                self.num_experts,
+                ep_group,
+                num_max_tokens_per_rank=self.num_max_tokens_per_rank,
+                cudagraphable=self.cudagraphable,
+            )
+
+            if get_spmd_backend() == "spmd_types":
+                with maybe_set_sparse_mesh():
+                    spmd.assert_type(hidden_states_RD, spmd.V)
+                    spmd.assert_type(num_global_tokens_per_local_expert_e, spmd.V)
 
         metadata = DeepEPDispatchMetadata(state=state)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
@@ -877,26 +887,30 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        # pyrefly: ignore [bad-argument-type]
-        combined_TD = combine_tokens(routed_output_RD, metadata.state)
+        with spmd.no_typecheck():
+            # pyrefly: ignore [bad-argument-type]
+            combined_TD = combine_tokens(routed_output_RD, metadata.state)
 
-        if self.sp_size > 1:
-            sync_combine()
-            out_TD = torch.zeros(
-                num_local_tokens_after_padding * self.sp_size,
-                combined_TD.shape[-1],
-                device=combined_TD.device,
-                dtype=combined_TD.dtype,
-            )
-            local_indices = torch.arange(
-                combined_TD.shape[0], device=combined_TD.device
-            )
-            global_indices = self._sp_global_token_indices(
-                local_indices,
-                local_seq_len_after_padding,
-            )
-            out_TD[global_indices] = combined_TD
-            return out_TD
+            if self.sp_size > 1:
+                sync_combine()
+                out_TD = torch.zeros(
+                    num_local_tokens_after_padding * self.sp_size,
+                    combined_TD.shape[-1],
+                    device=combined_TD.device,
+                    dtype=combined_TD.dtype,
+                )
+                local_indices = torch.arange(
+                    combined_TD.shape[0], device=combined_TD.device
+                )
+                global_indices = self._sp_global_token_indices(
+                    local_indices,
+                    local_seq_len_after_padding,
+                )
+                out_TD[global_indices] = combined_TD
+                combined_TD = out_TD
+
+            if get_spmd_backend() == "spmd_types":
+                spmd.assert_type(combined_TD, spmd.V)
 
         return combined_TD
 
@@ -1177,6 +1191,12 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         # TODO(xmfan): make this capacity configurable by user
         num_receive_rows_per_source_rank = num_tokens * min(top_k, num_local_experts)
         receive_capacity = ep_size * num_receive_rows_per_source_rank
+
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            for axis in ["dp", "cp", "tp"]:
+                spmd.mutate_type(
+                    num_local_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V
+                )
 
         (
             hidden_states_RD,
