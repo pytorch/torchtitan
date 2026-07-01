@@ -28,6 +28,7 @@ The folder should be organized as follows
   - Define `set_<model>_sharding_config(config, *, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention `LocalMapConfig` placements are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
   - Call the helper from `Model.Config.update_from_config()` so placements depend on the trainer's `parallelism` settings.
   - Reuse shared helpers from `torchtitan/models/common/decoder_sharding.py` (`set_decoder_sharding_config`, `set_dense_ffn_sharding`, `set_gqa_attention_sharding`, `norm_config`, `dense_param_placement`, `dense_activation_placement`) where possible.
+  - Write the single-device module first, then express its parallelism here -- placements are always written in the `spmd_types` language (`spmd.R/I/V/P`, `spmd.S(dim)`, `PartitionSpec`), and translated into DTensor placements for the `default` and `full_dtensor` backends, so a single set of sharding configs covers all three `--parallelism.spmd_backend` choices.
   - Under `--parallelism.spmd_backend full_dtensor`, declare the mesh axes in canonical outer-to-inner SPMD order: `(dp_replicate, dp_shard, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, efsdp, ep)` for sparse (MoE expert weights). `Module.parallelize` resolves the mesh by the declared order and validates it matches one of the SPMD meshes; declaring axes out of order raises `ValueError`.
 - `parallelize.py`
   - apply training techniques in the following order
@@ -37,6 +38,8 @@ The folder should be organized as follows
     - `torch.compile`
     - FSDP /  HSDP
     - NOTE: currently CP support for language models is enabled via a context manager in `torchtitan/train.py`. Ideally no extra work is needed to enable CP.
+  - Register the parallelizing function as `parallelize_fn` in the model registry (see `__init__.py` below).
+  - NOTE: model inputs need SPMD type annotations as well. If the existing trainers do not cover your input signature, annotate them on the trainer side; any input sharding or splitting belongs in the dataloader, not in the model.
 - `pipeline.py` (optional if model size is small)
   - apply PP
 - `__init__.py`
@@ -65,6 +68,10 @@ The folder should be organized as follows
   - One way of doing this E2E is to load the same model checkpoint into the `torchtitan` model and the HF model, and compare the model output given the same input. This assumes
     - HF implementation is correct.
     - The correctness of a `torchtitan` model and the corresponding state dict adapter together indicates the correctness of both.
+- SPMD typechecking
+  - Run with `--parallelism.spmd_backend spmd_types --debug.spmd_typechecking` during development. This invokes the global SPMD typechecker over the trainer's FWD step, catching distributed compute that is unannotated or that violates operator sharding rules. See [`spmd_types` integration](/torchtitan/distributed/SPMD_TYPES.md) for the programming model and for escape hatches when a region is not expressible in global SPMD (`LocalMapConfig`, custom autograd functions, handwritten collectives).
+  - A new model should typecheck under every parallelism it claims to support, the same expectation as for DTensor-based models. Pipeline parallelism and SAC + FlexAttention are current gaps, and are rejected with a `ValueError` when typechecking is on.
+  - Leave the flag off for real runs -- it adds significant overhead.
 - Loss converging
   - If there is a verified baseline, compare the loss curves with the baseline.
   - For comparisons within `torchtitan`, see the [guidelines](/docs/converging.md).
