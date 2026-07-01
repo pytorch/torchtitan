@@ -243,15 +243,26 @@ class TestFlexShardTraining(FSDPTest):
         composed_context_fn = model.layers[0].checkpoint_fn.keywords["context_fn"]
         self.assertIsNot(composed_context_fn, _prefer_recompute_context_fn)
         forward_ctx, _ = composed_context_fn()
+        from torchtitan.experiments.flex_shard.flex_shard.unshard_op import (
+            UNSHARD_BUCKET_OP,
+        )
+
         self.assertEqual(
             forward_ctx.policy_fn(
                 None,
-                torch.ops._c10d_functional.all_gather_into_tensor.default,
+                UNSHARD_BUCKET_OP,
             ),
             CheckpointPolicy.MUST_RECOMPUTE,
         )
         self.assertEqual(
             forward_ctx.policy_fn(None, torch.ops.aten.mm.default),
+            CheckpointPolicy.PREFER_RECOMPUTE,
+        )
+        self.assertEqual(
+            forward_ctx.policy_fn(
+                None,
+                torch.ops._c10d_functional.all_to_all_single.default,
+            ),
             CheckpointPolicy.PREFER_RECOMPUTE,
         )
 

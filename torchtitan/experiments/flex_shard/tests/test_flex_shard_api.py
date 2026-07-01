@@ -23,7 +23,6 @@ from torchtitan.experiments.flex_shard.tests.common import (
     make_transformer_model,
     single_rank_cpu_mesh,
     single_rank_cuda_mesh,
-    transformer_bucket_specs,
 )
 
 

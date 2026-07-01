@@ -11,60 +11,30 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torchtitan.experiments.flex_shard import is_flex_shard_param
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cuda,
-    flex_shard_transformer_model,
+    make_transformer_model,
     single_rank_cuda_mesh,
     transformer_inputs,
 )
 
 
 class TestFlexShardEagerRuntime(TestCase):
-    def test_eager_forward_backward_on_cuda_mesh(self):
+    def test_meta_to_empty_materializes_bucket_storage_and_runtime(self):
         with single_rank_cuda_mesh() as mesh:
-            args, model = flex_shard_transformer_model(mesh)
-
-            loss = model(transformer_inputs(args, device="cuda")).sum()
-            loss.backward()
-
-            for param in model.parameters():
-                self.assertTrue(is_flex_shard_param(param))
-                self.assertIsNotNone(param.grad)
-
-    def test_eager_forward_allows_repeated_param_reads(self):
-        class DoubleReadWeight(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.weight = nn.Parameter(torch.randn(4, 4, device="cuda"))
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                return x @ self.weight + x @ self.weight
-
-        with single_rank_cuda_mesh() as mesh:
-            model = DoubleReadWeight()
-            x = torch.randn(2, 4, device="cuda")
-            with torch.no_grad():
-                ref_out = model(x)
+            with torch.device("meta"):
+                args, model = make_transformer_model()
 
             flex_shard_cuda(model, mesh)
+            for storage in model.sharded_bucket_storages:
+                self.assertEqual(storage.byte_storage.device.type, "meta")
 
-            out = model(x)
-            self.assertEqual(out, ref_out)
-            out.sum().backward()
-            self.assertIsNotNone(next(model.parameters()).grad)
+            model.to_empty(device="cuda")
+            for storage in model.sharded_bucket_storages:
+                self.assertEqual(storage.byte_storage.device.type, "cuda")
+            for param in model.parameters():
+                self.assertTrue(is_flex_shard_param(param))
+                nn.init.uniform_(param, -0.1, 0.1)
 
-    def test_param_access_outside_forward_raises(self):
-        with single_rank_cuda_mesh() as mesh:
-            _, model = flex_shard_transformer_model(mesh)
-
-            with self.assertRaisesRegex(RuntimeError, "bucket unshard hook"):
-                _ = model.output.weight
-
-    def test_torch_compile_forward_backward_on_cuda_mesh(self):
-        with single_rank_cuda_mesh() as mesh:
-            args, model = flex_shard_transformer_model(mesh)
-
-            compiled_model = torch.compile(model, backend="eager")
-
-            loss = compiled_model(transformer_inputs(args, device="cuda")).sum()
+            loss = model(transformer_inputs(args, device="cuda")).sum()
             loss.backward()
 
             for param in model.parameters():

@@ -20,6 +20,8 @@ Usage:
 """
 
 import copy
+import importlib.util
+from unittest import mock
 
 import torch
 import torch.distributed as dist
@@ -42,6 +44,10 @@ from torchtitan.experiments.flex_shard import (
     flex_shard,
     is_flex_shard_param,
     Placement,
+)
+from torchtitan.experiments.flex_shard.example.owned import (
+    GroupedOwned,
+    GroupedOwnedSegmentSpec,
 )
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
@@ -262,7 +268,6 @@ class TestBucketPlacementValidation(TestCase):
                     mesh,
                     {"scalar": (Shard(0),)},
                 )
-
     def test_rejects_mixed_dtypes(self):
         """Parameters in one bucket must share the same storage dtype."""
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
@@ -515,6 +520,7 @@ class TestDistributedBuckets(FSDPTest):
 # ---------------------------------------------------------------------------
 # Per-bucket mesh: experts on a 1-D efsdp axis, dense on a 1-D dp axis
 # ---------------------------------------------------------------------------
+
 
 def _multi_mesh_moe_args() -> ModelArgs:
     # weight_tying=False: flex_shard rejects shared params (output<->tok_emb).
