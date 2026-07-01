@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -24,6 +25,11 @@ class SFTTrainer(Trainer):
     Builds the BlockMask in post_dataloading_process (before any parallelism
     sharding) so it works correctly with TP + sequence parallel.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Trainer.Config):
+        hf_model: str = ""
+        """HuggingFace model ID (e.g. 'Qwen/Qwen2.5-7B')."""
 
     @sl.log_trace_span("post_dataloading_process")
     def post_dataloading_process(
