@@ -22,6 +22,7 @@ from .spec import MODES, REPORTERV2_API_URL, SPECS, TRAIN_LOSS_KEY
 PALETTE = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A"]
 RUN_PAGE_URL = REPORTERV2_API_URL + "/runs/{run_id}"
 SCALING_LR = "1e-2"
+TAIL_FRACTION = 0.05
 
 
 def run_id(array_job_id, task_index):
@@ -45,7 +46,9 @@ def run_config(run):
     cmd = d.get("command", "")
     selected = cmd.rsplit("selected_args:", 1)[-1]
     width = re.search(r"CONFIG=vit_mup_w(\d+)", cmd)
-    lr = re.search(r"--optimizer\.lr=([0-9.eE+-]+)", selected)
+    lr = re.search(r"--optimizer\.lr=([0-9.eE+-]+)", selected) or re.search(
+        r"--optimizer\.lr=([0-9.eE+-]+)", cmd
+    )
     return {
         "width": int(width.group(1)) if width else None,
         "lr": lr.group(1) if lr else None,
@@ -64,7 +67,7 @@ def collect_scaling(spec, arrays, lr=SCALING_LR, max_tasks=8):
                 continue
             if cfg["width"] is not None:
                 seen.add(cfg["width"])
-            loss = final_loss(rid, spec.loss_key)
+            loss = tail_loss(rid, spec.loss_key)
             if loss is not None:
                 losses.append(loss)
                 runs.append(rid)
@@ -84,13 +87,16 @@ def collect_scaling(spec, arrays, lr=SCALING_LR, max_tasks=8):
     return points
 
 
-def final_loss(run, loss_key=TRAIN_LOSS_KEY):
+def tail_loss(run, loss_key=TRAIN_LOSS_KEY):
     try:
         rows = fetch_metrics(run)
     except (OSError, ValueError, KeyError):
         return None
     vals = [row[loss_key] for row in rows if loss_key in row]
-    return float(vals[-1]) if vals else None
+    if not vals:
+        return None
+    tail = vals[-max(1, int(len(vals) * TAIL_FRACTION)) :]
+    return sum(tail) / len(tail)
 
 
 def read_manifest(path):
@@ -126,7 +132,7 @@ def collect(spec, manifest_path=None):
                 break
             seen.add(cfg["lr"])
             seeded[(param, width, cfg["lr"])].append(
-                (final_loss(rid, spec.loss_key), rid)
+                (tail_loss(rid, spec.loss_key), rid)
             )
         if seen != lrs:
             logger.warning(
@@ -156,7 +162,7 @@ def collect_arrays(spec, arrays, max_tasks=8):
                 continue
             width = cfg["width"] or want_width
             seeded[("mup", width, cfg["lr"])].append(
-                (final_loss(rid, spec.loss_key), rid)
+                (tail_loss(rid, spec.loss_key), rid)
             )
     results = []
     for (param, width, lr), hits in seeded.items():
@@ -211,7 +217,7 @@ def _curves(results):
     return curves
 
 
-def _mutransfer_fig(curves, widths):
+def _mutransfer_fig(curves, widths, lr_ticks):
     import plotly.graph_objects as go
 
     fig = go.Figure()
@@ -230,8 +236,13 @@ def _mutransfer_fig(curves, widths):
                 marker={"color": PALETTE[wi % len(PALETTE)]},
             )
         )
-    fig.update_xaxes(type="log", title_text="learning rate")
-    fig.update_yaxes(title_text="final train loss")
+    fig.update_xaxes(
+        type="log",
+        title_text="learning rate",
+        tickvals=[v for v, _ in lr_ticks],
+        ticktext=[s for _, s in lr_ticks],
+    )
+    fig.update_yaxes(title_text="train loss (tail mean)")
     fig.update_layout(
         title_text="muTransfer (mup): final train loss vs lr per width",
         width=1000,
@@ -289,19 +300,6 @@ def build_report(spec, results=None):
         results = collect(spec)
     per_width, transferred = hp_table(spec, results)
 
-    basins = {w: loss for w, (lr, loss) in per_width.items()}
-    predictor = None
-    if len(basins) >= 3:
-        try:
-            predictor = fit_predictor(basins)
-        except ImportError:
-            logger.warning("scipy unavailable; skipping loss-predictor panel")
-    preds = []
-    if predictor is not None:
-        popt, r2, predict = predictor
-        top_w = max(basins)
-        preds = [(top_w * 2, predict(top_w * 2)), (top_w * 4, predict(top_w * 4))]
-
     os.makedirs(spec.report_dir, exist_ok=True)
     hp = {
         "model": spec.name,
@@ -315,6 +313,9 @@ def build_report(spec, results=None):
 
     curves = _curves(results)
     widths = sorted({w for mode in curves for w in curves[mode]})
+    lr_ticks = sorted(
+        {(float(lr), lr) for _, _, lr, loss, _, _ in results if loss is not None}
+    )
 
     class Report(BaseReport):
         def run_data(self):
@@ -327,35 +328,22 @@ def build_report(spec, results=None):
             mw.print("1. muTransfer sweep", heading=2)
             mw.print(
                 "under muP the loss-minimising lr is width-stable (panel minima line up "
-                "across width). loss is each run's final logged "
-                f"{spec.loss_key}, averaged over seeds."
+                f"across width). loss is the mean over each run's trailing "
+                f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}, averaged over seeds."
             )
             if widths:
-                mw.add_plot(_mutransfer_fig(curves, widths), xscale=None, yscale=None)
+                mw.add_plot(
+                    _mutransfer_fig(curves, widths, lr_ticks), xscale=None, yscale=None
+                )
 
             mw.print(f"2. transferred muP lr = {transferred}", heading=2)
+            mw.print(
+                "conditions: 2000-step runs, warmup 51, cosine decay over the final "
+                "80%; the transferred lr is specific to this horizon and schedule."
+            )
             with mw.html_table(["width", "optimal lr", "basin"], borders=True) as t:
                 for w in sorted(per_width):
                     t.row([w, per_width[w][0], f"{per_width[w][1]:.3f}"])
-
-            if predictor is not None:
-                linf, a, alpha = popt
-                mw.print("3. loss predictor (width scaling)", heading=2)
-                mw.print(
-                    f"fit loss(w) = L_inf + A*w^(-alpha): L_inf={linf:.3f}, A={a:.3f}, "
-                    f"alpha={alpha:.3f}, R2={r2:.3f}"
-                )
-                mw.print(
-                    " ".join(f"predicted basin w{int(w)}={v:.3f}." for w, v in preds)
-                )
-                mw.add_plot(
-                    _predictor_fig(per_width, popt, preds), xscale=None, yscale=None
-                )
-            mw.print(
-                "*caveat: few width points at fixed depth/data, a muP-enabled "
-                "width-scaling extrapolation, not a compute-optimal scaling law. "
-                "indicative only.*"
-            )
 
             mw.print("runs", heading=2)
             with mw.html_table(
@@ -408,8 +396,9 @@ def scaling_report(spec, points, bigvit_width=None):
             mw.filename = f"{spec.report_dir}/scaling.html"
             mw.print(f"{spec.name} width-scaling", heading=1)
             mw.print(
-                "loss(w) at the fixed muP lr, averaged over seeds. loss is each run's "
-                f"final {spec.loss_key}. width is read from each run's logged CONFIG."
+                "loss(w) at the fixed muP lr, averaged over seeds. loss is the mean "
+                f"over each run's trailing {TAIL_FRACTION:.0%} of logged "
+                f"{spec.loss_key}. width is read from each run's logged CONFIG."
             )
             if predictor is not None:
                 popt, r2, predict = predictor
