@@ -177,7 +177,9 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
         local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
         local_result.masked_fill_(out_of_range.unsqueeze(-1), 0)
-        dist.all_reduce(local_result, op=dist.ReduceOp.SUM, group=tp_group)
+        local_result = funcol.all_reduce(
+            local_result, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
+        )
 
         # Per-token NLL, dropping ignored labels (logprob 0 for ignored).
         result = -local_result.squeeze(-1)
