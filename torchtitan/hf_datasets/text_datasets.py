@@ -80,14 +80,26 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        *,
+        loader: Callable | None = None,
+        sample_processor: Callable | None = None,
     ) -> None:
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 
-        path, dataset_loader, text_processor = _validate_dataset(
-            dataset_name, dataset_path
-        )
-        ds = dataset_loader(path)
+        if loader is None and sample_processor is None:
+            path, dataset_loader, text_processor = _validate_dataset(
+                dataset_name, dataset_path
+            )
+            ds = dataset_loader(path)
+        elif loader is not None and sample_processor is not None:
+            ds = loader(dataset_path)
+            text_processor = sample_processor
+        else:
+            raise ValueError(
+                "Both loader and sample_processor must be provided together "
+                "(or neither, to use the DATASETS dict lookup)."
+            )
 
         self.dataset_name = dataset_name
         # Keep an unshuffled reference so map-style datasets can be re-shuffled
@@ -247,6 +259,14 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
 
+        loader: Annotated[Callable | None, tyro.conf.Suppress] = None
+        """Optional ``Callable[[str], Dataset]``. Set alongside
+        ``sample_processor`` to bypass the DATASETS dict lookup."""
+
+        sample_processor: Annotated[Callable | None, tyro.conf.Suppress] = None
+        """Optional ``Callable[[dict], str]``. Set alongside
+        ``loader`` to bypass the DATASETS dict lookup."""
+
     def __init__(
         self,
         config: Config,
@@ -267,6 +287,8 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             infinite=config.infinite,
+            loader=config.loader,
+            sample_processor=config.sample_processor,
         )
 
         dataloader_kwargs = {
@@ -344,6 +366,8 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
                     dp_rank=dp_rank,
                     dp_world_size=dp_world_size,
                     infinite=source.infinite,
+                    loader=source.loader,
+                    sample_processor=source.sample_processor,
                 )
                 for source in config.sources
             ],

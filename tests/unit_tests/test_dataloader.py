@@ -6,6 +6,8 @@
 
 import unittest
 
+from datasets import Dataset
+
 from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
@@ -302,6 +304,66 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             single_batch_input["positions"].shape,
             interleaved_batch_input["positions"].shape,
         )
+
+
+class TestCustomDatasetConfig(unittest.TestCase):
+    """Tests for loader / sample_processor on HuggingFaceTextDataLoader.Config."""
+
+    _TEXT = "the quick brown fox jumps over the lazy dog "
+
+    def test_dataloader_with_custom_loader_and_processor(self):
+        loader = lambda path: Dataset.from_dict({"text": [self._TEXT]})
+        proc = lambda s: s["text"].upper()
+        tokenizer = DummyTokenizer()
+        cfg = HuggingFaceTextDataLoader.Config(
+            dataset="custom",
+            loader=loader,
+            sample_processor=proc,
+            num_workers=0,
+            infinite=False,
+        )
+        dl = HuggingFaceTextDataLoader(
+            cfg, dp_world_size=1, dp_rank=0,
+            tokenizer=tokenizer, seq_len=16, local_batch_size=1,
+        )
+        batch_input, batch_label = next(iter(dl))
+        decoded = tokenizer.decode(batch_input["input"].squeeze(0).tolist())
+        self.assertIn("THE QUICK BROWN", decoded)
+
+    def test_interleaved_with_custom_loader_and_processor(self):
+        tokenizer = DummyTokenizer()
+        cfg = InterleavedHuggingFaceTextDataLoader.Config(
+            sources=[
+                HFDataSource(
+                    dataset="upper",
+                    loader=lambda path: Dataset.from_dict({"text": [self._TEXT]}),
+                    sample_processor=lambda s: s["text"].upper(),
+                    infinite=False,
+                    weight=1.0,
+                ),
+                HFDataSource(
+                    dataset="lower",
+                    loader=lambda path: Dataset.from_dict({"text": [self._TEXT]}),
+                    sample_processor=lambda s: s["text"].lower(),
+                    infinite=False,
+                    weight=1.0,
+                ),
+            ],
+            seed=42,
+            num_workers=0,
+        )
+        dl = InterleavedHuggingFaceTextDataLoader(
+            cfg, dp_world_size=1, dp_rank=0,
+            tokenizer=tokenizer, seq_len=16, local_batch_size=1,
+        )
+        all_decoded = []
+        for batch_input, batch_label in dl:
+            all_decoded.append(
+                tokenizer.decode(batch_input["input"].squeeze(0).tolist())
+            )
+        combined = " ".join(all_decoded)
+        self.assertIn("THE QUICK BROWN", combined)
+        self.assertIn("the quick brown", combined)
 
 
 if __name__ == "__main__":
