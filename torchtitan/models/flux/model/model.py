@@ -6,15 +6,18 @@
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from torch import nn, Tensor
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
+
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
+    local_split_text_image,
     MLPEmbedder,
     SingleStreamBlock,
     timestep_embedding,
@@ -60,7 +63,9 @@ class FluxModel(BaseModel):
         single_blocks: list[SingleStreamBlock.Config]
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            pass
+            from torchtitan.models.flux.sharding import set_flux_sharding_config
+
+            set_flux_sharding_config(self)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -151,6 +156,16 @@ class FluxModel(BaseModel):
         timesteps: Tensor,
         y: Tensor,
     ) -> Tensor:
+        @spmd.local_map(
+            in_types=(
+                spmd.PartitionSpec("dp", "cp", None),
+                spmd.PartitionSpec("dp", "cp", None),
+            ),
+            out_types=spmd.PartitionSpec("dp", "cp", None),
+        )
+        def _local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
+            return torch.cat((text, image), dim=1)
+
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
@@ -160,16 +175,16 @@ class FluxModel(BaseModel):
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 
-        ids = torch.cat((txt_ids, img_ids), dim=1)
+        ids = _local_concat_text_image(txt_ids, img_ids)
         pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
-        img = torch.cat((txt, img), 1)
+        img = _local_concat_text_image(txt, img)
         for block in self.single_blocks:
             img = block(img, vec=vec, pe=pe)
-        img = img[:, txt.shape[1] :, ...]
+        _, img = local_split_text_image(img, txt.shape[1])
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img
