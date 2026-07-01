@@ -48,6 +48,7 @@ from torchtitan.experiments.flex_shard import (
 from torchtitan.experiments.flex_shard.example.owned import (
     GroupedOwned,
     GroupedOwnedSegmentSpec,
+    Owned,
 )
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
@@ -70,6 +71,28 @@ from torchtitan.experiments.flex_shard.tests.common import (
 
 
 device_type = torch.device(get_devtype())
+
+
+def _owned_param_info(
+    fqn: str,
+    global_shape: torch.Size,
+    placement: Owned,
+    *,
+    rank: int = 0,
+    world_size: int = 1,
+    dtype: torch.dtype = torch.float32,
+) -> ParamInfo:
+    return ParamInfo(
+        fqn=fqn,
+        global_shape=global_shape,
+        global_stride=tuple(torch.empty(global_shape).stride()),
+        dtype=dtype,
+        requires_grad=True,
+        placements=(placement,),
+        local_shape=placement.compute_local_shape(global_shape, rank, world_size),
+        local_numel=placement.compute_local_numel(global_shape, rank, world_size),
+        global_numel=torch.empty(global_shape).numel(),
+    )
 
 
 class _IncompletePlacement(Placement):
@@ -258,6 +281,76 @@ class TestBucketPlacementValidation(TestCase):
                     },
                 )
 
+    def test_grouped_owned_reuses_triton_segment_pack_descriptors(self):
+        """GroupedOwned caches static Triton segment-pack descriptors."""
+        if importlib.util.find_spec("triton") is None:
+            self.skipTest("Triton is required for GroupedOwned CUDA segment packing.")
+
+        from torchtitan.experiments.flex_shard.example import owned as owned_module
+
+        with single_rank_cuda_mesh() as mesh:
+            placement = GroupedOwned(
+                {
+                    "a": [GroupedOwnedSegmentSpec("a#0", "a", 0, 4, 0)],
+                    "b": [GroupedOwnedSegmentSpec("b#0", "b", 0, 3, 0)],
+                }
+            )
+            tensors = [
+                torch.arange(4, dtype=torch.float32, device="cuda").view(2, 2),
+                torch.arange(3, dtype=torch.float32, device="cuda").add(10),
+            ]
+            infos = [
+                ParamInfo(
+                    fqn="a",
+                    global_shape=tensors[0].shape,
+                    global_stride=tuple(tensors[0].stride()),
+                    dtype=torch.float32,
+                    param_dtype=torch.bfloat16,
+                    requires_grad=True,
+                    placements=(placement,),
+                    local_shape=tensors[0].shape,
+                    local_numel=tensors[0].numel(),
+                    global_numel=tensors[0].numel(),
+                ),
+                ParamInfo(
+                    fqn="b",
+                    global_shape=tensors[1].shape,
+                    global_stride=tuple(tensors[1].stride()),
+                    dtype=torch.float32,
+                    param_dtype=torch.bfloat16,
+                    requires_grad=True,
+                    placements=(placement,),
+                    local_shape=tensors[1].shape,
+                    local_numel=tensors[1].numel(),
+                    global_numel=tensors[1].numel(),
+                ),
+            ]
+
+            with mock.patch.object(
+                owned_module,
+                "make_segment_pack_descriptor_triton_if_supported",
+                wraps=owned_module.make_segment_pack_descriptor_triton_if_supported,
+            ) as make_descriptor:
+                for _ in range(2):
+                    prepared_unshard = placement.prepare_unshard_bucket(
+                        tensors,
+                        infos,
+                        mesh,
+                        None,
+                    )
+                    torch.cuda.synchronize()
+                    prepared = placement.prepare_reduce_grad(
+                        tensors,
+                        infos,
+                        mesh,
+                        None,
+                    )
+                    placement.reduce_prepared_grad(prepared)
+                    torch.cuda.synchronize()
+
+            self.assertEqual(make_descriptor.call_count, 1)
+            self.assertEqual(prepared_unshard.buffers[0].dtype, torch.bfloat16)
+
     def test_rejects_shard_dim_out_of_range(self):
         """Placement layout validation happens during bucket storage planning."""
 
@@ -268,6 +361,107 @@ class TestBucketPlacementValidation(TestCase):
                     mesh,
                     {"scalar": (Shard(0),)},
                 )
+
+    def test_rejects_owned_owner_rank_out_of_range(self):
+        """Owned placement owner_rank must be valid for the mesh."""
+        with single_rank_cpu_mesh() as mesh:
+            with self.assertRaisesRegex(ValueError, "owner_rank"):
+                ShardedBucketStorage.create_param_infos(
+                    [("weight", nn.Parameter(torch.empty(2, 2)))],
+                    mesh,
+                    {"weight": (Owned(1),)},
+                )
+
+    def test_owned_reduce_grad_single_rank(self):
+        """Owned placement can reduce gradients through its placement contract."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = Owned(0)
+            global_shape = torch.Size([2, 2])
+            info = ParamInfo(
+                fqn="weight",
+                global_shape=global_shape,
+                global_stride=(2, 1),
+                dtype=torch.float32,
+                requires_grad=True,
+                placements=(placement,),
+                local_shape=global_shape,
+                local_numel=4,
+                global_numel=4,
+            )
+            grad = torch.ones(global_shape)
+
+            prepared = placement.prepare_reduce_grad([grad], [info], mesh, None)
+            result = placement.reduce_prepared_grad(prepared).sharded_grads[0]
+
+            self.assertEqual(result, grad)
+
+    def test_owned_unshard_uses_one_broadcast_for_multi_param_bucket(self):
+        """Owned unshard fuses a multi-param bucket into one broadcast."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = Owned(0)
+            infos = [
+                _owned_param_info("a", torch.Size([2, 2]), placement),
+                _owned_param_info("b", torch.Size([3]), placement),
+            ]
+            tensors = [
+                torch.arange(4, dtype=torch.float32).view(2, 2),
+                torch.arange(3, dtype=torch.float32),
+            ]
+
+            prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, None)
+            with mock.patch.object(
+                dist, "broadcast", wraps=dist.broadcast
+            ) as broadcast:
+                placement.run_prepared_unshard(prepared)
+            result = placement.finish_prepared_unshard(prepared).full_params
+
+            self.assertEqual(broadcast.call_count, 1)
+            self.assertEqual(result[0], tensors[0])
+            self.assertEqual(result[1], tensors[1])
+
+    def test_owned_unshard_aliases_contiguous_owner_bucket(self):
+        """Owned unshard avoids pack copy when owner tensors are contiguous."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = Owned(0)
+            infos = [
+                _owned_param_info("a", torch.Size([2, 2]), placement),
+                _owned_param_info("b", torch.Size([3]), placement),
+            ]
+            flat_storage = torch.arange(7, dtype=torch.float32)
+            tensors = [
+                flat_storage.narrow(0, 0, 4).view(2, 2),
+                flat_storage.narrow(0, 4, 3),
+            ]
+
+            prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, None)
+
+            self.assertEqual(
+                prepared.buffers[0].untyped_storage().data_ptr(),
+                flat_storage.untyped_storage().data_ptr(),
+            )
+            self.assertEqual(prepared.buffers[0], flat_storage)
+
+    def test_owned_reduce_grad_uses_one_reduce_for_multi_param_bucket(self):
+        """Owned reduce-grad fuses a multi-param bucket into one reduce."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = Owned(0)
+            infos = [
+                _owned_param_info("a", torch.Size([2, 2]), placement),
+                _owned_param_info("b", torch.Size([3]), placement),
+            ]
+            grads = [
+                torch.ones(2, 2),
+                torch.arange(3, dtype=torch.float32),
+            ]
+
+            prepared = placement.prepare_reduce_grad(grads, infos, mesh, None)
+            with mock.patch.object(dist, "reduce", wraps=dist.reduce) as reduce:
+                result = placement.reduce_prepared_grad(prepared).sharded_grads
+
+            self.assertEqual(reduce.call_count, 1)
+            self.assertEqual(result[0], grads[0])
+            self.assertEqual(result[1], grads[1])
+
     def test_rejects_mixed_dtypes(self):
         """Parameters in one bucket must share the same storage dtype."""
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
@@ -418,6 +612,120 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
                 self.assertEqual(param, local_view)
                 self.assertTrue(is_flex_shard_param(param))
 
+    def test_owned_materialized_params_match_owner_rank(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+
+        class TinyModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.arange(6, dtype=torch.float32).view(3, 2)
+                )
+
+        def owned_rank0(named_params, mesh):
+            return {fqn: (Owned(0),) for fqn, _ in named_params}
+
+        model = TinyModule()
+        named_params = list(model.named_parameters())
+        placements = {fqn: (Owned(0),) for fqn, _ in named_params}
+        buckets = [
+            BucketSpec(
+                ["*"],
+                placement_fn=owned_rank0,
+                mesh=mesh,
+                reshard_after_forward=False,
+            )
+        ]
+
+        inputs = PreparedFlexShardInputs(
+            named_params=named_params,
+            device=torch.device("cpu"),
+            param_placements=placements,
+            bucket_assignments=[[fqn for fqn, _ in named_params]],
+        )
+        bucket_storages, _ = _materialize_bucket_storages(
+            model,
+            inputs,
+            buckets,
+        )
+
+        bucket_storage = bucket_storages[0]
+        param = dict(model.named_parameters())["weight"]
+        if self.rank == 0:
+            self.assertEqual(param.shape, torch.Size([3, 2]))
+            self.assertEqual(param, named_params[0][1].detach())
+            self.assertEqual(bucket_storage.total_bytes, 6 * torch.float32.itemsize)
+        else:
+            self.assertEqual(param.shape, torch.Size([0, 0]))
+            self.assertEqual(param.numel(), 0)
+            self.assertEqual(bucket_storage.total_bytes, 0)
+
+    def test_owned_unshard_broadcasts_from_owner(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+        placement = Owned(0)
+        info = ParamInfo(
+            fqn="weight",
+            global_shape=torch.Size([2, 2]),
+            global_stride=(2, 1),
+            dtype=torch.float32,
+            requires_grad=True,
+            placements=(placement,),
+            local_shape=placement.compute_local_shape(
+                torch.Size([2, 2]),
+                self.rank,
+                self.world_size,
+            ),
+            local_numel=placement.compute_local_numel(
+                torch.Size([2, 2]),
+                self.rank,
+                self.world_size,
+            ),
+            global_numel=4,
+        )
+        expected = torch.arange(4, dtype=torch.float32).view(2, 2)
+        local = expected.clone() if self.rank == 0 else torch.empty(0)
+
+        prepared = placement.prepare_unshard_bucket([local], [info], mesh, None)
+        placement.run_prepared_unshard(prepared)
+        result = placement.finish_prepared_unshard(prepared).full_params[0]
+
+        self.assertEqual(result, expected)
+
+    def test_owned_unshard_broadcasts_multi_param_bucket_from_owner(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+        placement = Owned(0)
+        infos = [
+            _owned_param_info(
+                "a",
+                torch.Size([2, 2]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+            _owned_param_info(
+                "b",
+                torch.Size([3]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+        ]
+        expected = [
+            torch.arange(4, dtype=torch.float32).view(2, 2),
+            torch.arange(3, dtype=torch.float32),
+        ]
+        local = [
+            tensor.clone() if self.rank == 0 else torch.empty(0)
+            for tensor in expected
+        ]
+
+        prepared = placement.prepare_unshard_bucket(local, infos, mesh, None)
+        placement.run_prepared_unshard(prepared)
+        result = placement.finish_prepared_unshard(prepared).full_params
+
+        self.assertEqual(result[0], expected[0])
+        self.assertEqual(result[1], expected[1])
+
 # ---------------------------------------------------------------------------
 # Distributed per-bucket ShardedBucketStorage tests (torchrun only)
 # ---------------------------------------------------------------------------
@@ -441,6 +749,41 @@ class TestDistributedBuckets(FSDPTest):
             (self.world_size,),
             mesh_dim_names=("fsdp",),
         )
+
+    @skip_if_lt_x_gpu(2)
+    def test_owned_reduce_grad_multi_param_bucket_to_owner(self):
+        mesh = self._init_mesh()
+        placement = Owned(0)
+        infos = [
+            _owned_param_info(
+                "a",
+                torch.Size([2, 2]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+            _owned_param_info(
+                "b",
+                torch.Size([3]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+        ]
+        grads = [
+            torch.full((2, 2), float(self.rank + 1), device=device_type),
+            torch.full((3,), float(10 + self.rank), device=device_type),
+        ]
+
+        prepared = placement.prepare_reduce_grad(grads, infos, mesh, None)
+        result = placement.reduce_prepared_grad(prepared).sharded_grads
+
+        if self.rank == 0:
+            self.assertEqual(result[0], torch.full((2, 2), 1.5, device=device_type))
+            self.assertEqual(result[1], torch.full((3,), 10.5, device=device_type))
+        else:
+            self.assertEqual(result[0].numel(), 0)
+            self.assertEqual(result[1].numel(), 0)
 
     def _flex_shard(self, model, mesh, **kwargs):
         from torchtitan.experiments.flex_shard import flex_shard
