@@ -19,6 +19,13 @@ DTensors, avoiding mixed plain-Tensor / DTensor errors in RoPE.
 
 MoE layers are already native Module instances with ShardingConfig and
 are handled by ``model.parallelize()`` directly.
+
+TODO: this DTensor-based sharding path is transitional. Core is migrating to
+``spmd_types`` (``spmd_backend="spmd_types"``), where state and activations are
+plain local shards rather than DTensor subclasses. Once that backend is ready,
+the DTensor-based sharding here should be deprecated in favor of it. The
+declarative ``ShardingConfig``/``SpmdLayout`` this module emits is already
+backend-agnostic, so the migration is a backend switch rather than a rewrite.
 """
 
 import inspect

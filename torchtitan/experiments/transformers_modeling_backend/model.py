@@ -692,6 +692,15 @@ class HFTransformerModel(BaseModel):
             # NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly
             # The default _initialize_weights sets _is_hf_initialized = True even on a meta device,
             # which prevents subsequent proper initialization.
+            #
+            # This mirrors HF's PreTrainedModel._initialize_weights and only adds
+            # the meta-device early-return below. The `is_remote_code` arg and the
+            # branch that follows are copied verbatim from HF: transformers 5.x
+            # calls this via smart_apply as `fn(module, self.is_remote_code())`,
+            # so the replacement must accept the arg and keep the remote-code
+            # guard (remote _init_weights may write params in place, so already
+            # initialized modules must be skipped). Source (transformers v5.9.0):
+            # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/modeling_utils.py#L2464
             if getattr(module, "_is_hf_initialized", False):
                 return
 

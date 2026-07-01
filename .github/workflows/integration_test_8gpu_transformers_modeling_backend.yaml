@@ -84,7 +84,7 @@ jobs:
         # MoE parallelism requires transformers >= 5.0.0 (grouped experts format).
         # Install here rather than in the shared Docker image to avoid affecting
         # other CI workflows (e.g. unit_test_cpu tokenizer tests).
-        python -m pip install transformers==5.3.0
+        python -m pip install transformers==5.9.0
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
