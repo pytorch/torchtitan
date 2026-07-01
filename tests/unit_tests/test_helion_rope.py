@@ -149,7 +149,6 @@ class TestHelionRoPEOverride(unittest.TestCase):
         self.assertIs(type(root.rope), _ContractSubclassRoPE.Config)
         self.assertEqual(root.rope.extra, 7)
 
-    @unittest.skipUnless(_HELION_INSTALLED, "requires helion")
     def test_cpu_falls_back_to_cossin(self):
         """On CPU the module falls back to CosSinRoPE, bit-for-bit identical."""
         torch.manual_seed(0)
@@ -167,7 +166,6 @@ class TestHelionRoPEOverride(unittest.TestCase):
         torch.testing.assert_close(out_q, ref_q, rtol=0, atol=0)
         torch.testing.assert_close(out_k, ref_k, rtol=0, atol=0)
 
-    @unittest.skipUnless(_HELION_INSTALLED, "requires helion")
     def test_cpu_falls_back_to_complex(self):
         """On CPU the module falls back to ComplexRoPE, bit-for-bit identical."""
         torch.manual_seed(0)
@@ -589,6 +587,21 @@ class TestHelionRoPEKernel(unittest.TestCase):
         torch.library.opcheck(
             _helion_complex_rope_fwd,
             (xq, xk, torch.view_as_real(self.helion_complex.cache), positions),
+        )
+
+    def test_complex_make_fx_traces_custom_op(self):
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        xq, xk, positions = self._inputs()
+
+        def fn(q, k, pos):
+            return self.helion_complex(q, k, pos)
+
+        gm = make_fx(fn)(xq, xk, positions)
+        targets = {node.target for node in gm.graph.nodes}
+        self.assertIn(
+            torch.ops.torchtitan.helion_complex_rope_fwd.default,
+            targets,
         )
 
 

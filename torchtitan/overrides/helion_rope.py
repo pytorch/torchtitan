@@ -42,6 +42,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.tensor import DTensor
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 from torchtitan.config import derive, override
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE, CosSinRoPE
 from torchtitan.tools.logging import logger, warn_once
@@ -908,7 +909,7 @@ if _HELION_IMPORT_ERROR is None:
 
         _maybe_check_max_pos(pos, max_valid_pos=cache.shape[0] - 1)
 
-        if torch.compiler.is_compiling():
+        if torch.compiler.is_compiling() or get_proxy_mode() is not None:
             xq_out, xk_out = _helion_complex_rope_fwd(xq, xk, cache_real, pos)
         else:
             xq_out, xk_out = _HelionComplexRoPEFunction.apply(xq, xk, cache_real, pos)

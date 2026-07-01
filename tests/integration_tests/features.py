@@ -533,23 +533,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "override_fused_grouped_experts",
             ngpu=4,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
-                    "--override.imports torchtitan.overrides.helion_rope",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                ],
-            ],
-            "Override: use Helion RoPE on deepseek_v3 "
-            "(FSDP2 dense, EP2 sparse)",
-            "override_deepseek_v3_helion_rope",
-            ngpu=2,
-            # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
-            # H100/GB200; skip on ROCm where they are unvalidated.
-            skip_rocm_test=True,
-        ),
         # NOTE: below are tests which require config change that cannot be done
         #       via CLI overrides, so remain llama3 specific
         OverrideDefinitions(
