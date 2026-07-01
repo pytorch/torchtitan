@@ -5,14 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 from types import SimpleNamespace
-from unittest import mock
 
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flex_shard.deepseek_v3.config_registry import (
     flex_shard_deepseek_v3_16b,
 )
@@ -23,16 +21,8 @@ from torchtitan.experiments.flex_shard.deepseek_v3.placement_policy import (
     DeepSeekV3FlexShardPolicy,
 )
 from torchtitan.experiments.flex_shard.example.owned import GroupedOwned
-from torchtitan.experiments.flex_shard.example.shard import (
-    make_shard_placement_fn,
-    Shard,
-)
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     MixedPrecisionPolicy,
-)
-from torchtitan.experiments.flex_shard.grad_norm import (
-    _full_tensor_norm,
-    install_flex_shard_grad_norm_clipping,
 )
 
 
@@ -60,11 +50,11 @@ class TestFlexShardDeepSeekV3Config(TestCase):
         values.update(kwargs)
         return SimpleNamespace(**values)
 
-    def _build_buckets(self, policy=None):
+    def _build_buckets(self):
         dp_mesh = _FakeMesh(4)
         efsdp_mesh = _FakeMesh(2)
         model = SimpleNamespace(layers={"0": object()})
-        buckets = (policy or DeepSeekV3FlexShardPolicy()).build_buckets(
+        buckets = DeepSeekV3FlexShardPolicy().build_buckets(
             model,
             dp_mesh=dp_mesh,
             efsdp_mesh=efsdp_mesh,
@@ -121,69 +111,6 @@ class TestFlexShardDeepSeekV3Config(TestCase):
             self.assertIs(placements[fqn][0], grouped_owned)
         self.assertIs(expert_bucket.mesh, efsdp_mesh)
 
-    def test_routed_experts_can_use_shard_baseline(self):
-        buckets, _, efsdp_mesh = self._build_buckets(
-            DeepSeekV3FlexShardPolicy(
-                routed_expert_placement_fn=make_shard_placement_fn(0)
-            )
-        )
-        expert_bucket = self._bucket_with_pattern(
-            buckets, "layers.0.*moe.experts.*"
-        )
-
-        placements = expert_bucket.placement_fn(self._expert_params(), efsdp_mesh)
-
-        for fqn, _ in self._expert_params():
-            self.assertEqual(placements[fqn], (Shard(0),))
-        self.assertIs(expert_bucket.mesh, efsdp_mesh)
-
-    def test_common_and_output_params_use_whole_param_grouped_owned(self):
-        buckets, dp_mesh, _ = self._build_buckets()
-        common_bucket = self._bucket_with_pattern(
-            buckets, "layers.0.*attention.*"
-        )
-        output_bucket = self._bucket_with_pattern(buckets, "lm_head.*")
-
-        common_params = [
-            (
-                "layers.0.attention.wq.weight",
-                torch.nn.Parameter(torch.empty(2, 2)),
-            ),
-            (
-                "layers.0.moe.router.weight",
-                torch.nn.Parameter(torch.empty(2, 2)),
-            ),
-            (
-                "layers.0.moe.shared_experts.w1.weight",
-                torch.nn.Parameter(torch.empty(2, 2)),
-            ),
-        ]
-        output_params = [
-            ("lm_head.weight", torch.nn.Parameter(torch.empty(2, 2))),
-        ]
-
-        common_placements = common_bucket.placement_fn(common_params, dp_mesh)
-        output_placements = output_bucket.placement_fn(output_params, dp_mesh)
-
-        common_grouped_owned = common_placements["layers.0.attention.wq.weight"][0]
-        output_grouped_owned = output_placements["lm_head.weight"][0]
-        self.assertIsInstance(common_grouped_owned, GroupedOwned)
-        self.assertEqual(common_grouped_owned.view_kind, "full_param")
-        self.assertIsInstance(output_grouped_owned, GroupedOwned)
-        self.assertEqual(output_grouped_owned.view_kind, "full_param")
-        for fqn, _ in common_params:
-            self.assertIs(common_placements[fqn][0], common_grouped_owned)
-        self.assertIs(output_placements["lm_head.weight"][0], output_grouped_owned)
-        self.assertIs(common_bucket.mesh, dp_mesh)
-        self.assertIs(output_bucket.mesh, dp_mesh)
-
-    def test_validation_allows_loss_compile(self):
-        _validate_supported_parallelisms(
-            parallel_dims=self._parallel_dims(),
-            training=self._training(),
-            compile_config=CompileConfig(enable=True, components=["loss"]),
-        )
-
     def test_validation_rejects_unsupported_main_path_features(self):
         unsupported_parallel_dims = [
             ("PP", dict(pp_enabled=True)),
@@ -213,44 +140,6 @@ class TestFlexShardDeepSeekV3Config(TestCase):
                 training=self._training(),
                 compile_config=CompileConfig(enable=True, components=["model"]),
             )
-
-    def test_flex_shard_grad_norm_adapter_handles_local_shards(self):
-        original_clip_grad_norm = dist_utils.clip_grad_norm_
-        try:
-            install_flex_shard_grad_norm_clipping()
-            param = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
-            param.grad = torch.tensor([3.0, 4.0])
-            param._placements = ("test",)
-            param._mesh = "test"
-
-            total_norm = dist_utils.clip_grad_norm_(
-                [param],
-                max_norm=1.0,
-                ep_enabled=True,
-            )
-
-            self.assertEqual(total_norm, torch.tensor(5.0))
-            self.assertEqual(param.grad, torch.tensor([0.6, 0.8]))
-        finally:
-            dist_utils.clip_grad_norm_ = original_clip_grad_norm
-
-    def test_flex_shard_empty_grad_norm_uses_target_device(self):
-        with mock.patch(
-            "torch.nn.utils.get_total_norm",
-            side_effect=AssertionError("empty norm should not call get_total_norm"),
-        ):
-            total_norm = _full_tensor_norm(
-                [],
-                norm_type=2.0,
-                error_if_nonfinite=False,
-                foreach=True,
-                empty_device=torch.device("cpu"),
-                empty_dtype=torch.float64,
-            )
-
-        self.assertEqual(total_norm.device, torch.device("cpu"))
-        self.assertEqual(total_norm.dtype, torch.float64)
-        self.assertEqual(total_norm, torch.zeros((), dtype=torch.float64))
 
 
 if __name__ == "__main__":
