@@ -6,7 +6,7 @@
 
 import logging
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 import torch
@@ -33,6 +33,11 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.utils import set_batch_invariance
+from torchtitan.experiments.graph_trainer.chunked_loss import (
+    ChunkedLossWrapperWithParamGrads,
+)
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.rl.actors.traced_step import RLTracedStep
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
@@ -110,8 +115,29 @@ class PolicyTrainer(Actor, Configurable):
 
         self.config = config
         self.compile_config = compile_config
-        self.loss_fn = config.loss.build()
-        # TODO: add support to compile the loss.
+        # aot_fx_trace mode captures fwd+loss+bwd as one FX graph and requires a
+        # SimpleFSDP-parallelized model. It is opted into by passing a
+        # GraphTrainerCompileConfig with mode="aot_fx_trace"; a plain
+        # CompileConfig (e.g. the generator's shared config) keeps the eager path.
+        self._use_aot_fx_trace = (
+            isinstance(compile_config, GraphTrainerCompileConfig)
+            and compile_config.enable
+            and compile_config.mode == "aot_fx_trace"
+        )
+        loss_cfg = config.loss
+        if (
+            self._use_aot_fx_trace
+            and isinstance(loss_cfg, ChunkedLossWrapper.Config)
+            and not isinstance(loss_cfg, ChunkedLossWrapperWithParamGrads.Config)
+        ):
+            # The base ChunkedLossWrapper populates lm_head grads via param.grad
+            # side effects inside its chunk loop; those writes do not survive
+            # graph capture (replay would yield zero lm_head grads). The
+            # ParamGrads variant emits them as explicit autograd outputs.
+            loss_cfg = ChunkedLossWrapperWithParamGrads.Config(
+                **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
+            )
+        self.loss_fn = loss_cfg.build()
 
         # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -148,6 +174,17 @@ class PolicyTrainer(Actor, Configurable):
             distinct_seed_mesh_dims=["pp"],
         )
 
+        # aot_fx_trace needs a traceable (SimpleFSDP) model. Rewrite THIS
+        # trainer's spec to the SimpleFSDP path; the generator, in a separate
+        # process, keeps its eager spec. Done before the sd_adapter is built so
+        # the adapter sees the same (wrapped) model config as the eager path.
+        if self._use_aot_fx_trace:
+            from torchtitan.experiments.rl.models.simple_fsdp_parallelize import (
+                to_simple_fsdp_spec,
+            )
+
+            model_spec = to_simple_fsdp_spec(model_spec)
+
         # Initialize state dict adapter for HF checkpoint loading
         if model_spec.state_dict_adapter is not None:
             self.sd_adapter = model_spec.state_dict_adapter(
@@ -167,6 +204,21 @@ class PolicyTrainer(Actor, Configurable):
             assert lm_head is not None, "Model must have lm_head for ChunkedLossWrapper"
             self.loss_fn.set_lm_head(lm_head)
             model._skip_lm_head = True
+
+        # Build the traced fwd+loss+bwd runner for the aot_fx_trace path. It
+        # lazily traces (or loads a precompiled artifact) on the first
+        # forward_backward call and reuses the graph thereafter.
+        self._traced_step: RLTracedStep | None = None
+        if self._use_aot_fx_trace:
+            self._traced_step = RLTracedStep(
+                compile_config=compile_config,
+                parallel_dims=self.parallel_dims,
+                parallelism=config.parallelism,
+                model_config=model_spec.model,
+                loss_config=config.loss,
+                train_context=self.train_context,
+                dump_folder=config.dump_folder,
+            )
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
@@ -393,24 +445,41 @@ class PolicyTrainer(Actor, Configurable):
 
         attention_masks = model.get_attention_masks(positions)
 
-        with self.train_context():
-            with sl.log_trace_span("model_forward"):
-                pred = model(
-                    token_ids, attention_masks=attention_masks, positions=positions
-                )
-
-            with sl.log_trace_span("loss_fn"):
-                loss, loss_metrics = self.loss_fn(
-                    pred,
-                    labels,
-                    num_global_valid_tokens,
+        if self._use_aot_fx_trace:
+            assert self._traced_step is not None
+            with sl.log_trace_span("traced_forward_backward"):
+                loss, loss_metrics = self._traced_step.run(
+                    model,
+                    self.loss_fn,
+                    token_ids=token_ids,
+                    labels=labels,
+                    positions=positions,
+                    attention_masks=attention_masks,
                     generator_logprobs=generator_logprobs,
                     advantages=advantages,
                     loss_mask=loss_mask,
+                    global_valid_tokens=num_global_valid_tokens,
+                    device=device,
                 )
+        else:
+            with self.train_context():
+                with sl.log_trace_span("model_forward"):
+                    pred = model(
+                        token_ids, attention_masks=attention_masks, positions=positions
+                    )
 
-            with sl.log_trace_span("model_backward"):
-                loss.backward()
+                with sl.log_trace_span("loss_fn"):
+                    loss, loss_metrics = self.loss_fn(
+                        pred,
+                        labels,
+                        num_global_valid_tokens,
+                        generator_logprobs=generator_logprobs,
+                        advantages=advantages,
+                        loss_mask=loss_mask,
+                    )
+
+                with sl.log_trace_span("model_backward"):
+                    loss.backward()
 
         sum_reduced_metrics = {
             key: value

@@ -105,6 +105,7 @@ from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.components.batcher import Batcher
@@ -227,7 +228,17 @@ class Controller(Configurable):
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
         compile: CompileConfig = field(default_factory=CompileConfig)
-        """torch.compile config shared by trainer and generator."""
+        """torch.compile config for the generator (vLLM). The trainer has its own
+        `trainer_compile` so its aot_fx_trace mode never reaches the generator."""
+
+        trainer_compile: GraphTrainerCompileConfig = field(
+            default_factory=GraphTrainerCompileConfig
+        )
+        """Trainer-only graph compile config for the aot_fx_trace / precompile
+        path. Defaults to disabled (`enable=False`), keeping the eager FSDP2
+        trainer. Set `enable=True` (and use a SimpleFSDP model spec) to capture
+        fwd+loss+bwd as one FX graph. Kept separate from `compile` because the
+        generator must never receive aot_fx_trace."""
 
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
@@ -544,7 +555,7 @@ class Controller(Configurable):
                 model_spec=config.model_spec,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
-                compile_config=config.compile,
+                compile_config=config.trainer_compile,
                 output_dir=config.dump_folder,
             )
 
