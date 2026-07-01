@@ -11,8 +11,6 @@ from dataclasses import dataclass, field, fields, MISSING
 
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor, Shard
-from torch.distributed.tensor.experimental import local_map
 from torch.nn import init
 from torch.nn.attention.flex_attention import and_masks
 from transformers import AutoConfig
@@ -29,49 +27,60 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import ModuleDict
+from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.tools.logging import logger
 
 
-def _flex_attention_torchtitan(module, query, key, value, attention_mask, **kwargs):
-    """Flex attention for the HF backend, ``local_map``-ed for tensor parallelism.
+class HFFlexKernel(Module):
+    """Flex-attention kernel wrapped as a titan Module for declarative TP.
 
-    Under TP, q/k/v reach the attention function as ``(b, heads, seq, dim)``
-    DTensors with heads sharded (``Shard(1)``). HF's flex path runs the flex HOP
-    directly on those DTensors, but the document ``mask_mod`` closes over a plain
-    ``positions`` tensor, so the kernel mixes plain + DTensor and fails. Instead
-    we ``local_map`` the kernel: q/k/v -> local, run flex (the ``mask_mod`` now
-    sees local tensors), then wrap the output back heads-sharded. The BlockMask
-    rides as a closure (not a ``local_map`` arg, so its container/None args don't
-    need placements); under TP the sequence isn't sharded, so the full replicated
-    mask matches the full-seq local q/k/v.
+    Runs the flex HOP over q/k/v. Under TP the Module protocol wraps this
+    forward with ``local_map`` (driven by the ``ShardingConfig`` set in
+    hf_sharding.py): q/k/v arrive head-sharded as DTensors, are converted to
+    local tensors so the document ``mask_mod`` -- which closes over a plain
+    ``positions`` tensor -- sees plain tensors, and the output is wrapped back
+    head-sharded. Expressing the sharding declaratively
+    (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with native
+    attention and lets it ride the ``spmd_types`` backend switch, instead of a
+    hand-rolled ``local_map`` call.
 
-    Without TP (q/k/v are plain tensors, e.g. FSDP-only), runs flex directly.
-    CP is not handled here yet (see the guard in ``parallelize_hf_transformers``).
+    The HF attention module and the BlockMask ride as passthrough keyword args
+    (non-tensors, so ``local_map`` leaves them untouched). CP is not handled
+    here (guarded in ``parallelize_hf_transformers``).
     """
-    if not isinstance(query, DTensor):
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: "HFFlexKernel.Config") -> None:
+        super().__init__()
+
+    def forward(self, query, key, value, *, module, block_mask=None, **kwargs):
+        # flex_attention_forward returns (output, lse); output is already
+        # transposed to (b, seq, heads, dim). Return the single tensor so the
+        # local_map out_placements is a 1-tuple.
+        out, _ = flex_attention_forward(module, query, key, value, block_mask, **kwargs)
+        return out
+
+
+def _flex_attention_torchtitan(module, query, key, value, attention_mask, **kwargs):
+    """HF ``AttentionInterface`` shim for flex attention.
+
+    Delegates to the per-attention-module ``HFFlexKernel`` when present (attached
+    under TP/EP in hf_sharding.py) so the Module protocol applies the declarative
+    ``local_map``. When no kernel is attached (e.g. FSDP-only, where the sharding
+    pass does not run), q/k/v are plain tensors and flex runs directly -- no
+    mapping needed. CP is not handled here (see the guard in
+    ``parallelize_hf_transformers``).
+    """
+    kernel = getattr(module, "_titan_flex_kernel", None)
+    if kernel is None:
         return flex_attention_forward(
             module, query, key, value, attention_mask, **kwargs
         )
-
-    block_mask = attention_mask
-
-    def _kernel(q, k, v):
-        # flex_attention_forward returns (output, attn_weights); output is
-        # transposed to (b, seq, heads, dim) inside it.
-        out, _ = flex_attention_forward(module, q, k, v, block_mask, **kwargs)
-        return out
-
-    heads_in = (Shard(1),)  # q/k/v: (b, heads, seq, dim) -> heads on dim 1
-    heads_out = (Shard(2),)  # output: (b, seq, heads, dim) -> heads on dim 2
-    mapped = local_map(
-        _kernel,
-        out_placements=(heads_out,),
-        in_placements=(heads_in, heads_in, heads_in),
-        in_grad_placements=(heads_in, heads_in, heads_in),
-        device_mesh=query.device_mesh,
-    )
-    return mapped(query, key, value), None
+    out = kernel(query, key, value, module=module, block_mask=attention_mask, **kwargs)
+    return out, None
 
 
 class SliceableModuleDict(ModuleDict):

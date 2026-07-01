@@ -33,6 +33,7 @@ import inspect
 import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -40,8 +41,16 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     rowwise_config,
 )
-from torchtitan.protocols.sharding import ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import (
+    LocalMapConfig,
+    ShardingConfig,
+    SpmdLayout,
+)
 from torchtitan.tools.logging import logger
+
+DP = MeshAxisName.DP
+CP = MeshAxisName.CP
+TP = MeshAxisName.TP
 
 
 def _sp_activation(*, enable_sp: bool) -> SpmdLayout:
@@ -118,8 +127,11 @@ def set_hf_sharding_configs(
         rope._sharding_config = _rope_config(rope, enable_sp=enable_sp)
 
     # Per-layer modules
+    use_flex = getattr(model.model.config, "use_flex_attn", False)
     for transformer_block in model.layers:
-        _set_layer_sharding_configs(transformer_block, enable_sp=enable_sp)
+        _set_layer_sharding_configs(
+            transformer_block, enable_sp=enable_sp, use_flex=use_flex
+        )
 
     # Completeness backstop: every parameter/buffer-bearing module this function
     # is responsible for must have a sharding config, or it silently mixes a
@@ -141,11 +153,47 @@ def set_hf_sharding_configs(
     logger.info("Set sharding configs on all HF modules")
 
 
-def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
+def _attach_flex_kernel(attn: nn.Module) -> None:
+    """Attach the flex-attention kernel Module carrying the attention local_map.
+
+    q/k/v reach the HF attention function as ``(b, heads, seq, dim)`` DTensors
+    with heads TP-sharded on tensor dim 1; the flex output is
+    ``(b, seq, heads, dim)`` with heads on dim 2. Declare those as the local_map
+    input/output placements so the Module protocol maps q/k/v to local tensors
+    around the flex HOP (see ``HFFlexKernel``). CP is Replicate here -- flex+CP
+    is guarded in ``parallelize_hf_transformers``, and ``spmd.R`` avoids a
+    same-tensor-dim collision with the TP shard on dim 1.
+    """
+    from torchtitan.experiments.transformers_modeling_backend.model import (
+        HFFlexKernel,
+    )
+
+    heads_in = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.S(1)})
+    heads_out = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.S(2)})
+    attn._titan_flex_kernel = HFFlexKernel.Config(
+        sharding_config=ShardingConfig(
+            in_dst_shardings={
+                "query": heads_in,
+                "key": heads_in,
+                "value": heads_in,
+            },
+            out_src_shardings=heads_out,
+            local_map=LocalMapConfig(
+                in_grad_placements=(heads_in, heads_in, heads_in),
+            ),
+        )
+    ).build()
+
+
+def _set_layer_sharding_configs(
+    layer: nn.Module, *, enable_sp: bool, use_flex: bool
+) -> None:
     """Set ``_sharding_config`` on each sub-module of a decoder layer.
 
     Covers norms, attention projections, and (for non-MoE layers) dense MLP.
-    MoE layers have their own ShardingConfig from the native MoE swap.
+    MoE layers have their own ShardingConfig from the native MoE swap. When
+    ``use_flex`` is set, also attaches the flex-attention kernel Module that
+    carries the attention local_map (see ``_attach_flex_kernel``).
     """
     # --- Norms ---
     if hasattr(layer, "input_layernorm"):
@@ -175,6 +223,12 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
             "hidden_states": dense_activation_placement(tp=spmd.R),
         },
     )
+
+    # Flex attention: attach the kernel Module that carries the attention
+    # local_map so q/k/v are computed on local (head-sharded) tensors. Only
+    # needed under flex (the SDPA path runs directly on DTensors).
+    if use_flex:
+        _attach_flex_kernel(attn)
 
     # Query projection. Detected independently of the KV path: a model may
     # use low-rank Q (q_a_proj/q_b_proj, e.g. DeepSeek-V3, GLM-4.7) or
