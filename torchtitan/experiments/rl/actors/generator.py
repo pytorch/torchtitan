@@ -262,18 +262,14 @@ class VLLMGenerator(Actor, Configurable):
         backend: Literal["torchtitan_wrapper", "vllm_native"] = "torchtitan_wrapper"
         """Which model the vLLM engine runs.
 
-        ``torchtitan_wrapper`` (default) wraps the torchtitan model via the
-        shared ``TorchTitanCausalLM`` adapter (one path for every titan model).
-        ``vllm_native`` lets vLLM resolve its own model class from the HF
-        checkpoint's ``architectures`` field; use it for models whose decode
-        needs kernels the wrapper lacks (e.g. Qwen3.5 GatedDeltaNet). Weight
-        sync for the native path is handled in ``_pull_model_state_dict``."""
+        ``torchtitan_wrapper`` (default) wraps the torchtitan model. Use
+        ``vllm_native`` for models whose decode needs kernels the wrapper lacks
+        (e.g. Qwen3.5 GatedDeltaNet); vLLM resolves its own model class from the
+        checkpoint's ``architectures``."""
 
         vllm_additional_config: dict[str, Any] = field(default_factory=dict)
         """Extra vLLM ``additional_config`` forwarded to ``EngineArgs`` on the
-        ``vllm_native`` path. E.g. ``{"gdn_prefill_backend": "triton"}`` forces
-        the triton GatedDeltaNet prefill kernel when flashinfer's JIT-compiled
-        kernel is unavailable in the local CUDA toolkit."""
+        ``vllm_native`` path, e.g. ``{"gdn_prefill_backend": "triton"}``."""
 
         parallelism: InferenceParallelismConfig = field(
             default_factory=InferenceParallelismConfig
@@ -380,9 +376,8 @@ class VLLMGenerator(Actor, Configurable):
         native = config.backend == "vllm_native"
 
         if native:
-            # vLLM resolves its own model class from the checkpoint's
-            # ``architectures`` (no TorchTitanCausalLM registration); weights
-            # are synced in ``_pull_model_state_dict``.
+            # No TorchTitanCausalLM registration; weights are synced in
+            # ``_pull_model_state_dict`` via the state_dict_adapter.
             if model_spec.state_dict_adapter is None:
                 raise ValueError(
                     "generator.backend='vllm_native' needs the model to define a "
@@ -401,9 +396,7 @@ class VLLMGenerator(Actor, Configurable):
                 checkpoint_config=config.checkpoint,
             )
 
-            # Hybrid models (e.g. Qwen3.5) only carry an attention config on
-            # their full-attention layers, so validate via `first_attention`
-            # not layers[0].
+            # `first_attention` handles hybrid models (linear + full attention).
             attn_config = model_spec.model.first_attention
             if attn_config is None:
                 raise ValueError(
@@ -433,10 +426,8 @@ class VLLMGenerator(Actor, Configurable):
         # Build vLLM engine
         enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
-            # ``model`` is the path to the HF checkpoint directory. vLLM uses it
-            # to locate the tokenizer assets and the safetensors weight shards;
-            # on the wrapper path the config is sourced from torchtitan's
-            # ModelSpec (``config_format`` below) instead of from config.json.
+            # ``model`` is the path to the HF checkpoint directory; vLLM uses it
+            # to locate the tokenizer assets and the safetensors weight shards.
             model=model_path,
             trust_remote_code=True,
             dtype=config.model_dtype,
@@ -456,12 +447,8 @@ class VLLMGenerator(Actor, Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
-        # vLLM's custom (CUDA-IPC) all-reduce fails with "invalid argument" under
-        # Monarch's external_launcher: the TP workers are spawned by Monarch's
-        # proc mesh, so the IPC peer-handle exchange across them does not set up.
-        # Disable it at TP>1 and fall back to the pynccl all-reduce
-        # (correctness-neutral, slightly slower). No-op at TP=1 (custom all-reduce
-        # is only constructed at world_size>1).
+        # vLLM's custom CUDA-IPC all-reduce fails under Monarch's
+        # external_launcher; fall back to pynccl (correctness-neutral) at TP>1.
         if config.parallelism.tensor_parallel_degree > 1:
             engine_kwargs["disable_custom_all_reduce"] = True
         if native:
@@ -889,11 +876,9 @@ class VLLMGenerator(Actor, Configurable):
         prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
         """
         if self._backend == "vllm_native":
-            # The native vLLM model is not a torchtitan model, so we can't read
-            # weights in place by FQN. Pull the trainer's full torchtitan state
-            # dict (CPU-staged; no user_state_dict template needed), convert it
-            # to HF layout via the model's state_dict_adapter, and let the vLLM
-            # model's load_weights copy + TP-shard them into its parameters.
+            # Native model isn't a torchtitan model, so we can't read weights in
+            # place by FQN: pull the full state dict (no template) and let the
+            # vLLM model's load_weights copy + TP-shard the HF tensors.
             tt_state_dict = await ts.get_state_dict(
                 "model_state_dict",
                 direct_rdma=False,

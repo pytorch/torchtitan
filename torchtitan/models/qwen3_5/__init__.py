@@ -75,7 +75,7 @@ _LINEAR_INIT = {
 _OFFSET_NORM_INIT = {"weight": nn.init.zeros_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 # Tied configs share tok_embeddings.weight with lm_head; skip its init so the
-# shared param is initialized once (by lm_head), matching the llama3 convention.
+# shared param is initialized once, by lm_head (llama3 convention).
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
 _POS_EMBED_INIT = {"pos_embed": partial(nn.init.trunc_normal_, mean=0.0, std=0.02)}
 

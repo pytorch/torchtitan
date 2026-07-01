@@ -62,9 +62,8 @@ _original_node_ref = _codegen._node_ref
 
 # TODO: Followup with core vLLM fix
 # https://github.com/pytorch/torchtitan/issues/3067
-# Accept and forward *args/**kwargs: vLLM's _node_ref signature has grown extra
-# params (e.g. consts, const_index) and may change again; only the first arg is
-# inspected here, the rest is delegated verbatim to the original.
+# Forward *args/**kwargs: vLLM's _node_ref signature has grown extra params
+# (e.g. consts, const_index); only the first arg is inspected here.
 def _patched_node_ref(arg, *args, **kwargs):
     try:
         from torch.distributed.tensor.placement_types import Partial, Placement
@@ -127,18 +126,11 @@ class VLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # Replace inner_attention with VLLMAttentionWrapper in config.
-        # Hybrid models (e.g. Qwen3.5) only carry an attention config on their
-        # full-attention layers, so derive head dims from the first such layer.
+        # Replace inner_attention with VLLMAttentionWrapper in config. Hybrid
+        # models carry attention only on full-attention layers; first_attention
+        # derives head dims from the first such layer.
         model_config = model_spec.model
-        attn_config = next(
-            (
-                a
-                for layer in model_config.layers
-                if (a := getattr(layer, "attention", None)) is not None
-            ),
-            None,
-        )
+        attn_config = model_config.first_attention
         if attn_config is None:
             raise ValueError("Model has no full-attention layer for the vLLM wrapper.")
         n_heads = attn_config.n_heads
@@ -150,8 +142,7 @@ class VLLMModelWrapper(Module):
         )
         new_layers = []
         for layer_cfg in model_config.layers:
-            # Linear-attention layers (e.g. Qwen3.5 GatedDeltaNet) have no
-            # inner_attention to swap; pass them through unchanged.
+            # Linear-attention layers have no inner_attention to swap.
             if getattr(layer_cfg, "attention", None) is None:
                 new_layers.append(layer_cfg)
                 continue

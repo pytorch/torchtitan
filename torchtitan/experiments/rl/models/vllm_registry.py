@@ -112,20 +112,13 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     cfg = spec.model
     if not cfg.layers:
         raise ValueError(f"ModelSpec {spec.name!r} has no layers")
-    # Some models mix dense and MoE layers (e.g. deepseek_v3 has dense
-    # first layers, MoE later) or mix linear and full attention (e.g. Qwen3.5);
-    # scan the layer list for a representative of each component rather than
-    # relying on layer 0.
-    attn = next(
-        (
-            a
-            for layer in cfg.layers
-            if (a := getattr(layer, "attention", None)) is not None
-        ),
-        None,
-    )
+    # first_attention picks the first full-attention layer; hybrid models
+    # (e.g. Qwen3.5) carry no attention config on linear-attention layers.
+    attn = cfg.first_attention
     if attn is None:
         raise ValueError(f"ModelSpec {spec.name!r} has no full-attention layer")
+    # ffn/moe scan per-layer too: some models mix dense and MoE layers
+    # (e.g. deepseek_v3 has dense first layers, MoE later).
     ffn = next(
         (
             ff

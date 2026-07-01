@@ -117,9 +117,8 @@ def verify_logprob_identity(
     diff = policy_flat - ref_flat
     return PartialLogprobDrift(
         logprob_diff_mean=diff.sum() / denom,
-        # abs_mean is the typical per-token drift magnitude (the signed mean
-        # cancels and hides it); pre-normalized by the global token count so a
-        # SUM-reduce across loss-mesh ranks reconstructs the global abs mean.
+        # Typical per-token drift magnitude (the signed mean cancels and hides
+        # it); pre-normalized so a SUM-reduce across ranks gives the global mean.
         logprob_diff_abs_mean=diff.abs().sum() / denom,
         logprob_diff_max=diff.abs().max(),
         ratio_tokens_different=(diff.abs() > 1e-6).sum() / denom,
@@ -325,10 +324,7 @@ class PolicyTrainer(Actor, Configurable):
 
         from torchtitan.models.common.attention import VarlenAttention
 
-        # Hybrid models (e.g. Qwen3.5: GatedDeltaNet linear-attention layers with a
-        # full-attention layer every N) don't carry an attention config on every
-        # layer, so validate the first full-attention layer via `first_attention`
-        # rather than assuming layers[0].
+        # `first_attention` handles hybrid models (linear + full attention).
         attn_config = model_spec.model.first_attention
         if attn_config is None:
             raise ValueError(

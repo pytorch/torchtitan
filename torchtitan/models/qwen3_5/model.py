@@ -541,9 +541,8 @@ class Qwen35Model(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        # Qwen3.5's final norm is OffsetRMSNorm, not the base Decoder's
-        # RMSNorm; narrow the inherited annotation so the field type matches
-        # its actual default (required for tyro CLI parsing of the config).
+        # Narrow the inherited RMSNorm annotation to OffsetRMSNorm so tyro CLI
+        # parsing sees the field's actual type.
         # pyrefly: ignore [bad-override]
         norm: OffsetRMSNorm.Config
         vision_encoder: Qwen35VisionEncoder.Config

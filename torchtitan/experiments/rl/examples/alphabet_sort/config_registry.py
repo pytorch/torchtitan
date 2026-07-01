@@ -75,9 +75,8 @@ def _qwen3_5_rl_model_registry(
 ) -> ModelSpec:
     """``qwen3_5.model_registry`` for RL, with the lm_head fp32 cast always on.
 
-    Qwen3.5 is a hybrid model (GatedDeltaNet linear-attention layers + a
-    full-attention layer every ``full_attention_interval``); ``attn_backend``
-    only selects the inner attention for the full-attention layers.
+    ``attn_backend`` selects inner attention only for the full-attention layers
+    (Qwen3.5's other layers are GatedDeltaNet linear attention).
     """
     converters = list(converters or [])
     converters.append(LMHeadCastConverter.Config())
@@ -225,20 +224,12 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
 def rl_grpo_qwen3_5_4b_varlen() -> RLTrainer.Config:
     """GRPO training config for Qwen3.5-4B (hybrid GatedDeltaNet + full attention).
 
-    Qwen3.5 layers are mostly GatedDeltaNet (linear attention); ``attn_backend``
-    only affects the full-attention layers (every ``full_attention_interval``).
-    The renderer uses Qwen3.5's dedicated chat template (name ``qwen3_5``).
-
-    The generator runs vLLM's native Qwen3.5 model (``backend="vllm_native"``):
-    its GatedDeltaNet kernels keep a recurrent-state cache across decode steps,
-    which the shared TorchTitanCausalLM wrapper has no equivalent for. The
-    trainer still trains the torchtitan model; each weight sync converts the
-    torchtitan state dict to HF and calls the vLLM model's load_weights.
-
-    The native generator and the trainer use different GatedDeltaNet kernels, so
-    logprobs are not bitwise aligned -- GRPO's importance ratio corrects the
-    drift. compile, generator cudagraph, and generator TP>1 are disabled here
-    pending follow-ups (see the inline notes).
+    The generator runs vLLM's native Qwen3.5 model (``backend="vllm_native"``)
+    for its GatedDeltaNet decode kernels; the trainer trains the torchtitan
+    model and weight-syncs via the state_dict_adapter. The two use different
+    GatedDeltaNet kernels, so logprobs are not bitwise aligned -- GRPO's
+    importance ratio corrects the drift. compile/cudagraph/TP>1 are off pending
+    follow-ups (see inline notes).
     """
     group_size = 8
     return RLTrainer.Config(
@@ -290,10 +281,8 @@ def rl_grpo_qwen3_5_4b_varlen() -> RLTrainer.Config:
             # validated for the GDN path.
             cudagraph=VLLMCudagraphConfig(enable=False),
             model_dtype="bfloat16",
-            # Generator TP>1 works: the actor sets disable_custom_all_reduce
-            # because vLLM's custom CUDA-IPC all-reduce fails under Monarch's
-            # external_launcher (it falls back to pynccl). Kept at 1 here -- a 4B
-            # model fits one GPU for inference, so TP=1 avoids the all-reduce.
+            # TP=1: a 4B model fits one GPU for inference. (TP>1 also works; the
+            # actor disables vLLM's custom all-reduce under Monarch.)
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=1,
