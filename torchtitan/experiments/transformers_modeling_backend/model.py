@@ -99,8 +99,10 @@ def _flex_torchtitan_attention_forward(
     out_BLNH = flex_module(
         q_BLNH, k_BLNH, v_BLNH, attention_masks=block_mask, scale=scaling
     )
-    # Native layout (B, L, N, H) -> HF layout (B, N, L, H)
-    return out_BLNH.transpose(1, 2), None
+    # HF attention interface expects output as (B, L, N, H) (batch, seq, heads,
+    # head_dim) -- same layout sdpa_attention_forward returns. out_BLNH is
+    # already in that layout, so return it directly (no transpose).
+    return out_BLNH, None
 
 
 class SliceableModuleDict(ModuleDict):
