@@ -122,6 +122,15 @@ def convnext_xxlarge() -> PathTrainer.Config:
     return _path("convnext_xxlarge")
 
 
+def _dp_degrees() -> tuple[int, int]:
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
+    num_nodes = int(
+        os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size))
+    )
+    return num_nodes, local_world_size
+
+
 def _path(flavor: str) -> PathTrainer.Config:
     steps = 1024 * 100
     validation_freq = 1024
@@ -138,11 +147,7 @@ def _path(flavor: str) -> PathTrainer.Config:
     }
     reports["analyse_dataset"] = [validation_freq]
     mixed_precision_param = "bfloat16"
-    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
-    world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
-    num_nodes = int(
-        os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size))
-    )
+    num_nodes, local_world_size = _dp_degrees()
     reporterv2_host = os.getenv("REPORTERV2_HOST")
     reporterv2_training_id = os.getenv("REPORTERV2_TRAINING_ID")
     checkpoint_base_folder = (
@@ -584,24 +589,19 @@ def _vit_optimizer_config(
     # at once; muP scales the hidden matmuls down by lr_mult = 1/m (m = width ratio).
     m = VIT_WIDTHS[flavor] / BASE_WIDTH
     common = {"betas": (0.9, 0.95), "eps": 1e-8, "weight_decay": wd}
-    groups = [
-        ParamGroupConfig(
-            pattern=r".*",
-            optimizer_name="AdamW",
-            optimizer_kwargs={**common},
-        )
-    ]
-    if mup:
-        # first-match-wins: scale hidden matmuls by lr_mult = 1/m before the catch-all
-        groups.insert(
-            0,
-            ParamGroupConfig(
-                pattern=MUP_PATTERN,
-                optimizer_name="AdamW",
-                lr_mult=1.0 / m,
-                optimizer_kwargs={**common, "weight_decay": wd * m},
-            ),
-        )
+    catch_all = ParamGroupConfig(
+        pattern=r".*",
+        optimizer_name="AdamW",
+        optimizer_kwargs=common,
+    )
+    # first-match-wins: scale hidden matmuls by lr_mult = 1/m before the catch-all
+    mup_group = ParamGroupConfig(
+        pattern=MUP_PATTERN,
+        optimizer_name="AdamW",
+        lr_mult=1.0 / m,
+        optimizer_kwargs={**common, "weight_decay": wd * m},
+    )
+    groups = [mup_group, catch_all] if mup else [catch_all]
     return OptimizersContainer.Config(
         implementation="fused_opt_states_bf16", lr=lr, param_groups=groups
     )
@@ -610,11 +610,7 @@ def _vit_optimizer_config(
 def _vit(
     flavor: str, *, mup: bool, lr: float = 3e-4, wd: float = 0.0125
 ) -> PathTrainer.Config:
-    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
-    world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
-    num_nodes = int(
-        os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size))
-    )
+    num_nodes, local_world_size = _dp_degrees()
     return PathTrainer.Config(
         loss=PlanViTLoss.Config(),
         model_spec=vit_model_registry(flavor, mup=mup),
