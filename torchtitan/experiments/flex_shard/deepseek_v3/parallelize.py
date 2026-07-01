@@ -4,6 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""FlexShard + communication-efficient Muon parallelizer for DeepSeek V3.
+
+A training test bed: shards DeepSeek V3 with FlexShard so the dense 2D weights run
+communication-efficient Muon (each transformer layer is one ``Owned`` bucket, owner
+balanced by Newton-Schulz FLOPs), while MoE expert stacks stay ``Shard``-ed (and
+run GroupedMuon / GatherGroupedMuon). The model-agnostic bucketing/parallelizer logic lives in
+``..example.bucketing``; this module just binds it to DeepSeek V3 (EP-capable).
+"""
+
+from __future__ import annotations
+
 from collections.abc import Callable
 
 import torch
@@ -23,6 +34,13 @@ from torchtitan.experiments.flex_shard import BucketSpec, flex_shard
 from torchtitan.experiments.flex_shard.example.shard import Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     MixedPrecisionPolicy,
+)
+
+from torchtitan.experiments.flex_shard.muon.bucketing import (
+    build_gather_muon_buckets,
+    build_muon_buckets,
+    make_gather_muon_parallelize_fn as _make_gather_muon_parallelize_fn,
+    make_muon_parallelize_fn,
 )
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.tools.logging import logger
@@ -214,3 +232,28 @@ def _apply_flex_shard(
     )
 
     flex_shard(model, buckets=buckets)
+
+
+# Comm-efficient Owned Muon (EP-capable: dense weights run Owned/Muon on the dp mesh,
+# MoE expert stacks Shard on the expert mesh).
+# Whole-layer allocation -- one Owned bucket per layer. dsv3-16B is 27 layers, run
+# single-node (world_size <= num_layers), so every rank owns whole layers. Finer per-matrix
+# / two-level allocations are available via ``make_muon_parallelize_fn(granularity=...)``
+# for the world_size > num_layers regimes; the dsv3 configs don't use them (on 8 GPUs both
+# would reduce to this whole-layer placement anyway).
+parallelize_deepseekv3_muon = make_muon_parallelize_fn(
+    model_name="DeepSeek V3", support_ep=True
+)
+
+
+def make_gather_muon_parallelize_fn(dense_kind: str):
+    """Gather-for-NS Muon baseline parallelize_fn for DeepSeek V3 (EP-capable)."""
+    return _make_gather_muon_parallelize_fn(dense_kind, model_name="DeepSeek V3")
+
+
+__all__ = [
+    "build_gather_muon_buckets",
+    "build_muon_buckets",
+    "make_gather_muon_parallelize_fn",
+    "parallelize_deepseekv3_muon",
+]
