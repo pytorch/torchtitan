@@ -36,32 +36,12 @@ from .rope import MRoPE
 from .sharding import set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
+GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent", "torch_native"]
+
 
 def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     """L2 norm using rsqrt(sum(x²) + eps), not x/max(norm, eps) like F.normalize, to match FLA kernel."""
     return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
-
-
-def _cu_seqlens_host_to_cpu_tensor(
-    cu_seqlens: torch.Tensor,
-    cu_seqlens_host: tuple[int, ...],
-) -> torch.Tensor:
-    return torch.tensor(cu_seqlens_host, dtype=cu_seqlens.dtype, device="cpu")
-
-
-def _cu_seqlens_to_list(cu_seqlens_host: tuple[int, ...]) -> list[int]:
-    return list(cu_seqlens_host)
-
-
-def _require_cu_seqlens_host(
-    cu_seqlens_host: tuple[int, ...] | None,
-) -> tuple[int, ...]:
-    if cu_seqlens_host is None:
-        raise ValueError(
-            "Qwen3.5 GatedDeltaNet varlen requires host-side cu_seqlens "
-            "metadata. Build VarlenMetadata with include_host_offsets=True."
-        )
-    return cu_seqlens_host
 
 
 def _torch_native_gated_delta(
@@ -119,10 +99,10 @@ def _torch_native_gated_delta_varlen(
     g_BLN: torch.Tensor,
     beta_BLN: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    cu_seqlens_host: tuple[int, ...],
+    cu_seqlens_cpu: torch.Tensor,
 ) -> torch.Tensor:
     out_segments_BLNV: list[torch.Tensor] = []
-    cu_seqlens_list = _cu_seqlens_to_list(cu_seqlens_host)
+    cu_seqlens_list = cu_seqlens_cpu.tolist()
     for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
         out_segments_BLNV.append(
             _torch_native_gated_delta(
@@ -141,10 +121,10 @@ def _torch_native_causal_conv1d_varlen(
     weight: torch.Tensor,
     cu_seqlens: torch.Tensor,
     conv_kernel_size: int,
-    cu_seqlens_host: tuple[int, ...],
+    cu_seqlens_cpu: torch.Tensor,
 ) -> torch.Tensor:
     out_segments_BTD: list[torch.Tensor] = []
-    cu_seqlens_list = _cu_seqlens_to_list(cu_seqlens_host)
+    cu_seqlens_list = cu_seqlens_cpu.tolist()
     for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
         x_segment_BDT = F.pad(
             x_BTD[:, start:end].transpose(1, 2),
@@ -165,33 +145,37 @@ def _causal_conv1d_varlen(
     weight: torch.Tensor,
     cu_seqlens: torch.Tensor,
     conv_kernel_size: int,
-    cu_seqlens_host: tuple[int, ...],
+    backend: GatedDeltaBackend,
     cu_seqlens_cpu: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if x_BTD.is_cuda:
-        from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
-
+    if backend == "torch_native" or not x_BTD.is_cuda:
         if cu_seqlens_cpu is None:
             raise ValueError(
-                "Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor."
+                "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
+                "metadata. Build VarlenMetadata with include_host_offsets=True."
             )
-        out_BTD, _ = _fla_causal_conv1d(
-            x=x_BTD,
-            weight=weight.squeeze(1),
-            bias=None,
-            activation="silu",
-            backend="triton",
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
+        return _torch_native_causal_conv1d_varlen(
+            x_BTD,
+            weight,
+            cu_seqlens,
+            conv_kernel_size,
+            cu_seqlens_cpu,
         )
-        return out_BTD
-    return _torch_native_causal_conv1d_varlen(
-        x_BTD,
-        weight,
-        cu_seqlens,
-        conv_kernel_size,
-        cu_seqlens_host,
+
+    from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
+
+    if cu_seqlens_cpu is None:
+        raise ValueError("Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor.")
+    out_BTD, _ = _fla_causal_conv1d(
+        x=x_BTD,
+        weight=weight.squeeze(1),
+        bias=None,
+        activation="silu",
+        backend="triton",
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
+    return out_BTD
 
 
 class SharedExperts(FeedForward):
@@ -281,9 +265,7 @@ class GatedDeltaKernel(Module):
         # "fla_chunked": parallel within chunks, fast for training (default)
         # "fla_fused_recurrent": token-by-token, lower memory for long sequences
         # "torch_native": pure-Python reference, for numerical testing only
-        backend: Literal[
-            "fla_chunked", "fla_fused_recurrent", "torch_native"
-        ] = "fla_chunked"
+        backend: GatedDeltaBackend = "fla_chunked"
 
     def __init__(self, config: Config):
         super().__init__()
@@ -298,7 +280,6 @@ class GatedDeltaKernel(Module):
         beta_BLN: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
-        cu_seqlens_host: tuple[int, ...] | None = None,
         cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Expand Q/K heads to match V when n_value_heads > n_key_heads
@@ -317,7 +298,11 @@ class GatedDeltaKernel(Module):
                     g_BLN,
                     beta_BLN,
                 )
-            cu_seqlens_host = _require_cu_seqlens_host(cu_seqlens_host)
+            if cu_seqlens_cpu is None:
+                raise ValueError(
+                    "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
+                    "metadata. Build VarlenMetadata with include_host_offsets=True."
+                )
             return _torch_native_gated_delta_varlen(
                 xq_BLNK,
                 xk_BLNK,
@@ -325,7 +310,7 @@ class GatedDeltaKernel(Module):
                 g_BLN,
                 beta_BLN,
                 cu_seqlens,
-                cu_seqlens_host,
+                cu_seqlens_cpu,
             )
 
         if cu_seqlens is not None and xq_BLNK.shape[0] != 1:
@@ -464,11 +449,14 @@ class GatedDeltaNet(Module):
         x_BLD: torch.Tensor,
         conv: Conv1d,
         cu_seqlens: torch.Tensor | None = None,
-        cu_seqlens_host: tuple[int, ...] | None = None,
         cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if cu_seqlens is not None:
-            cu_seqlens_host = _require_cu_seqlens_host(cu_seqlens_host)
+            if cu_seqlens_cpu is None:
+                raise ValueError(
+                    "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
+                    "metadata. Build VarlenMetadata with include_host_offsets=True."
+                )
             if isinstance(x_BLD, DTensor):
 
                 def _conv_varlen(
@@ -481,7 +469,7 @@ class GatedDeltaNet(Module):
                         w_local,
                         cu_seqlens_local,
                         self.conv_kernel_size,
-                        cu_seqlens_host,
+                        self.kernel.backend,
                         cu_seqlens_cpu,
                     )
 
@@ -491,7 +479,7 @@ class GatedDeltaNet(Module):
                 conv.weight,
                 cu_seqlens,
                 self.conv_kernel_size,
-                cu_seqlens_host,
+                self.kernel.backend,
                 cu_seqlens_cpu,
             )
 
@@ -522,16 +510,23 @@ class GatedDeltaNet(Module):
     ) -> torch.Tensor:
         B, L, _ = x_BLD.shape
         cu_seqlens = None
-        cu_seqlens_host = None
         cu_seqlens_cpu = None
         if isinstance(attention_masks, VarlenMetadata):
             cu_seqlens = attention_masks.cu_seq_q
-            cu_seqlens_host = _require_cu_seqlens_host(attention_masks.cu_seq_q_host)
-            if x_BLD.is_cuda:
-                cu_seqlens_cpu = _cu_seqlens_host_to_cpu_tensor(
-                    cu_seqlens,
-                    cu_seqlens_host,
+            cu_seqlens_host = attention_masks.cu_seq_q_host
+            if cu_seqlens_host is None:
+                raise ValueError(
+                    "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
+                    "metadata. Build VarlenMetadata with include_host_offsets=True."
                 )
+            # Keep host metadata as Python values in VarlenMetadata so
+            # SelectiveAC does not treat integer CPU tensors as checkpoint
+            # inputs; build the FLA API tensor at the DeltaNet boundary.
+            cu_seqlens_cpu = torch.tensor(
+                cu_seqlens_host,
+                dtype=cu_seqlens.dtype,
+                device="cpu",
+            )
 
         if cu_seqlens is None:
             kernel_B, kernel_L = B, L
@@ -551,21 +546,18 @@ class GatedDeltaNet(Module):
             _maybe_flatten(self.in_proj_q(x_BLD)),
             self.conv_q,
             cu_seqlens,
-            cu_seqlens_host,
             cu_seqlens_cpu,
         ).view(kernel_B, kernel_L, -1, self.key_head_dim)
         xk_BLNK = self._causal_conv(
             _maybe_flatten(self.in_proj_k(x_BLD)),
             self.conv_k,
             cu_seqlens,
-            cu_seqlens_host,
             cu_seqlens_cpu,
         ).view(kernel_B, kernel_L, -1, self.key_head_dim)
         xv_BLNV = self._causal_conv(
             _maybe_flatten(self.in_proj_v(x_BLD)),
             self.conv_v,
             cu_seqlens,
-            cu_seqlens_host,
             cu_seqlens_cpu,
         ).view(kernel_B, kernel_L, -1, self.value_head_dim)
         xz_BLNV = _maybe_flatten(self.in_proj_z(x_BLD)).view(
@@ -589,7 +581,6 @@ class GatedDeltaNet(Module):
             g_BLN,
             beta_BLN,
             cu_seqlens=cu_seqlens,
-            cu_seqlens_host=cu_seqlens_host,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )
 
