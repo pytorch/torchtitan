@@ -24,6 +24,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import re
 import secrets
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
@@ -237,6 +238,32 @@ def _tool_input(arguments: Any) -> dict:
     return {}
 
 
+# Hermes tool-call delimiters as plain text. The id-level Qwen3ToolParser matches
+# the ``<tool_call>`` SPECIAL token; some completions (observed after a long
+# reasoning block) emit these delimiters as ORDINARY tokens instead, so the
+# id-level parser misses them and the agent loop ends with no action even though
+# the model did request a tool. This regex recovers such calls from decoded text.
+_TEXT_TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+
+
+def _tool_calls_from_text(text: str) -> list[tuple[str, Any]]:
+    """Best-effort recover Hermes ``<tool_call>{...}</tool_call>`` calls from text.
+
+    Returns ``(name, arguments)`` pairs for well-formed JSON objects carrying a
+    ``name``; silently skips malformed blocks (the caller treats none-found as no
+    tool call, exactly as before).
+    """
+    out: list[tuple[str, Any]] = []
+    for m in _TEXT_TOOLCALL_RE.finditer(text):
+        try:
+            obj = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("name"):
+            out.append((obj["name"], obj.get("arguments", {})))
+    return out
+
+
 def _completion_to_blocks(
     renderer: Renderer, token_ids: list[int], tools: list[ToolSpec] | None
 ) -> tuple[list[dict], str]:
@@ -249,8 +276,10 @@ def _completion_to_blocks(
     blocks: list[dict] = []
     if parsed.reasoning_content:
         blocks.append({"type": "thinking", "thinking": parsed.reasoning_content})
+    text_block: dict | None = None
     if parsed.content:
-        blocks.append({"type": "text", "text": parsed.content})
+        text_block = {"type": "text", "text": parsed.content}
+        blocks.append(text_block)
     has_tool = False
     for tc in parsed.tool_calls:
         if tc.status != ToolCallParseStatus.OK or not tc.name:
@@ -264,6 +293,37 @@ def _completion_to_blocks(
                 "input": _tool_input(tc.arguments),
             }
         )
+    # Fallback: the id-level parser found no tool call, but the model may have
+    # emitted the Hermes <tool_call>{...}</tool_call> markers as ORDINARY tokens
+    # (observed after a long reasoning block), which the id-level parser misses.
+    # Recover from the RAW decode with special-token markers KEPT -- parse_response
+    # strips those markers from parsed.content (via _strip_special_tokens), so the
+    # markers are gone there and we must scan the raw text. The recovered turn
+    # branches in TITO packing (the assistant turn re-renders the tool call in the
+    # canonical special-token form, not the original ordinary tokens); branching is
+    # handled downstream by rollout_to_training_samples.
+    if not has_tool:
+        tokenizer = getattr(renderer, "_tokenizer", None)
+        raw = (
+            tokenizer.decode(token_ids, skip_special_tokens=False)
+            if tokenizer is not None
+            else ""
+        )
+        for name, arguments in _tool_calls_from_text(raw):
+            has_tool = True
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": f"toolu_{secrets.token_hex(8)}",
+                    "name": name,
+                    "input": _tool_input(arguments),
+                }
+            )
+        if has_tool and text_block is not None:
+            # parse_response already stripped the tool-call markers from
+            # parsed.content, leaving the bare JSON as "text"; drop it so the
+            # echoed assistant turn is not both a text block and a tool_use.
+            blocks.remove(text_block)
     if not blocks:
         blocks.append({"type": "text", "text": ""})
     return blocks, ("tool_use" if has_tool else "end_turn")
@@ -308,7 +368,11 @@ class AnthropicAdapter:
     async def start(self) -> "AnthropicAdapter":
         self._runner = web.AppRunner(self.app, handler_cancellation=True)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
+        # Large accept backlog: at high rollout concurrency (host_loop) hundreds of
+        # rollouts open connections to this loopback adapter at once; the default
+        # backlog (128) overflows -> dropped connections the client sees as
+        # "adapter call failed". 2048 lets the burst queue instead of being refused.
+        site = web.TCPSite(self._runner, self.host, self.port, backlog=2048)
         await site.start()
         logger.info("[anthropic_adapter] serving on http://%s:%d", self.host, self.port)
         return self

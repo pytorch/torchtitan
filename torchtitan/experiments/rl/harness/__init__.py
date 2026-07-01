@@ -29,6 +29,7 @@ from torchtitan.experiments.rl.harness.agents import (
     boot_agent_sandbox,
     git_diff,
     run_claude_code,
+    run_host_loop,
 )
 from torchtitan.experiments.rl.harness.sandbox import (
     DaytonaSandbox,
@@ -46,4 +47,5 @@ __all__ = [
     "git_diff",
     "make_sandbox",
     "run_claude_code",
+    "run_host_loop",
 ]

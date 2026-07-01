@@ -254,8 +254,16 @@ class PolicyTrainer(Actor, Configurable):
 
         from torchtitan.models.common.attention import VarlenAttention
 
+        # `first_attention` handles hybrid models (linear + full attention): it
+        # returns the first full-attention layer's config, from which attention
+        # masks are derived. A purely-linear model has no full-attention layer.
+        attn_config = model_spec.model.first_attention
+        if attn_config is None:
+            raise ValueError(
+                "RL requires at least one full-attention layer for attention masks."
+            )
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention,
+            attn_config.inner_attention,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
@@ -362,9 +370,13 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             dict[str, float]: Globally-reduced metrics.
         """
-        logger.debug(
-            f"{os.getpid()=} PolicyTrainer forward_backward "
-            f"step {self.policy_version}"
+        # info-level phase logs: the trainer step is otherwise silent until the
+        # controller's end-of-step flush, so a stall inside the first cross-host
+        # FSDP all-gather (model_forward) vs. never entering forward_backward at
+        # all (upstream actor-dispatch stall) is indistinguishable. These pin it.
+        logger.info(
+            f"[trainer] forward_backward ENTER pid={os.getpid()} "
+            f"dp_rank={self.dp_rank} policy_version={self.policy_version}"
         )
 
         # RL does not support pipeline parallelism yet, so the trainer
@@ -388,10 +400,14 @@ class PolicyTrainer(Actor, Configurable):
 
         attention_masks = model.get_attention_masks(positions)
 
+        # The model forward is where FSDP2 fully_shard issues its unshard
+        # all-gather; under a multi-host dp_shard this is a cross-host collective.
+        logger.info(f"[trainer] dp_rank={self.dp_rank}: model forward start")
         with sl.log_trace_span("model_forward"):
             pred = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
+        logger.info(f"[trainer] dp_rank={self.dp_rank}: model forward done")
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
@@ -402,9 +418,11 @@ class PolicyTrainer(Actor, Configurable):
                 advantages=advantages,
                 loss_mask=loss_mask,
             )
+        logger.info(f"[trainer] dp_rank={self.dp_rank}: loss done")
 
         with sl.log_trace_span("model_backward"):
             loss.backward()
+        logger.info(f"[trainer] dp_rank={self.dp_rank}: backward done")
 
         sum_reduced_metrics = {
             key: value

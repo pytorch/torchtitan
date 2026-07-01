@@ -925,7 +925,13 @@ class Controller(Configurable):
                     training_sample_group=training_sample_group,
                 )
             if maybe_training_batch is not None:
+                logger.info(
+                    "[batcher_loop] packed a training batch "
+                    f"({len(maybe_training_batch.microbatches)} microbatch(es)); "
+                    "putting on queue"
+                )
                 await training_batch_queue.put(maybe_training_batch)
+                logger.info("[batcher_loop] batch enqueued")
         await training_batch_queue.put(None)
         # TODO(async-rl): if finite datasets are supported, drain a final partial batch here.
 
@@ -944,8 +950,14 @@ class Controller(Configurable):
         """
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
+            # Phase logging: the training step is otherwise a black box until its
+            # end-of-step metrics flush, so a hang inside it is invisible. Log each
+            # actor-call boundary so a stall is localized in the stdout timeline.
+            logger.info(f"[trainer_loop] step {step}: begin; trainer.sync_log_step")
             await self.trainer.sync_log_step.call(step)
+            logger.info(f"[trainer_loop] step {step}: generator fanout sync_log_step")
             await self.generator_router.fanout("sync_log_step", step)
+            logger.info(f"[trainer_loop] step {step}: awaiting training batch")
             step_timer = MetricsTimer()
 
             with sl.log_trace_span("train_step"), step_timer.record(
@@ -960,6 +972,11 @@ class Controller(Configurable):
                 if packed is None:
                     logger.info("Batcher closed and drained; stopping training")
                     break
+                logger.info(
+                    f"[trainer_loop] step {step}: got batch, "
+                    f"{len(packed.microbatches)} microbatch(es), "
+                    f"{packed.num_global_valid_tokens} valid tokens"
+                )
 
                 # Policy age is computed HERE, at consumption time, against the live trainer version, so it is
                 # faithful to what this step trains on -- not the version when the batch was packed.
@@ -975,17 +992,28 @@ class Controller(Configurable):
                 with sl.log_trace_span("forward_backward"), step_timer.record(
                     "timing/step/forward_backward"
                 ):
-                    # fwd_bwd on all microbatches
-                    microbatch_metrics = [
-                        self._get_rank_0_value(
-                            await self.trainer.forward_backward.call(
-                                microbatch, packed.num_global_valid_tokens
+                    # fwd_bwd on all microbatches (logged per microbatch so a stall
+                    # inside the first cross-host collective is visible in the timeline).
+                    microbatch_metrics = []
+                    num_microbatches = len(packed.microbatches)
+                    for mb_idx, microbatch in enumerate(packed.microbatches):
+                        logger.info(
+                            f"[trainer_loop] step {step}: forward_backward "
+                            f"microbatch {mb_idx + 1}/{num_microbatches}"
+                        )
+                        microbatch_metrics.append(
+                            self._get_rank_0_value(
+                                await self.trainer.forward_backward.call(
+                                    microbatch, packed.num_global_valid_tokens
+                                )
                             )
                         )
-                        for microbatch in packed.microbatches
-                    ]
 
                     fwd_bwd_metrics = combine_microbatch_metrics(microbatch_metrics)
+                    logger.info(
+                        f"[trainer_loop] step {step}: forward_backward done, "
+                        f"loss={fwd_bwd_metrics['loss/mean']:.4f}"
+                    )
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")
@@ -998,6 +1026,7 @@ class Controller(Configurable):
                         await self.trainer.optim_step.call()
                     )
                 self._trainer_policy_version = optim_result.policy_version
+                logger.info(f"[trainer_loop] step {step}: optim done")
 
                 # Weight sync: publish new weights before the next train step (push then pull, both awaited).
                 # TODO(perf): overlap weight sync (today both are awaited synchronously).
@@ -1005,6 +1034,7 @@ class Controller(Configurable):
                     "trainer_push_model_state_dict"
                 ), step_timer.record("timing/step/push_model_state_dict"):
                     await self.trainer.push_model_state_dict.call()
+                logger.info(f"[trainer_loop] step {step}: weights pushed")
                 with sl.log_trace_span(
                     "generator_pull_model_state_dict"
                 ), step_timer.record("timing/step/pull_model_state_dict"):
@@ -1012,6 +1042,7 @@ class Controller(Configurable):
                         policy_version=optim_result.policy_version
                     )
                 self._generator_policy_version = optim_result.policy_version
+                logger.info(f"[trainer_loop] step {step}: weights pulled (step done)")
 
                 # Release one train step's group slots after the pull; the batcher packs exactly
                 # num_groups_per_train_step trainable groups per batch.

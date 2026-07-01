@@ -548,7 +548,7 @@ def set_pg_timeouts(
     for group in groups:
         torch.distributed.distributed_c10d._set_pg_timeout(
             timeout, group
-        )  # pyrefly: ignore[deprecated]
+        )
 
 
 @torch.no_grad()

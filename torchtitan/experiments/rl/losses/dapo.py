@@ -125,6 +125,10 @@ class DAPOLoss(BaseLoss):
                 / loss_denominator,
                 "bit_wise/logprob_diff/mean": diff_for_metrics.float().sum()
                 / loss_denominator,
+                # Typical per-token drift magnitude; the signed mean cancels and
+                # hides it. Pre-normalized so a SUM-reduce gives the global mean.
+                "bit_wise/logprob_diff/abs_mean": diff_for_metrics.abs().float().sum()
+                / loss_denominator,
                 "bit_wise/ratio_tokens_different/mean": (
                     (diff_for_metrics.abs() > 1e-6).float() * loss_mask
                 ).sum()

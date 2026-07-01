@@ -197,6 +197,11 @@ def spawn_proc_mesh(
 
 
 async def main():
+    # Monarch is landing a breaking change to its message-dispatch default; the
+    # recommended way to keep the current (desired) behavior is @concurrent_endpoint,
+    # which is not in monarch's stable release yet. Pin the env until then (#3832).
+    os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
+
     config = ConfigManager().parse_args()
     assert isinstance(config, Controller.Config)
     sl.init_structured_logger(

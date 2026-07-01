@@ -51,6 +51,7 @@ from torchtitan.experiments.rl.harness import (
     boot_agent_sandbox,
     git_diff,
     run_claude_code,
+    run_host_loop,
 )
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
@@ -125,6 +126,12 @@ class SWER2ERollouter(Rollouter):
         self._time_budget_sec = _env_int("SWE_TIME_BUDGET_SEC", 1200)
         self._eval_timeout_sec = _env_int("SWE_EVAL_TIMEOUT_SEC", 400)
         self._max_context_tokens = _env_int("SWE_MAX_CONTEXT_LEN", 32768)
+        # Agent execution mode. "in_sandbox_claude" (default): the unmodified Claude
+        # Code CLI runs in the sandbox and reaches the adapter via the file-relay
+        # bridge. "host_loop": a host-side ReAct loop talks to the adapter directly
+        # over localhost and ships only tool commands to the sandbox -- removes the
+        # per-LLM-turn bridge round-trips so the generator saturates.
+        self._agent_mode = os.environ.get("SWE_AGENT_MODE", "in_sandbox_claude")
         # Whole-rollout wall-clock guard: agent budget + eval + boot/diff buffer.
         self._guard_sec = self._time_budget_sec + self._eval_timeout_sec + 300
         self._adapter: AnthropicAdapter | None = None
@@ -224,15 +231,26 @@ class SWER2ERollouter(Rollouter):
         try:
             async with asyncio.timeout(self._guard_sec):
                 async with boot_agent_sandbox(sample.image) as sb:
-                    await run_claude_code(
-                        sb,
-                        workdir=sample.workdir,
-                        session_id=rollout_id,
-                        adapter_url=adapter.url,
-                        time_budget_sec=self._time_budget_sec,
-                        problem_statement=sample.problem_statement,
-                        pre_commands=sample.pre_commands,
-                    )
+                    if self._agent_mode == "host_loop":
+                        await run_host_loop(
+                            sb,
+                            workdir=sample.workdir,
+                            session_id=rollout_id,
+                            adapter_url=adapter.url,
+                            time_budget_sec=self._time_budget_sec,
+                            problem_statement=sample.problem_statement,
+                            pre_commands=sample.pre_commands,
+                        )
+                    else:
+                        await run_claude_code(
+                            sb,
+                            workdir=sample.workdir,
+                            session_id=rollout_id,
+                            adapter_url=adapter.url,
+                            time_budget_sec=self._time_budget_sec,
+                            problem_statement=sample.problem_statement,
+                            pre_commands=sample.pre_commands,
+                        )
                     diff_text = await git_diff(sb, sample.workdir, tracked_only=True)
 
                 reward, solved, applied = await evaluate_r2e(

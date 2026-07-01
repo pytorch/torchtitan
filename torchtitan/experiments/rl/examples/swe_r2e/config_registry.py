@@ -22,8 +22,8 @@ Recipes:
   - 1.7B / 8B: single-host smokes (prove the sandbox -> Claude Code -> adapter ->
     grading -> GRPO step path end to end).
   - 32B: the scale target. ``_fsdp16`` / ``_fsdp24`` are the multi-host async
-    runs the ``mast_rl`` launcher wraps (a 2- or 3-host FSDP trainer + N generator
-    hosts), with rollout collection overlapping training (``max_offpolicy_steps``).
+    runs (a 2- or 3-host FSDP trainer + N generator hosts), with rollout collection
+    overlapping training (``max_offpolicy_steps``).
 """
 
 from __future__ import annotations
@@ -44,6 +44,9 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.training_sample_builder import (
+    TrainingSampleBuilder,
+)
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -64,6 +67,7 @@ from torchtitan.experiments.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.models.qwen3 import model_registry
+from torchtitan.models.qwen3_5 import model_registry as qwen3_5_model_registry
 from torchtitan.protocols.model_spec import ModelSpec
 
 # R2E JSONL path, supplied by the launcher (PROMPT_DATA -> SWE_PROMPT_DATA).
@@ -92,6 +96,14 @@ def _qwen3_rl_model_registry(flavor: str, *, attn_backend: str) -> ModelSpec:
     makes the (chunked) loss apply an fp32 lm_head on top of the bf16 model.
     """
     return model_registry(
+        flavor, attn_backend=attn_backend, converters=[LMHeadCastConverter.Config()]
+    )
+
+
+def _qwen3_5_rl_model_registry(flavor: str, *, attn_backend: str) -> ModelSpec:
+    """``qwen3_5.model_registry`` (Gated DeltaNet hybrid) with the lm_head fp32 cast
+    always on, mirroring ``_qwen3_rl_model_registry``."""
+    return qwen3_5_model_registry(
         flavor, attn_backend=attn_backend, converters=[LMHeadCastConverter.Config()]
     )
 
@@ -205,7 +217,7 @@ def rl_grpo_qwen3_8b_swe_r2e() -> Controller.Config:
 def rl_grpo_qwen3_32b_swe_r2e() -> Controller.Config:
     """Qwen3-32B (dense) SWE-R2E: single FSDP-8 trainer host + TP-8 generator host.
 
-    The FSDP-8 baseline (2 MAST hosts: 1 trainer + 1 generator). Trainer FSDP-8
+    The FSDP-8 baseline (2 hosts: 1 trainer + 1 generator). Trainer FSDP-8
     (data_parallel_shard_degree=8, TP=1) with bf16 master + bf16 AdamW states
     (fused_opt_states_bf16) + FullAC to fit 32B in one 8x80GB host; the chunked
     loss bounds the long-context (24576) logits. Generator is dense TP=8 with
@@ -275,14 +287,12 @@ def _scale_32b_multihost(
     config.async_loop = dataclasses.replace(
         config.async_loop,
         num_training_steps=num_training_steps,
-        # 4 groups/step x group_size 16. The starvation that forced 1 group/step was
-        # an ARTIFACT of a broken rollout config (per-turn max_tokens=4096 truncated
-        # ~41% of turns -> ~1% solve -> almost every group all-fail). With the fixed
-        # rollout config (max_tokens=8192, lean tools, read-before-edit/locate system
-        # prompt) the 32B solves ~7% (pass@8) and ~18% of tasks are mixed, so multi-
-        # group steps fill normally without a pass-rate curriculum. Soft filtering
-        # still drops the residual all-solve / all-fail groups.
-        num_groups_per_train_step=4,
+        # 8 groups/step x group_size 16 = 128 trained rollouts/step: enough prompt
+        # diversity per step for a stable GRPO gradient (1 group would be too
+        # high-variance). The concurrent-rollout ceiling is max_active_rollout_groups
+        # = (max_offpolicy_steps+1) x num_groups_per_train_step x group_size
+        # (controller.py); SWE_ROLLOUT_CONCURRENCY can only throttle BELOW it.
+        num_groups_per_train_step=8,
         group_size=16,
         max_offpolicy_steps=max_offpolicy_steps,
     )
@@ -306,16 +316,23 @@ def _scale_32b_multihost(
 def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
     """Qwen3-32B SWE-R2E, multi-host async: TRUE FSDP-16 trainer + 5 TP-8 gens.
 
-    8 MAST hosts: 1 controller + 2 trainer (data_parallel_shard_degree=16, TP=1) +
+    8 hosts: 1 controller + 2 trainer (data_parallel_shard_degree=16, TP=1) +
     5 generator (TP=8). Default fused QKV; PR #3807 made the fused init + checkpoint
     hooks gather-to-Replicate before the per-kv-head reshape, so FSDP-16 (>
     n_kv_heads=8) shards cleanly. bf16 master + bf16 Adam (fused_opt_states_bf16) +
     FullAC + chunked loss (fp32 master + fp32 Adam OOMs 32B at seq 24576 even on
-    FSDP-16). Rollout collection overlaps training by up to ``max_offpolicy_steps=2``
-    (the trainer trains step N's batch while the generators collect step N+1's), so
+    FSDP-16). Rollout collection overlaps training by up to ``max_offpolicy_steps``
+    (the trainer trains step N's batch while the generators collect step N+1+'s), so
     each train step is short (fwd/bwd + CPU-staged weight sync) instead of blocking
-    on the slow Claude Code rollouts. ``num_groups_per_train_step=1`` x
-    ``group_size=16`` = 16 rollouts per step.
+    on the slow Claude Code rollouts. ``num_groups_per_train_step=8`` x
+    ``group_size=16`` = 128 trained rollouts per step.
+
+    Concurrency: the active-rollout ceiling = (max_offpolicy_steps+1) x
+    num_groups_per_train_step x group_size, and step time ~ 1/(max_offpolicy_steps+1)
+    (more collect-ahead -> the buffer stays full so the trainer waits less). With
+    Daytona raised to 1500 vCPU / 3000 GB, max_offpolicy_steps=4 gives a 640-rollout
+    ceiling ((4+1)*8*16) -- ~1.7x more concurrent rollouts than the old 2/192 -- to
+    fill the generators and shorten steps; off-policy 4 is a standard async value.
     """
     config = rl_grpo_qwen3_32b_swe_r2e()
     return _scale_32b_multihost(
@@ -323,14 +340,14 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
         trainer_dp_shard=16,
         num_generators=5,
         num_training_steps=100,
-        max_offpolicy_steps=2,
+        max_offpolicy_steps=4,
     )
 
 
 def rl_grpo_qwen3_32b_swe_r2e_fsdp24() -> Controller.Config:
     """Qwen3-32B SWE-R2E, multi-host async: TRUE FSDP-24 trainer + 5 TP-8 gens.
 
-    9 MAST hosts: 1 controller + 3 trainer (data_parallel_shard_degree=24, TP=1) +
+    9 hosts: 1 controller + 3 trainer (data_parallel_shard_degree=24, TP=1) +
     5 generator (TP=8). Same fused-QKV (PR #3807) + bf16-master (fused_opt_states_bf16)
     + async overlap as ``_fsdp16`` with a wider trainer shard (more memory headroom /
     faster fwd-bwd).
@@ -343,3 +360,60 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp24() -> Controller.Config:
         num_training_steps=100,
         max_offpolicy_steps=2,
     )
+
+
+def rl_grpo_qwen3_5_27b_swe_r2e() -> Controller.Config:
+    """Qwen3.6-27B (dense Gated DeltaNet hybrid) SWE-R2E on a single 8-GPU node.
+
+    trainer FSDP-4 (data_parallel_shard_degree=4, GPUs 0-3) + generator vLLM-native
+    GDN TP-4 (GPUs 4-7). Trainer runs the FLA chunked GDN kernel (needs fla +
+    tilelang 0.1.11 + torchvision in the CUDA 13 toolchain);
+    the generator runs vLLM-native GDN (recurrent decode + chunked prefill), synced
+    torchtitan -> HF by the model's state_dict_adapter. Inherits the 32B recipe's
+    memory setup (bf16 master + bf16 Adam + FullAC + chunked DAPO loss) and
+    max_tokens=8192. Requested knobs: max_offpolicy_steps=2,
+    drop_zero_std_reward_groups=False, 8 groups x group_size 8. Run locally with
+    ``SWE_CONFIG=rl_grpo_qwen3_5_27b_swe_r2e bash run_swe_r2e_daytona.sh`` (host_loop).
+    """
+    config = rl_grpo_qwen3_32b_swe_r2e()
+    config.model_spec = _qwen3_5_rl_model_registry("27B", attn_backend="varlen")
+    # GDN default context is 262144; cap RoPE (== vLLM max_model_len) to the SWE len
+    # so the generator does not allocate a 256k-token KV cache.
+    _set_max_seq_len(config.model_spec, _SWE_MAX_MODEL_LEN)
+    config.hf_assets_path = f"{_CKPT_DIR}/Qwen3.6-27B"
+    # GDN is not torch.compile-clean; run eager (matches the qwen3_5 alphabet recipe).
+    config.compile = CompileConfig(enable=False, backend="aot_eager")
+    config.renderer = RendererConfig(name="qwen3.6")
+    config.async_loop = dataclasses.replace(
+        config.async_loop,
+        num_training_steps=100,
+        num_groups_per_train_step=8,
+        group_size=8,
+        max_offpolicy_steps=2,
+        # Keep zero-std (all-fail / all-solve) groups instead of dropping them
+        # (requested): no dynamic-filter over-sampling, predictable step size.
+        training_sample_builder=TrainingSampleBuilder.Config(
+            drop_zero_std_reward_groups=False,
+        ),
+    )
+    # FSDP-8 (the trainer host has 8 GPUs): 27B on FSDP-4 = ~54GB/GPU of bf16
+    # master+grad+Adam state, which OOMs the 80GB H100 once step-1
+    # materializes the optimizer states (step 2 dies). FSDP-8 halves that to ~27GB.
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=8,
+            tensor_parallel_degree=1,
+        ),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        backend="vllm_native",
+        vllm_additional_config={"gdn_prefill_backend": "triton"},
+        cudagraph=VLLMCudagraphConfig(enable=False),
+        parallelism=dataclasses.replace(
+            config.generator.parallelism, tensor_parallel_degree=4
+        ),
+    )
+    return config

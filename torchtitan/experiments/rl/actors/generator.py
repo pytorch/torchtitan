@@ -13,7 +13,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import cloudpickle
 import torch
@@ -679,6 +679,18 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
+        backend: Literal["torchtitan_wrapper", "vllm_native"] = "torchtitan_wrapper"
+        """Which vLLM model backend to use. ``torchtitan_wrapper`` (default) wraps
+        the torchtitan model class and syncs sharded weights directly. Use
+        ``vllm_native`` for architectures whose generation needs kernels the
+        wrapper lacks (e.g. Qwen3.5 Gated DeltaNet: recurrent decode + chunked
+        prefill); vLLM resolves its native model class and weights are synced via
+        the model's ``state_dict_adapter`` (torchtitan -> HF)."""
+
+        vllm_additional_config: dict[str, Any] = field(default_factory=dict)
+        """Extra engine ``additional_config`` forwarded to vLLM on the
+        ``vllm_native`` path, e.g. ``{"gdn_prefill_backend": "triton"}``."""
+
         max_engine_steps_between_decisions: int = 16
         """Controls how many `engine.step()` calls the `engine_loop` performs before processing a new decision.
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
@@ -755,21 +767,42 @@ class VLLMGenerator(Actor, Configurable):
         if config.cudagraph.enable and config.cudagraph.mode == "FULL_AND_PIECEWISE":
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
-        # Register TorchTitan model + parser with vLLM
-        register_to_vllm(
-            model_spec,
-            parallelism=config.parallelism,
-            compile_config=compile_config,
-            checkpoint_config=config.checkpoint,
-            override=config.override,
-        )
-
-        # Set vLLM environment variables from config before any vLLM initialization
-        inner_attn = model_spec.model.layers[0].attention.inner_attention
-        assert isinstance(
-            inner_attn,
-            (VarlenAttention.Config, FlexAttention.Config),
-        ), "Only varlen and flex attention backends are allowed."
+        self._backend = config.backend
+        native = config.backend == "vllm_native"
+        inner_attn = None
+        if native:
+            # vLLM resolves its native model class from config.json; weights are
+            # synced via the model's state_dict_adapter (torchtitan -> HF) in
+            # ``_pull_model_state_dict``.
+            if model_spec.state_dict_adapter is None:
+                raise ValueError(
+                    "generator.backend='vllm_native' needs the model to define a "
+                    "state_dict_adapter (torchtitan->HF) for weight sync."
+                )
+            self._sd_adapter = model_spec.state_dict_adapter(
+                model_config=model_spec.model, hf_assets_path=model_path
+            )
+        else:
+            # Register TorchTitan model + parser with vLLM
+            register_to_vllm(
+                model_spec,
+                parallelism=config.parallelism,
+                compile_config=compile_config,
+                checkpoint_config=config.checkpoint,
+                override=config.override,
+            )
+            # Set vLLM environment variables from config before any vLLM init.
+            # first_attention handles hybrid models (linear + full attention).
+            attn_config = model_spec.model.first_attention
+            if attn_config is None:
+                raise ValueError(
+                    "Model has no full-attention layer for the torchtitan wrapper."
+                )
+            inner_attn = attn_config.inner_attention
+            assert isinstance(
+                inner_attn,
+                (VarlenAttention.Config, FlexAttention.Config),
+            ), "Only varlen and flex attention backends are allowed."
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         set_batch_invariance(config.debug.batch_invariant)
@@ -789,17 +822,12 @@ class VLLMGenerator(Actor, Configurable):
         # Build vLLM engine
         enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
-            # ``model`` is the path to the HF checkpoint directory. The
-            # config is sourced from torchtitan's ModelSpec via
-            # ``config_format=TORCHTITAN_CONFIG_FORMAT`` (no config.json
-            # read), but vLLM still uses this path to locate the
-            # tokenizer assets and the safetensors weight shards.
+            # ``model`` is the path to the HF checkpoint directory: vLLM uses it
+            # for tokenizer assets + safetensors shards. On the torchtitan_wrapper
+            # path the config is sourced from ModelSpec via a config_format parser
+            # (set below); on the vllm_native path vLLM reads config.json there.
             model=model_path,
             trust_remote_code=True,
-            # Use the torchtitan custom config parser (registered by
-            # register_to_vllm above). It builds PretrainedConfig from
-            # ModelSpec instead of reading config.json from disk.
-            config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
             data_parallel_size=config.parallelism.data_parallel_degree,
@@ -814,13 +842,6 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            attention_config=AttentionConfig(
-                backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(inner_attn, FlexAttention.Config)
-                    else AttentionBackendEnum.CUSTOM
-                ),
-            ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
@@ -832,11 +853,32 @@ class VLLMGenerator(Actor, Configurable):
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
-        vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
-            max_num_seqs=self._max_num_seqs,
-        )
-        if vllm_compilation_config is not None:
-            engine_kwargs["compilation_config"] = vllm_compilation_config
+        if config.parallelism.tensor_parallel_degree > 1:
+            # vLLM's custom all-reduce hangs under Monarch's external_launcher at
+            # TP>1; fall back to NCCL all-reduce.
+            engine_kwargs["disable_custom_all_reduce"] = True
+        if native:
+            # vLLM reads config.json + resolves its native model class; forward any
+            # extra engine config (e.g. gdn_prefill_backend for the GDN kernel).
+            if config.vllm_additional_config:
+                engine_kwargs["additional_config"] = config.vllm_additional_config
+        else:
+            # torchtitan_wrapper: build PretrainedConfig from ModelSpec (no
+            # config.json read) + pin the attention backend for the wrapper, and
+            # let vLLM capture our cudagraph. Native manages its own compilation.
+            engine_kwargs["config_format"] = TORCHTITAN_CONFIG_FORMAT
+            engine_kwargs["attention_config"] = AttentionConfig(
+                backend=(
+                    AttentionBackendEnum.FLEX_ATTENTION
+                    if isinstance(inner_attn, FlexAttention.Config)
+                    else AttentionBackendEnum.CUSTOM
+                ),
+            )
+            vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
+                max_num_seqs=self._max_num_seqs,
+            )
+            if vllm_compilation_config is not None:
+                engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
         engine_args = EngineArgs(**engine_kwargs)
@@ -1197,24 +1239,36 @@ class VLLMGenerator(Actor, Configurable):
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
         prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
         """
-        # Async RL uses a StorageVolume snapshot so generators do not read
-        # live trainer GPU tensors while optimizer steps may be mutating them.
-        # TODO(async-rl): use 2 version keys so trainer can push a new version
-        # without being blocked by a generator's ongoing pull.
-        model_sd = self._get_model().model.state_dict()
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=model_sd,
-            strict=False,
-            direct_rdma=False,
-        )
-        # state_dict() returns hook-produced copies for fused modules (e.g.
-        # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
-        # reaches the real param. Re-apply via load_state_dict to run the merge hook.
-        # Non-fused params share storage with model_sd, so reloading them is a
-        # harmless self-copy; only the fused wqkv is actually rebuilt.
-        # TODO: investigate can we avoid the copy and properly load fused qkv weights
-        self._get_model().model.load_state_dict(model_sd, strict=False)
+        if self._backend == "vllm_native":
+            # The native model is not a torchtitan model, so weights cannot be
+            # filled in place by FQN. Pull the full state dict (no template) and
+            # let the vLLM model's load_weights copy + TP-shard the HF tensors
+            # (converted from torchtitan layout by the state_dict_adapter).
+            tt_state_dict = await ts.get_state_dict(
+                "model_state_dict",
+                direct_rdma=False,
+            )
+            hf_state_dict = self._sd_adapter.to_hf(tt_state_dict)
+            self._get_model().load_weights(hf_state_dict.items())
+        else:
+            # Async RL uses a StorageVolume snapshot so generators do not read
+            # live trainer GPU tensors while optimizer steps may be mutating them.
+            # TODO(async-rl): use 2 version keys so trainer can push a new version
+            # without being blocked by a generator's ongoing pull.
+            model_sd = self._get_model().model.state_dict()
+            await ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=model_sd,
+                strict=False,
+                direct_rdma=False,
+            )
+            # state_dict() returns hook-produced copies for fused modules (e.g.
+            # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
+            # reaches the real param. Re-apply via load_state_dict to run the merge
+            # hook. Non-fused params share storage with model_sd, so reloading them
+            # is a harmless self-copy; only the fused wqkv is actually rebuilt.
+            # TODO: can we avoid the copy and properly load fused qkv weights?
+            self._get_model().model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps

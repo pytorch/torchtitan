@@ -46,7 +46,12 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
 
     def convert(self, model_config):
         for layer_cfg in model_config.layers:
-            inner = layer_cfg.attention.inner_attention
+            # Hybrid models (Qwen3.5) have linear-attention layers with no
+            # ``attention`` config to pin -- skip them.
+            attention = getattr(layer_cfg, "attention", None)
+            if attention is None:
+                continue
+            inner = attention.inner_attention
             if isinstance(inner, FlexAttention.Config):
                 inner.kernel_options["BACKEND"] = "TRITON"
                 inner.kernel_options["BLOCK_M"] = self._BLOCK_M

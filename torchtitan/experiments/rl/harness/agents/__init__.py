@@ -14,10 +14,12 @@ from torchtitan.experiments.rl.harness.agents.claude_code import (
     git_diff,
     run_claude_code,
 )
+from torchtitan.experiments.rl.harness.agents.host_loop import run_host_loop
 
 __all__ = [
     "apply_pre_commands",
     "boot_agent_sandbox",
     "git_diff",
     "run_claude_code",
+    "run_host_loop",
 ]

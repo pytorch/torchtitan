@@ -28,7 +28,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, OverrideConfig, ParallelismConfig
@@ -68,6 +68,9 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. 1 means disabled."""
 
+    spmd_backend: Literal["default", "spmd_types"] = "default"
+    """SPMD backend used by TorchTitan model parallelization in the generator."""
+
     def to_training(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
         the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
@@ -89,6 +92,7 @@ class InferenceParallelismConfig:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
             enable_sequence_parallel=False,
+            spmd_backend=self.spmd_backend,
         )
 
 
@@ -112,10 +116,13 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     cfg = spec.model
     if not cfg.layers:
         raise ValueError(f"ModelSpec {spec.name!r} has no layers")
-    # Some models mix dense and MoE layers (e.g. deepseek_v3 has dense
-    # first layers, MoE later); scan the layer list for a representative
-    # of each component rather than relying on layer 0.
-    attn = cfg.layers[0].attention
+    # first_attention picks the first full-attention layer; hybrid models
+    # (e.g. Qwen3.5) carry no attention config on linear-attention layers.
+    attn = cfg.first_attention
+    if attn is None:
+        raise ValueError(f"ModelSpec {spec.name!r} has no full-attention layer")
+    # ffn/moe scan per-layer too: some models mix dense and MoE layers
+    # (e.g. deepseek_v3 has dense first layers, MoE later).
     ffn = next(
         (
             ff

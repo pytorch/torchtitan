@@ -8,16 +8,15 @@
 
 Runs the trainee policy over a SHARD of the R2E task pool and records, for every
 (task, sample), whether the coding agent solved it. Together with
-``aggregate_passrate.py`` (stage 2, pure CPU) this implements the msl/rl
+``aggregate_passrate.py`` (stage 2, pure CPU) this implements a
 rejection-sampling recipe: estimate each task's pass-rate by running the SAME
 policy + grader the trainer will use, K samples per task, then keep only the
 learnability band (e.g. 0.2 < pass_rate < 0.7). The band is what unstarves
 binary-reward GRPO on sparse R2E (most raw tasks are 0% or 100% -> zero-variance
 groups the soft filter drops).
 
-This is an EMBARRASSINGLY-PARALLEL worker (mirrors msl/rl
-``projects/swe/run_distributed.py``): there is NO controller, trainer, mesh, or
-weight sync. Each host runs one in-process vLLM ``AsyncLLMEngine`` serving the
+This is an EMBARRASSINGLY-PARALLEL worker: there is NO controller, trainer, mesh,
+or weight sync. Each host runs one in-process vLLM ``AsyncLLMEngine`` serving the
 policy, one ``AnthropicAdapter``, and grades its shard of (task, sample) attempts
 concurrently. Launch N hosts with ``--shard-id 0..N-1 --num-shards N`` (strided
 sharding balances the repo-sorted pool) writing to one shared ``--out-dir``;
@@ -67,6 +66,7 @@ from torchtitan.experiments.rl.harness import (
     boot_agent_sandbox,
     git_diff,
     run_claude_code,
+    run_host_loop,
 )
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.types import Completion
@@ -124,6 +124,29 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument(
+        "--renderer",
+        default=os.environ.get("SWE_RENDERER", "qwen3"),
+        help="Renderer/chat-template name (e.g. qwen3, qwen3.6). Must match model.",
+    )
+    ap.add_argument(
+        "--agent-mode",
+        default=os.environ.get("SWE_AGENT_MODE", "in_sandbox_claude"),
+        choices=["in_sandbox_claude", "host_loop"],
+        help="in_sandbox_claude = Claude Code CLI bridge (large system prompt); "
+        "host_loop = lean host-side ReAct agent (small prompt, matches training).",
+    )
+    ap.add_argument(
+        "--vllm-additional-config",
+        default=os.environ.get("SWE_VLLM_ADDITIONAL_CONFIG", ""),
+        help='JSON forwarded to vLLM additional_config, e.g. {"gdn_prefill_backend": "triton"} for GDN hybrids.',
+    )
+    ap.add_argument(
+        "--disable-custom-all-reduce",
+        action="store_true",
+        default=os.environ.get("SWE_DISABLE_CUSTOM_ALL_REDUCE", "") not in ("", "0"),
+        help="Fall back to NCCL all-reduce (some archs hang on custom all-reduce at TP>1).",
+    )
+    ap.add_argument(
         "--max-model-len", type=int, default=_env_int("SWE_MAX_MODEL_LEN", 24576)
     )
     ap.add_argument(
@@ -142,6 +165,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=_env_int("SWE_CURATE_LIMIT", 0),
         help="Cap tasks in this shard (0 = all); for smoke tests.",
+    )
+    ap.add_argument(
+        "--dump-dir",
+        default=os.environ.get("SWE_DUMP_DIR", ""),
+        help="If set, write a decoded transcript + final diff per attempt here (diagnostics).",
     )
     return ap.parse_args()
 
@@ -163,14 +191,21 @@ def build_engine(args: argparse.Namespace) -> AsyncLLMEngine:
     many concurrent ``generate`` calls, which is what the K-way-per-task fanout
     needs -- unlike the offline ``LLM`` (one batch at a time) the smoke harness uses.
     """
-    engine_args = AsyncEngineArgs(
+    kwargs = dict(
         model=args.model,
         dtype="bfloat16",
         tensor_parallel_size=args.tensor_parallel,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=True,  # robust over decode-throughput; curation is agent-bound
+        trust_remote_code=True,
     )
+    if args.disable_custom_all_reduce:
+        kwargs["disable_custom_all_reduce"] = True
+    if args.vllm_additional_config:
+        # e.g. {"gdn_prefill_backend": "triton"} for Qwen3.5/3.6 GDN hybrids.
+        kwargs["additional_config"] = json.loads(args.vllm_additional_config)
+    engine_args = AsyncEngineArgs(**kwargs)
     return AsyncLLMEngine.from_engine_args(engine_args)
 
 
@@ -241,6 +276,42 @@ def _write_result(path: str, record: dict) -> None:
     os.replace(tmp, path)  # atomic; a present file is always complete (resume-safe)
 
 
+def _dump_trace(
+    dump_dir: str,
+    sample: SWER2ESample,
+    k: int,
+    captured,
+    diff_text: str,
+    tokenizer,
+    status: str,
+    solved: bool,
+    reward: float,
+) -> None:
+    """Write a human-readable transcript (system+first prompt, each turn's decoded
+    completion, and the final git diff) so a low solve rate can be diagnosed."""
+    safe = sample.instance_id.replace("/", "_")
+    path = os.path.join(dump_dir, f"{safe}__k{k}.txt")
+    os.makedirs(dump_dir, exist_ok=True)
+    lines = [
+        f"instance_id: {sample.instance_id}",
+        f"status={status} solved={solved} reward={reward:.2f} turns={len(captured)}",
+        "=" * 80,
+    ]
+    if captured:
+        first = tokenizer.decode(captured[0].prompt_token_ids, skip_special_tokens=False)
+        lines += ["TURN-0 PROMPT (system + first user):", first, "=" * 80]
+    for i, t in enumerate(captured):
+        comp = tokenizer.decode(t.completion_token_ids, skip_special_tokens=False)
+        lines += [
+            f"--- COMPLETION turn={i} (finish={t.finish_reason}, "
+            f"{len(t.completion_token_ids)} tok) ---",
+            comp,
+        ]
+    lines += ["=" * 80, "FINAL GIT DIFF:", diff_text or "(empty)"]
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+
+
 async def grade_attempt(
     *,
     adapter: AnthropicAdapter,
@@ -254,6 +325,9 @@ async def grade_attempt(
     time_budget_sec: int,
     eval_timeout_sec: int,
     guard_sec: int,
+    agent_mode: str = "in_sandbox_claude",
+    dump_dir: str = "",
+    tokenizer=None,
 ) -> str:
     """Run + grade ONE (task, sample) attempt; write its result JSON; return status.
 
@@ -280,19 +354,31 @@ async def grade_attempt(
     applied = False
     error_msg = ""
     num_turns = 0
+    diff_text = ""
     await sem.acquire()
     try:
         async with asyncio.timeout(guard_sec):
             async with boot_agent_sandbox(sample.image) as sb:
-                await run_claude_code(
-                    sb,
-                    workdir=sample.workdir,
-                    session_id=sid,
-                    adapter_url=adapter.url,
-                    time_budget_sec=time_budget_sec,
-                    problem_statement=sample.problem_statement,
-                    pre_commands=sample.pre_commands,
-                )
+                if agent_mode == "host_loop":
+                    await run_host_loop(
+                        sb,
+                        workdir=sample.workdir,
+                        session_id=sid,
+                        adapter_url=adapter.url,
+                        time_budget_sec=time_budget_sec,
+                        problem_statement=sample.problem_statement,
+                        pre_commands=sample.pre_commands,
+                    )
+                else:
+                    await run_claude_code(
+                        sb,
+                        workdir=sample.workdir,
+                        session_id=sid,
+                        adapter_url=adapter.url,
+                        time_budget_sec=time_budget_sec,
+                        problem_statement=sample.problem_statement,
+                        pre_commands=sample.pre_commands,
+                    )
                 diff_text = await git_diff(sb, sample.workdir, tracked_only=True)
             reward, solved, applied = await evaluate_r2e(
                 image=sample.image,
@@ -314,6 +400,10 @@ async def grade_attempt(
         sem.release()
         captured = await adapter.finish_session(sid)
         num_turns = len(captured)
+        if dump_dir and tokenizer is not None:
+            _dump_trace(
+                dump_dir, sample, k, captured, diff_text, tokenizer, status, solved, reward
+            )
 
     _write_result(
         path,
@@ -347,7 +437,7 @@ async def main() -> None:
     if "DAYTONA_API_KEY" not in os.environ:
         raise ValueError("DAYTONA_API_KEY must be set for the sandbox backend")
 
-    renderer = RendererConfig(name="qwen3").build(tokenizer_path=args.model)
+    renderer = RendererConfig(name=args.renderer).build(tokenizer_path=args.model)
     stop_ids = renderer.get_stop_token_ids()
 
     ds = SWER2EDataset.Config(data_path=args.data, seed=42, shuffle=False).build()
@@ -400,6 +490,9 @@ async def main() -> None:
                 time_budget_sec=time_budget_sec,
                 eval_timeout_sec=eval_timeout_sec,
                 guard_sec=guard_sec,
+                agent_mode=args.agent_mode,
+                dump_dir=args.dump_dir,
+                tokenizer=getattr(renderer, "_tokenizer", None),
             )
             for sample in my_samples
             for k in range(args.k)
