@@ -11,8 +11,6 @@ from xx.common.compressor_helpers import COMPRESSOR_STATS
 
 from torchtitan.components.optimizer import register_float8_precompute_scale_hook
 from torchtitan.components.quantization import Float8LinearConverter
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import parallelize_worldmodel, TransformerConfig, WorldModel
@@ -34,15 +32,8 @@ WORLD_MODEL_FLOAT8_FILTER_FQNS = [
 ]
 
 
-def model_registry(
-    flavor: str,
-    converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+def model_registry(flavor: str) -> ModelSpec:
     config = _worldmodel_configs()[flavor]()
-    if converters is not None:
-        validate_converter_order(converters)
-        for converter in converters:
-            converter.build().convert(config)
     return ModelSpec(
         name="worldmodel",
         flavor=flavor,
