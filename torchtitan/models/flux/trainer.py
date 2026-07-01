@@ -62,7 +62,7 @@ class FluxTrainer(Trainer):
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         distinct_seed_mesh_dims = (
             ["cp", "dp_shard", "dp_replicate"]
-            if config.parallelism.spmd_backend == "spmd_types"
+            if config.parallelism.spmd_backend in ("full_dtensor", "spmd_types")
             else ["fsdp", "dp_replicate"]
         )
         dist_utils.set_determinism(
