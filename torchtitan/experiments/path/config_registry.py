@@ -597,7 +597,7 @@ def _vit_optimizer_config(
                 pattern=MUP_PATTERN,
                 optimizer_name="AdamW",
                 lr_mult=1.0 / m,
-                optimizer_kwargs={**common},
+                optimizer_kwargs={**common, "weight_decay": wd * m},
             ),
         )
     return OptimizersContainer.Config(
@@ -606,9 +606,8 @@ def _vit_optimizer_config(
 
 
 def _vit(
-    flavor: str, *, mup: bool, lr: float = 3e-4, wd: float = 3e-2
+    flavor: str, *, mup: bool, lr: float = 3e-4, wd: float = 0.0125
 ) -> PathTrainer.Config:
-    wd = float(os.environ.get("VIT_WD", wd))
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
     num_nodes = int(
