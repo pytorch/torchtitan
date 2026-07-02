@@ -111,6 +111,7 @@ repos:
         - "--exclude=http://localhost:.*"
         - "--exclude=http://127.0.0.1:.*"
         - "--exclude=tcp://localhost:.*"
+        - "--exclude=https?://[^/]*\\.comma\\.life.*"  # internal hosts, unreachable from public runners
         - "--max-retries=5"
         - "--retry-wait-time=10"
         - "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"

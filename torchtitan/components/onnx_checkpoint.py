@@ -121,7 +121,9 @@ class OnnxCheckpointManager(CheckpointManager):
         if dist.get_world_size() == 1:
             return
 
-        barrier_group = dist.new_group(timeout=_ARTIFACT_BARRIER_TIMEOUT)
+        barrier_group = cast(
+            dist.ProcessGroup, dist.new_group(timeout=_ARTIFACT_BARRIER_TIMEOUT)
+        )
         try:
             dist.barrier(
                 group=barrier_group,
