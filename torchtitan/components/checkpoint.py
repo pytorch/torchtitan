@@ -258,6 +258,13 @@ class CheckpointManager(Configurable):
         `--checkpoint.no_initial_load_model_only` to override the default setting.
         """
 
+        allow_partial_initial_load: bool = False
+        """
+        Allow checkpoint loads to skip keys that are present in the target state dict
+        but missing from the checkpoint. This is useful when loading initial model
+        weights into a model whose state dict has added keys.
+        """
+
         initial_load_in_hf: bool = False
         """
         Enable the use of HuggingFace's safetensors format for checkpointing. This will
@@ -470,6 +477,7 @@ class CheckpointManager(Configurable):
         self.exclude_from_loading = config.exclude_from_loading
         self.initial_load_path = config.initial_load_path
         self.initial_load_model_only = config.initial_load_model_only
+        self.allow_partial_initial_load = config.allow_partial_initial_load
         self.initial_load_in_hf = config.initial_load_in_hf
         self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
 
@@ -683,6 +691,9 @@ class CheckpointManager(Configurable):
                 state_dict,
                 storage_reader=FsspecReader(checkpoint_id),
                 checkpoint_id=checkpoint_id,
+                planner=dcp.DefaultLoadPlanner(
+                    allow_partial_load=self.allow_partial_initial_load
+                ),
             )
 
             # TODO: Since we flatten the model states in state_dict, we need to
