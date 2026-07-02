@@ -499,6 +499,7 @@ def scaling_report(spec, points, bigvit_width=None):
 USAGE = (
     "usage: python -m torchtitan.experiments.mup.routine {collect|report} <model> [manifest]\n"
     "       python -m torchtitan.experiments.mup.routine scaling <model> <w256=job,...> [bigvit_width]\n"
+    "       python -m torchtitan.experiments.mup.routine val <model> --ckpt <dcp_dir> [--label L] [--smoke]\n"
     "       python -m torchtitan.experiments.mup.routine suite <model> [--arrays w256=J,...] [--big-array J] [--ckpt DIR]"
 )
 
@@ -516,10 +517,13 @@ def _flags(argv):
     i = 0
     while i < len(argv):
         token = argv[i]
-        if token.startswith("--") and i + 1 < len(argv):
+        if not token.startswith("--"):
+            i += 1
+        elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
             flags[token[2:]] = argv[i + 1]
             i += 2
         else:
+            flags[token[2:]] = True
             i += 1
     return flags
 
@@ -578,28 +582,54 @@ def _scaling(spec, arrays, big_width, produced, skipped):
     produced.append(("scaling", scaling_report(spec, points, big_width)))
 
 
-def _val(spec, ckpt, skipped):
-    try:
-        from . import valset_report as vr
+def _ckpt_flavor(ckpt):
+    from ..path.config_registry import VIT_WIDTHS
 
-        names = ", ".join(vr.ATOMIC_VALSETS)
-    except Exception:
-        names = "day_straight, night_straight, left_lane_change, right_lane_change"
-    if ckpt and os.path.isdir(ckpt):
-        skipped.append(
-            (
-                "val",
-                f"checkpoint {ckpt} present; scoring the 4 atomic valsets [{names}] "
-                "is a GPU job via valset_report.evaluate_all",
-            )
-        )
-    else:
-        skipped.append(
-            (
-                "val",
-                f"needs a checkpoint dir (--ckpt DIR) to score the 4 atomic valsets [{names}]",
-            )
-        )
+    for part in reversed(ckpt.rstrip("/").split(os.sep)):
+        if part in VIT_WIDTHS:
+            return part
+    sys.exit(
+        f"cannot infer flavor from {ckpt}; expected a path segment in "
+        f"{sorted(VIT_WIDTHS)}"
+    )
+
+
+def _val_verb(spec, argv):
+    from . import valset_report as vr
+
+    flags = _flags(argv)
+    ckpt = flags.get("ckpt")
+    if not isinstance(ckpt, str) or not os.path.isdir(ckpt):
+        sys.exit("val needs --ckpt <dcp checkpoint dir>")
+    flavor = _ckpt_flavor(ckpt)
+    label = flags.get("label") or "/".join(ckpt.rstrip("/").split(os.sep)[-2:])
+    steps = 1 if flags.get("smoke") else None
+
+    model = vr.load_model(flavor, ckpt, mup=True)
+    per = vr.evaluate_all(model, vr.load_loss(), steps=steps)
+
+    os.makedirs(spec.report_dir, exist_ok=True)
+    metrics_path = f"{spec.report_dir}/valset_metrics.json"
+    results = {}
+    if os.path.exists(metrics_path):
+        with open(metrics_path) as fh:
+            results = json.load(fh)
+    results[label] = per
+    with open(metrics_path, "w") as fh:
+        json.dump(results, fh, indent=2)
+
+    for name, m in per.items():
+        print(f"{name}: loss={m['loss']:.4f} n_samples={m['n_samples']}")
+    out = vr.build_report(results, report_dir=spec.report_dir, read_only=True)
+    print(f"report -> {out}")
+
+
+def _val(spec, ckpt, skipped):
+    cmd = (
+        f"python -m torchtitan.experiments.mup.routine val {spec.name} "
+        f"--ckpt {ckpt or 'DIR'}"
+    )
+    skipped.append(("val", f"GPU job; run: {cmd}"))
 
 
 def _suite(spec, argv):
@@ -624,7 +654,7 @@ def _suite(spec, argv):
 
 def main():
     argv = sys.argv[1:]
-    if len(argv) < 2 or argv[0] not in ("collect", "report", "scaling", "suite"):
+    if len(argv) < 2 or argv[0] not in ("collect", "report", "scaling", "val", "suite"):
         sys.exit(USAGE)
     verb, model = argv[0], argv[1]
     if model not in SPECS:
@@ -635,6 +665,10 @@ def main():
 
     if verb == "suite":
         _suite(spec, argv[2:])
+        return
+
+    if verb == "val":
+        _val_verb(spec, argv[2:])
         return
 
     if verb == "scaling":

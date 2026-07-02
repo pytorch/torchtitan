@@ -10,9 +10,9 @@ import getpass
 import os
 from dataclasses import replace
 
-import torch
-
 from xx.common.basedir import XX_BASEDIR
+
+import torch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VALSET_DIR = os.path.join(XX_BASEDIR, "projects/prune_10m")
@@ -27,6 +27,11 @@ REPORT_DIR = f"/raid.unprotected/reports/{os.getenv('REPORT_USER') or getpass.ge
 
 def valset_path(name: str) -> str:
     return os.path.join(VALSET_DIR, ATOMIC_VALSETS[name])
+
+
+def valset_len(name: str) -> int:
+    with open(valset_path(name)) as fh:
+        return sum(1 for line in fh if line.strip())
 
 
 def valset_dataloader_config(name: str):
@@ -51,7 +56,9 @@ def accumulate(model, loss_fn, batches, device, max_steps=-1):
         for k, v in metrics.items():
             if k == "loss":
                 continue
-            metric_sums[k] = metric_sums.get(k, torch.zeros((), device=device)) + v.float().sum()
+            metric_sums[k] = (
+                metric_sums.get(k, torch.zeros((), device=device)) + v.float().sum()
+            )
     samples = total_samples.clamp(min=1.0)
     out = {"loss": float((total_loss / samples).item())}
     for k, v in metric_sums.items():
@@ -61,15 +68,17 @@ def accumulate(model, loss_fn, batches, device, max_steps=-1):
 
 
 def evaluate_valset(
-    model, loss_fn, name, *, device=DEVICE, steps=-1, local_batch_size=16
+    model, loss_fn, name, *, device=DEVICE, steps=None, local_batch_size=16
 ):
+    if steps is None:
+        steps = (valset_len(name) + local_batch_size - 1) // local_batch_size
     loader = valset_dataloader_config(name).build(
         dp_world_size=1,
         dp_rank=0,
         tokenizer=None,
         seq_len=1,
         local_batch_size=local_batch_size,
-        validation_steps=max(steps, 1),
+        validation_steps=steps,
     )
     try:
         return accumulate(model, loss_fn, loader, device, steps)
@@ -78,12 +87,17 @@ def evaluate_valset(
 
 
 def evaluate_all(
-    model, loss_fn, *, device=DEVICE, steps=-1, local_batch_size=16, names=None
+    model, loss_fn, *, device=DEVICE, steps=None, local_batch_size=16, names=None
 ):
     names = names or list(ATOMIC_VALSETS)
     return {
         name: evaluate_valset(
-            model, loss_fn, name, device=device, steps=steps, local_batch_size=local_batch_size
+            model,
+            loss_fn,
+            name,
+            device=device,
+            steps=steps,
+            local_batch_size=local_batch_size,
         )
         for name in names
     }
@@ -106,6 +120,12 @@ def load_model(flavor, checkpoint_dir, *, mup, device=DEVICE):
     return model.eval()
 
 
+def load_loss(device=DEVICE):
+    from ..path.vit import PlanViTLoss
+
+    return PlanViTLoss(PlanViTLoss.Config()).to(torch.device(device))
+
+
 def metric_table(results):
     keys = sorted({k for per in results.values() for m in per.values() for k in m})
     cols = ["run", "valset", *keys]
@@ -118,12 +138,39 @@ def metric_table(results):
             row = [label, name]
             for k in keys:
                 v = m.get(k)
-                row.append("-" if v is None else f"{v:.4f}" if isinstance(v, float) else str(v))
+                row.append(
+                    "-" if v is None else f"{v:.4f}" if isinstance(v, float) else str(v)
+                )
             rows.append(row)
     return cols, rows
 
 
-def build_report(results, *, report_dir=REPORT_DIR, report_name="valset_metrics", read_only=False):
+def _metric_figs(results):
+    import plotly.graph_objects as go
+
+    keys = sorted(
+        {
+            k
+            for per in results.values()
+            for m in per.values()
+            for k in m
+            if k != "n_samples"
+        }
+    )
+    figs = []
+    for key in keys:
+        fig = go.Figure()
+        for label, per in results.items():
+            names = [n for n in ATOMIC_VALSETS if n in per and key in per[n]]
+            fig.add_trace(go.Bar(x=names, y=[per[n][key] for n in names], name=label))
+        fig.update_layout(barmode="group", title_text=key, width=1000, height=380)
+        figs.append(fig)
+    return figs
+
+
+def build_report(
+    results, *, report_dir=REPORT_DIR, report_name="valset_metrics", read_only=False
+):
     from xx.release_tests.lib.base_report import (
         BaseReport,
         BaseReportConfig,
@@ -132,6 +179,7 @@ def build_report(results, *, report_dir=REPORT_DIR, report_name="valset_metrics"
     from xx.release_tests.lib.utils import MarkdownWriter
 
     cols, rows = metric_table(results)
+    figs = _metric_figs(results)
 
     class Report(BaseReport):
         def run_data(self):
@@ -145,6 +193,8 @@ def build_report(results, *, report_dir=REPORT_DIR, report_name="valset_metrics"
                 "per-run validation loss and driving metrics over the atomic valsets "
                 "(day / night straight, left / right lane change), each scored on its own list."
             )
+            for fig in figs:
+                mw.add_plot(fig, xscale=None, yscale=None)
             with mw.html_table(cols, borders=True) as t:
                 for row in rows:
                     t.row(row)
