@@ -10,7 +10,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, cast
+from typing import cast
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -88,6 +88,19 @@ class FaultTolerantTrainer(Trainer):
             config.tokenizer.build(tokenizer_path=config.hf_assets_path)
             if config.tokenizer is not None
             else None
+        )
+
+        # build dataloader
+        self.dataloader = config.dataloader.build(
+            dp_world_size=batch_degree,
+            dp_rank=batch_rank,
+            tokenizer=self.tokenizer,
+            seq_len=config.training.seq_len,
+            local_batch_size=(
+                config.parallelism.pipeline_parallel_microbatch_size
+                if parallel_dims.pp_enabled
+                else config.training.local_batch_size
+            ),
         )
 
         # build model (using meta init)
@@ -169,19 +182,6 @@ class FaultTolerantTrainer(Trainer):
             config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
-
-        # build dataloader
-        self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=(
-                config.parallelism.pipeline_parallel_microbatch_size
-                if parallel_dims.pp_enabled
-                else config.training.local_batch_size
-            ),
-        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -390,15 +390,21 @@ class FaultTolerantTrainer(Trainer):
         )
 
         # Collect all microbatches on CPU and count total valid tokens
-        batches = []
+        microbatches = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
-            step_microbatches = []
-            for _ in range(num_microbatches):
+            if parallel_dims.pp_enabled:
+                input_dict = []
+                labels = []
+                for _ in range(num_microbatches):
+                    mb_input_dict, mb_labels = next(data_iterator)
+                    local_valid_tokens += (mb_labels != IGNORE_INDEX).sum()
+                    input_dict.append(mb_input_dict)
+                    labels.append(mb_labels)
+            else:
                 input_dict, labels = next(data_iterator)
                 local_valid_tokens += (labels != IGNORE_INDEX).sum()
-                step_microbatches.append((input_dict, labels))
-            batches.append(step_microbatches)
+            microbatches.append((input_dict, labels))
 
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
@@ -410,74 +416,31 @@ class FaultTolerantTrainer(Trainer):
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
-        # Process each batch: move to GPU, forward/backward, then free
+        # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
-        for step_microbatches in batches:
+        for input_dict, labels in microbatches:
             if parallel_dims.pp_enabled:
-                arg_mbs: list[tuple[torch.Tensor, ...]] = []
-                kwarg_mbs: list[dict[str, Any]] = []
-                target_mbs: list[torch.Tensor] | None = (
-                    [] if self.pp_has_last_stage else None
-                )
-
-                for input_dict, labels in step_microbatches:
-                    for k, v in input_dict.items():
+                assert isinstance(input_dict, list)
+                assert isinstance(labels, list)
+                for mb_input_dict in input_dict:
+                    for k, v in mb_input_dict.items():
                         if isinstance(v, torch.Tensor):
-                            input_dict[k] = v.to(self.device)
-                    labels = labels.to(self.device)
-
-                    inputs, labels, extra_kwargs = self.post_dataloading_process(
-                        input_dict, labels
-                    )
-                    if self.pp_has_first_stage:
-                        arg_mbs.append((inputs,))
-                    kwarg_mbs.append(extra_kwargs)
-                    if target_mbs is not None:
-                        target_mbs.append(labels)
-
-                loss_kwargs = {"global_valid_tokens": global_valid_tokens}
-                with self.train_context():
-                    losses = [] if self.pp_has_last_stage else None
-                    if self.pp_has_first_stage:
-                        self.pp_schedule.step(
-                            arg_mbs,
-                            kwargs=kwarg_mbs,
-                            target=target_mbs,
-                            losses=losses,
-                            loss_kwargs=loss_kwargs,
-                            return_outputs=False,
-                            pre_split_args_kwargs=True,
-                        )
-                    else:
-                        self.pp_schedule.step(
-                            kwargs=kwarg_mbs,
-                            target=target_mbs,
-                            losses=losses,
-                            loss_kwargs=loss_kwargs,
-                            return_outputs=False,
-                            pre_split_args_kwargs=True,
-                        )
-
-                # accumulate losses across pipeline microbatches
-                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                if self.pp_has_last_stage:
-                    assert losses is not None
-                    # All loss classes scale by global_valid_tokens internally
-                    loss = torch.sum(torch.stack(losses)).to(self.device)
-                else:
-                    loss = torch.tensor([-1.0], device=self.device)
+                            mb_input_dict[k] = v.to(self.device)
+                labels = [mb_labels.to(self.device) for mb_labels in labels]
             else:
-                assert len(step_microbatches) == 1
-                input_dict, labels = step_microbatches[0]
+                assert isinstance(input_dict, dict)
+                assert isinstance(labels, torch.Tensor)
+                # Move tensors to GPU
                 for k, v in input_dict.items():
                     if isinstance(v, torch.Tensor):
                         input_dict[k] = v.to(self.device)
                 labels = labels.to(self.device)
-                loss = self.forward_backward_step(
-                    input_dict=input_dict,
-                    labels=labels,
-                    global_valid_tokens=global_valid_tokens,
-                )
+
+            loss = self.forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(
