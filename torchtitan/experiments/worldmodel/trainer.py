@@ -10,7 +10,7 @@ import os
 import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 from xx.common.helpers import parse_info
 
@@ -35,6 +35,12 @@ from .tokenizer import WorldModelTokenizer
 
 
 ValidationContext = Callable[[], AbstractContextManager[None]]
+
+
+@dataclass(kw_only=True, slots=True)
+class WorldModelFloat8Config:
+    enable: bool = True
+    emulate: bool = False
 
 
 def _batch_size(inputs: dict[str, torch.Tensor]) -> int:
@@ -301,6 +307,9 @@ class WorldModelTrainer(Trainer):
         dataloader: WorldModelDataLoader.Config
         tokenizer: WorldModelTokenizer.Config
         validator: WorldModelValidator.Config
+        float8: WorldModelFloat8Config = field(
+            default_factory=WorldModelFloat8Config
+        )
         pose_dropout: float
         noise_scheduler_steps: int
         no_noise_conditioning_frames_prob: float
@@ -311,6 +320,7 @@ class WorldModelTrainer(Trainer):
             _validate_worldmodel_config(self)
 
     def __init__(self, config: Config):
+        _apply_worldmodel_float8(config)
         super().__init__(config)
         self.dtype = TORCH_DTYPE_MAP[config.training.mixed_precision_param]
         self.train_noise_scheduler = RFScheduler(steps=config.noise_scheduler_steps).to(
@@ -537,6 +547,22 @@ def _floating_model_dtype(model: torch.nn.Module) -> torch.dtype:
         if param.is_floating_point():
             return param.dtype
     return torch.float32
+
+
+def _apply_worldmodel_float8(config: WorldModelTrainer.Config) -> None:
+    if not config.float8.enable:
+        return
+    assert config.model_spec is not None
+    from .model_config import _blocks_only_float8
+
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    converter = _blocks_only_float8(
+        model_compile_enabled=model_compile_enabled,
+        emulate=config.float8.emulate,
+    )
+    converter.build().convert(config.model_spec.model)
 
 
 def _validate_worldmodel_config(config: WorldModelTrainer.Config) -> None:

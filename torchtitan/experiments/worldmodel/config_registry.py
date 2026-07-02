@@ -75,15 +75,7 @@ def worldmodel() -> WorldModelTrainer.Config:
             compressor_model=COMPRESSOR_MODEL,
             compressor_in_channels="auto",
         ),
-        model_spec=model_registry(
-            "base",
-            converters=[
-                _blocks_only_float8(
-                    model_compile_enabled=compile_config.enable
-                    and "model" in compile_config.components,
-                )
-            ],
-        ),
+        model_spec=model_registry("base"),
         dataloader=_dataloader_config(split="train"),
         optimizer=optimizer,
         lr_scheduler=LRSchedulersContainer.Config(
