@@ -10,9 +10,17 @@ from typing import Any
 from unittest import mock
 
 import torch
+import torch.fx as fx
 import torch.nn as nn
 import torch.utils._pytree as pytree
-from torch.distributed.pipelining.schedules import _PipelineContext
+from torch.distributed.pipelining.schedules import (
+    _Action,
+    _PipelineContext,
+    BACKWARD_INPUT,
+    FORWARD,
+    FULL_BACKWARD,
+    OVERLAP_F_B,
+)
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
@@ -24,7 +32,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.graph_pp import multiplex_fw_bw_graph
 from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
+    _build_graph_pp_overlap_graphs,
     _build_stage_graphs,
     _compile_graph_pp_module,
     _execute_graph_module,
@@ -49,12 +59,18 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 
 
+def _boxed_run(gm: fx.GraphModule, args: list[object]):
+    return fx.Interpreter(gm).boxed_run(args)
+
+
 def _build_test_stage_graphs(
     stage,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     target: Any,
     loss_kwargs: dict[str, Any],
+    *,
+    compile_graphs: bool = True,
 ) -> None:
     _build_stage_graphs(
         stage,
@@ -66,6 +82,7 @@ def _build_test_stage_graphs(
         compile_config=stage.compile_config,
         model_config=stage.model_config,
         parallelism=stage.parallelism,
+        compile_graphs=compile_graphs,
     )
 
 
@@ -504,6 +521,209 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(args, [])
         self.assertTrue(torch.equal(out, x + y))
 
+    def test_full_inductor_overlap_builds_multiplexed_graph(self) -> None:
+        full_compile = GraphTrainerCompileConfig(
+            enable=True,
+            enable_passes=True,
+            inductor_compilation="full",
+        )
+        torch.manual_seed(0)
+        x = torch.randn(2, 4, requires_grad=True)
+        stage0_mod = nn.Linear(4, 3)
+        stage1_mod = nn.Linear(4, 3)
+        stage0 = _make_test_stage(
+            stage0_mod,
+            is_last=False,
+            loss_fn=None,
+            stage_index=0,
+            output_grads=torch.empty_like(stage0_mod(x)),
+        )
+        stage1 = _make_test_stage(
+            stage1_mod,
+            is_last=False,
+            loss_fn=None,
+            stage_index=1,
+            output_grads=torch.empty_like(stage1_mod(x)),
+        )
+        _build_test_stage_graphs(stage0, (x,), {}, None, {}, compile_graphs=False)
+        _build_test_stage_graphs(stage1, (x,), {}, None, {}, compile_graphs=False)
+        stage0.compile_config = full_compile
+        stage1.compile_config = full_compile
+        schedule = types.SimpleNamespace(
+            _stages=[stage0, stage1],
+            rank=0,
+            pipeline_order_with_comms={
+                0: [
+                    _Action(
+                        -1,
+                        OVERLAP_F_B,
+                        None,
+                        (
+                            _Action(0, FORWARD, 0, None),
+                            _Action(1, FULL_BACKWARD, 0, None),
+                        ),
+                    )
+                ]
+            },
+        )
+
+        with mock.patch(
+            "torchtitan.experiments.graph_trainer.graph_pp.graph_builder."
+            "_compile_graph_pp_module",
+            side_effect=lambda gm, *, compile_config, graph_name: gm,
+        ) as compile_graph:
+            overlap_graphs = _build_graph_pp_overlap_graphs(
+                schedule,
+                compile_config=full_compile,
+            )
+
+        self.assertIn((0, 1), overlap_graphs)
+        compile_graph.assert_called_once()
+        self.assertIs(compile_graph.call_args.kwargs["compile_config"], full_compile)
+
+    def test_overlap_backward_input_sub_action_errors(self) -> None:
+        schedule = types.SimpleNamespace(
+            _stages=[],
+            rank=0,
+            pipeline_order_with_comms={
+                0: [
+                    _Action(
+                        -1,
+                        OVERLAP_F_B,
+                        None,
+                        (
+                            _Action(0, FORWARD, 0, None),
+                            _Action(1, BACKWARD_INPUT, 0, None),
+                        ),
+                    )
+                ]
+            },
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "BACKWARD_INPUT"):
+            _build_graph_pp_overlap_graphs(
+                schedule,
+                compile_config=GraphTrainerCompileConfig(enable_passes=False),
+            )
+
+    def test_multiplexed_graph_copies_backward_meta_to_forward_fake_mode(
+        self,
+    ) -> None:
+        # This is intentionally a focused synthetic metadata test. Real model
+        # traces only expose the final Inductor failure; this constructs the
+        # exact GraphPP multiplexing case where foreign unbacked base symbols
+        # must be copied before derived SymInt expressions.
+        import sympy
+        from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        bw_mode = FakeTensorMode(shape_env=ShapeEnv(), allow_non_fake_inputs=True)
+        fw_mode = FakeTensorMode(shape_env=ShapeEnv(), allow_non_fake_inputs=True)
+        bw_shape_sym = bw_mode.shape_env.create_unbacked_symint()
+        bw_shape_sym_2 = bw_mode.shape_env.create_unbacked_symint()
+        bw_raw_sym = bw_mode.shape_env.create_unbacked_symint()
+        bw_raw_sym_2 = bw_mode.shape_env.create_unbacked_symint()
+        fw_sym = fw_mode.shape_env.create_unbacked_symint()
+        with bw_mode:
+            bw_fake = bw_mode.from_tensor(
+                torch.empty((bw_shape_sym + bw_shape_sym_2, 4), device="meta")
+            )
+        with fw_mode:
+            fw_fake = fw_mode.from_tensor(torch.empty((fw_sym, 4), device="meta"))
+
+        bw_gm = torch.fx.symbolic_trace(lambda x: (x * 2,))
+        fw_gm = torch.fx.symbolic_trace(lambda x: (x + 1,))
+        bw_gm.graph.find_nodes(op="placeholder")[0].meta["val"] = bw_fake
+        fw_gm.graph.find_nodes(op="placeholder")[0].meta["val"] = fw_fake
+        bw_call_node = next(
+            node for node in bw_gm.graph.nodes if node.op == "call_function"
+        )
+        bw_call_node.meta["raw_symints"] = (
+            bw_raw_sym + 2 * bw_raw_sym_2,
+            bw_raw_sym,
+            bw_raw_sym_2,
+        )
+        bw_call_node.meta["unbacked_bindings"] = {
+            bw_raw_sym.node.expr: ("lhs",),
+            bw_raw_sym_2.node.expr: ("rhs",),
+        }
+
+        multiplexed = multiplex_fw_bw_graph(fw_gm, bw_gm)
+        placeholders = multiplexed.graph.find_nodes(op="placeholder")
+        bw_meta = placeholders[0].meta["val"]
+        fw_meta = placeholders[1].meta["val"]
+        multiplexed_call_node = next(
+            node for node in multiplexed.graph.nodes if "raw_symints" in node.meta
+        )
+
+        self.assertIsInstance(bw_meta, FakeTensor)
+        self.assertIsInstance(fw_meta, FakeTensor)
+        self.assertIs(bw_meta.fake_mode, fw_meta.fake_mode)
+        self.assertIs(
+            bw_meta.size()[0].node.shape_env,
+            fw_meta.fake_mode.shape_env,
+        )
+        for symint in multiplexed_call_node.meta["raw_symints"]:
+            self.assertIs(symint.node.shape_env, fw_meta.fake_mode.shape_env)
+        raw_derived, raw_lhs, raw_rhs = multiplexed_call_node.meta["raw_symints"]
+        self.assertEqual(
+            len(bw_meta.size()[0].node.expr.free_symbols),
+            2,
+        )
+        self.assertEqual(
+            sympy.simplify(
+                raw_derived.node.expr - (raw_lhs.node.expr + 2 * raw_rhs.node.expr)
+            ),
+            0,
+        )
+        self.assertEqual(
+            set(multiplexed_call_node.meta["unbacked_bindings"].keys()),
+            {raw_lhs.node.expr, raw_rhs.node.expr},
+        )
+
+    def test_multiplexed_graph_errors_on_unsupported_symbolic_meta(self) -> None:
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        bw_mode = FakeTensorMode(shape_env=ShapeEnv(), allow_non_fake_inputs=True)
+        fw_mode = FakeTensorMode(shape_env=ShapeEnv(), allow_non_fake_inputs=True)
+        bw_sym = bw_mode.shape_env.create_unbacked_symint()
+        fw_sym = fw_mode.shape_env.create_unbacked_symint()
+        with fw_mode:
+            fw_fake = fw_mode.from_tensor(torch.empty((fw_sym, 4), device="meta"))
+        bw_gm = torch.fx.symbolic_trace(lambda x: (x * 2,))
+        fw_gm = torch.fx.symbolic_trace(lambda x: (x + 1,))
+        fw_gm.graph.find_nodes(op="placeholder")[0].meta["val"] = fw_fake
+        bw_call_node = next(
+            node for node in bw_gm.graph.nodes if node.op == "call_function"
+        )
+        bw_call_node.meta["unsupported_symbool"] = bw_sym > 0
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported symbolic metadata"):
+            multiplex_fw_bw_graph(fw_gm, bw_gm)
+
+    def test_multiplexed_graph_errors_on_missing_backward_get_attr_remap(self) -> None:
+        class BackwardGraphWithAttr(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.register_buffer("scale", torch.ones(2))
+
+            def forward(self, x: torch.Tensor) -> tuple[torch.Tensor]:
+                return (x + self.scale,)
+
+        fw_gm = torch.fx.symbolic_trace(lambda x: (x + 1,))
+        bw_gm = torch.fx.symbolic_trace(BackwardGraphWithAttr())
+
+        with (
+            mock.patch(
+                "torchtitan.experiments.graph_trainer.graph_pp.graph_multiplex."
+                "_copy_prefixed_get_attrs",
+                return_value={},
+            ),
+            self.assertRaisesRegex(ValueError, "missing copied get_attr target"),
+        ):
+            multiplex_fw_bw_graph(fw_gm, bw_gm)
+
     def test_intermediate_stage_graphs_match_eager_grads(self) -> None:
         torch.manual_seed(0)
         model = nn.Linear(4, 3)
@@ -630,6 +850,97 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
         )
 
         self.assertTrue(torch.equal(model.tokens, initial_tokens + x.detach().sum()))
+
+    def test_multiplexed_graph_returns_backward_then_forward_outputs(self) -> None:
+        torch.manual_seed(0)
+        model = nn.Linear(4, 3)
+        x = torch.randn(2, 4, requires_grad=True)
+        output_grad = torch.randn(2, 3)
+        stage = _make_test_stage(
+            model,
+            is_last=False,
+            loss_fn=None,
+            stage_index=0,
+            output_grads=output_grad,
+        )
+        _build_test_stage_graphs(stage, (x,), {}, None, {})
+
+        state = list(model.parameters())
+        fw_outputs = _boxed_run(
+            stage.graphs.modules.fw,
+            [*state, x],
+        )
+        bw_outputs = _boxed_run(
+            stage.graphs.modules.full_bw,
+            [*fw_outputs[1:], output_grad],
+        )
+        multiplexed = multiplex_fw_bw_graph(
+            stage.graphs.modules.fw,
+            stage.graphs.modules.full_bw,
+        )
+
+        multiplexed_outputs = _boxed_run(
+            multiplexed,
+            [*fw_outputs[1:], output_grad, *state, x],
+        )
+
+        expected_outputs = [*bw_outputs, *fw_outputs]
+        self.assertEqual(len(multiplexed_outputs), len(expected_outputs))
+        for actual, expected in zip(
+            multiplexed_outputs,
+            expected_outputs,
+            strict=True,
+        ):
+            self.assertTrue(torch.allclose(actual, expected))
+
+    def test_multiplexed_graph_is_prebuilt_for_overlap_action(self) -> None:
+        torch.manual_seed(0)
+        compile_config = GraphTrainerCompileConfig(enable_passes=False)
+        x = torch.randn(2, 4, requires_grad=True)
+        stage0_mod = nn.Linear(4, 3)
+        stage1_mod = nn.Linear(4, 3)
+        stage0 = _make_test_stage(
+            stage0_mod,
+            is_last=False,
+            loss_fn=None,
+            stage_index=0,
+            compile_config=compile_config,
+            output_grads=torch.empty_like(stage0_mod(x)),
+        )
+        stage1 = _make_test_stage(
+            stage1_mod,
+            is_last=False,
+            loss_fn=None,
+            stage_index=1,
+            compile_config=compile_config,
+            output_grads=torch.empty_like(stage1_mod(x)),
+        )
+        _build_test_stage_graphs(stage0, (x,), {}, None, {}, compile_graphs=False)
+        _build_test_stage_graphs(stage1, (x,), {}, None, {}, compile_graphs=False)
+        schedule = types.SimpleNamespace(
+            _stages=[stage0, stage1],
+            rank=0,
+            pipeline_order_with_comms={
+                0: [
+                    _Action(
+                        -1,
+                        OVERLAP_F_B,
+                        None,
+                        (
+                            _Action(0, FORWARD, 0, None),
+                            _Action(1, FULL_BACKWARD, 0, None),
+                        ),
+                    )
+                ]
+            },
+        )
+
+        overlap_graphs = _build_graph_pp_overlap_graphs(
+            schedule,
+            compile_config=compile_config,
+        )
+
+        self.assertIn((0, 1), overlap_graphs)
 
     def test_last_stage_graphs_return_loss_and_input_grad(self) -> None:
         torch.manual_seed(0)
