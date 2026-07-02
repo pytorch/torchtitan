@@ -25,7 +25,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
-from torchtitan.experiments.graph_trainer.graph_pp import partition_joint_graph
+from torchtitan.experiments.graph_trainer.graph_pp import (
+    partition_joint_graph,
+    split_di_dw_graph,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
 from torchtitan.experiments.graph_trainer.graph_pp.utils import flatten_graph_values
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -444,6 +447,68 @@ class GraphPPPartitionFSDPTest(_GraphPPDsv3FSDPTest):
 
         self.assertTrue(torch.equal(fw_outputs[0], joint_outputs[0]))
         _assert_tensor_sequence_equal(self, bw_outputs, joint_outputs[1:])
+
+
+class GraphPPSplitDiDwTest(unittest.TestCase):
+    def test_real_dsv3_moe_block_split_reconstructs_backward(self) -> None:
+        traced_block = _trace_dsv3_moe_block_stage()
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced_block.traced,
+            num_fwd_outputs=1,
+            backward_only_input_indices=(len(traced_block.traced.example_inputs) - 1,),
+        )
+        split = split_di_dw_graph(
+            bw_module,
+            num_param_grads=traced_block.num_param_grad_values,
+        )
+
+        self.assertIsNotNone(split)
+        if split is None:
+            self.fail("Expected dI/dW split for decoder block with input grad")
+        self.assertEqual(split.num_input_grads, 1)
+        self.assertGreater(len(split.bw_dw_input_names), 0)
+
+        fw_args = [
+            traced_block.flat_inputs[index] for index in meta.fwd_flat_input_indices
+        ]
+        fw_outputs = _boxed_run(fw_module, list(fw_args))
+        bw_args = _backward_args_from_partition(
+            meta,
+            fw_outputs,
+            (traced_block.output_grad,),
+        )
+        full_bw_outputs = _boxed_run(bw_module, list(bw_args))
+
+        di_outputs = _boxed_run(split.bw_di_module, list(bw_args))
+        input_grads_to_prev = di_outputs[: split.num_input_grads]
+        dw_live_ins = di_outputs[split.num_input_grads :]
+        dw_outputs = _boxed_run(split.bw_dw_module, list(dw_live_ins))
+
+        _assert_tensor_sequence_equal(
+            self,
+            input_grads_to_prev,
+            full_bw_outputs[traced_block.num_param_grad_values :],
+        )
+        _assert_tensor_sequence_equal(
+            self,
+            dw_outputs,
+            full_bw_outputs[: traced_block.num_param_grad_values],
+        )
+
+    def test_real_dsv3_moe_block_without_input_grad_skips_split(self) -> None:
+        traced_block = _trace_dsv3_moe_block_stage(include_input_grad=False)
+        _, bw_module, _ = partition_joint_graph(
+            traced_block.traced,
+            num_fwd_outputs=1,
+            backward_only_input_indices=(len(traced_block.traced.example_inputs) - 1,),
+        )
+
+        split = split_di_dw_graph(
+            bw_module,
+            num_param_grads=traced_block.num_param_grad_values,
+        )
+
+        self.assertIsNone(split)
 
 
 if __name__ == "__main__":
