@@ -45,21 +45,27 @@ def run_config(run):
         return None
     cmd = d.get("command", "")
     selected = cmd.rsplit("selected_args:", 1)[-1]
+
+    def arg(pattern):
+        return re.search(pattern, selected) or re.search(pattern, cmd)
+
     width = re.search(r"CONFIG=vit_mup_w(\d+)", cmd)
-    lr = re.search(r"--optimizer\.lr=([0-9.eE+-]+)", selected) or re.search(
-        r"--optimizer\.lr=([0-9.eE+-]+)", cmd
-    )
+    lr = arg(r"--optimizer\.lr=([0-9.eE+-]+)")
+    steps = arg(r"--training\.steps=(\d+)")
     return {
         "width": int(width.group(1)) if width else None,
         "lr": lr.group(1) if lr else None,
+        "steps": int(steps.group(1)) if steps else None,
         "status": d.get("status"),
     }
 
 
 def collect_scaling(spec, arrays, lr=SCALING_LR, max_tasks=8):
     points = []
+    steps_seen = set()
     for want_width, array_job_id in sorted(arrays.items()):
-        losses, runs, seen = [], [], set()
+        seen = set()
+        by_steps = defaultdict(list)
         for task_index in range(max_tasks):
             rid = run_id(array_job_id, task_index)
             cfg = run_config(rid)
@@ -69,8 +75,7 @@ def collect_scaling(spec, arrays, lr=SCALING_LR, max_tasks=8):
                 seen.add(cfg["width"])
             loss = tail_loss(rid, spec.loss_key)
             if loss is not None:
-                losses.append(loss)
-                runs.append(rid)
+                by_steps[cfg["steps"]].append((loss, rid))
         width = want_width
         if seen and want_width not in seen:
             width = sorted(seen)[0]
@@ -80,9 +85,27 @@ def collect_scaling(spec, arrays, lr=SCALING_LR, max_tasks=8):
                 want_width,
                 sorted(seen),
             )
-        mean = sum(losses) / len(losses) if losses else None
-        points.append((width, mean, len(losses), runs))
-    if not any(n for _, _, n, _ in points):
+        if not by_steps:
+            points.append((width, None, None, 0, []))
+        for steps, hits in by_steps.items():
+            steps_seen.add(steps)
+            losses = [x for x, _ in hits]
+            points.append(
+                (
+                    width,
+                    steps,
+                    sum(losses) / len(losses),
+                    len(hits),
+                    [r for _, r in hits],
+                )
+            )
+    if len(steps_seen) > 1:
+        logger.warning(
+            "mixed --training.steps %s across arrays %s",
+            sorted(steps_seen, key=str),
+            arrays,
+        )
+    if not any(n for *_, n, _ in points):
         raise RuntimeError(f"collected zero losses from arrays {arrays}")
     return points
 
@@ -117,12 +140,26 @@ def read_manifest(path):
     return runs
 
 
+def _rows(seeded, source):
+    results = []
+    for (param, width, lr, steps), hits in seeded.items():
+        losses = [x for x, _ in hits if x is not None]
+        mean = sum(losses) / len(losses) if losses else None
+        results.append(
+            (param, width, lr, steps, mean, len(losses), [r for _, r in hits])
+        )
+    if not any(n for *_, n, _ in results):
+        raise RuntimeError(f"collected zero losses {source}")
+    return results
+
+
 def collect(spec, manifest_path=None):
     path = manifest_path or spec.manifest_path
     declared = defaultdict(set)
     for param, width, _seed, lrs, array_job_id in read_manifest(path):
         declared[(param, width, array_job_id)].update(lrs)
     seeded = defaultdict(list)
+    steps_seen = set()
     for (param, width, array_job_id), lrs in declared.items():
         seen = set()
         for task_index in count():
@@ -131,7 +168,8 @@ def collect(spec, manifest_path=None):
             if cfg is None or cfg["lr"] is None:
                 break
             seen.add(cfg["lr"])
-            seeded[(param, width, cfg["lr"])].append(
+            steps_seen.add(cfg["steps"])
+            seeded[(param, width, cfg["lr"], cfg["steps"])].append(
                 (tail_loss(rid, spec.loss_key), rid)
             )
         if seen != lrs:
@@ -142,18 +180,18 @@ def collect(spec, manifest_path=None):
                 path,
                 sorted(lrs),
             )
-    results = []
-    for (param, width, lr), hits in seeded.items():
-        losses = [x for x, _ in hits if x is not None]
-        mean = sum(losses) / len(losses) if losses else None
-        results.append((param, width, lr, mean, len(losses), [r for _, r in hits]))
-    if not any(n for *_, n, _ in results):
-        raise RuntimeError(f"collected zero losses reading manifest {path}")
-    return results
+    if len(steps_seen) > 1:
+        logger.warning(
+            "mixed --training.steps %s reading manifest %s",
+            sorted(steps_seen, key=str),
+            path,
+        )
+    return _rows(seeded, f"reading manifest {path}")
 
 
 def collect_arrays(spec, arrays, max_tasks=8):
     seeded = defaultdict(list)
+    steps_seen = set()
     for want_width, array_job_id in sorted(arrays.items()):
         for task_index in range(max_tasks):
             rid = run_id(array_job_id, task_index)
@@ -161,22 +199,22 @@ def collect_arrays(spec, arrays, max_tasks=8):
             if cfg is None or cfg["lr"] is None:
                 continue
             width = cfg["width"] or want_width
-            seeded[("mup", width, cfg["lr"])].append(
+            steps_seen.add(cfg["steps"])
+            seeded[("mup", width, cfg["lr"], cfg["steps"])].append(
                 (tail_loss(rid, spec.loss_key), rid)
             )
-    results = []
-    for (param, width, lr), hits in seeded.items():
-        losses = [x for x, _ in hits if x is not None]
-        mean = sum(losses) / len(losses) if losses else None
-        results.append((param, width, lr, mean, len(losses), [r for _, r in hits]))
-    if not any(n for *_, n, _ in results):
-        raise RuntimeError(f"collected zero losses from arrays {arrays}")
-    return results
+    if len(steps_seen) > 1:
+        logger.warning(
+            "mixed --training.steps %s across arrays %s",
+            sorted(steps_seen, key=str),
+            arrays,
+        )
+    return _rows(seeded, f"from arrays {arrays}")
 
 
 def hp_table(spec, results):
     per_width = {}
-    for param, width, lr, loss, _n, _runs in results:
+    for param, width, lr, _steps, loss, _n, _runs in results:
         if param != "mup" or loss is None:
             continue
         cur = per_width.get(width)
@@ -205,9 +243,13 @@ def fit_predictor(basins):
     return popt, r2, (lambda w: float(f(np.array([w], float), *popt)[0]))
 
 
+def _steps_text(steps_seen):
+    return "/".join(str(s) for s in sorted(steps_seen)) or "?"
+
+
 def _curves(results):
     curves = {m: {} for m in MODES}
-    for param, width, lr, loss, _n, _runs in results:
+    for param, width, lr, _steps, loss, _n, _runs in results:
         if param not in curves or loss is None:
             continue
         curves[param].setdefault(width, []).append((float(lr), loss))
@@ -244,7 +286,7 @@ def _mutransfer_fig(curves, widths, lr_ticks):
     )
     fig.update_yaxes(title_text="train loss (tail mean)")
     fig.update_layout(
-        title_text="muTransfer (mup): final train loss vs lr per width",
+        title_text="muTransfer (mup): train loss vs lr per width",
         width=1000,
         height=460,
     )
@@ -314,8 +356,9 @@ def build_report(spec, results=None):
     curves = _curves(results)
     widths = sorted({w for mode in curves for w in curves[mode]})
     lr_ticks = sorted(
-        {(float(lr), lr) for _, _, lr, loss, _, _ in results if loss is not None}
+        {(float(lr), lr) for _, _, lr, _, loss, _, _ in results if loss is not None}
     )
+    steps = _steps_text({s for _, _, _, s, _, _, _ in results if s is not None})
 
     class Report(BaseReport):
         def run_data(self):
@@ -338,8 +381,9 @@ def build_report(spec, results=None):
 
             mw.print(f"2. transferred muP lr = {transferred}", heading=2)
             mw.print(
-                "conditions: 2000-step runs, warmup 51, cosine decay over the final "
-                "80%; the transferred lr is specific to this horizon and schedule."
+                f"conditions: {steps}-step runs, warmup 51, cosine decay over the "
+                "final 80%; the transferred lr is specific to this horizon and "
+                "schedule."
             )
             with mw.html_table(["width", "optimal lr", "basin"], borders=True) as t:
                 for w in sorted(per_width):
@@ -347,15 +391,16 @@ def build_report(spec, results=None):
 
             mw.print("runs", heading=2)
             with mw.html_table(
-                ["param", "width", "lr", "seeds", "loss", "reporters"], borders=True
+                ["param", "width", "lr", "steps", "seeds", "loss", "reporters"],
+                borders=True,
             ) as t:
-                for param, width, lr, loss, n, runs in sorted(results):
+                for param, width, lr, run_steps, loss, n, runs in sorted(results):
                     loss_s = f"{loss:.6f}" if loss is not None else "N/A"
                     links = " ".join(
                         f'<a href="{RUN_PAGE_URL.format(run_id=r)}">{r[:8]}</a>'
                         for r in runs
                     )
-                    t.row([param, width, lr, n, loss_s, links])
+                    t.row([param, width, lr, run_steps, n, loss_s, links])
             return mw
 
     Report(
@@ -377,7 +422,8 @@ def scaling_report(spec, points, bigvit_width=None):
     )
     from xx.release_tests.lib.utils import MarkdownWriter
 
-    basins = {w: loss for w, loss, _n, _runs in points if loss is not None}
+    basins = {w: loss for w, _s, loss, _n, _runs in points if loss is not None}
+    steps = _steps_text({s for _, s, loss, _, _ in points if loss is not None})
     predictor = None
     if len(basins) >= 3:
         try:
@@ -396,9 +442,10 @@ def scaling_report(spec, points, bigvit_width=None):
             mw.filename = f"{spec.report_dir}/scaling.html"
             mw.print(f"{spec.name} width-scaling", heading=1)
             mw.print(
-                "loss(w) at the fixed muP lr, averaged over seeds. loss is the mean "
-                f"over each run's trailing {TAIL_FRACTION:.0%} of logged "
-                f"{spec.loss_key}. width is read from each run's logged CONFIG."
+                f"loss(w) at the fixed muP lr after {steps} steps, averaged over "
+                f"seeds. loss is the mean over each run's trailing "
+                f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}. width and steps are "
+                "read from each run's logged command."
             )
             if predictor is not None:
                 popt, r2, predict = predictor
@@ -427,15 +474,15 @@ def scaling_report(spec, points, bigvit_width=None):
                 )
 
             with mw.html_table(
-                ["width", "loss", "seeds", "reporters"], borders=True
+                ["width", "steps", "loss", "seeds", "reporters"], borders=True
             ) as t:
-                for width, loss, n, runs in sorted(points):
+                for width, run_steps, loss, n, runs in sorted(points):
                     loss_s = f"{loss:.6f}" if loss is not None else "N/A"
                     links = " ".join(
                         f'<a href="{RUN_PAGE_URL.format(run_id=r)}">{r[:8]}</a>'
                         for r in runs
                     )
-                    t.row([width, loss_s, n, links])
+                    t.row([width, run_steps, loss_s, n, links])
             return mw
 
     Report(
@@ -523,8 +570,11 @@ def _scaling(spec, arrays, big_width, produced, skipped):
         return
     points = collect_scaling(spec, arrays)
     print("scaling points:")
-    for width, loss, n, _runs in sorted(points):
-        print(f"  w{width}: loss={'N/A' if loss is None else round(loss, 4)} seeds={n}")
+    for width, steps, loss, n, _runs in sorted(points):
+        print(
+            f"  w{width}: loss={'N/A' if loss is None else round(loss, 4)} "
+            f"seeds={n} steps={steps}"
+        )
     produced.append(("scaling", scaling_report(spec, points, big_width)))
 
 
@@ -593,9 +643,10 @@ def main():
         arrays = _arrays(argv[2])
         big_width = int(argv[3]) if len(argv) > 3 else None
         points = collect_scaling(spec, arrays)
-        for width, loss, n, _runs in sorted(points):
+        for width, steps, loss, n, _runs in sorted(points):
             print(
-                f"w{width}: loss={'N/A' if loss is None else round(loss, 4)} seeds={n}"
+                f"w{width}: loss={'N/A' if loss is None else round(loss, 4)} "
+                f"seeds={n} steps={steps}"
             )
         print(f"report -> {scaling_report(spec, points, big_width)}")
         return
