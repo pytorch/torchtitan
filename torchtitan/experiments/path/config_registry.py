@@ -151,6 +151,9 @@ def _dp_degrees() -> tuple[int, int]:
     return num_nodes, local_world_size
 
 
+dp_degrees = _dp_degrees
+
+
 def _path(flavor: str) -> PathTrainer.Config:
     steps = 1024 * 100
     validation_freq = 1024
@@ -567,6 +570,9 @@ def _vit_model_config(flavor: str, *, mup: bool) -> PlanViT.Config:
     )
 
 
+vit_model_config = _vit_model_config
+
+
 def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
     return ModelSpec(
         name="path",
@@ -590,6 +596,9 @@ def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
         dataset=os.path.join(XX_BASEDIR, dataset),
         pipeline_dir=BASE_DIR_GT_10M,
     )
+
+
+vit_dataloader_config = _vit_dataloader_config
 
 
 def _vit_optimizer_config(
@@ -659,6 +668,9 @@ def _vit(
         fps=SUPERCOMBO_FPS,
         debug=DebugConfig(seed=0),
     )
+
+
+vit = _vit
 
 
 def vit_standard_w256() -> PathTrainer.Config:

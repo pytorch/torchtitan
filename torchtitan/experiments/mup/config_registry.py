@@ -16,7 +16,7 @@ from xx.datasets.constants import DEFAULT_10M_TRAIN_LIST
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 
-from ..path.config_registry import _dp_degrees, _vit
+from ..path.config_registry import dp_degrees as _dp_degrees, vit as _vit
 from ..path.trainer import PathTrainer
 
 BIG_FLAVOR = "w2048"

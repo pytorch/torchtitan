@@ -36,7 +36,7 @@ def valset_len(name: str) -> int:
 
 
 def valset_dataloader_config(name: str):
-    from ..path.config_registry import _vit_dataloader_config
+    from ..path.config_registry import vit_dataloader_config as _vit_dataloader_config
 
     return replace(_vit_dataloader_config(split="val"), dataset=valset_path(name))
 
@@ -92,7 +92,7 @@ def load_model(flavor, checkpoint_dir, *, mup):
         set_model_state_dict,
     )
 
-    from ..path.config_registry import _vit_model_config
+    from ..path.config_registry import vit_model_config as _vit_model_config
 
     model = _vit_model_config(flavor, mup=mup).build()
     model.to_empty(device=DEVICE)
