@@ -17,7 +17,7 @@ from urllib.request import urlopen
 
 from torchtitan.tools.logging import logger
 
-from .spec import MODES, REPORTERV2_API_URL, SPECS
+from .spec import MODES, REPORTERV2_API_URL, SPECS, TRAIN_DATASET_LABEL
 
 PALETTE = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A"]
 RUN_PAGE_URL = REPORTERV2_API_URL + "/runs/{run_id}"
@@ -212,38 +212,8 @@ def hp_table(spec, results):
     return per_width, transferred
 
 
-def fit_predictor(basins):
-    import numpy as np
-    from scipy.optimize import curve_fit
-
-    ws = np.array(sorted(basins), dtype=float)
-    ys = np.array([basins[int(w)] for w in ws])
-
-    def f(w, linf, a, alpha):
-        return linf + a * w ** (-alpha)
-
-    popt, _ = curve_fit(f, ws, ys, p0=[ys.min() - 1, 50.0, 0.5], maxfev=20000)
-    pred = f(ws, *popt)
-    ss_res = float(np.sum((ys - pred) ** 2))
-    ss_tot = float(np.sum((ys - ys.mean()) ** 2))
-    r2 = 1 - ss_res / ss_tot if ss_tot else float("nan")
-    return popt, r2, (lambda w: float(f(np.array([w], float), *popt)[0]))
-
-
 def _steps_text(steps_seen):
     return "/".join(str(s) for s in sorted(steps_seen)) or "?"
-
-
-def _curves(results):
-    curves = {m: {} for m in MODES}
-    for param, width, lr, _steps, loss, _n, _runs in results:
-        if param not in curves or loss is None:
-            continue
-        curves[param].setdefault(width, []).append((float(lr), loss))
-    for mode in curves:
-        for width in curves[mode]:
-            curves[mode][width].sort()
-    return curves
 
 
 def _mutransfer_fig(curves, widths, lr_ticks):
@@ -279,40 +249,27 @@ def _mutransfer_fig(curves, widths, lr_ticks):
     return fig
 
 
-def _predictor_fig(basins, popt, pred):
-    import numpy as np
+def _scaling_fig(basins):
     import plotly.graph_objects as go
 
-    linf, a, alpha = popt
     ws = sorted(basins)
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
             x=ws,
             y=[basins[w] for w in ws],
-            mode="markers",
+            mode="lines+markers",
             name="measured basin",
             marker={"size": 10},
         )
     )
-    xs = np.geomspace(min(ws), pred[0], 60)
-    fig.add_trace(
-        go.Scatter(
-            x=xs, y=[linf + a * x ** (-alpha) for x in xs], mode="lines", name="fit"
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[pred[0]],
-            y=[pred[1]],
-            mode="markers",
-            name="prediction",
-            marker={"size": 12, "symbol": "x"},
-        )
-    )
     fig.update_xaxes(type="log", title_text="width")
     fig.update_yaxes(title_text="muP basin loss (at optimal lr)")
-    fig.update_layout(title_text="width-scaling loss predictor", width=1000, height=460)
+    fig.update_layout(
+        title_text="width-scaling loss (measured points, no fit)",
+        width=1000,
+        height=460,
+    )
     return fig
 
 
@@ -368,7 +325,15 @@ def build_report(spec, results=None):
     with open(f"{spec.report_dir}/mup_hparams.json", "w") as fh:
         json.dump(hp, fh, indent=2)
 
-    curves = _curves(results)
+    curves = {m: {} for m in MODES}
+    for param, width, lr, _steps, loss, _n, _runs in results:
+        if param not in curves or loss is None:
+            continue
+        curves[param].setdefault(width, []).append((float(lr), loss))
+    for mode in curves:
+        for width in curves[mode]:
+            curves[mode][width].sort()
+
     widths = sorted({w for mode in curves for w in curves[mode]})
     lr_ticks = sorted(
         {(float(lr), lr) for _, _, lr, _, loss, _, _ in results if loss is not None}
@@ -393,8 +358,8 @@ def build_report(spec, results=None):
         mw.print(f"2. transferred muP lr = {transferred}", heading=2)
         mw.print(
             f"conditions: {steps}-step runs, warmup 51, cosine decay over the "
-            "final 80%; the transferred lr is specific to this horizon and "
-            "schedule."
+            f"final 80%, trained on the {TRAIN_DATASET_LABEL}; the transferred lr "
+            "is specific to this horizon and schedule."
         )
         with mw.html_table(["width", "optimal lr", "basin"], borders=True) as t:
             for w in sorted(per_width):
@@ -413,17 +378,11 @@ def build_report(spec, results=None):
     return spec.report_url()
 
 
-def scaling_report(spec, points, bigvit_width=None):
+def scaling_report(spec, points):
     from xx.release_tests.lib.utils import MarkdownWriter
 
     basins = {w: loss for w, _s, loss, _n, _runs in points if loss is not None}
     steps = _steps_text({s for _, s, loss, _, _ in points if loss is not None})
-    predictor = None
-    if len(basins) >= 3:
-        try:
-            predictor = fit_predictor(basins)
-        except ImportError:
-            logger.warning("scipy unavailable; skipping scaling fit")
 
     os.makedirs(spec.report_dir, exist_ok=True)
 
@@ -432,33 +391,15 @@ def scaling_report(spec, points, bigvit_width=None):
         mw.filename = f"{spec.report_dir}/scaling.html"
         mw.print(f"{spec.name} width-scaling", heading=1)
         mw.print(
-            f"loss(w) at the fixed muP lr after {steps} steps, averaged over "
-            f"seeds. loss is the mean over each run's trailing "
-            f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}. width and steps are "
-            "read from each run's logged command."
+            f"loss(w) at the fixed muP lr after {steps} steps on the "
+            f"{TRAIN_DATASET_LABEL}, averaged over seeds. loss is the mean over "
+            f"each run's trailing {TAIL_FRACTION:.0%} of logged {spec.loss_key}. "
+            "width and steps are read from each run's logged command."
         )
-        if predictor is not None:
-            popt, r2, predict = predictor
-            linf, a, alpha = popt
-            pred = (
-                (bigvit_width, predict(bigvit_width))
-                if bigvit_width is not None
-                else (max(basins), basins[max(basins)])
-            )
-            mw.print(
-                f"fit loss(w) = L_inf + A*w^(-alpha): L_inf={linf:.3f}, A={a:.3f}, "
-                f"alpha={alpha:.3f}, R2={r2:.3f}"
-            )
-            if bigvit_width is not None:
-                mw.print(
-                    f"predicted bigvit w{bigvit_width} loss = "
-                    f"{predict(bigvit_width):.4f}"
-                )
-            mw.add_plot(_predictor_fig(basins, popt, pred), xscale=None, yscale=None)
+        if basins:
+            mw.add_plot(_scaling_fig(basins), xscale=None, yscale=None)
         else:
-            mw.print(
-                "need >=3 width points (and scipy) to fit; showing raw points only."
-            )
+            mw.print("no width points with a measured loss yet.")
 
         with mw.html_table(
             ["width", "steps", "loss", "seeds", "reporters"], borders=True
@@ -473,9 +414,9 @@ def scaling_report(spec, points, bigvit_width=None):
 
 USAGE = (
     "usage: python -m torchtitan.experiments.mup.routine {collect|report} <model> [manifest]\n"
-    "       python -m torchtitan.experiments.mup.routine scaling <model> <w256=job,...> [bigvit_width]\n"
+    "       python -m torchtitan.experiments.mup.routine scaling <model> <w256=job,...>\n"
     "       python -m torchtitan.experiments.mup.routine val <model> --ckpt <dcp_dir> [--label L] [--smoke]\n"
-    "       python -m torchtitan.experiments.mup.routine suite <model> [--arrays w256=J,...] [--big-array J] [--ckpt DIR]"
+    "       python -m torchtitan.experiments.mup.routine suite <model> [--arrays w256=J,...] [--ckpt DIR]"
 )
 
 
@@ -503,24 +444,22 @@ def _flags(argv):
     return flags
 
 
-def _coord_check(spec, produced, skipped):
+def _coord_check(spec):
     import torch
 
     cmd = f"python -m torchtitan.experiments.mup.coord_check {spec.name}"
     if not torch.cuda.is_available():
-        skipped.append(("coord_check", f"needs a GPU; run: {cmd}"))
-        return
+        return "coord_check", f"needs a GPU; run: {cmd}", False
     from . import coord_check as cc
 
     try:
         cc.run(spec)
     except Exception as exc:
-        skipped.append(("coord_check", f"{type(exc).__name__}: {exc}; run: {cmd}"))
-        return
-    produced.append(("coord_check", spec.report_url("coord_check")))
+        return "coord_check", f"{type(exc).__name__}: {exc}; run: {cmd}", False
+    return "coord_check", spec.report_url("coord_check"), True
 
 
-def _mutransfer(spec, arrays, produced, skipped):
+def _mutransfer(spec, arrays):
     if arrays:
         results = collect_arrays(spec, arrays)
         source = "arrays"
@@ -528,23 +467,23 @@ def _mutransfer(spec, arrays, produced, skipped):
         results = collect(spec)
         source = spec.manifest_path
     else:
-        skipped.append(
-            ("mutransfer", f"no --arrays and no manifest at {spec.manifest_path}")
+        return (
+            "mutransfer",
+            f"no --arrays and no manifest at {spec.manifest_path}",
+            False,
         )
-        return
     per_width, transferred = hp_table(spec, results)
     print(f"muTransfer from {source}:")
     for w in sorted(per_width):
         lr, basin = per_width[w]
         print(f"  w{w}: lr*={lr} basin={basin:.4f}")
     print(f"  transferred muP lr = {transferred}")
-    produced.append(("mutransfer", build_report(spec, results=results)))
+    return "mutransfer", build_report(spec, results=results), True
 
 
-def _scaling(spec, arrays, big_width, produced, skipped):
+def _scaling(spec, arrays):
     if not arrays:
-        skipped.append(("scaling", "needs --arrays w256=job,..."))
-        return
+        return "scaling", "needs --arrays w256=job,...", False
     points = collect_scaling(spec, arrays)
     print("scaling points:")
     for width, steps, loss, n, _runs in sorted(points):
@@ -552,7 +491,7 @@ def _scaling(spec, arrays, big_width, produced, skipped):
             f"  w{width}: loss={'N/A' if loss is None else round(loss, 4)} "
             f"seeds={n} steps={steps}"
         )
-    produced.append(("scaling", scaling_report(spec, points, big_width)))
+    return "scaling", scaling_report(spec, points), True
 
 
 def _ckpt_flavor(ckpt):
@@ -567,7 +506,7 @@ def _ckpt_flavor(ckpt):
     )
 
 
-def _val_verb(spec, argv):
+def run_val(spec, argv):
     from . import valset_report as vr
 
     flags = _flags(argv)
@@ -600,24 +539,25 @@ def _val_verb(spec, argv):
     print(f"report -> {out}")
 
 
-def _suite(spec, argv):
+def run_suite(spec, argv):
     flags = _flags(argv)
     arrays = _arrays(flags["arrays"]) if "arrays" in flags else None
-    big_width = int(flags["big-array"]) if "big-array" in flags else None
     ckpt = flags.get("ckpt")
 
     os.makedirs(spec.report_dir, exist_ok=True)
-    produced, skipped = [], []
-    _coord_check(spec, produced, skipped)
-    _mutransfer(spec, arrays, produced, skipped)
-    _scaling(spec, arrays, big_width, produced, skipped)
-    skipped.append(
+    outcomes = [
+        _coord_check(spec),
+        _mutransfer(spec, arrays),
+        _scaling(spec, arrays),
         (
             "val",
             "GPU job; run: python -m torchtitan.experiments.mup.routine val "
             f"{spec.name} --ckpt {ckpt or 'DIR'}",
-        )
-    )
+            False,
+        ),
+    ]
+    produced = [(label, url) for label, url, ok in outcomes if ok]
+    skipped = [(label, reason) for label, reason, ok in outcomes if not ok]
 
     print(f"\nsuite index for {spec.name} -> {spec.report_dir}")
     for label, url in produced:
@@ -638,25 +578,24 @@ def main():
         sys.exit(f"{model} has no muP configs landed yet; nothing to collect.")
 
     if verb == "suite":
-        _suite(spec, argv[2:])
+        run_suite(spec, argv[2:])
         return
 
     if verb == "val":
-        _val_verb(spec, argv[2:])
+        run_val(spec, argv[2:])
         return
 
     if verb == "scaling":
         if len(argv) < 3:
             sys.exit(USAGE)
         arrays = _arrays(argv[2])
-        big_width = int(argv[3]) if len(argv) > 3 else None
         points = collect_scaling(spec, arrays)
         for width, steps, loss, n, _runs in sorted(points):
             print(
                 f"w{width}: loss={'N/A' if loss is None else round(loss, 4)} "
                 f"seeds={n} steps={steps}"
             )
-        print(f"report -> {scaling_report(spec, points, big_width)}")
+        print(f"report -> {scaling_report(spec, points)}")
         return
 
     manifest = argv[2] if len(argv) > 2 else None
