@@ -74,3 +74,9 @@ testpaths = ["tests"]
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
 replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "fla.*", "reporterv2"]  # optional dependencies
 search-path = ["../pytorch"]  # local built pytorch
+
+[[tool.pyrefly.sub-config]]
+matches = "torchtitan/components/unique_counter.py"
+
+[tool.pyrefly.sub-config.errors]
+no-matching-overload = false

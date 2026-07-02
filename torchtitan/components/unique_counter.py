@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 from __future__ import annotations
 
 import json
@@ -17,9 +11,7 @@ from torch import distributed as dist
 class StringUniqueCounter:
     """Counts unique strings while syncing only newly seen local strings."""
 
-    def __init__(
-        self, store_prefix: str = "unique_ids", sync_timeout_seconds: int = 30
-    ) -> None:
+    def __init__(self, store_prefix: str = "unique_ids", sync_timeout_seconds: int = 30) -> None:
         self._store_prefix = store_prefix
         self._sync_timeout_seconds = sync_timeout_seconds
         self._sync_idx = 0
@@ -56,19 +48,11 @@ class StringUniqueCounter:
             self._pending_ids.clear()
             return len(self._global_ids)
 
-        group_ranks = (
-            dist.get_process_group_ranks(group)
-            if group is not None
-            else list(range(world_size))
-        )
-        store = dist.PrefixStore(
-            self._store_prefix, dist.distributed_c10d._get_default_store()
-        )
+        group_ranks = dist.get_process_group_ranks(group) if group is not None else list(range(world_size))
+        store = dist.PrefixStore(self._store_prefix, dist.distributed_c10d._get_default_store())
         store_key_prefix = f"sync:{self._sync_idx}:rank:"
         self._sync_idx += 1
-        store.set(
-            f"{store_key_prefix}{global_rank}", json.dumps(list(self._pending_ids))
-        )
+        store.set(f"{store_key_prefix}{global_rank}", json.dumps(list(self._pending_ids)))
         store_keys = [f"{store_key_prefix}{rank}" for rank in group_ranks]
 
         global_count = None
@@ -83,7 +67,6 @@ class StringUniqueCounter:
         src_rank = group_ranks[0]
         dist.broadcast_object_list(count_holder, src=src_rank, group=group)
         self._pending_ids.clear()
-        assert count_holder[0] is not None
         return int(count_holder[0])
 
     def state_dict(self) -> dict[str, Any]:
