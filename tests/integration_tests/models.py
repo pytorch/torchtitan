@@ -176,6 +176,37 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3_5 --config qwen35_debugmodel_varlen_attn",
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--training.steps 10",
+                    "--comm.train_timeout_seconds 600",
+                    "activation-checkpoint:selective",
+                ]
+            ],
+            "Qwen3.5 FSDP+VARLEN_ATTN + per op SAC",
+            "qwen3_5_fsdp+varlen_attn+per_op_sac",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3_5 --config qwen35_debugmodel_varlen_attn",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--training.steps 10",
+                    "--comm.train_timeout_seconds 600",
+                    "activation-checkpoint:selective",
+                ]
+            ],
+            "Qwen3.5 TP+VARLEN_ATTN + per op SAC",
+            "qwen3_5_tp+varlen_attn+per_op_sac",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
         # Integration Test Cases for gpt-oss
         OverrideDefinitions(
             [
