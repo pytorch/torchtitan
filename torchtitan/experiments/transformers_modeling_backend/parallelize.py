@@ -101,6 +101,15 @@ def parallelize_hf_transformers(
 
     if parallel_dims.cp_enabled:
         model.set_cp_mesh(parallel_dims.get_mesh("cp"))
+        # Collect HFFlexAttention kernel modules for CP wrapping
+        flex_modules = []
+        for layer in model.layers.values():
+            if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "_flex_kernel"):
+                flex_modules.append(layer.self_attn._flex_kernel)
+        if flex_modules:
+            from torchtitan.distributed.context_parallel import apply_cp_to_forward
+
+            apply_cp_to_forward(flex_modules, parallel_dims.get_mesh("cp"))
         logger.info("Applied Context Parallel to the model")
 
     return model

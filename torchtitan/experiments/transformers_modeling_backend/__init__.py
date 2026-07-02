@@ -59,8 +59,24 @@ flavors = {
             n_kv_heads=16,
         ),
     ),
+    "sft_debugmodel": HFTransformerModel.Config(
+        titan_dense_config=TitanDenseModelConfig(
+            dim=256,
+            n_layers=2,
+            n_heads=16,
+            n_kv_heads=16,
+            attn_mask_type="block_causal",
+        ),
+        attn_implementation="flex_torchtitan",
+    ),
     "full": HFTransformerModel.Config(
         titan_dense_config=TitanDenseModelConfig(),
+    ),
+    "sft_full": HFTransformerModel.Config(
+        titan_dense_config=TitanDenseModelConfig(
+            attn_mask_type="block_causal",
+        ),
+        attn_implementation="flex_torchtitan",
     ),
 }
 
