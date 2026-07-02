@@ -59,7 +59,11 @@ class Trainer(ForgeEngine):
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
-            local_batch_size=self.dataloader_batch_size,
+            local_batch_size=(
+                config.parallelism.pipeline_parallel_microbatch_size
+                if self.parallel_dims.pp_enabled
+                else config.training.local_batch_size
+            ),
         )
 
         model_args = self.model_config
@@ -227,63 +231,6 @@ class Trainer(ForgeEngine):
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
 
-    def _move_batch_to_device(
-        self, input_dict: dict[str, Any], labels: torch.Tensor
-    ) -> tuple[dict[str, Any], torch.Tensor]:
-        for k, v in input_dict.items():
-            if isinstance(v, torch.Tensor):
-                input_dict[k] = v.to(self.device)
-        return input_dict, labels.to(self.device)
-
-    def _forward_backward_pp_step(
-        self,
-        microbatches: list[tuple[dict[str, Any], torch.Tensor]],
-        global_valid_tokens: float,
-    ) -> torch.Tensor:
-        arg_mbs: list[tuple[torch.Tensor, ...]] = []
-        kwarg_mbs: list[dict[str, Any]] = []
-        target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
-
-        for input_dict, labels in microbatches:
-            input_dict, labels = self._move_batch_to_device(input_dict, labels)
-            inputs, labels, extra_kwargs = self.post_dataloading_process(
-                input_dict, labels
-            )
-            if self.pp_has_first_stage:
-                arg_mbs.append((inputs,))
-            kwarg_mbs.append(extra_kwargs)
-            if target_mbs is not None:
-                target_mbs.append(labels)
-
-        with self.train_context():
-            losses = [] if self.pp_has_last_stage else None
-            if self.pp_has_first_stage:
-                self.pp_schedule.step(
-                    arg_mbs,
-                    kwargs=kwarg_mbs,
-                    target=target_mbs,
-                    losses=losses,
-                    pre_split_args_kwargs=True,
-                )
-            else:
-                self.pp_schedule.step(
-                    kwargs=kwarg_mbs,
-                    target=target_mbs,
-                    losses=losses,
-                    pre_split_args_kwargs=True,
-                )
-
-        # accumulate losses across pipeline microbatches
-        # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-        if self.pp_has_last_stage:
-            assert losses is not None
-            # Rescale PP loss to be "local loss sum / global valid tokens"
-            # because each microbatch could have different number of valid tokens
-            return (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
-                self.device
-            )
-        return torch.tensor([-1.0], device=self.device)
-
     def train_step(
         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
@@ -292,13 +239,19 @@ class Trainer(ForgeEngine):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
+        num_microbatches = (
+            self.config.training.local_batch_size
+            // self.config.parallelism.pipeline_parallel_microbatch_size
+            if parallel_dims.pp_enabled
+            else 1
+        )
 
         # Collect all microbatches on CPU and count total valid tokens
         batches = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
             step_microbatches = []
-            for _ in range(self.num_pipeline_microbatches):
+            for _ in range(num_microbatches):
                 input_dict, labels = next(data_iterator)
                 local_valid_tokens += (labels != IGNORE_INDEX).sum()
                 step_microbatches.append((input_dict, labels))
@@ -318,13 +271,63 @@ class Trainer(ForgeEngine):
         accumulated_losses = []
         for step_microbatches in batches:
             if parallel_dims.pp_enabled:
-                loss = self._forward_backward_pp_step(
-                    step_microbatches,
-                    global_valid_tokens=global_valid_tokens,
+                arg_mbs: list[tuple[torch.Tensor, ...]] = []
+                kwarg_mbs: list[dict[str, Any]] = []
+                target_mbs: list[torch.Tensor] | None = (
+                    [] if self.pp_has_last_stage else None
                 )
+
+                for input_dict, labels in step_microbatches:
+                    for k, v in input_dict.items():
+                        if isinstance(v, torch.Tensor):
+                            input_dict[k] = v.to(self.device)
+                    labels = labels.to(self.device)
+
+                    inputs, labels, extra_kwargs = self.post_dataloading_process(
+                        input_dict, labels
+                    )
+                    if self.pp_has_first_stage:
+                        arg_mbs.append((inputs,))
+                    kwarg_mbs.append(extra_kwargs)
+                    if target_mbs is not None:
+                        target_mbs.append(labels)
+
+                with self.train_context():
+                    losses = [] if self.pp_has_last_stage else None
+                    if self.pp_has_first_stage:
+                        self.pp_schedule.step(
+                            arg_mbs,
+                            kwargs=kwarg_mbs,
+                            target=target_mbs,
+                            losses=losses,
+                            pre_split_args_kwargs=True,
+                        )
+                    else:
+                        self.pp_schedule.step(
+                            kwargs=kwarg_mbs,
+                            target=target_mbs,
+                            losses=losses,
+                            pre_split_args_kwargs=True,
+                        )
+
+                # accumulate losses across pipeline microbatches
+                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
+                if self.pp_has_last_stage:
+                    assert losses is not None
+                    # Rescale PP loss to be "local loss sum / global valid tokens"
+                    # because each microbatch could have different number of valid tokens
+                    loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
+                        self.device
+                    )
+                else:
+                    loss = torch.tensor([-1.0], device=self.device)
             else:
                 assert len(step_microbatches) == 1
-                input_dict, labels = self._move_batch_to_device(*step_microbatches[0])
+                input_dict, labels = step_microbatches[0]
+                for k, v in input_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        input_dict[k] = v.to(self.device)
+                labels = labels.to(self.device)
                 loss = self.forward_backward_step(
                     input_dict=input_dict,
                     labels=labels,
