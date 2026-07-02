@@ -14,6 +14,7 @@ from xx.common.basedir import XX_BASEDIR
 import torch
 
 from .routine import render_report
+from .spec import TRAIN_DATASET_LABEL
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VALSET_DIR = os.path.join(XX_BASEDIR, "projects/prune_10m")
@@ -161,7 +162,9 @@ def build_report(results, *, report_dir, report_name="valset_metrics", read_only
         mw.print("prune10m atomic valset metrics", heading=1)
         mw.print(
             "per-run validation loss and driving metrics over the atomic valsets "
-            "(day / night straight, left / right lane change), each scored on its own list."
+            "(day / night straight, left / right lane change), each scored on its "
+            f"own list; runs to date were trained on the {TRAIN_DATASET_LABEL} "
+            "(a checkpoint's own training dataset is named in its run label)."
         )
         for fig in figs:
             mw.add_plot(fig, xscale=None, yscale=None)

@@ -17,7 +17,7 @@ from urllib.request import urlopen
 
 from torchtitan.tools.logging import logger
 
-from .spec import MODES, REPORTERV2_API_URL, SPECS
+from .spec import MODES, REPORTERV2_API_URL, SPECS, TRAIN_DATASET_LABEL
 
 PALETTE = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A"]
 RUN_PAGE_URL = REPORTERV2_API_URL + "/runs/{run_id}"
@@ -354,8 +354,8 @@ def build_report(spec, results=None):
         mw.print(f"2. transferred muP lr = {transferred}", heading=2)
         mw.print(
             f"conditions: {steps}-step runs, warmup 51, cosine decay over the "
-            "final 80%; the transferred lr is specific to this horizon and "
-            "schedule."
+            f"final 80%, trained on the {TRAIN_DATASET_LABEL}; the transferred lr "
+            "is specific to this horizon and schedule."
         )
         with mw.html_table(["width", "optimal lr", "basin"], borders=True) as t:
             for w in sorted(per_width):
@@ -387,10 +387,10 @@ def scaling_report(spec, points):
         mw.filename = f"{spec.report_dir}/scaling.html"
         mw.print(f"{spec.name} width-scaling", heading=1)
         mw.print(
-            f"loss(w) at the fixed muP lr after {steps} steps, averaged over "
-            f"seeds. loss is the mean over each run's trailing "
-            f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}. width and steps are "
-            "read from each run's logged command."
+            f"loss(w) at the fixed muP lr after {steps} steps on the "
+            f"{TRAIN_DATASET_LABEL}, averaged over seeds. loss is the mean over "
+            f"each run's trailing {TAIL_FRACTION:.0%} of logged {spec.loss_key}. "
+            "width and steps are read from each run's logged command."
         )
         if basins:
             mw.add_plot(_scaling_fig(basins), xscale=None, yscale=None)

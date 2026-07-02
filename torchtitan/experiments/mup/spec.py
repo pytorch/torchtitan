@@ -13,6 +13,7 @@ from dataclasses import dataclass
 REPORTERV2_API_URL = "https://reporterv2.comma.life"
 TRAIN_LOSS_KEY = "loss_metrics/global_avg_loss"
 MODES = ("standard", "mup")
+TRAIN_DATASET_LABEL = "random-100k proxy list (prune10m_random100k_seed0.txt)"
 
 
 def _report_user() -> str:
