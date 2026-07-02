@@ -212,24 +212,6 @@ def hp_table(spec, results):
     return per_width, transferred
 
 
-def fit_predictor(basins):
-    import numpy as np
-    from scipy.optimize import curve_fit
-
-    ws = np.array(sorted(basins), dtype=float)
-    ys = np.array([basins[int(w)] for w in ws])
-
-    def f(w, linf, a, alpha):
-        return linf + a * w ** (-alpha)
-
-    popt, _ = curve_fit(f, ws, ys, p0=[ys.min() - 1, 50.0, 0.5], maxfev=20000)
-    pred = f(ws, *popt)
-    ss_res = float(np.sum((ys - pred) ** 2))
-    ss_tot = float(np.sum((ys - ys.mean()) ** 2))
-    r2 = 1 - ss_res / ss_tot if ss_tot else float("nan")
-    return popt, r2, (lambda w: float(f(np.array([w], float), *popt)[0]))
-
-
 def _steps_text(steps_seen):
     return "/".join(str(s) for s in sorted(steps_seen)) or "?"
 
@@ -267,40 +249,23 @@ def _mutransfer_fig(curves, widths, lr_ticks):
     return fig
 
 
-def _predictor_fig(basins, popt, pred):
-    import numpy as np
+def _scaling_fig(basins):
     import plotly.graph_objects as go
 
-    linf, a, alpha = popt
     ws = sorted(basins)
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
             x=ws,
             y=[basins[w] for w in ws],
-            mode="markers",
+            mode="lines+markers",
             name="measured basin",
             marker={"size": 10},
         )
     )
-    xs = np.geomspace(min(ws), pred[0], 60)
-    fig.add_trace(
-        go.Scatter(
-            x=xs, y=[linf + a * x ** (-alpha) for x in xs], mode="lines", name="fit"
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[pred[0]],
-            y=[pred[1]],
-            mode="markers",
-            name="prediction",
-            marker={"size": 12, "symbol": "x"},
-        )
-    )
     fig.update_xaxes(type="log", title_text="width")
     fig.update_yaxes(title_text="muP basin loss (at optimal lr)")
-    fig.update_layout(title_text="width-scaling loss predictor", width=1000, height=460)
+    fig.update_layout(title_text="width-scaling loss (measured points, no fit)", width=1000, height=460)
     return fig
 
 
@@ -409,17 +374,11 @@ def build_report(spec, results=None):
     return spec.report_url()
 
 
-def scaling_report(spec, points, bigvit_width=None):
+def scaling_report(spec, points):
     from xx.release_tests.lib.utils import MarkdownWriter
 
     basins = {w: loss for w, _s, loss, _n, _runs in points if loss is not None}
     steps = _steps_text({s for _, s, loss, _, _ in points if loss is not None})
-    predictor = None
-    if len(basins) >= 3:
-        try:
-            predictor = fit_predictor(basins)
-        except ImportError:
-            logger.warning("scipy unavailable; skipping scaling fit")
 
     os.makedirs(spec.report_dir, exist_ok=True)
 
@@ -433,28 +392,10 @@ def scaling_report(spec, points, bigvit_width=None):
             f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}. width and steps are "
             "read from each run's logged command."
         )
-        if predictor is not None:
-            popt, r2, predict = predictor
-            linf, a, alpha = popt
-            pred = (
-                (bigvit_width, predict(bigvit_width))
-                if bigvit_width is not None
-                else (max(basins), basins[max(basins)])
-            )
-            mw.print(
-                f"fit loss(w) = L_inf + A*w^(-alpha): L_inf={linf:.3f}, A={a:.3f}, "
-                f"alpha={alpha:.3f}, R2={r2:.3f}"
-            )
-            if bigvit_width is not None:
-                mw.print(
-                    f"predicted bigvit w{bigvit_width} loss = "
-                    f"{predict(bigvit_width):.4f}"
-                )
-            mw.add_plot(_predictor_fig(basins, popt, pred), xscale=None, yscale=None)
+        if basins:
+            mw.add_plot(_scaling_fig(basins), xscale=None, yscale=None)
         else:
-            mw.print(
-                "need >=3 width points (and scipy) to fit; showing raw points only."
-            )
+            mw.print("no width points with a measured loss yet.")
 
         with mw.html_table(
             ["width", "steps", "loss", "seeds", "reporters"], borders=True
@@ -469,9 +410,9 @@ def scaling_report(spec, points, bigvit_width=None):
 
 USAGE = (
     "usage: python -m torchtitan.experiments.mup.routine {collect|report} <model> [manifest]\n"
-    "       python -m torchtitan.experiments.mup.routine scaling <model> <w256=job,...> [bigvit_width]\n"
+    "       python -m torchtitan.experiments.mup.routine scaling <model> <w256=job,...>\n"
     "       python -m torchtitan.experiments.mup.routine val <model> --ckpt <dcp_dir> [--label L] [--smoke]\n"
-    "       python -m torchtitan.experiments.mup.routine suite <model> [--arrays w256=J,...] [--big-array J] [--ckpt DIR]"
+    "       python -m torchtitan.experiments.mup.routine suite <model> [--arrays w256=J,...] [--ckpt DIR]"
 )
 
 
@@ -536,7 +477,7 @@ def _mutransfer(spec, arrays):
     return "mutransfer", build_report(spec, results=results), True
 
 
-def _scaling(spec, arrays, big_width):
+def _scaling(spec, arrays):
     if not arrays:
         return "scaling", "needs --arrays w256=job,...", False
     points = collect_scaling(spec, arrays)
@@ -546,7 +487,7 @@ def _scaling(spec, arrays, big_width):
             f"  w{width}: loss={'N/A' if loss is None else round(loss, 4)} "
             f"seeds={n} steps={steps}"
         )
-    return "scaling", scaling_report(spec, points, big_width), True
+    return "scaling", scaling_report(spec, points), True
 
 
 def _ckpt_flavor(ckpt):
@@ -597,14 +538,13 @@ def run_val(spec, argv):
 def run_suite(spec, argv):
     flags = _flags(argv)
     arrays = _arrays(flags["arrays"]) if "arrays" in flags else None
-    big_width = int(flags["big-array"]) if "big-array" in flags else None
     ckpt = flags.get("ckpt")
 
     os.makedirs(spec.report_dir, exist_ok=True)
     outcomes = [
         _coord_check(spec),
         _mutransfer(spec, arrays),
-        _scaling(spec, arrays, big_width),
+        _scaling(spec, arrays),
         (
             "val",
             "GPU job; run: python -m torchtitan.experiments.mup.routine val "
@@ -645,14 +585,13 @@ def main():
         if len(argv) < 3:
             sys.exit(USAGE)
         arrays = _arrays(argv[2])
-        big_width = int(argv[3]) if len(argv) > 3 else None
         points = collect_scaling(spec, arrays)
         for width, steps, loss, n, _runs in sorted(points):
             print(
                 f"w{width}: loss={'N/A' if loss is None else round(loss, 4)} "
                 f"seeds={n} steps={steps}"
             )
-        print(f"report -> {scaling_report(spec, points, big_width)}")
+        print(f"report -> {scaling_report(spec, points)}")
         return
 
     manifest = argv[2] if len(argv) > 2 else None
