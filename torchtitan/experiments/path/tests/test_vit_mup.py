@@ -12,6 +12,8 @@ from torchtitan.experiments.path.config_registry import (
     _vit_optimizer_config,
     MUP_PATTERN,
     VIT_BASE_WIDTH,
+    VIT_HEAD_DIM,
+    VIT_WIDTHS,
 )
 
 
@@ -56,6 +58,17 @@ class TestViTMuPParamGroups(unittest.TestCase):
 
         matched = {name for name in param_names if re.search(MUP_PATTERN, name)}
         self.assertEqual(matched, expected)
+
+    def test_widths_are_head_dim_multiples(self):
+        for flavor in VIT_WIDTHS:
+            _vit_model_config(flavor, mup=True)
+        VIT_WIDTHS["w100"] = 100
+        try:
+            with self.assertRaises(ValueError):
+                _vit_model_config("w100", mup=True)
+        finally:
+            del VIT_WIDTHS["w100"]
+        self.assertTrue(all(d % VIT_HEAD_DIM == 0 for d in VIT_WIDTHS.values()))
 
 
 if __name__ == "__main__":
