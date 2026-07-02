@@ -54,21 +54,25 @@ class TitanModelConfig:
 
 @dataclass
 class TitanMoeModelConfig(TitanModelConfig):
-    """MoE model config — extends the base config with routed-expert parameters."""
+    """MoE model config — extends the base config with routed-expert parameters.
 
-    num_experts: int = 128
+    HF-mapped fields default to None (AutoConfig's value is used); the
+    TorchTitan-only knobs below keep concrete defaults.
+    """
+
+    num_experts: int | None = None
     """Total number of routed experts in each MoE layer."""
 
-    num_experts_per_tok: int = 8
+    num_experts_per_tok: int | None = None
     """Top-k routing: number of experts each token is dispatched to."""
 
-    moe_intermediate_size: int = 768
+    moe_intermediate_size: int | None = None
     """Hidden dimension of each expert's MLP (per-expert intermediate size)."""
 
-    decoder_sparse_step: int = 1
+    decoder_sparse_step: int | None = None
     """Replace the dense MLP with an MoE block every N decoder layers (1 = every layer is MoE)."""
 
-    norm_topk_prob: bool = False
+    norm_topk_prob: bool | None = None
     """Normalize the top-k routing scores to sum to 1 (HF `norm_topk_prob` convention)."""
 
     num_nextn_predict_layers: int | None = None
