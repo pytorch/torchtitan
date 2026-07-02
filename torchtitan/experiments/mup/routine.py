@@ -234,18 +234,6 @@ def _steps_text(steps_seen):
     return "/".join(str(s) for s in sorted(steps_seen)) or "?"
 
 
-def _curves(results):
-    curves = {m: {} for m in MODES}
-    for param, width, lr, _steps, loss, _n, _runs in results:
-        if param not in curves or loss is None:
-            continue
-        curves[param].setdefault(width, []).append((float(lr), loss))
-    for mode in curves:
-        for width in curves[mode]:
-            curves[mode][width].sort()
-    return curves
-
-
 def _mutransfer_fig(curves, widths, lr_ticks):
     import plotly.graph_objects as go
 
@@ -368,7 +356,15 @@ def build_report(spec, results=None):
     with open(f"{spec.report_dir}/mup_hparams.json", "w") as fh:
         json.dump(hp, fh, indent=2)
 
-    curves = _curves(results)
+    curves = {m: {} for m in MODES}
+    for param, width, lr, _steps, loss, _n, _runs in results:
+        if param not in curves or loss is None:
+            continue
+        curves[param].setdefault(width, []).append((float(lr), loss))
+    for mode in curves:
+        for width in curves[mode]:
+            curves[mode][width].sort()
+
     widths = sorted({w for mode in curves for w in curves[mode]})
     lr_ticks = sorted(
         {(float(lr), lr) for _, _, lr, _, loss, _, _ in results if loss is not None}
@@ -503,24 +499,22 @@ def _flags(argv):
     return flags
 
 
-def _coord_check(spec, produced, skipped):
+def _coord_check(spec):
     import torch
 
     cmd = f"python -m torchtitan.experiments.mup.coord_check {spec.name}"
     if not torch.cuda.is_available():
-        skipped.append(("coord_check", f"needs a GPU; run: {cmd}"))
-        return
+        return "coord_check", f"needs a GPU; run: {cmd}", False
     from . import coord_check as cc
 
     try:
         cc.run(spec)
     except Exception as exc:
-        skipped.append(("coord_check", f"{type(exc).__name__}: {exc}; run: {cmd}"))
-        return
-    produced.append(("coord_check", spec.report_url("coord_check")))
+        return "coord_check", f"{type(exc).__name__}: {exc}; run: {cmd}", False
+    return "coord_check", spec.report_url("coord_check"), True
 
 
-def _mutransfer(spec, arrays, produced, skipped):
+def _mutransfer(spec, arrays):
     if arrays:
         results = collect_arrays(spec, arrays)
         source = "arrays"
@@ -528,23 +522,23 @@ def _mutransfer(spec, arrays, produced, skipped):
         results = collect(spec)
         source = spec.manifest_path
     else:
-        skipped.append(
-            ("mutransfer", f"no --arrays and no manifest at {spec.manifest_path}")
+        return (
+            "mutransfer",
+            f"no --arrays and no manifest at {spec.manifest_path}",
+            False,
         )
-        return
     per_width, transferred = hp_table(spec, results)
     print(f"muTransfer from {source}:")
     for w in sorted(per_width):
         lr, basin = per_width[w]
         print(f"  w{w}: lr*={lr} basin={basin:.4f}")
     print(f"  transferred muP lr = {transferred}")
-    produced.append(("mutransfer", build_report(spec, results=results)))
+    return "mutransfer", build_report(spec, results=results), True
 
 
-def _scaling(spec, arrays, big_width, produced, skipped):
+def _scaling(spec, arrays, big_width):
     if not arrays:
-        skipped.append(("scaling", "needs --arrays w256=job,..."))
-        return
+        return "scaling", "needs --arrays w256=job,...", False
     points = collect_scaling(spec, arrays)
     print("scaling points:")
     for width, steps, loss, n, _runs in sorted(points):
@@ -552,7 +546,7 @@ def _scaling(spec, arrays, big_width, produced, skipped):
             f"  w{width}: loss={'N/A' if loss is None else round(loss, 4)} "
             f"seeds={n} steps={steps}"
         )
-    produced.append(("scaling", scaling_report(spec, points, big_width)))
+    return "scaling", scaling_report(spec, points, big_width), True
 
 
 def _ckpt_flavor(ckpt):
@@ -567,7 +561,7 @@ def _ckpt_flavor(ckpt):
     )
 
 
-def _val_verb(spec, argv):
+def run_val(spec, argv):
     from . import valset_report as vr
 
     flags = _flags(argv)
@@ -600,24 +594,26 @@ def _val_verb(spec, argv):
     print(f"report -> {out}")
 
 
-def _suite(spec, argv):
+def run_suite(spec, argv):
     flags = _flags(argv)
     arrays = _arrays(flags["arrays"]) if "arrays" in flags else None
     big_width = int(flags["big-array"]) if "big-array" in flags else None
     ckpt = flags.get("ckpt")
 
     os.makedirs(spec.report_dir, exist_ok=True)
-    produced, skipped = [], []
-    _coord_check(spec, produced, skipped)
-    _mutransfer(spec, arrays, produced, skipped)
-    _scaling(spec, arrays, big_width, produced, skipped)
-    skipped.append(
+    outcomes = [
+        _coord_check(spec),
+        _mutransfer(spec, arrays),
+        _scaling(spec, arrays, big_width),
         (
             "val",
             "GPU job; run: python -m torchtitan.experiments.mup.routine val "
             f"{spec.name} --ckpt {ckpt or 'DIR'}",
-        )
-    )
+            False,
+        ),
+    ]
+    produced = [(label, url) for label, url, ok in outcomes if ok]
+    skipped = [(label, reason) for label, reason, ok in outcomes if not ok]
 
     print(f"\nsuite index for {spec.name} -> {spec.report_dir}")
     for label, url in produced:
@@ -638,11 +634,11 @@ def main():
         sys.exit(f"{model} has no muP configs landed yet; nothing to collect.")
 
     if verb == "suite":
-        _suite(spec, argv[2:])
+        run_suite(spec, argv[2:])
         return
 
     if verb == "val":
-        _val_verb(spec, argv[2:])
+        run_val(spec, argv[2:])
         return
 
     if verb == "scaling":
