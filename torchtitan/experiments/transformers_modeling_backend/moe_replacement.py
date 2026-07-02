@@ -324,7 +324,7 @@ def _resolve_top_k(moe_block: nn.Module, gate: nn.Module | None, config) -> int:
 
 def _resolve_score_func(gate: nn.Module | None, config) -> str:
     """Determine the router scoring function (softmax or sigmoid)."""
-    # DeepSeek V3/V4 uses sigmoid with e_score_correction_bias
+    # DeepSeek-V3 / GLM use sigmoid with e_score_correction_bias.
     if gate is not None and "e_score_correction_bias" in getattr(gate, "_buffers", {}):
         return "sigmoid"
 
@@ -336,18 +336,6 @@ def _resolve_score_func(gate: nn.Module | None, config) -> str:
             f"Unsupported scoring function '{scoring_func}'. "
             "Native MoE router supports 'softmax' and 'sigmoid'."
         )
-
-    # Llama4 uses sigmoid without e_score_correction_bias.
-    # Detect by inspecting the router's forward source for ``sigmoid``.
-    if gate is not None:
-        import inspect
-
-        try:
-            src = inspect.getsource(type(gate).forward)
-            if "sigmoid" in src:
-                return "sigmoid"
-        except (OSError, TypeError):
-            pass
 
     return "softmax"
 
