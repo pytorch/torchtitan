@@ -86,7 +86,27 @@ VIT_INPUT_SIZE = (1, 128, 256)
 VIT_PATCH_SIZE = (1, 16, 8)
 VIT_IN_CHANNELS = 24
 VIT_BASE_WIDTH = 256
-VIT_WIDTHS = {"w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
+VIT_WIDTHS = {
+    f"w{d}": d
+    for d in (
+        64,
+        128,
+        192,
+        256,
+        320,
+        384,
+        448,
+        512,
+        640,
+        896,
+        1024,
+        1280,
+        1536,
+        1792,
+        2048,
+        3072,
+    )
+}
 VIT_STEPS = 512
 MUP_PATTERN = (
     r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
@@ -512,6 +532,10 @@ def _vit_mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PathMLP.Config:
 
 def _vit_model_config(flavor: str, *, mup: bool) -> PlanViT.Config:
     dim = VIT_WIDTHS[flavor]
+    if dim % VIT_HEAD_DIM != 0:
+        raise ValueError(
+            f"vit width {dim} must be a multiple of head_dim {VIT_HEAD_DIM}"
+        )
     n_head = dim // VIT_HEAD_DIM
     pt, ph, pw = VIT_PATCH_SIZE
     patch_dim = pt * VIT_IN_CHANNELS * ph * pw
@@ -556,11 +580,14 @@ def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
 
 
 def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
+    dataset = (
+        "datasets/lists/prune10m_val.txt"
+        if split == "val"
+        else "datasets/lists/prune10m_random100k_seed0.txt"
+    )
     return dataclasses.replace(
         _dataloader_config(split=split, fps=SUPERCOMBO_FPS, plan_only=True),
-        dataset=os.path.join(
-            XX_BASEDIR, "datasets/lists/prune10m_random100k_seed0.txt"
-        ),
+        dataset=os.path.join(XX_BASEDIR, dataset),
         pipeline_dir=BASE_DIR_GT_10M,
     )
 
@@ -623,8 +650,9 @@ def _vit(
             log_freq=10, enable_reporterv2=True, save_freq=VIT_STEPS
         ),
         validator=PathValidator.Config(
-            enable=False,
-            steps=-1,
+            enable=True,
+            freq=1024,
+            steps=32,
             dataloader=_vit_dataloader_config(split="val"),
             mixed_precision_param="bfloat16",
         ),
@@ -663,3 +691,51 @@ def vit_mup_w1024() -> PathTrainer.Config:
 
 def vit_mup_w2048() -> PathTrainer.Config:
     return _vit("w2048", mup=True)
+
+
+def vit_mup_w64() -> PathTrainer.Config:
+    return _vit("w64", mup=True)
+
+
+def vit_mup_w128() -> PathTrainer.Config:
+    return _vit("w128", mup=True)
+
+
+def vit_mup_w192() -> PathTrainer.Config:
+    return _vit("w192", mup=True)
+
+
+def vit_mup_w320() -> PathTrainer.Config:
+    return _vit("w320", mup=True)
+
+
+def vit_mup_w384() -> PathTrainer.Config:
+    return _vit("w384", mup=True)
+
+
+def vit_mup_w448() -> PathTrainer.Config:
+    return _vit("w448", mup=True)
+
+
+def vit_mup_w640() -> PathTrainer.Config:
+    return _vit("w640", mup=True)
+
+
+def vit_mup_w896() -> PathTrainer.Config:
+    return _vit("w896", mup=True)
+
+
+def vit_mup_w1280() -> PathTrainer.Config:
+    return _vit("w1280", mup=True)
+
+
+def vit_mup_w1536() -> PathTrainer.Config:
+    return _vit("w1536", mup=True)
+
+
+def vit_mup_w1792() -> PathTrainer.Config:
+    return _vit("w1792", mup=True)
+
+
+def vit_mup_w3072() -> PathTrainer.Config:
+    return _vit("w3072", mup=True)
