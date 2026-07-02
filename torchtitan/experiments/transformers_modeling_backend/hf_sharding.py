@@ -41,11 +41,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     rowwise_config,
 )
-from torchtitan.protocols.sharding import (
-    LocalMapConfig,
-    ShardingConfig,
-    SpmdLayout,
-)
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 from torchtitan.tools.logging import logger
 
 DP = MeshAxisName.DP
@@ -164,9 +160,7 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
     is guarded in ``parallelize_hf_transformers``, and ``spmd.R`` avoids a
     same-tensor-dim collision with the TP shard on dim 1.
     """
-    from torchtitan.experiments.transformers_modeling_backend.model import (
-        HFFlexKernel,
-    )
+    from torchtitan.experiments.transformers_modeling_backend.model import HFFlexKernel
 
     heads_in = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.S(1)})
     heads_out = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.S(2)})
