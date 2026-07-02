@@ -5,10 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from torch.nn.attention.flex_attention import and_masks
+from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
 
 from torchtitan.distributed.minimal_async_ep.api import (
     maybe_update_minimal_async_ep_config,
@@ -287,11 +288,16 @@ class Decoder(BaseModel):
         self,
         positions: torch.Tensor,
         attn_config: BaseAttention.Config,
+        *,
+        extra_mask_mods: Sequence[_mask_mod_signature] = (),
     ) -> AttentionMasksType:
+        """Build the flex-attention mask. extra_mask_mods are ANDed onto the base
+        causal + packed-document mask, e.g. a sliding window."""
         assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         mask_mods = [
             get_causal_mask_mod(),
             get_efficient_causal_mask_mod_for_packed_document(positions),
+            *extra_mask_mods,
         ]
         B = positions.shape[0]
         seq_len = positions.shape[1]
