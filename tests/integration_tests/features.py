@@ -219,6 +219,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 ],
                 [
                     "--checkpoint.enable",
+                    "--checkpoint.initial_load_path {dump_folder}/checkpoint",
+                    "--checkpoint.no_initial_load_model_only",
                     "--training.steps 20",
                 ],
             ],
@@ -305,6 +307,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--training.steps 20",
                     "--checkpoint.enable",
+                    "--checkpoint.initial_load_path {dump_folder}/checkpoint",
+                    "--checkpoint.no_initial_load_model_only",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -520,6 +524,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 # excluded during loading to avoid errors caused by mismatched dp_degree.
                 [
                     "--checkpoint.enable",
+                    "--checkpoint.initial_load_path {dump_folder}/checkpoint",
+                    "--checkpoint.no_initial_load_model_only",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                     "--parallelism.tensor_parallel_degree 2",
                     "--training.steps 20",

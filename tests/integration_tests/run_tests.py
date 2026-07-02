@@ -113,7 +113,8 @@ def run_single_test(
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
+    dump_folder = f"{output_dir}/{test_name}"
+    dump_folder_arg = f"--dump_folder {dump_folder}"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
@@ -144,6 +145,15 @@ def run_single_test(
 
         cmd += " " + dump_folder_arg
         if override_arg:
+            # Static override args may embed the ``{dump_folder}`` placeholder
+            # (the runtime dump folder is only known here); substitute it.
+            # Use an absolute path because ``checkpoint.initial_load_path``
+            # requires one, and both runs share this cwd so it still points at
+            # the same dir as the (possibly relative) ``--dump_folder``.
+            dump_folder_abs = os.path.abspath(dump_folder)
+            override_arg = [
+                arg.replace("{dump_folder}", dump_folder_abs) for arg in override_arg
+            ]
             cmd += " " + " ".join(override_arg)
 
         start_ts = time.strftime("%Y-%m-%d %H:%M:%S")

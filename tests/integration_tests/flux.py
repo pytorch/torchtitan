@@ -84,8 +84,12 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
 
         # save checkpoint (idx == 0) and load it for generation (idx == 1)
         if test_name == "hsdp+cp+validation+inference" and idx == 1:
-            # For flux generation, test using inference script
+            # For flux generation, test using inference script. Point
+            # run_infer.sh's INITIAL_LOAD_PATH at the checkpoint the save run
+            # (idx == 0) wrote to ({output_dir}/{test_name}/checkpoint) via
+            # DUMP_FOLDER, since the runtime dump folder isn't the env default.
             cmd = (
+                f"DUMP_FOLDER={output_dir}/{test_name} "
                 f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 f"torchtitan/models/flux/run_infer.sh"
             )
