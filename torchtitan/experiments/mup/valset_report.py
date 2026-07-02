@@ -6,13 +6,14 @@
 
 from __future__ import annotations
 
-import getpass
 import os
 from dataclasses import replace
 
 from xx.common.basedir import XX_BASEDIR
 
 import torch
+
+from .routine import render_report
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VALSET_DIR = os.path.join(XX_BASEDIR, "projects/prune_10m")
@@ -22,7 +23,6 @@ ATOMIC_VALSETS = {
     "left_lane_change": "val_left_lane_change.txt",
     "right_lane_change": "val_right_lane_change.txt",
 }
-REPORT_DIR = f"/raid.unprotected/reports/{os.getenv('REPORT_USER') or getpass.getuser()}_reports/prune_10m/vit"
 
 
 def valset_path(name: str) -> str:
@@ -67,9 +67,7 @@ def accumulate(model, loss_fn, batches, device, max_steps=-1):
     return out
 
 
-def evaluate_valset(
-    model, loss_fn, name, *, device=DEVICE, steps=None, local_batch_size=16
-):
+def evaluate_valset(model, loss_fn, name, *, steps=None, local_batch_size=16):
     if steps is None:
         steps = (valset_len(name) + local_batch_size - 1) // local_batch_size
     loader = valset_dataloader_config(name).build(
@@ -81,29 +79,12 @@ def evaluate_valset(
         validation_steps=steps,
     )
     try:
-        return accumulate(model, loss_fn, loader, device, steps)
+        return accumulate(model, loss_fn, loader, DEVICE, steps)
     finally:
         loader.close()
 
 
-def evaluate_all(
-    model, loss_fn, *, device=DEVICE, steps=None, local_batch_size=16, names=None
-):
-    names = names or list(ATOMIC_VALSETS)
-    return {
-        name: evaluate_valset(
-            model,
-            loss_fn,
-            name,
-            device=device,
-            steps=steps,
-            local_batch_size=local_batch_size,
-        )
-        for name in names
-    }
-
-
-def load_model(flavor, checkpoint_dir, *, mup, device=DEVICE):
+def load_model(flavor, checkpoint_dir, *, mup):
     import torch.distributed.checkpoint as dcp
     from torch.distributed.checkpoint.state_dict import (
         get_model_state_dict,
@@ -113,17 +94,17 @@ def load_model(flavor, checkpoint_dir, *, mup, device=DEVICE):
     from ..path.config_registry import _vit_model_config
 
     model = _vit_model_config(flavor, mup=mup).build()
-    model.to_empty(device=device)
+    model.to_empty(device=DEVICE)
     state = get_model_state_dict(model)
     dcp.load(state, checkpoint_id=checkpoint_dir)
     set_model_state_dict(model, state)
     return model.eval()
 
 
-def load_loss(device=DEVICE):
+def load_loss():
     from ..path.vit import PlanViTLoss
 
-    return PlanViTLoss(PlanViTLoss.Config()).to(torch.device(device))
+    return PlanViTLoss(PlanViTLoss.Config()).to(torch.device(DEVICE))
 
 
 def metric_table(results):
@@ -168,44 +149,26 @@ def _metric_figs(results):
     return figs
 
 
-def build_report(
-    results, *, report_dir=REPORT_DIR, report_name="valset_metrics", read_only=False
-):
-    from xx.release_tests.lib.base_report import (
-        BaseReport,
-        BaseReportConfig,
-        ReportFormat,
-    )
+def build_report(results, *, report_dir, report_name="valset_metrics", read_only=False):
     from xx.release_tests.lib.utils import MarkdownWriter
 
     cols, rows = metric_table(results)
     figs = _metric_figs(results)
 
-    class Report(BaseReport):
-        def run_data(self):
-            return None
-
-        def make_report(self, _):
-            mw = MarkdownWriter(report_name=report_name)
-            mw.filename = f"{report_dir}/{report_name}.html"
-            mw.print("prune10m atomic valset metrics", heading=1)
-            mw.print(
-                "per-run validation loss and driving metrics over the atomic valsets "
-                "(day / night straight, left / right lane change), each scored on its own list."
-            )
-            for fig in figs:
-                mw.add_plot(fig, xscale=None, yscale=None)
-            with mw.html_table(cols, borders=True) as t:
-                for row in rows:
-                    t.row(row)
-            return mw
-
-    Report(
-        BaseReportConfig(
-            report_name=report_name,
-            output_dir=report_dir,
-            read_only=read_only,
-            format=ReportFormat.FILE,
+    def make():
+        mw = MarkdownWriter(report_name=report_name)
+        mw.filename = f"{report_dir}/{report_name}.html"
+        mw.print("prune10m atomic valset metrics", heading=1)
+        mw.print(
+            "per-run validation loss and driving metrics over the atomic valsets "
+            "(day / night straight, left / right lane change), each scored on its own list."
         )
-    ).run_report()
+        for fig in figs:
+            mw.add_plot(fig, xscale=None, yscale=None)
+        with mw.html_table(cols, borders=True) as t:
+            for row in rows:
+                t.row(row)
+        return mw
+
+    render_report(report_name, report_dir, make, read_only=read_only)
     return f"{report_dir}/{report_name}.html"

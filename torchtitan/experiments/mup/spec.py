@@ -45,9 +45,8 @@ class MuPSweepSpec:
             f"/raid.unprotected/reports/{_report_user()}_reports/mup/{self.name}"
         )
 
-    @property
-    def report_url(self) -> str:
-        return f"https://research-reports.comma.life/{_report_user()}_reports/mup/{self.name}/mutransfer.html"
+    def report_url(self, page: str = "mutransfer") -> str:
+        return f"https://research-reports.comma.life/{_report_user()}_reports/mup/{self.name}/{page}.html"
 
 
 SPECS = {

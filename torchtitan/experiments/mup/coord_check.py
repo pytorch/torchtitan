@@ -11,11 +11,6 @@ import os
 import re
 import sys
 
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 from xx.ml_tools.constants.model import (
     frame_constants_from_fps,
     FRAME_TYPE,
@@ -25,6 +20,12 @@ from xx.ml_tools.constants.model import (
     TEMPORAL_INPUTS,
 )
 
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from .routine import render_report
 from .spec import MODES, SPECS
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -32,14 +33,11 @@ SEEDS, STEPS, BS = 3, 10, 4
 TEMPORAL_KEYS = (ModelInputs.DESIRE, ModelInputs.TRAFFIC, ModelInputs.ACTION_T)
 
 
-def _registry(spec):
-    return importlib.import_module(
+def _config(spec, mode: str, width: int):
+    registry = importlib.import_module(
         f"torchtitan.experiments.{spec.module}.config_registry"
     )
-
-
-def _config(spec, mode: str, width: int):
-    return getattr(_registry(spec), spec.config_name(mode, width))()
+    return getattr(registry, spec.config_name(mode, width))()
 
 
 def _scaled_pattern(spec) -> re.Pattern:
@@ -136,12 +134,12 @@ def _by_key(dicts: list) -> dict:
     return {k: float(np.mean(v)) for k, v in keys.items()}
 
 
-def coord_check(spec, mode: str, pattern: re.Pattern, widths, seeds=SEEDS, steps=STEPS):
+def coord_check(spec, mode: str, pattern: re.Pattern, widths):
     init, trained, wnorm, dwnorm = {}, {}, {}, {}
     for width in widths:
         cfg = _config(spec, mode, width)
         at_init, at_end, w_seed, dw_seed = [], [], [], []
-        for seed in range(seeds):
+        for seed in range(SEEDS):
             model = _model(cfg, seed)
             blocks = _blocks(model, pattern)
             scaled = [
@@ -158,7 +156,7 @@ def coord_check(spec, mode: str, pattern: re.Pattern, widths, seeds=SEEDS, steps
             opt = _optimizer(cfg, model)
             x = _inputs(BS)
             targets, snapshot = None, None
-            for step in range(steps):
+            for step in range(STEPS):
                 out = model(x)
                 if targets is None:
                     targets = {k: torch.randn_like(v) for k, v in out.items()}
@@ -206,7 +204,9 @@ def show(name: str, res: dict, widths):
 
 def show_spec(name: str, res: dict, widths):
     keys = sorted(next(iter(res.values())))
-    print(f"\n{name}: spectral norm by width (flat = maximal, decay = lazy)", flush=True)
+    print(
+        f"\n{name}: spectral norm by width (flat = maximal, decay = lazy)", flush=True
+    )
     print("layer".ljust(24) + "".join(f"{wd:>10}" for wd in widths))
     for k in keys:
         row = [res[wd][k] for wd in widths]
@@ -218,58 +218,26 @@ def show_spec(name: str, res: dict, widths):
 
 
 def write_report(spec, results: dict, widths):
+    from xx.release_tests.lib.utils import MarkdownWriter
+
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    from xx.release_tests.lib.base_report import (
-        BaseReport,
-        BaseReportConfig,
-        ReportFormat,
-    )
-    from xx.release_tests.lib.utils import MarkdownWriter
-
     layers = _layers(results[MODES[0]][0])
     report_dir = spec.report_dir
-    report_url = spec.report_url.replace("mutransfer.html", "coord_check.html")
 
-    def fig(which: int, label: str):
-        f = make_subplots(rows=1, cols=2, subplot_titles=list(MODES), shared_yaxes=True)
-        for col, mode in enumerate(MODES, 1):
-            acts = results[mode][which]
-            for li, layer in enumerate(layers):
-                f.add_trace(
-                    go.Scatter(
-                        x=widths,
-                        y=[acts[wd][li] for wd in widths],
-                        name=layer,
-                        mode="lines+markers",
-                        legendgroup=layer,
-                        showlegend=(col == 1),
-                    ),
-                    row=1,
-                    col=col,
-                )
-        f.update_xaxes(type="log", title_text="width")
-        f.update_yaxes(type="log", title_text="mean abs activation")
-        f.update_layout(
-            title_text=f"{spec.name} coord check {label}: standard fans out with width, muP stays flat",
-            width=1100,
-            height=460,
-        )
-        return f
-
-    def sfig(idx: int, label: str, ytitle: str):
+    def panel(idx: int, series, ytitle: str, title: str):
         f = make_subplots(rows=1, cols=2, subplot_titles=list(MODES), shared_yaxes=True)
         for col, mode in enumerate(MODES, 1):
             data = results[mode][idx]
-            for k in sorted(next(iter(data.values()))):
+            for key, name in series(data):
                 f.add_trace(
                     go.Scatter(
                         x=widths,
-                        y=[data[wd][k] for wd in widths],
-                        name=k,
+                        y=[data[wd][key] for wd in widths],
+                        name=name,
                         mode="lines+markers",
-                        legendgroup=k,
+                        legendgroup=name,
                         showlegend=(col == 1),
                     ),
                     row=1,
@@ -277,49 +245,50 @@ def write_report(spec, results: dict, widths):
                 )
         f.update_xaxes(type="log", title_text="width")
         f.update_yaxes(type="log", title_text=ytitle)
-        f.update_layout(
-            title_text=f"{spec.name} spectral coord check {label}: muP flat = maximal update, decay = lazy layer",
-            width=1100,
-            height=460,
-        )
+        f.update_layout(title_text=title, width=1100, height=460)
         return f
 
-    class Report(BaseReport):
-        def run_data(self):
-            return None
+    def fig(which: int, label: str):
+        return panel(
+            which,
+            lambda _: enumerate(layers),
+            "mean abs activation",
+            f"{spec.name} coord check {label}: standard fans out with width, muP stays flat",
+        )
 
-        def make_report(self, _):
-            mw = MarkdownWriter(report_name=f"{spec.name}_coord_check")
-            mw.filename = f"{report_dir}/coord_check.html"
-            mw.print(f"{spec.name} muP coord check (torchtitan stack)", heading=1)
-            mw.print(
-                f"width-scaled blocks of the {spec.name} model over widths {list(widths)}, "
-                f"{SEEDS} seeds, {STEPS} steps, random input. standard param vs muP "
-                f"(eta/m lr on hidden matmuls, 1/m readout). hidden flat = wired right; "
-                f"muP output slopes ~1/sqrt(m) at init, flat trained."
-            )
-            mw.add_plot(fig(0, "at init"), xscale=None, yscale=None)
-            mw.add_plot(fig(1, f"after {STEPS} steps"), xscale=None, yscale=None)
-            mw.print(
-                "spectral coord check on the width-scaled weights: activation flatness "
-                "can pass while a hidden layer is frozen (its init carries the norm). "
-                "|dW| flat across width = every layer maximally updating; |dW| decaying "
-                "with width = a lazy layer the activation check misses."
-            )
-            mw.add_plot(sfig(2, "weights", "spectral norm |W|"), xscale=None, yscale=None)
-            mw.add_plot(sfig(3, "updates", "spectral norm |dW|"), xscale=None, yscale=None)
-            return mw
+    def sfig(idx: int, label: str, ytitle: str):
+        return panel(
+            idx,
+            lambda data: ((k, k) for k in sorted(next(iter(data.values())))),
+            ytitle,
+            f"{spec.name} spectral coord check {label}: muP flat = maximal update, decay = lazy layer",
+        )
+
+    def make():
+        mw = MarkdownWriter(report_name=f"{spec.name}_coord_check")
+        mw.filename = f"{report_dir}/coord_check.html"
+        mw.print(f"{spec.name} muP coord check (torchtitan stack)", heading=1)
+        mw.print(
+            f"width-scaled blocks of the {spec.name} model over widths {list(widths)}, "
+            f"{SEEDS} seeds, {STEPS} steps, random input. standard param vs muP "
+            f"(eta/m lr on hidden matmuls, 1/m readout). hidden flat = wired right; "
+            f"muP output slopes ~1/sqrt(m) at init, flat trained."
+        )
+        mw.add_plot(fig(0, "at init"), xscale=None, yscale=None)
+        mw.add_plot(fig(1, f"after {STEPS} steps"), xscale=None, yscale=None)
+        mw.print(
+            "spectral coord check on the width-scaled weights: activation flatness "
+            "can pass while a hidden layer is frozen (its init carries the norm). "
+            "|dW| flat across width = every layer maximally updating; |dW| decaying "
+            "with width = a lazy layer the activation check misses."
+        )
+        mw.add_plot(sfig(2, "weights", "spectral norm |W|"), xscale=None, yscale=None)
+        mw.add_plot(sfig(3, "updates", "spectral norm |dW|"), xscale=None, yscale=None)
+        return mw
 
     os.makedirs(report_dir, exist_ok=True)
-    Report(
-        BaseReportConfig(
-            report_name=f"{spec.name}_coord_check",
-            output_dir=report_dir,
-            read_only=True,
-            format=ReportFormat.FILE,
-        )
-    ).run_report()
-    print(f"\nwrote report -> {report_url}", flush=True)
+    render_report(f"{spec.name}_coord_check", report_dir, make)
+    print(f"\nwrote report -> {spec.report_url('coord_check')}", flush=True)
 
 
 def run(spec):

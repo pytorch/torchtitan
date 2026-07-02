@@ -17,7 +17,7 @@ from urllib.request import urlopen
 
 from torchtitan.tools.logging import logger
 
-from .spec import MODES, REPORTERV2_API_URL, SPECS, TRAIN_LOSS_KEY
+from .spec import MODES, REPORTERV2_API_URL, SPECS
 
 PALETTE = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A"]
 RUN_PAGE_URL = REPORTERV2_API_URL + "/runs/{run_id}"
@@ -28,12 +28,6 @@ TAIL_FRACTION = 0.05
 def run_id(array_job_id, task_index):
     h = hashlib.sha1(f"slurm:{array_job_id}:{task_index}".encode()).hexdigest()
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
-
-
-def fetch_metrics(run):
-    url = f"{REPORTERV2_API_URL}/api/runs/{run}/metrics"
-    with urlopen(url, timeout=60) as response:
-        return json.load(response)["metrics"]
 
 
 def run_config(run):
@@ -56,20 +50,26 @@ def run_config(run):
         "width": int(width.group(1)) if width else None,
         "lr": lr.group(1) if lr else None,
         "steps": int(steps.group(1)) if steps else None,
-        "status": d.get("status"),
     }
 
 
-def collect_scaling(spec, arrays, lr=SCALING_LR, max_tasks=8):
+def warn_mixed_steps(steps_seen, source):
+    if len(steps_seen) > 1:
+        logger.warning(
+            "mixed --training.steps %s %s", sorted(steps_seen, key=str), source
+        )
+
+
+def collect_scaling(spec, arrays):
     points = []
     steps_seen = set()
     for want_width, array_job_id in sorted(arrays.items()):
         seen = set()
         by_steps = defaultdict(list)
-        for task_index in range(max_tasks):
+        for task_index in range(8):
             rid = run_id(array_job_id, task_index)
             cfg = run_config(rid)
-            if cfg is None or cfg["lr"] != lr:
+            if cfg is None or cfg["lr"] != SCALING_LR:
                 continue
             if cfg["width"] is not None:
                 seen.add(cfg["width"])
@@ -99,20 +99,17 @@ def collect_scaling(spec, arrays, lr=SCALING_LR, max_tasks=8):
                     [r for _, r in hits],
                 )
             )
-    if len(steps_seen) > 1:
-        logger.warning(
-            "mixed --training.steps %s across arrays %s",
-            sorted(steps_seen, key=str),
-            arrays,
-        )
+    warn_mixed_steps(steps_seen, f"across arrays {arrays}")
     if not any(n for *_, n, _ in points):
         raise RuntimeError(f"collected zero losses from arrays {arrays}")
     return points
 
 
-def tail_loss(run, loss_key=TRAIN_LOSS_KEY):
+def tail_loss(run, loss_key):
+    url = f"{REPORTERV2_API_URL}/api/runs/{run}/metrics"
     try:
-        rows = fetch_metrics(run)
+        with urlopen(url, timeout=60) as response:
+            rows = json.load(response)["metrics"]
     except (OSError, ValueError, KeyError):
         return None
     vals = [row[loss_key] for row in rows if loss_key in row]
@@ -180,20 +177,15 @@ def collect(spec, manifest_path=None):
                 path,
                 sorted(lrs),
             )
-    if len(steps_seen) > 1:
-        logger.warning(
-            "mixed --training.steps %s reading manifest %s",
-            sorted(steps_seen, key=str),
-            path,
-        )
+    warn_mixed_steps(steps_seen, f"reading manifest {path}")
     return _rows(seeded, f"reading manifest {path}")
 
 
-def collect_arrays(spec, arrays, max_tasks=8):
+def collect_arrays(spec, arrays):
     seeded = defaultdict(list)
     steps_seen = set()
     for want_width, array_job_id in sorted(arrays.items()):
-        for task_index in range(max_tasks):
+        for task_index in range(8):
             rid = run_id(array_job_id, task_index)
             cfg = run_config(rid)
             if cfg is None or cfg["lr"] is None:
@@ -203,12 +195,7 @@ def collect_arrays(spec, arrays, max_tasks=8):
             seeded[("mup", width, cfg["lr"], cfg["steps"])].append(
                 (tail_loss(rid, spec.loss_key), rid)
             )
-    if len(steps_seen) > 1:
-        logger.warning(
-            "mixed --training.steps %s across arrays %s",
-            sorted(steps_seen, key=str),
-            arrays,
-        )
+    warn_mixed_steps(steps_seen, f"across arrays {arrays}")
     return _rows(seeded, f"from arrays {arrays}")
 
 
@@ -263,11 +250,10 @@ def _mutransfer_fig(curves, widths, lr_ticks):
     import plotly.graph_objects as go
 
     fig = go.Figure()
-    for width in widths:
+    for wi, width in enumerate(widths):
         pts = curves.get("mup", {}).get(width, [])
         if not pts:
             continue
-        wi = widths.index(width)
         fig.add_trace(
             go.Scatter(
                 x=[lr for lr, _ in pts],
@@ -293,23 +279,23 @@ def _mutransfer_fig(curves, widths, lr_ticks):
     return fig
 
 
-def _predictor_fig(per_width, popt, preds):
+def _predictor_fig(basins, popt, pred):
     import numpy as np
     import plotly.graph_objects as go
 
     linf, a, alpha = popt
-    ws = sorted(per_width)
+    ws = sorted(basins)
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
             x=ws,
-            y=[per_width[w][1] for w in ws],
+            y=[basins[w] for w in ws],
             mode="markers",
             name="measured basin",
             marker={"size": 10},
         )
     )
-    xs = np.geomspace(min(ws), max(p[0] for p in preds), 60)
+    xs = np.geomspace(min(ws), pred[0], 60)
     fig.add_trace(
         go.Scatter(
             x=xs, y=[linf + a * x ** (-alpha) for x in xs], mode="lines", name="fit"
@@ -317,8 +303,8 @@ def _predictor_fig(per_width, popt, preds):
     )
     fig.add_trace(
         go.Scatter(
-            x=[w for w, _ in preds],
-            y=[v for _, v in preds],
+            x=[pred[0]],
+            y=[pred[1]],
             mode="markers",
             name="prediction",
             marker={"size": 12, "symbol": "x"},
@@ -330,12 +316,41 @@ def _predictor_fig(per_width, popt, preds):
     return fig
 
 
-def build_report(spec, results=None):
+def links(runs):
+    return " ".join(
+        f'<a href="{RUN_PAGE_URL.format(run_id=r)}">{r[:8]}</a>' for r in runs
+    )
+
+
+def loss_cell(loss):
+    return f"{loss:.6f}" if loss is not None else "N/A"
+
+
+def render_report(report_name, report_dir, make, read_only=True):
     from xx.release_tests.lib.base_report import (
         BaseReport,
         BaseReportConfig,
         ReportFormat,
     )
+
+    class Report(BaseReport):
+        def run_data(self):
+            return None
+
+        def make_report(self, _):
+            return make()
+
+    Report(
+        BaseReportConfig(
+            report_name=report_name,
+            output_dir=report_dir,
+            read_only=read_only,
+            format=ReportFormat.FILE,
+        )
+    ).run_report()
+
+
+def build_report(spec, results=None):
     from xx.release_tests.lib.utils import MarkdownWriter
 
     if results is None:
@@ -360,66 +375,45 @@ def build_report(spec, results=None):
     )
     steps = _steps_text({s for _, _, _, s, _, _, _ in results if s is not None})
 
-    class Report(BaseReport):
-        def run_data(self):
-            return None
-
-        def make_report(self, _):
-            mw = MarkdownWriter(report_name=f"{spec.name}_mutransfer")
-            mw.filename = f"{spec.report_dir}/mutransfer.html"
-            mw.print(f"{spec.name} muP routine", heading=1)
-            mw.print("1. muTransfer sweep", heading=2)
-            mw.print(
-                "under muP the loss-minimising lr is width-stable (panel minima line up "
-                f"across width). loss is the mean over each run's trailing "
-                f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}, averaged over seeds."
-            )
-            if widths:
-                mw.add_plot(
-                    _mutransfer_fig(curves, widths, lr_ticks), xscale=None, yscale=None
-                )
-
-            mw.print(f"2. transferred muP lr = {transferred}", heading=2)
-            mw.print(
-                f"conditions: {steps}-step runs, warmup 51, cosine decay over the "
-                "final 80%; the transferred lr is specific to this horizon and "
-                "schedule."
-            )
-            with mw.html_table(["width", "optimal lr", "basin"], borders=True) as t:
-                for w in sorted(per_width):
-                    t.row([w, per_width[w][0], f"{per_width[w][1]:.3f}"])
-
-            mw.print("runs", heading=2)
-            with mw.html_table(
-                ["param", "width", "lr", "steps", "seeds", "loss", "reporters"],
-                borders=True,
-            ) as t:
-                for param, width, lr, run_steps, loss, n, runs in sorted(results):
-                    loss_s = f"{loss:.6f}" if loss is not None else "N/A"
-                    links = " ".join(
-                        f'<a href="{RUN_PAGE_URL.format(run_id=r)}">{r[:8]}</a>'
-                        for r in runs
-                    )
-                    t.row([param, width, lr, run_steps, n, loss_s, links])
-            return mw
-
-    Report(
-        BaseReportConfig(
-            report_name=f"{spec.name}_mutransfer",
-            output_dir=spec.report_dir,
-            read_only=True,
-            format=ReportFormat.FILE,
+    def make():
+        mw = MarkdownWriter(report_name=f"{spec.name}_mutransfer")
+        mw.filename = f"{spec.report_dir}/mutransfer.html"
+        mw.print(f"{spec.name} muP routine", heading=1)
+        mw.print("1. muTransfer sweep", heading=2)
+        mw.print(
+            "under muP the loss-minimising lr is width-stable (panel minima line up "
+            f"across width). loss is the mean over each run's trailing "
+            f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}, averaged over seeds."
         )
-    ).run_report()
-    return spec.report_url
+        if widths:
+            mw.add_plot(
+                _mutransfer_fig(curves, widths, lr_ticks), xscale=None, yscale=None
+            )
+
+        mw.print(f"2. transferred muP lr = {transferred}", heading=2)
+        mw.print(
+            f"conditions: {steps}-step runs, warmup 51, cosine decay over the "
+            "final 80%; the transferred lr is specific to this horizon and "
+            "schedule."
+        )
+        with mw.html_table(["width", "optimal lr", "basin"], borders=True) as t:
+            for w in sorted(per_width):
+                t.row([w, per_width[w][0], f"{per_width[w][1]:.3f}"])
+
+        mw.print("runs", heading=2)
+        with mw.html_table(
+            ["param", "width", "lr", "steps", "seeds", "loss", "reporters"],
+            borders=True,
+        ) as t:
+            for param, width, lr, run_steps, loss, n, runs in sorted(results):
+                t.row([param, width, lr, run_steps, n, loss_cell(loss), links(runs)])
+        return mw
+
+    render_report(f"{spec.name}_mutransfer", spec.report_dir, make)
+    return spec.report_url()
 
 
 def scaling_report(spec, points, bigvit_width=None):
-    from xx.release_tests.lib.base_report import (
-        BaseReport,
-        BaseReportConfig,
-        ReportFormat,
-    )
     from xx.release_tests.lib.utils import MarkdownWriter
 
     basins = {w: loss for w, _s, loss, _n, _runs in points if loss is not None}
@@ -433,67 +427,48 @@ def scaling_report(spec, points, bigvit_width=None):
 
     os.makedirs(spec.report_dir, exist_ok=True)
 
-    class Report(BaseReport):
-        def run_data(self):
-            return None
-
-        def make_report(self, _):
-            mw = MarkdownWriter(report_name=f"{spec.name}_scaling")
-            mw.filename = f"{spec.report_dir}/scaling.html"
-            mw.print(f"{spec.name} width-scaling", heading=1)
-            mw.print(
-                f"loss(w) at the fixed muP lr after {steps} steps, averaged over "
-                f"seeds. loss is the mean over each run's trailing "
-                f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}. width and steps are "
-                "read from each run's logged command."
-            )
-            if predictor is not None:
-                popt, r2, predict = predictor
-                linf, a, alpha = popt
-                preds = [
-                    (bigvit_width, predict(bigvit_width))
-                    if bigvit_width is not None
-                    else (max(basins), basins[max(basins)])
-                ]
-                per_width = {w: (None, loss) for w, loss in basins.items()}
-                mw.print(
-                    f"fit loss(w) = L_inf + A*w^(-alpha): L_inf={linf:.3f}, A={a:.3f}, "
-                    f"alpha={alpha:.3f}, R2={r2:.3f}"
-                )
-                if bigvit_width is not None:
-                    mw.print(
-                        f"predicted bigvit w{bigvit_width} loss = "
-                        f"{predict(bigvit_width):.4f}"
-                    )
-                mw.add_plot(
-                    _predictor_fig(per_width, popt, preds), xscale=None, yscale=None
-                )
-            else:
-                mw.print(
-                    "need >=3 width points (and scipy) to fit; showing raw points only."
-                )
-
-            with mw.html_table(
-                ["width", "steps", "loss", "seeds", "reporters"], borders=True
-            ) as t:
-                for width, run_steps, loss, n, runs in sorted(points):
-                    loss_s = f"{loss:.6f}" if loss is not None else "N/A"
-                    links = " ".join(
-                        f'<a href="{RUN_PAGE_URL.format(run_id=r)}">{r[:8]}</a>'
-                        for r in runs
-                    )
-                    t.row([width, run_steps, loss_s, n, links])
-            return mw
-
-    Report(
-        BaseReportConfig(
-            report_name=f"{spec.name}_scaling",
-            output_dir=spec.report_dir,
-            read_only=True,
-            format=ReportFormat.FILE,
+    def make():
+        mw = MarkdownWriter(report_name=f"{spec.name}_scaling")
+        mw.filename = f"{spec.report_dir}/scaling.html"
+        mw.print(f"{spec.name} width-scaling", heading=1)
+        mw.print(
+            f"loss(w) at the fixed muP lr after {steps} steps, averaged over "
+            f"seeds. loss is the mean over each run's trailing "
+            f"{TAIL_FRACTION:.0%} of logged {spec.loss_key}. width and steps are "
+            "read from each run's logged command."
         )
-    ).run_report()
-    return spec.report_url.replace("mutransfer.html", "scaling.html")
+        if predictor is not None:
+            popt, r2, predict = predictor
+            linf, a, alpha = popt
+            pred = (
+                (bigvit_width, predict(bigvit_width))
+                if bigvit_width is not None
+                else (max(basins), basins[max(basins)])
+            )
+            mw.print(
+                f"fit loss(w) = L_inf + A*w^(-alpha): L_inf={linf:.3f}, A={a:.3f}, "
+                f"alpha={alpha:.3f}, R2={r2:.3f}"
+            )
+            if bigvit_width is not None:
+                mw.print(
+                    f"predicted bigvit w{bigvit_width} loss = "
+                    f"{predict(bigvit_width):.4f}"
+                )
+            mw.add_plot(_predictor_fig(basins, popt, pred), xscale=None, yscale=None)
+        else:
+            mw.print(
+                "need >=3 width points (and scipy) to fit; showing raw points only."
+            )
+
+        with mw.html_table(
+            ["width", "steps", "loss", "seeds", "reporters"], borders=True
+        ) as t:
+            for width, run_steps, loss, n, runs in sorted(points):
+                t.row([width, run_steps, loss_cell(loss), n, links(runs)])
+        return mw
+
+    render_report(f"{spec.name}_scaling", spec.report_dir, make)
+    return spec.report_url("scaling")
 
 
 USAGE = (
@@ -542,9 +517,7 @@ def _coord_check(spec, produced, skipped):
     except Exception as exc:
         skipped.append(("coord_check", f"{type(exc).__name__}: {exc}; run: {cmd}"))
         return
-    produced.append(
-        ("coord_check", spec.report_url.replace("mutransfer.html", "coord_check.html"))
-    )
+    produced.append(("coord_check", spec.report_url("coord_check")))
 
 
 def _mutransfer(spec, arrays, produced, skipped):
@@ -606,7 +579,10 @@ def _val_verb(spec, argv):
     steps = 1 if flags.get("smoke") else None
 
     model = vr.load_model(flavor, ckpt, mup=True)
-    per = vr.evaluate_all(model, vr.load_loss(), steps=steps)
+    loss_fn = vr.load_loss()
+    per = {
+        n: vr.evaluate_valset(model, loss_fn, n, steps=steps) for n in vr.ATOMIC_VALSETS
+    }
 
     os.makedirs(spec.report_dir, exist_ok=True)
     metrics_path = f"{spec.report_dir}/valset_metrics.json"
@@ -624,14 +600,6 @@ def _val_verb(spec, argv):
     print(f"report -> {out}")
 
 
-def _val(spec, ckpt, skipped):
-    cmd = (
-        f"python -m torchtitan.experiments.mup.routine val {spec.name} "
-        f"--ckpt {ckpt or 'DIR'}"
-    )
-    skipped.append(("val", f"GPU job; run: {cmd}"))
-
-
 def _suite(spec, argv):
     flags = _flags(argv)
     arrays = _arrays(flags["arrays"]) if "arrays" in flags else None
@@ -643,7 +611,13 @@ def _suite(spec, argv):
     _coord_check(spec, produced, skipped)
     _mutransfer(spec, arrays, produced, skipped)
     _scaling(spec, arrays, big_width, produced, skipped)
-    _val(spec, ckpt, skipped)
+    skipped.append(
+        (
+            "val",
+            "GPU job; run: python -m torchtitan.experiments.mup.routine val "
+            f"{spec.name} --ckpt {ckpt or 'DIR'}",
+        )
+    )
 
     print(f"\nsuite index for {spec.name} -> {spec.report_dir}")
     for label, url in produced:

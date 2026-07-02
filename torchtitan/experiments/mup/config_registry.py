@@ -19,11 +19,6 @@ BIG_STEPS = 15360
 BIG_LR = 1e-2
 
 
-def _checkpoint_folder(flavor: str) -> str:
-    user = getpass.getuser()
-    return f"/raid.unprotected/reports/{user}_reports/prune_10m/vit/checkpoints/{flavor}"
-
-
 def vit_mup_w2048_ckpt() -> PathTrainer.Config:
     cfg = _vit(BIG_FLAVOR, mup=True, lr=BIG_LR)
     return replace(
@@ -31,7 +26,8 @@ def vit_mup_w2048_ckpt() -> PathTrainer.Config:
         training=replace(cfg.training, steps=BIG_STEPS),
         checkpoint=CheckpointManager.Config(
             enable=True,
-            folder=_checkpoint_folder(BIG_FLAVOR),
+            folder=f"/raid.unprotected/reports/{getpass.getuser()}_reports"
+            f"/prune_10m/vit/checkpoints/{BIG_FLAVOR}",
             interval=BIG_STEPS,
             keep_latest_k=0,
         ),
