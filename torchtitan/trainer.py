@@ -228,6 +228,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.model_spec is not None
         ), "model_spec must be set before creating Trainer"
         model_spec = config.model_spec
+        self.model_metrics_fn = model_spec.metrics_fn
 
         device_module, device_type = utils.device_module, utils.device_type
         # pyrefly: ignore [read-only]
@@ -856,6 +857,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
         }
+        if self.model_metrics_fn is not None:
+            extra_metrics.update(
+                self.model_metrics_fn(self.model_parts, parallel_dims)
+            )
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
