@@ -7,7 +7,11 @@
 from __future__ import annotations
 
 import getpass
+import os
 from dataclasses import replace
+
+from xx.common.basedir import XX_BASEDIR
+from xx.datasets.constants import DEFAULT_10M_TRAIN_LIST
 
 from torchtitan.components.checkpoint import CheckpointManager
 
@@ -17,18 +21,53 @@ from ..path.trainer import PathTrainer
 BIG_FLAVOR = "w2048"
 BIG_STEPS = 15360
 BIG_LR = 1e-2
+RANDOM1M_LIST = os.path.join(XX_BASEDIR, "datasets/lists/prune10m_random1m_seed0.txt")
 
 
-def vit_mup_w2048_ckpt() -> PathTrainer.Config:
+def _ckpt(seed: int, dataset: str | None = None) -> PathTrainer.Config:
     cfg = _vit(BIG_FLAVOR, mup=True, lr=BIG_LR)
+    dataset = dataset or cfg.dataloader.dataset
+    stem = os.path.splitext(os.path.basename(dataset))[0]
     return replace(
         cfg,
         training=replace(cfg.training, steps=BIG_STEPS),
+        dataloader=replace(cfg.dataloader, dataset=dataset),
+        debug=replace(cfg.debug, seed=seed),
         checkpoint=CheckpointManager.Config(
             enable=True,
-            folder=f"/raid.unprotected/reports/{getpass.getuser()}_reports"
-            f"/prune_10m/vit/checkpoints/{BIG_FLAVOR}",
+            folder=(
+                f"/raid.unprotected/reports/{getpass.getuser()}_reports"
+                f"/prune_10m/vit/checkpoints/{BIG_FLAVOR}/{stem}_s{seed}"
+            ),
             interval=BIG_STEPS,
             keep_latest_k=0,
         ),
     )
+
+
+def vit_mup_w2048_ckpt() -> PathTrainer.Config:
+    return _ckpt(seed=0)
+
+
+def vit_mup_w2048_ckpt_rand1m_s0() -> PathTrainer.Config:
+    return _ckpt(0, RANDOM1M_LIST)
+
+
+def vit_mup_w2048_ckpt_rand1m_s1() -> PathTrainer.Config:
+    return _ckpt(1, RANDOM1M_LIST)
+
+
+def vit_mup_w2048_ckpt_rand1m_s2() -> PathTrainer.Config:
+    return _ckpt(2, RANDOM1M_LIST)
+
+
+def vit_mup_w2048_ckpt_full10m_s0() -> PathTrainer.Config:
+    return _ckpt(0, DEFAULT_10M_TRAIN_LIST)
+
+
+def vit_mup_w2048_ckpt_full10m_s1() -> PathTrainer.Config:
+    return _ckpt(1, DEFAULT_10M_TRAIN_LIST)
+
+
+def vit_mup_w2048_ckpt_full10m_s2() -> PathTrainer.Config:
+    return _ckpt(2, DEFAULT_10M_TRAIN_LIST)
