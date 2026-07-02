@@ -65,7 +65,14 @@ class ParamGroupConfig:
 
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     """Keyword arguments passed to the optimizer constructor.
-    Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
+    Must include all required kwargs (e.g. ``lr``) unless the container sets a
+    base ``lr`` (see ``OptimizersContainer.Config.lr``). No implicit defaults."""
+
+    lr_mult: float = 1.0
+    """Multiplier on the container's base ``lr`` for this group. Only applies when
+    ``OptimizersContainer.Config.lr`` is set; the group's learning rate is then
+    ``lr * lr_mult`` and ``lr`` must not also appear in ``optimizer_kwargs``.
+    Defaults to 1.0 (group uses the base lr unscaled)."""
 
 
 T = TypeVar("T", bound=Optimizer)
@@ -106,6 +113,14 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         """Per-parameter-group optimizer configurations. Each entry specifies a
         regex pattern and a self-contained optimizer setup.
         Patterns are checked in order; first match wins."""
+
+        lr: float | None = None
+        """Optional base learning rate shared by all param groups. When set, each
+        group's learning rate is ``lr * ParamGroupConfig.lr_mult`` and groups must
+        not set their own ``lr`` in ``optimizer_kwargs``. When ``None`` (default),
+        each group provides its own ``lr`` in ``optimizer_kwargs``. A single base
+        lr lets the native ``--optimizer.lr`` override (and lr sweeps) scale every
+        group at once while preserving per-group ratios (e.g. muP lr scaling)."""
 
         implementation: Literal[
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
@@ -158,10 +173,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         model: nn.Module,
         param_group_configs: list[ParamGroupConfig],
         impl_kwargs: dict[str, Any],
+        base_lr: float | None = None,
     ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
         """Build PyTorch param groups from model parameters, partitioned by optimizer.
 
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
+        When ``base_lr`` is set, each group's learning rate is ``base_lr *
+        ParamGroupConfig.lr_mult`` and groups must not set their own ``lr``.
 
         Returns two dicts keyed by optimizer name and aligned by index: the param
         group dicts to pass to the optimizer constructor, and the regex pattern of
@@ -192,12 +210,27 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     f"matched no parameters"
                 )
 
+            group_kwargs = {**impl_kwargs, **pg.optimizer_kwargs}
+            if base_lr is not None:
+                if "lr" in pg.optimizer_kwargs:
+                    raise ValueError(
+                        f"Optimizer param_groups pattern '{pg.pattern}' sets 'lr' in "
+                        f"optimizer_kwargs while the optimizer Config also sets a base "
+                        f"lr; use lr_mult to scale from the base lr instead"
+                    )
+                group_kwargs["lr"] = base_lr * pg.lr_mult
+            elif pg.lr_mult != 1.0:
+                raise ValueError(
+                    f"Optimizer param_groups pattern '{pg.pattern}' sets lr_mult "
+                    f"but the optimizer Config sets no base lr; lr_mult only "
+                    f"applies when the Config sets a base lr"
+                )
+
             groups[pg.optimizer_name].append(
                 {
                     "params": params,
                     "param_names": param_names,
-                    **impl_kwargs,
-                    **pg.optimizer_kwargs,
+                    **group_kwargs,
                 }
             )
             patterns[pg.optimizer_name].append(pg.pattern)
@@ -213,7 +246,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         for part_idx, model in enumerate(self.model_parts):
             groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
-                model, param_group_configs, impl_kwargs
+                model, param_group_configs, impl_kwargs, base_lr=config.lr
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
                 optimizer = self._resolve_optimizer_cls(opt_name)(opt_param_groups)
