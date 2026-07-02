@@ -10,11 +10,10 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.fx.traceback import annotate_fn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
-    _maybe_materialize_grad_for_param_layout,
-    _MODULE_FQN,
+    accumulate_param_grads_,
+    compute_annotated_loss,
     log_timer,
     maybe_register_blockmask_pytree_node,
 )
@@ -83,8 +82,11 @@ def make_fwd_bwd_step(model, loss_fn):
         # annotate_module_fqns won't tag it. Annotate it here so that
         # downstream passes (bucketing, SAC, kernel annotations) can
         # attribute loss nodes in the traced graph.
-        loss, _ = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)(
-            pred, labels, global_valid_tokens
+        loss = compute_annotated_loss(
+            loss_fn,
+            pred,
+            labels,
+            {"global_valid_tokens": global_valid_tokens},
         )
         params = [
             p
@@ -115,11 +117,6 @@ class GraphTrainer(Trainer):
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
-        if self.config.compile.mode == "aot_fx_trace" and self.parallel_dims.pp_enabled:
-            raise ValueError(
-                "aot_fx_trace compile mode does not support Pipeline Parallel"
-            )
-
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
 
@@ -149,6 +146,12 @@ class GraphTrainer(Trainer):
                 labels=labels,
                 global_valid_tokens=global_valid_tokens,
             )
+        if self.parallel_dims.pp_enabled:
+            return self._graph_pp_forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
 
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
@@ -169,6 +172,32 @@ class GraphTrainer(Trainer):
             params,
             extra_kwargs,
         )
+
+    def _graph_pp_forward_backward_step(
+        self,
+        *,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: float,
+    ) -> torch.Tensor:
+        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+        loss_kwargs = {"global_valid_tokens": global_valid_tokens}
+        with self.train_context():
+            targets, losses = (labels, []) if self.pp_has_last_stage else (None, None)
+            schedule_args = (inputs,) if self.pp_has_first_stage else ()
+            self.pp_schedule.step(
+                *schedule_args,
+                **extra_kwargs,
+                target=targets,
+                losses=losses,
+                loss_kwargs=loss_kwargs,
+                return_outputs=False,
+            )
+
+        if self.pp_has_last_stage:
+            assert losses is not None
+            return torch.sum(torch.stack(losses)).to(self.device)
+        return torch.tensor([-1.0], device=self.device)
 
     def _load_precompiled_fx_trace(self, model: nn.Module) -> None:
         """Load a precompiled aot_fx_trace artifact from disk."""
@@ -253,13 +282,7 @@ class GraphTrainer(Trainer):
         loss = outputs[0]
         grads = outputs[1:]
 
-        for param, grad in zip(params, grads, strict=True):
-            grad = _maybe_materialize_grad_for_param_layout(param, grad)
-            if param.grad is None:
-                param.grad = grad
-            else:
-                param.grad += grad
-
+        accumulate_param_grads_(params, grads)
         return loss
 
     def _prepare_trace_inputs(

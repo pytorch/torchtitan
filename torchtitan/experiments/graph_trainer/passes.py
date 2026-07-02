@@ -34,6 +34,7 @@ from collections.abc import Callable
 import torch
 
 from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
     MOE_BLOCK_FQN,
     validate_ep_overlap_config,
 )
@@ -146,6 +147,8 @@ def compile_time_passes(
     *,
     use_cudagraph: bool = False,
     parallel_dims=None,
+    include_inductor: bool = True,
+    include_mandatory_normalization: bool = True,
 ) -> list[Callable]:
     """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
@@ -160,12 +163,19 @@ def compile_time_passes(
     collectives on dedicated process groups / streams (bucketing then inherits
     the new PGs). Disable with
     ``--compile.disable_passes reassign_collective_pgs_pass``.
+
+    ``include_inductor=False`` leaves the graph in FX form after the
+    metadata-preserving passes. GraphPP uses that mode before it calls its
+    standalone partitioner and compiles the extracted graphs.
+
+    ``include_mandatory_normalization=False`` lets GraphPP run required
+    normalization unconditionally and then append only the optional passes
+    controlled by ``enable_passes``.
     """
     from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
-    from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
     loss_config = getattr(config, "loss", None)
@@ -192,11 +202,15 @@ def compile_time_passes(
         split_moe_expert_buckets=efsdp_degree > 1,
     )
 
-    passes: list[Callable] = [
-        eliminate_dead_code_pass,
-        canonicalize_graph_pass,
-        deduplicate_fsdp_unshard_chains_pass,
-    ]
+    passes: list[Callable] = (
+        [
+            eliminate_dead_code_pass,
+            canonicalize_graph_pass,
+            deduplicate_fsdp_unshard_chains_pass,
+        ]
+        if include_mandatory_normalization
+        else []
+    )
     ep_overlap_chunk_passes: list[Callable] = []
     ep_overlap_module_fqn: str | None = None
     ep_overlap_chunk_strategy: str | None = None
@@ -327,12 +341,46 @@ def compile_time_passes(
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
-    inductor_compilation = config.compile.inductor_compilation
+    if not include_inductor:
+        return passes
+
+    passes.extend(
+        final_inductor_compile_passes(
+            config.compile,
+            use_cudagraph=use_cudagraph,
+        )
+    )
+    return passes
+
+
+def final_inductor_compile_passes(
+    compile_config: GraphTrainerCompileConfig,
+    *,
+    use_cudagraph: bool = False,
+    boxed_codegen: bool = False,
+) -> list[Callable]:
+    """Return the terminal Inductor passes for a traced graph.
+
+    GraphTrainer applies these to the full train-step graph. GraphPP applies
+    the same pass list to each extracted stage callable after its PP-specific
+    partitioning has chosen the callable boundary. Terminal Inductor selection
+    only depends on compile config; model- and parallelism-aware rewrites stay
+    in ``compile_time_passes``.
+    """
+    from torchtitan.models.common.attention import FlexAttention
+
+    passes: list[Callable] = []
+    inductor_compilation = compile_config.inductor_compilation
     if inductor_compilation == "full":
         # Compile the entire graph into optimized Triton kernels. Must be
         # terminal; the FX graph is no longer authoritative after this pass.
-        passes.append(full_inductor_compilation_pass)
-    if inductor_compilation == "regional":
+        passes.append(
+            functools.partial(
+                full_inductor_compilation_pass,
+                boxed_codegen=boxed_codegen,
+            )
+        )
+    elif inductor_compilation == "regional":
         # FlexAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         passes.append(
@@ -341,15 +389,25 @@ def compile_time_passes(
                 flex_compile_config=FlexAttention.inductor_configs,
             )
         )
-        if config.compile.numerics_changing_optim:
+        if compile_config.numerics_changing_optim:
             from torchtitan.experiments.graph_trainer.performance_passes import (
                 annotate_rmsnorm_for_regional_inductor_pass,
             )
 
             passes.append(annotate_rmsnorm_for_regional_inductor_pass)
-        passes.append(regional_inductor_pass)
+        passes.append(
+            functools.partial(
+                regional_inductor_pass,
+                boxed_codegen=boxed_codegen,
+            )
+        )
         if use_cudagraph:
             passes.append(insert_kernel_annotations_pass)
+    else:
+        raise ValueError(
+            "--compile.inductor_compilation must be 'regional' or 'full', "
+            f"got {inductor_compilation!r}"
+        )
     return passes
 
 
@@ -449,6 +507,7 @@ def apply_graph_passes(
     passes: list[Callable],
     *,
     compile_config: "GraphTrainerCompileConfig | None" = None,
+    respect_disable_passes: bool = True,
 ) -> torch.fx.GraphModule:
     """Apply graph passes to the traced fwd+bwd graph.
 
@@ -460,12 +519,15 @@ def apply_graph_passes(
         compile_config: Optional compile config. When provided and
             ``debug_graph_passes`` is True, logs timing, op-count diffs,
             and before/after graphs to tlparse for each pass.
+        respect_disable_passes: Whether ``compile_config.disable_passes`` may
+            remove passes from this invocation. GraphPP sets this to ``False``
+            for mandatory pre-partition normalization.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
     disable_patterns = (
         compile_config.disable_passes if compile_config is not None else []
     )
-    if disable_patterns:
+    if respect_disable_passes and disable_patterns:
         passes = _filter_disabled_passes(passes, disable_patterns)
     pass_names = [_get_pass_name(pass_fn) for pass_fn in passes]
     pass_list = "\n  ".join(f"{i}. {name}" for i, name in enumerate(pass_names, 1))
