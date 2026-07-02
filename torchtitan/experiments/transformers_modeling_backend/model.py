@@ -7,20 +7,80 @@
 import copy
 import importlib
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields, MISSING
 
 import torch
 from torch import nn
 from torch.nn import init
+from torch.nn.attention.flex_attention import and_masks
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
+from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import (
+    create_attention_mask,
+    get_causal_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
+)
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import ModuleDict
+from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.tools.logging import logger
+
+
+class HFFlexKernel(Module):
+    """Flex-attention kernel wrapped as a titan Module for declarative TP.
+
+    Runs the flex HOP over q/k/v. Under TP the Module protocol wraps this
+    forward with ``local_map`` (driven by the ``ShardingConfig`` set in
+    hf_sharding.py): q/k/v arrive head-sharded as DTensors, are converted to
+    local tensors so the document ``mask_mod`` -- which closes over a plain
+    ``positions`` tensor -- sees plain tensors, and the output is wrapped back
+    head-sharded. Expressing the sharding declaratively
+    (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with native
+    attention and lets it ride the ``spmd_types`` backend switch, instead of a
+    hand-rolled ``local_map`` call.
+
+    The HF attention module and the BlockMask ride as passthrough keyword args
+    (non-tensors, so ``local_map`` leaves them untouched). CP is not handled
+    here (guarded in ``parallelize_hf_transformers``).
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: "HFFlexKernel.Config") -> None:
+        super().__init__()
+
+    def forward(self, query, key, value, *, module, block_mask=None, **kwargs):
+        # flex_attention_forward returns (output, lse); output is already
+        # transposed to (b, seq, heads, dim). Return the single tensor so the
+        # local_map out_placements is a 1-tuple.
+        out, _ = flex_attention_forward(module, query, key, value, block_mask, **kwargs)
+        return out
+
+
+def _flex_attention_torchtitan(module, query, key, value, attention_mask, **kwargs):
+    """HF ``AttentionInterface`` shim for flex attention.
+
+    Delegates to the per-attention-module ``HFFlexKernel`` when present (attached
+    under TP/EP in hf_sharding.py) so the Module protocol applies the declarative
+    ``local_map``. When no kernel is attached (e.g. FSDP-only, where the sharding
+    pass does not run), q/k/v are plain tensors and flex runs directly -- no
+    mapping needed. CP is not handled here (see the guard in
+    ``parallelize_hf_transformers``).
+    """
+    kernel = getattr(module, "_titan_flex_kernel", None)
+    if kernel is None:
+        return flex_attention_forward(
+            module, query, key, value, attention_mask, **kwargs
+        )
+    out = kernel(query, key, value, module=module, block_mask=attention_mask, **kwargs)
+    return out, None
 
 
 class SliceableModuleDict(ModuleDict):
@@ -68,7 +128,9 @@ _TT_TO_HF_MAPPINGS = {
         "norm_eps": "rms_norm_eps",
         "max_seq_len": "max_position_embeddings",
         "eos_id": "eos_token_id",
-    }
+    },
+    # MoE attrs use the same names in TorchTitan and HuggingFace, no remapping needed
+    "moe": {},
 }
 
 # Declarative list of TorchTitan-only attributes (no HF equivalent)
@@ -79,6 +141,25 @@ _TT_SPECIFIC_ATTRIBUTES = [
     "use_flex_attn",
     "attn_mask_type",
 ]
+
+# NOTE: This backend instantiates model classes from the installed
+# ``transformers`` package. When a model repo ships an older remote config
+# implementation, mixing that remote config with the newer local model code can
+# drop compatibility attrs the local model expects. Prefer the local
+# ``transformers`` config/model pair for denylisted model types.
+_REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v2", "deepseek_v3"})
+
+
+def _get_moe_attr_name(layer: nn.Module) -> str | None:
+    """Return the attribute name holding the MoE block on a decoder layer.
+
+    Most models use ``mlp``; Llama4 uses ``feed_forward``.  Returns ``None``
+    if neither is present.
+    """
+    for name in ("mlp", "feed_forward"):
+        if hasattr(layer, name):
+            return name
+    return None
 
 
 class HFTransformerModel(BaseModel):
@@ -93,9 +174,24 @@ class HFTransformerModel(BaseModel):
         HuggingFace compatibility.
         """
 
+        # Redeclare PretrainedConfig dataclass fields as init=False so
+        # ``Configurable.__init_subclass__`` kw_only check passes.  These
+        # fields are set dynamically in ``__init__`` via
+        # ``PretrainedConfig.__init__``, not through the generated __init__.
+        transformers_version: str = field(init=False, default="")
+        architectures: list | None = field(init=False, default=None)
+        output_hidden_states: bool = field(init=False, default=False)
+        return_dict: bool = field(init=False, default=True)
+        dtype: str | None = field(init=False, default=None)
+        chunk_size_feed_forward: int = field(init=False, default=0)
+        is_encoder_decoder: bool = field(init=False, default=False)
+        id2label: dict | None = field(init=False, default=None)
+        label2id: dict | None = field(init=False, default=None)
+        problem_type: str | None = field(init=False, default=None)
+
         def __init__(
             self,
-            titan_dense_config,
+            model_config,
             # HuggingFace specific args
             attn_implementation: str = "sdpa_torchtitan",
             **kwargs,
@@ -113,15 +209,22 @@ class HFTransformerModel(BaseModel):
             )
             self.sharding_config = None
 
-            assert titan_dense_config is not None, "titan_dense_config is required"
+            assert model_config is not None, "model_config is required"
+
+            from torchtitan.experiments.transformers_modeling_backend import (
+                TitanMoeModelConfig,
+            )
+
+            self.is_moe = isinstance(model_config, TitanMoeModelConfig)
 
             # Create getter/setter dynamically for TT <-> HF attribute mappings
-            self._create_getter_setter_dynamically(has_moe=False)
+            self._create_getter_setter_dynamically(is_moe=self.is_moe)
 
             self._titan_injected_model_args = {}
-            self._configure_hf_attention(attn_implementation)
+            use_flex = getattr(model_config, "use_flex_attn", False)
+            self._configure_hf_attention(attn_implementation, use_flex=use_flex)
 
-            self._initialize_dense_attributes(titan_dense_config)
+            self._initialize_attributes(model_config)
 
         def build(self, **kwargs):
             """Override build() to use _replace() instead of dataclasses.replace().
@@ -140,7 +243,7 @@ class HFTransformerModel(BaseModel):
 
             ``dataclasses.replace()`` re-invokes ``__init__``, which is
             incompatible with the custom ``__init__`` here (it expects
-            ``titan_dense_config`` and calls ``PretrainedConfig.__init__``).
+            ``model_config`` and calls ``PretrainedConfig.__init__``).
             A shallow copy preserves all dynamically-set HF attributes.
             """
             clone = copy.copy(self)
@@ -158,32 +261,83 @@ class HFTransformerModel(BaseModel):
                     )
             return clone
 
-        def _initialize_dense_attributes(self, titan_dense_config):
-            """Initialize all dense model attributes."""
-            # Set mapped attributes (TorchTitan <-> HuggingFace)
+        def _initialize_attributes(self, model_config):
+            """Initialize all model attributes from the config.
+
+            Only stores explicitly-set (non-default) fields in
+            ``_titan_injected_model_args`` so that ``update_from_config``
+            only overrides HF config values the user intentionally set
+            in the flavor, preserving model-specific HF attrs like
+            ``qk_head_dim`` or ``n_routed_experts``.
+            """
+            # Determine which fields were explicitly set (not defaults)
+            explicit_overrides = {}
+            for f in fields(model_config):
+                value = getattr(model_config, f.name)
+                default = f.default
+                if default is MISSING:
+                    # No default — always explicit
+                    explicit_overrides[f.name] = value
+                elif value != default:
+                    explicit_overrides[f.name] = value
+
+            # Set mapped attributes (TorchTitan -> HuggingFace)
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
-                if hasattr(titan_dense_config, titan_name):
-                    value = getattr(titan_dense_config, titan_name)
-                    setattr(self, hf_name, value)
+                if hasattr(model_config, titan_name):
+                    setattr(self, hf_name, getattr(model_config, titan_name))
 
-            # Set TorchTitan-only attributes
-            for attr_name in _TT_SPECIFIC_ATTRIBUTES:
-                if hasattr(titan_dense_config, attr_name):
-                    setattr(self, attr_name, getattr(titan_dense_config, attr_name))
+            # Set all remaining attributes directly (TorchTitan-only + MoE)
+            for attr_name, value in vars(model_config).items():
+                if (
+                    not attr_name.startswith("_")
+                    and attr_name not in self._tt_to_hf_attribute_map
+                ):
+                    setattr(self, attr_name, value)
 
-            # Update passed_args
-            self._titan_injected_model_args.update(titan_dense_config.__dict__)
+            # Store only EXPLICIT overrides for re-application after HF
+            # config load. Mapped attrs use HF names; others use titan names.
+            for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
+                if titan_name in explicit_overrides:
+                    self._titan_injected_model_args[hf_name] = explicit_overrides[
+                        titan_name
+                    ]
+            for attr_name, value in explicit_overrides.items():
+                if attr_name not in self._tt_to_hf_attribute_map:
+                    self._titan_injected_model_args[attr_name] = value
 
-        def _configure_hf_attention(self, attn_implementation: str):
-            """Configure HuggingFace attention settings."""
+        def _configure_hf_attention(
+            self, attn_implementation: str, use_flex: bool = False
+        ):
+            """Configure HuggingFace attention settings.
+
+            Default is SDPA with is_causal and no explicit mask. When ``use_flex``
+            is set, route attention through flex instead so a document/packing
+            BlockMask can be applied — ``is_causal`` cannot express cross-sample
+            (packed) masking. We pass the titan-built BlockMask through HF's
+            normal ``attention_mask`` argument (HF returns an already-4D/BlockMask
+            mask as-is), so no custom mask plumbing is needed. The custom impl
+            name only exists to bypass HF's per-model ``_supports_flex_attn`` gate.
+            """
+            if use_flex:
+                attn_implementation = "flex_torchtitan"
+                AttentionInterface._global_mapping[
+                    attn_implementation
+                ] = _flex_attention_torchtitan
+            else:
+                # NOTE:(3outeille):This will force create_causal_mask to return None
+                AttentionInterface._global_mapping[
+                    attn_implementation
+                ] = sdpa_attention_forward
             self._titan_injected_model_args["attn_implementation"] = attn_implementation
             self.attn_implementation = attn_implementation
-            # NOTE:(3outeille):This will force create_causal_mask to return None
-            AttentionInterface._global_mapping[
-                attn_implementation
-            ] = sdpa_attention_forward
+            # HF selects the attention function from ``config._attn_implementation``.
+            # PretrainedConfig has no ``attn_implementation`` property in this
+            # version, so the line above only sets a dead plain attribute — set the
+            # underscore field directly (it is preserved through update_from_config,
+            # which skips underscore keys when copying the loaded HF config).
+            self._attn_implementation = attn_implementation
 
-        def _create_getter_setter_dynamically(self, has_moe: bool):
+        def _create_getter_setter_dynamically(self, is_moe: bool):
             """
             Create properties dynamically based on tt and hf attribute mappings.
             For example, creates a property 'dim' that reads/writes to 'hidden_size'.
@@ -200,13 +354,15 @@ class HFTransformerModel(BaseModel):
 
             # Setup attribute mappings
             self._tt_to_hf_attribute_map = dict(_TT_TO_HF_MAPPINGS["dense"])
-            if has_moe:
+            if is_moe:
                 self._tt_to_hf_attribute_map.update(_TT_TO_HF_MAPPINGS["moe"])
 
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
-                # A self-mapped name (e.g. vocab_size -> vocab_size) is already
-                # stored under the correct name; creating an alias property would
-                # make its setter call setattr() on itself and recurse forever.
+                # Identity mappings (e.g. vocab_size -> vocab_size) need no
+                # property: the HF attribute is already reachable under the same
+                # name. Creating one would make the setter ``setattr(self,
+                # hf_name)`` recurse into itself. The map entry is still used by
+                # _initialize_attributes to copy the value from the titan config.
                 if titan_name == hf_name:
                     continue
                 # Create getter/setter for attribute that don't already exist
@@ -233,26 +389,57 @@ class HFTransformerModel(BaseModel):
             debug = config.debug
             # Extract HF model ID from the extended config
             hf_model_id = getattr(config, "hf_model", "")
+            config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
+            trust_remote_code = (
+                config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
+            )
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
                 attn_implementation=self.attn_implementation,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
+
+            # For composite (VL) models, use the nested text config so we
+            # build the text-only CausalLM instead of the conditional model.
+            if hasattr(hf_model_config, "text_config"):
+                hf_model_config = hf_model_config.text_config
+                hf_model_config.attn_implementation = self.attn_implementation
+                # Ensure the text config has architectures for model class lookup
+                if not getattr(hf_model_config, "architectures", None):
+                    from transformers.models.auto.modeling_auto import (
+                        MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+                    )
+
+                    model_type = getattr(hf_model_config, "model_type", "")
+                    cls_name = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(model_type)
+                    if cls_name:
+                        hf_model_config.architectures = [cls_name]
 
             # Explicitly update attributes based on mappings
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
                 if hasattr(hf_model_config, hf_name):
                     setattr(self, titan_name, getattr(hf_model_config, hf_name))
 
-            # Copy any other attributes that might not be in the mapping
-            for key, value in hf_model_config.to_dict().items():
-                setattr(self, key, value)
-
-            # Update our attributes with the passed args from flavors
-            for key, value in self._titan_injected_model_args.items():
-                if hasattr(self, key) and value is not None:
+            # Copy all HF config attributes including computed ones.
+            # to_dict() misses attrs computed in __init__ (e.g., DeepSeek V3's
+            # qk_head_dim), so we copy from vars() which has them.
+            for key, value in vars(hf_model_config).items():
+                if not key.startswith("_"):
                     setattr(self, key, value)
+
+            # Copy attribute_map for models that alias config names
+            # (e.g., DeepSeek V3 maps num_local_experts → n_routed_experts)
+            if hf_model_config.attribute_map:
+                self.attribute_map.update(hf_model_config.attribute_map)
+
+            # Re-apply explicitly-set flavor overrides (not defaults)
+            for key, value in self._titan_injected_model_args.items():
+                setattr(self, key, value)
+                # Sync expert count aliases for models that use different naming
+                # (e.g., DeepSeek V3 uses n_routed_experts, GLM uses num_local_experts)
+                if key == "num_experts" and hasattr(self, "n_routed_experts"):
+                    self.n_routed_experts = value
 
             self.max_seq_len = training.seq_len
 
@@ -271,19 +458,45 @@ class HFTransformerModel(BaseModel):
             # intermediate_size from hidden_size/num_heads, so deriving them here
             # would silently build the wrong architecture.
             dim_overridden = self._titan_injected_model_args.get("dim") is not None
-            if dim_overridden:
-                if not hasattr(self, "inter_dim"):  # Only for llama model
-                    ffn_hidden_size = 4 * self.dim
-                    ffn_hidden_size = int(2 * ffn_hidden_size / 3)
-                    if self.ffn_dim_multiplier is not None:
-                        ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
-                    self.intermediate_size = self.multiple_of * (
-                        (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
-                    )
+            if (
+                dim_overridden
+                and not getattr(self, "is_moe", False)
+                and not hasattr(self, "inter_dim")
+            ):
+                ffn_hidden_size = 4 * self.dim
+                ffn_hidden_size = int(2 * ffn_hidden_size / 3)
+                if self.ffn_dim_multiplier is not None:
+                    ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
+                self.intermediate_size = self.multiple_of * (
+                    (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
+                )
+
+            # MLA models (DeepSeek V3, GLM-5) set head_dim = qk_rope_head_dim
+            # in the HF config for RoPE; don't clobber it with the standard
+            # computation. Also force num_key_value_heads = num_attention_heads
+            # because MLA has no GQA -- the KV LoRA path always produces
+            # num_attention_heads heads.
+            if hasattr(self, "qk_rope_head_dim"):
+                self.num_key_value_heads = self.num_attention_heads
+                # Ensure head_dim is set for MLA models; remote configs
+                # may not compute it in __post_init__.
+                if not getattr(self, "head_dim", None):
+                    self.head_dim = self.qk_rope_head_dim
+            elif dim_overridden:
+                # dim explicitly overridden: derive head_dim from it.
                 self.head_dim = self.dim // self.num_attention_heads
             elif not getattr(self, "head_dim", None):
                 # HF config did not provide head_dim; use the standard derivation.
                 self.head_dim = self.dim // self.num_attention_heads
+
+            # Ensure expert groups are consistent with (possibly overridden)
+            # num_experts for models with group-level routing (DeepSeek V3).
+            # Each group needs >= 2 experts for the in-group topk(2).
+            if hasattr(self, "n_group") and hasattr(self, "n_routed_experts"):
+                while self.n_group > 1 and self.n_routed_experts // self.n_group < 2:
+                    self.n_group //= 2
+                if hasattr(self, "topk_group"):
+                    self.topk_group = min(self.topk_group, self.n_group)
 
             return self
 
@@ -308,11 +521,30 @@ class HFTransformerModel(BaseModel):
             try:
                 transformers_mod = importlib.import_module("transformers")
                 model_cls = getattr(transformers_mod, model_class_name)
-            except (ImportError, AttributeError) as e:
+            except (ImportError, AttributeError):
+                model_cls = None
+
+        if model_cls is None:
+            # Fallback: resolve via model_type → Auto mapping.
+            # Handles cases where the config's architecture name doesn't match
+            # the actual class name.
+            from transformers.models.auto.modeling_auto import (
+                MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+            )
+
+            model_type = getattr(config, "model_type", "")
+            resolved_name = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(model_type)
+            if resolved_name:
+                transformers_mod = importlib.import_module("transformers")
+                model_cls = getattr(transformers_mod, resolved_name, None)
+                if model_cls is not None:
+                    model_class_name = resolved_name
+
+            if model_cls is None:
                 raise ImportError(
                     f"Could not find model class '{model_class_name}' in globals or transformers. "
-                    f"Make sure the class is available. Original error: {e}"
-                ) from e
+                    f"Make sure the class is available."
+                )
 
         # Attempt to patch model weight initialization based on architecture type
         try:
@@ -325,6 +557,10 @@ class HFTransformerModel(BaseModel):
                 model_module, f"{model_name_prefix}DecoderLayer", None
             )
 
+            # Discover MoE-specific classes
+            experts_cls = getattr(model_module, f"{model_name_prefix}Experts", None)
+            router_cls = getattr(model_module, f"{model_name_prefix}TopKRouter", None)
+
             required_classes = {
                 "Attention": attention_cls,
                 "DecoderLayer": decoder_layer_cls,
@@ -336,6 +572,8 @@ class HFTransformerModel(BaseModel):
                     decoder_layer_cls=decoder_layer_cls,
                     attention_cls=attention_cls,
                     mlp_cls=mlp_cls,  # mlp_cls can be None
+                    experts_cls=experts_cls,
+                    router_cls=router_cls,
                 )
             else:
                 missing = [name for name, cls in required_classes.items() if not cls]
@@ -350,6 +588,34 @@ class HFTransformerModel(BaseModel):
                 "Weight initialization might not match TorchTitan."
             )
 
+        # Select the HF experts forward kernel from the explicit request in
+        # TitanMoeModelConfig.experts_implementation. Honor it or fail — never
+        # silently substitute a different kernel than the user asked for.
+        #
+        # - "native": use the model's own built-in experts unchanged (valid for
+        #   every model; the only valid choice for models that can't take a
+        #   settable implementation, e.g. Llama4 which uses bmm).
+        # - "grouped_mm"/"batched_mm"/"eager": require a model that supports a
+        #   settable experts implementation (the @use_experts_implementation
+        #   decorator, probed up front as a classmethod). If the model can't, the
+        #   request cannot be honored -> raise rather than ignore it.
+        #
+        # All paths work transparently with hook-based EP/TP because the hooks
+        # preserve the (hidden_states, top_k_index, top_k_weights) interface.
+        if config.is_moe:
+            impl = config.experts_implementation
+            if impl == "native":
+                config._experts_implementation = None
+            elif model_cls._can_set_experts_implementation():
+                config._experts_implementation = impl
+            else:
+                raise ValueError(
+                    f"{model_class_name} does not support a settable experts "
+                    f"implementation, so experts_implementation='{impl}' cannot "
+                    "be honored. Set experts_implementation='native' to use the "
+                    "model's built-in experts kernel."
+                )
+
         self.model = model_cls(config=config)
         self.max_seq_len = config.max_seq_len
         self.cp_mesh = None
@@ -362,12 +628,43 @@ class HFTransformerModel(BaseModel):
             )
 
         for layer in self.model.model.layers.values():
-            layer.moe_enabled = False
+            # Detect MoE layers by checking for gate/router and experts sub-modules.
+            # Some models (Llama4) use ``feed_forward`` instead of ``mlp``.
+            # Gemma4 has router/experts as siblings of the dense MLP at the
+            # layer level (not inside ``mlp``).
+            moe_attr = _get_moe_attr_name(layer)
+            moe_module = getattr(layer, moe_attr, None) if moe_attr else None
+            if moe_module is not None:
+                has_gate = hasattr(moe_module, "gate") or hasattr(moe_module, "router")
+                layer.moe_enabled = has_gate and hasattr(moe_module, "experts")
+            else:
+                layer.moe_enabled = False
+
+            # Layer-level MoE: router and experts are direct children of the
+            # decoder layer, not nested inside the MLP block (e.g. Gemma4).
+            if not layer.moe_enabled:
+                has_layer_router = hasattr(layer, "router") or hasattr(layer, "gate")
+                has_layer_experts = hasattr(layer, "experts")
+                if has_layer_router and has_layer_experts:
+                    layer.moe_enabled = True
+                    layer._layer_level_moe = True
+
+        if config.is_moe:
+            from .moe_replacement import prepare_native_moe_configs
+
+            prepare_native_moe_configs(self, config)
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh
 
-    def _patch_hf_llama_like(self, decoder_layer_cls, attention_cls, mlp_cls=None):
+    def _patch_hf_llama_like(
+        self,
+        decoder_layer_cls,
+        attention_cls,
+        mlp_cls=None,
+        experts_cls=None,
+        router_cls=None,
+    ):
         """
         This patch modifies a Hugging Face Llama-like model's weight initialization to match
         the initialization scheme used in TorchTitan. This is crucial for ensuring
@@ -394,12 +691,41 @@ class HFTransformerModel(BaseModel):
             # some models might not have mlp in each layer
             if hasattr(self, "mlp") and self.mlp is not None:
                 self.mlp.layer_idx = layer_idx
+                # Propagate to shared experts (e.g., Qwen2 MoE, DeepSeek V3)
+                for shared_name in ("shared_expert", "shared_experts"):
+                    shared = getattr(self.mlp, shared_name, None)
+                    if shared is not None:
+                        shared.layer_idx = layer_idx
 
-        def _initialize_weights_patched(self, module):
+        def _initialize_weights_patched(self, module, is_remote_code: bool = False):
             # NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly
             # The default _initialize_weights sets _is_hf_initialized = True even on a meta device,
             # which prevents subsequent proper initialization.
+            #
+            # This mirrors HF's PreTrainedModel._initialize_weights and only adds
+            # the meta-device early-return below. The `is_remote_code` arg and the
+            # branch that follows are copied verbatim from HF: transformers 5.x
+            # calls this via smart_apply as `fn(module, self.is_remote_code())`,
+            # so the replacement must accept the arg and keep the remote-code
+            # guard (remote _init_weights may write params in place, so already
+            # initialized modules must be skipped). Source (transformers v5.9.0):
+            # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/modeling_utils.py#L2464
             if getattr(module, "_is_hf_initialized", False):
+                return
+
+            if (
+                is_remote_code
+                and all(
+                    getattr(param, "_is_hf_initialized", False)
+                    for param in module.parameters(recurse=False)
+                )
+                and all(
+                    getattr(buffer, "_is_hf_initialized", False)
+                    for buffer in module.buffers(recurse=False)
+                    if buffer is not None
+                )
+            ):
+                module._is_hf_initialized = True
                 return
 
             for param in module.parameters(recurse=True):
@@ -437,8 +763,11 @@ class HFTransformerModel(BaseModel):
 
             if isinstance(module, attention_cls):
                 # Initialize weights and biases for q, k, v projections
+                # (some models use q_a_proj/q_b_proj instead of q_proj)
                 for proj_name in ["q_proj", "k_proj", "v_proj"]:
-                    proj = getattr(module, proj_name)
+                    proj = getattr(module, proj_name, None)
+                    if proj is None:
+                        continue
                     nn.init.trunc_normal_(proj.weight, mean=0.0, std=0.02)
                     if proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(proj.weight)
@@ -480,6 +809,17 @@ class HFTransformerModel(BaseModel):
                         fan_in, _ = init._calculate_fan_in_and_fan_out(down_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                         init.uniform_(down_proj.bias, -bound, bound)
+
+            elif experts_cls and isinstance(module, experts_cls):
+                # MoE expert weights are 3D parameter tensors (not nn.Linear)
+                if hasattr(module, "gate_up_proj"):
+                    nn.init.trunc_normal_(module.gate_up_proj, mean=0.0, std=0.02)
+                if hasattr(module, "down_proj"):
+                    nn.init.trunc_normal_(module.down_proj, mean=0.0, std=0.02)
+
+            elif router_cls and isinstance(module, router_cls):
+                if hasattr(module, "weight"):
+                    nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02)
 
             elif module is getattr(
                 self, "lm_head", None
@@ -656,17 +996,69 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
-    def forward(self, *args, **kwargs):
-        local_seq_len = self.max_seq_len
-        local_seq_len //= (
-            self.cp_mesh.size()
-            if self.cp_mesh is not None and self.cp_mesh.size() > 1
-            else 1
+    def get_attention_masks(self, positions: torch.Tensor):
+        """Build a document-causal flex BlockMask for packed sequences.
+
+        Returns None unless flex attention is enabled (``use_flex_attn``).
+        ``forward`` calls this and passes the result through as the HF
+        ``attention_mask``. The mask is causal AND same-document, so packed
+        samples don't attend across boundaries -- which ``is_causal`` alone
+        (the SDPA path) cannot express.
+        """
+        if not getattr(self.model.config, "use_flex_attn", False):
+            return None
+        mask_mod = and_masks(
+            get_causal_mask_mod(),
+            get_efficient_causal_mask_mod_for_packed_document(positions),
         )
-        kwargs["position_ids"] = torch.arange(
-            local_seq_len, device=args[0].device
-        ).unsqueeze(0)
+        batch_size, seq_len = positions.shape
+        return create_attention_mask(
+            mask_mod,
+            batch_size,
+            None,
+            seq_len,
+            seq_len,
+            device=positions.device,
+            BLOCK_SIZE=128,
+            separate_full_blocks=not is_in_batch_invariant_mode(),
+        )
+
+    def forward(self, *args, **kwargs):
+        positions = kwargs.pop("positions", None)
+        attention_masks = kwargs.pop("attention_masks", None)
+        use_flex = getattr(self.model.config, "use_flex_attn", False)
+
+        if use_flex and positions is not None:
+            # Per-document positions (reset at packed-sample boundaries) drive
+            # RoPE under flex; the BlockMask handles cross-sample masking.
+            kwargs["position_ids"] = positions
+            # Build the document-causal BlockMask here rather than in the core
+            # trainer: the trainer only builds masks for Decoder.Config models,
+            # so this backend opts in by building its own (keeps trainer.py free
+            # of HF-backend special-casing). This outer forward runs eager (only
+            # the inner transformer blocks are compiled), so BlockMask creation
+            # here is safe.
+            if attention_masks is None:
+                attention_masks = self.get_attention_masks(positions)
+        else:
+            local_seq_len = self.max_seq_len
+            local_seq_len //= (
+                self.cp_mesh.size()
+                if self.cp_mesh is not None and self.cp_mesh.size() > 1
+                else 1
+            )
+            kwargs["position_ids"] = torch.arange(
+                local_seq_len, device=args[0].device
+            ).unsqueeze(0)
+
+        if attention_masks is not None:
+            # HF returns an already-4D mask / BlockMask as-is (see
+            # masking_utils._preprocess_mask_arguments), so the titan-built
+            # BlockMask flows straight through to the flex attention function.
+            kwargs["attention_mask"] = attention_masks
+
         output = self.model.model(*args, **kwargs)
+
         if self._skip_lm_head:
             return output.last_hidden_state
         output = self.model.lm_head(output.last_hidden_state)
