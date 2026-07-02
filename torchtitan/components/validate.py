@@ -227,28 +227,45 @@ class Validator(BaseValidator):
         accumulated_losses = []
         device_type = utils.device_type
         num_steps = 0
+        num_microbatches = (
+            self.local_batch_size // self.parallelism.pipeline_parallel_microbatch_size
+            if parallel_dims.pp_enabled
+            else 1
+        )
 
         validation_dataloader = self.dl_config.build(
             dp_world_size=self.dp_world_size,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
             seq_len=self.seq_len,
-            local_batch_size=self.local_batch_size,
+            local_batch_size=(
+                self.parallelism.pipeline_parallel_microbatch_size
+                if parallel_dims.pp_enabled
+                else self.local_batch_size
+            ),
         )
 
-        for input_dict, labels in validation_dataloader:
+        validation_iterator = iter(validation_dataloader)
+        while True:
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
-            for k, v in input_dict.items():
-                input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
-
-            # Count valid tokens for this batch
-            local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)
-            local_valid_tokens += (labels != IGNORE_INDEX).sum()
+            try:
+                microbatches = []
+                local_valid_tokens = torch.tensor(
+                    0, dtype=torch.int64, device=device_type
+                )
+                for _ in range(num_microbatches):
+                    input_dict, labels = next(validation_iterator)
+                    self.metrics_processor.ntokens_since_last_log += labels.numel()
+                    for k, v in input_dict.items():
+                        input_dict[k] = v.to(device_type)
+                    labels = labels.to(device_type)
+                    local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                    microbatches.append((input_dict, labels))
+            except StopIteration:
+                break
 
             # All-reduce token count across DP ranks to get global token count
             if parallel_dims.dp_enabled:
@@ -259,32 +276,43 @@ class Validator(BaseValidator):
             else:
                 global_valid_tokens = float(local_valid_tokens.item())
 
-            # Process data (extract inputs, handle attention masks, CP sharding)
-            inputs, labels, extra_kwargs = self.post_dataloading_process(
-                input_dict, labels, model_parts
-            )
-
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
                 assert self.pp_has_first_stage is not None
                 assert self.pp_has_last_stage is not None
-                # Pipeline Parallel forward inside eval() call
-                with self.validation_context():
-                    targets, losses = (
-                        (labels, []) if self.pp_has_last_stage else (None, None)
+
+                arg_mbs: list[tuple[torch.Tensor, ...]] = []
+                kwarg_mbs: list[dict[str, Any]] = []
+                target_mbs: list[torch.Tensor] | None = (
+                    [] if self.pp_has_last_stage else None
+                )
+
+                for input_dict, labels in microbatches:
+                    inputs, labels, extra_kwargs = self.post_dataloading_process(
+                        input_dict, labels, model_parts
                     )
                     if self.pp_has_first_stage:
+                        arg_mbs.append((inputs,))
+                    kwarg_mbs.append(extra_kwargs)
+                    if target_mbs is not None:
+                        target_mbs.append(labels)
+
+                with self.validation_context():
+                    losses = [] if self.pp_has_last_stage else None
+                    if self.pp_has_first_stage:
                         self.pp_schedule.eval(
-                            inputs,
-                            **extra_kwargs,
-                            target=targets,
+                            arg_mbs,
+                            kwargs=kwarg_mbs,
+                            target=target_mbs,
                             losses=losses,
+                            pre_split_args_kwargs=True,
                         )
                     else:
                         self.pp_schedule.eval(
-                            **extra_kwargs,
-                            target=targets,
+                            kwargs=kwarg_mbs,
+                            target=target_mbs,
                             losses=losses,
+                            pre_split_args_kwargs=True,
                         )
 
                 # accumulate losses across pipeline microbatches
@@ -296,6 +324,12 @@ class Validator(BaseValidator):
                 else:
                     loss_sum = torch.tensor([-1.0], device=device_type)
             else:
+                assert len(microbatches) == 1
+                input_dict, labels = microbatches[0]
+                # Process data (extract inputs, handle attention masks, CP sharding)
+                inputs, labels, extra_kwargs = self.post_dataloading_process(
+                    input_dict, labels, model_parts
+                )
                 with self.validation_context():
                     assert len(model_parts) == 1
                     predictions = model_parts[0](inputs, **extra_kwargs)
