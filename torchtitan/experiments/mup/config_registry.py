@@ -14,13 +14,16 @@ from xx.common.basedir import XX_BASEDIR
 from xx.datasets.constants import DEFAULT_10M_TRAIN_LIST
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
 
-from ..path.config_registry import _vit
+from ..path.config_registry import _dp_degrees, _vit
 from ..path.trainer import PathTrainer
 
 BIG_FLAVOR = "w2048"
 BIG_STEPS = 15360
 BIG_LR = 1e-2
+DEPLOY_WARMUP_STEPS = 1024
+DEPLOY_DECAY_RATIO = 0.1
 RANDOM1M_LIST = os.path.join(XX_BASEDIR, "datasets/lists/prune10m_random1m_seed0.txt")
 
 
@@ -71,3 +74,24 @@ def vit_mup_w2048_ckpt_full10m_s1() -> PathTrainer.Config:
 
 def vit_mup_w2048_ckpt_full10m_s2() -> PathTrainer.Config:
     return _ckpt(2, DEFAULT_10M_TRAIN_LIST)
+
+
+def vit_mup_w256_deploy_schedule() -> PathTrainer.Config:
+    cfg = _vit("w256", mup=True, lr=BIG_LR)
+    num_nodes, local_world_size = _dp_degrees()
+    world_size = num_nodes * local_world_size
+    return replace(
+        cfg,
+        training=replace(
+            cfg.training,
+            steps=BIG_STEPS,
+            global_batch_size=cfg.training.local_batch_size * world_size * 2,
+        ),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=DEPLOY_WARMUP_STEPS,
+            total_steps=BIG_STEPS,
+            decay_ratio=DEPLOY_DECAY_RATIO,
+            decay_type="cosine",
+            min_lr_factor=0.0,
+        ),
+    )
