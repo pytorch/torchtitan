@@ -90,15 +90,6 @@ class FaultTolerantTrainer(Trainer):
             else None
         )
 
-        # build dataloader
-        self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
-        )
-
         # build model (using meta init)
         model_config = model_spec.model
         # set the model args from training job configs
@@ -178,6 +169,33 @@ class FaultTolerantTrainer(Trainer):
             config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
+
+        if parallel_dims.pp_enabled:
+            pipeline_microbatch_size = (
+                config.parallelism.pipeline_parallel_microbatch_size
+            )
+            if config.training.local_batch_size % pipeline_microbatch_size != 0:
+                raise ValueError(
+                    f"local batch size ({config.training.local_batch_size}) must "
+                    f"be divisible by pipeline parallel microbatch size "
+                    f"({pipeline_microbatch_size})"
+                )
+            self.num_pipeline_microbatches = (
+                config.training.local_batch_size // pipeline_microbatch_size
+            )
+            dataloader_batch_size = pipeline_microbatch_size
+        else:
+            self.num_pipeline_microbatches = 1
+            dataloader_batch_size = config.training.local_batch_size
+
+        # build dataloader
+        self.dataloader = config.dataloader.build(
+            dp_world_size=batch_degree,
+            dp_rank=batch_rank,
+            tokenizer=self.tokenizer,
+            seq_len=config.training.seq_len,
+            local_batch_size=dataloader_batch_size,
+        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -380,12 +398,15 @@ class FaultTolerantTrainer(Trainer):
         parallel_dims = self.parallel_dims
 
         # Collect all microbatches on CPU and count total valid tokens
-        microbatches = []
+        batches = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
-        for _microbatch in range(self.gradient_accumulation_steps):
-            input_dict, labels = next(data_iterator)
-            local_valid_tokens += (labels != IGNORE_INDEX).sum()
-            microbatches.append((input_dict, labels))
+        for _ in range(self.gradient_accumulation_steps):
+            step_microbatches = []
+            for _ in range(self.num_pipeline_microbatches):
+                input_dict, labels = next(data_iterator)
+                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                step_microbatches.append((input_dict, labels))
+            batches.append(step_microbatches)
 
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
@@ -397,20 +418,22 @@ class FaultTolerantTrainer(Trainer):
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
-        # Process each microbatch: move to GPU, forward/backward, then free
+        # Process each batch: move to GPU, forward/backward, then free
         accumulated_losses = []
-        for input_dict, labels in microbatches:
-            # Move tensors to GPU
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(self.device)
-            labels = labels.to(self.device)
-
-            loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                global_valid_tokens=global_valid_tokens,
-            )
+        for step_microbatches in batches:
+            if parallel_dims.pp_enabled:
+                loss = self._forward_backward_pp_step(
+                    step_microbatches,
+                    global_valid_tokens=global_valid_tokens,
+                )
+            else:
+                assert len(step_microbatches) == 1
+                input_dict, labels = self._move_batch_to_device(*step_microbatches[0])
+                loss = self.forward_backward_step(
+                    input_dict=input_dict,
+                    labels=labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(

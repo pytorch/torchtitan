@@ -194,7 +194,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module gpt_oss --config gpt_oss_debugmodel_flex",
+                    "--module gpt_oss --config gpt_oss_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",

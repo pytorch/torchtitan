@@ -90,6 +90,8 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     device: torch.device
     gc_handler: utils.GarbageCollection
     gradient_accumulation_steps: int
+    num_pipeline_microbatches: int
+    dataloader_batch_size: int
     train_context: Generator[None, None, None]
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -200,6 +202,24 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.training.local_batch_size * dp_degree
         )
         assert self.gradient_accumulation_steps > 0
+
+        if parallel_dims.pp_enabled:
+            pipeline_microbatch_size = (
+                config.parallelism.pipeline_parallel_microbatch_size
+            )
+            if config.training.local_batch_size % pipeline_microbatch_size != 0:
+                raise ValueError(
+                    f"local batch size ({config.training.local_batch_size}) must "
+                    f"be divisible by pipeline parallel microbatch size "
+                    f"({pipeline_microbatch_size})"
+                )
+            self.num_pipeline_microbatches = (
+                config.training.local_batch_size // pipeline_microbatch_size
+            )
+            self.dataloader_batch_size = pipeline_microbatch_size
+        else:
+            self.num_pipeline_microbatches = 1
+            self.dataloader_batch_size = config.training.local_batch_size
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
