@@ -122,6 +122,7 @@ class OnnxCheckpointManager(CheckpointManager):
             return
 
         barrier_group = dist.new_group(timeout=_ARTIFACT_BARRIER_TIMEOUT)
+        assert isinstance(barrier_group, dist.ProcessGroup)
         try:
             dist.barrier(
                 group=barrier_group,
