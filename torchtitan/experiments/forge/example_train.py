@@ -8,7 +8,7 @@ import os
 import time
 from collections.abc import Iterable
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -59,7 +59,11 @@ class Trainer(ForgeEngine):
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
+            local_batch_size=(
+                config.parallelism.pipeline_parallel_microbatch_size
+                if self.parallel_dims.pp_enabled
+                else config.training.local_batch_size
+            ),
         )
 
         model_args = self.model_config
@@ -206,26 +210,41 @@ class Trainer(ForgeEngine):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
-
         if parallel_dims.pp_enabled:
-            # Pipeline Parallel forward / backward inside step() call
-            with self.train_context():
-                targets, losses = (
-                    (labels, []) if self.pp_has_last_stage else (None, None)
+            input_dict_mbs = cast(list[dict[str, torch.Tensor]], input_dict)
+            label_mbs = cast(list[torch.Tensor], labels)
+            arg_mbs: list[tuple[torch.Tensor, ...]] = []
+            kwarg_mbs: list[dict[str, Any]] = []
+            target_mbs: list[torch.Tensor] | None = (
+                [] if self.pp_has_last_stage else None
+            )
+            for mb_input_dict, mb_labels in zip(input_dict_mbs, label_mbs, strict=True):
+                inputs, mb_labels, extra_kwargs = self.post_dataloading_process(
+                    mb_input_dict, mb_labels
                 )
                 if self.pp_has_first_stage:
+                    arg_mbs.append((inputs,))
+                kwarg_mbs.append(extra_kwargs)
+                if target_mbs is not None:
+                    target_mbs.append(mb_labels)
+
+            # Pipeline Parallel forward / backward inside step() call
+            with self.train_context():
+                losses = [] if self.pp_has_last_stage else None
+                if self.pp_has_first_stage:
                     self.pp_schedule.step(
-                        inputs,
-                        **extra_kwargs,
-                        target=targets,
+                        arg_mbs,
+                        kwargs=kwarg_mbs,
+                        target=target_mbs,
                         losses=losses,
+                        pre_split_args_kwargs=True,
                     )
                 else:
                     self.pp_schedule.step(
-                        **extra_kwargs,
-                        target=targets,
+                        kwargs=kwarg_mbs,
+                        target=target_mbs,
                         losses=losses,
+                        pre_split_args_kwargs=True,
                     )
 
             # accumulate losses across pipeline microbatches
@@ -238,6 +257,10 @@ class Trainer(ForgeEngine):
                 else torch.tensor([-1.0], device=self.device)
             )
         else:
+            inputs, labels, extra_kwargs = self.post_dataloading_process(
+                input_dict, labels
+            )
+
             # Non-PP forward / backward
             with self.train_context():
                 assert len(model_parts) == 1
@@ -264,14 +287,28 @@ class Trainer(ForgeEngine):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
+        num_microbatches = (
+            self.config.training.local_batch_size
+            // self.config.parallelism.pipeline_parallel_microbatch_size
+            if parallel_dims.pp_enabled
+            else 1
+        )
 
         # Collect all microbatches on CPU and count total valid tokens
-        # Here we assume the inputs/labels are on GPU
-        microbatches = []
+        microbatches: list[tuple[Any, Any]] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
-        for _microbatch in range(self.gradient_accumulation_steps):
-            input_dict, labels = next(data_iterator)
-            local_valid_tokens += (labels != IGNORE_INDEX).sum()
+        for _ in range(self.gradient_accumulation_steps):
+            if parallel_dims.pp_enabled:
+                input_dict = []
+                labels = []
+                for _ in range(num_microbatches):
+                    mb_input_dict, mb_labels = next(data_iterator)
+                    local_valid_tokens += (mb_labels != IGNORE_INDEX).sum()
+                    input_dict.append(mb_input_dict)
+                    labels.append(mb_labels)
+            else:
+                input_dict, labels = next(data_iterator)
+                local_valid_tokens += (labels != IGNORE_INDEX).sum()
             microbatches.append((input_dict, labels))
 
         # All-reduce to get global token count across DP ranks
@@ -287,15 +324,26 @@ class Trainer(ForgeEngine):
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
         for input_dict, labels in microbatches:
-            # Move tensors to GPU
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(self.device)
-            labels = labels.to(self.device)
+            if parallel_dims.pp_enabled:
+                assert isinstance(input_dict, list)
+                assert isinstance(labels, list)
+                for mb_input_dict in input_dict:
+                    for k, v in mb_input_dict.items():
+                        if isinstance(v, torch.Tensor):
+                            mb_input_dict[k] = v.to(self.device)
+                labels = [mb_labels.to(self.device) for mb_labels in labels]
+            else:
+                assert isinstance(input_dict, dict)
+                assert isinstance(labels, torch.Tensor)
+                # Move tensors to GPU
+                for k, v in input_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        input_dict[k] = v.to(self.device)
+                labels = labels.to(self.device)
 
             loss = self.forward_backward_step(
                 input_dict=input_dict,
-                labels=labels,
+                labels=labels,  # pyrefly: ignore [bad-argument-type]
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())
