@@ -55,6 +55,7 @@ from torchtitan.experiments.rl.routing.strategies import (
 )
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
+from torchtitan.models.qwen3_5 import model_registry as qwen3_5_model_registry
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -76,6 +77,24 @@ def _qwen3_rl_model_registry(
     converters.append(LMHeadCastConverter.Config())
     spec = model_registry(flavor, attn_backend=attn_backend, converters=converters)
     return spec
+
+
+def _qwen3_5_rl_model_registry(
+    flavor: str,
+    *,
+    attn_backend: str,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> ModelSpec:
+    """``qwen3_5.model_registry`` for RL, with the lm_head fp32 cast always on.
+
+    ``attn_backend`` selects inner attention only for the full-attention layers
+    (Qwen3.5's other layers are GatedDeltaNet linear attention).
+    """
+    converters = list(converters or [])
+    converters.append(LMHeadCastConverter.Config())
+    return qwen3_5_model_registry(
+        flavor, attn_backend=attn_backend, converters=converters
+    )
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
@@ -222,6 +241,84 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
         config.generator, debug=_BATCH_INVARIANT_DEBUG
     )
     return config
+
+
+def rl_grpo_qwen3_5_4b_varlen() -> Controller.Config:
+    """GRPO training config for Qwen3.5-4B (hybrid GatedDeltaNet + full attention).
+
+    The generator runs vLLM's native Qwen3.5 model (``backend="vllm_native"``)
+    for its GatedDeltaNet decode kernels; the trainer trains the torchtitan
+    model and weight-syncs via the state_dict_adapter. The two use different
+    GatedDeltaNet kernels, so logprobs are not bitwise aligned -- GRPO's
+    importance ratio corrects the drift. compile/cudagraph/TP>1 are off pending
+    follow-ups (see inline notes).
+    """
+    group_size = 8
+    return Controller.Config(
+        model_spec=_qwen3_5_rl_model_registry("4B", attn_backend="varlen"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3.5-4B",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=5,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
+        # TODO: re-enable once torch.compile composes with the fla GatedDeltaNet
+        # op under activation checkpointing.
+        compile=CompileConfig(enable=False, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3_5", enable_thinking=False),
+        generator_router=InterGeneratorRouter.Config(
+            strategy=StickySessionRoutingStrategy.Config(
+                fallback_strategy=LeastLoadedRoutingStrategy.Config()
+            )
+        ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+        ),
+        generator=VLLMGenerator.Config(
+            backend="vllm_native",
+            # FlashInfer's GatedDeltaNet prefill kernel JIT-compiles per env; on
+            # toolchains where that build is unavailable, force the triton path.
+            vllm_additional_config={"gdn_prefill_backend": "triton"},
+            # enforce_eager: the native model's CUDA-graph capture is not yet
+            # validated for the GDN path.
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            model_dtype="bfloat16",
+            # TP=1: a 4B model fits one GPU for inference. (TP>1 also works; the
+            # actor disables vLLM's custom all-reduce under Monarch.)
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=700,
+            ),
+        ),
+    )
 
 
 def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
