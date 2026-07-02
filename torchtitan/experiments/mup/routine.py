@@ -265,7 +265,11 @@ def _scaling_fig(basins):
     )
     fig.update_xaxes(type="log", title_text="width")
     fig.update_yaxes(title_text="muP basin loss (at optimal lr)")
-    fig.update_layout(title_text="width-scaling loss (measured points, no fit)", width=1000, height=460)
+    fig.update_layout(
+        title_text="width-scaling loss (measured points, no fit)",
+        width=1000,
+        height=460,
+    )
     return fig
 
 
