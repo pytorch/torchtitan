@@ -556,11 +556,14 @@ def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
 
 
 def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
+    dataset = (
+        "datasets/lists/prune10m_val.txt"
+        if split == "val"
+        else "datasets/lists/prune10m_random100k_seed0.txt"
+    )
     return dataclasses.replace(
         _dataloader_config(split=split, fps=SUPERCOMBO_FPS, plan_only=True),
-        dataset=os.path.join(
-            XX_BASEDIR, "datasets/lists/prune10m_random100k_seed0.txt"
-        ),
+        dataset=os.path.join(XX_BASEDIR, dataset),
         pipeline_dir=BASE_DIR_GT_10M,
     )
 
@@ -623,8 +626,9 @@ def _vit(
             log_freq=10, enable_reporterv2=True, save_freq=VIT_STEPS
         ),
         validator=PathValidator.Config(
-            enable=False,
-            steps=-1,
+            enable=True,
+            freq=1024,
+            steps=32,
             dataloader=_vit_dataloader_config(split="val"),
             mixed_precision_param="bfloat16",
         ),
