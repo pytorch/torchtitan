@@ -31,6 +31,7 @@ def _ckpt(seed: int, dataset: str | None = None) -> PathTrainer.Config:
     cfg = _vit(BIG_FLAVOR, mup=True, lr=BIG_LR)
     dataset = dataset or cfg.dataloader.dataset
     stem = os.path.splitext(os.path.basename(dataset))[0]
+    report_user = os.getenv("REPORT_USER") or getpass.getuser()
     return replace(
         cfg,
         training=replace(cfg.training, steps=BIG_STEPS),
@@ -39,7 +40,7 @@ def _ckpt(seed: int, dataset: str | None = None) -> PathTrainer.Config:
         checkpoint=CheckpointManager.Config(
             enable=True,
             folder=(
-                f"/raid.unprotected/reports/{getpass.getuser()}_reports"
+                f"/raid.unprotected/reports/{report_user}_reports"
                 f"/prune_10m/vit/checkpoints/{BIG_FLAVOR}/{stem}_s{seed}"
             ),
             interval=BIG_STEPS,

@@ -46,10 +46,11 @@ class PathTrainer(Trainer):
                 }
             if self.dataloader.limit and not self.checkpoint.enable:
                 stem = os.path.splitext(os.path.basename(self.dataloader.dataset))[0]
+                report_user = os.getenv("REPORT_USER") or getpass.getuser()
                 self.checkpoint = CheckpointManager.Config(
                     enable=True,
                     folder=(
-                        f"/raid.unprotected/reports/{getpass.getuser()}_reports"
+                        f"/raid.unprotected/reports/{report_user}_reports"
                         f"/prune_10m/vit/checkpoints/{self.model_spec.flavor}"
                         f"/{stem}_s{self.debug.seed}"
                     ),
