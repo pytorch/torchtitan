@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
@@ -37,6 +36,7 @@ from .model_config import (
     WORLD_MODEL_FLOAT8_FILTER_FQNS,
 )
 from .tokenizer import WorldModelTokenizer
+from .torchpackage_checkpoint import WorldModelTorchPackageCheckpointManager
 from .trainer import WorldModelTrainer, WorldModelValidator
 
 
@@ -87,7 +87,7 @@ def worldmodel() -> WorldModelTrainer.Config:
         ),
         training=TrainingConfig(
             local_batch_size=local_batch_size,
-            global_batch_size=local_batch_size * world_size * 2,
+            global_batch_size=local_batch_size * world_size * 2,  # 2 grad acc
             seq_len=1,
             steps=steps,
             max_norm=1.0,
@@ -111,7 +111,7 @@ def worldmodel() -> WorldModelTrainer.Config:
             enable_reporterv2=True,
             save_freq=validation_freq,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=WorldModelTorchPackageCheckpointManager.Config(
             enable=True,
             folder=os.getenv("REPORTERV2_TRAINING_ID") or "checkpoint",
             interval=validation_freq * 5,
@@ -126,6 +126,7 @@ def worldmodel() -> WorldModelTrainer.Config:
                 "dataloader",
                 "train_state",
             ],
+            export_torch_package=True,
         ),
         validator=WorldModelValidator.Config(
             enable=True,
