@@ -55,20 +55,21 @@ class PlanHead(Module):
     class Config(Module.Config):
         norm: LayerNorm.Config | RMSNorm.Config
         head: Linear.Config
+        output_mult: float = 1.0
 
     def __init__(self, config: Config):
         super().__init__()
         self.norm = config.norm.build()
         self.head = config.head.build()
+        self.output_mult = config.output_mult
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.norm(x))
+        return self.head(self.norm(x) * self.output_mult)
 
 
 class PlanViT(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        output_mult: float
         mean: float
         std: float
         patch_embed: PatchEmbed.Config
@@ -108,7 +109,7 @@ class PlanViT(BaseModel):
         for block in self.blocks:
             x = block(x)
         x = self.norm(x)
-        return {"plan": self.plan_head(x.mean(dim=1)) * self.config.output_mult}
+        return {"plan": self.plan_head(x.mean(dim=1))}
 
 
 class PlanViTLoss(PathLoss):

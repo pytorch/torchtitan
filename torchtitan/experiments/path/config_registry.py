@@ -545,7 +545,6 @@ def _vit_model_config(flavor: str, *, mup: bool) -> PlanViT.Config:
     t, h, w = VIT_INPUT_SIZE
     num_patches = (t // pt) * (h // ph) * (w // pw)
     return PlanViT.Config(
-        output_mult=(VIT_BASE_WIDTH / dim) if mup else 1.0,
         mean=255 / 2,
         std=255 / 4,
         patch_embed=PatchEmbed.Config(
@@ -566,6 +565,7 @@ def _vit_model_config(flavor: str, *, mup: bool) -> PlanViT.Config:
         plan_head=PlanHead.Config(
             norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
             head=_lin(dim, PLAN_HEAD_SIZE, std=VIT_BASE_WIDTH**-0.5),
+            output_mult=(VIT_BASE_WIDTH / dim) if mup else 1.0,
         ),
     )
 
