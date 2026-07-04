@@ -504,10 +504,7 @@ class PolicyTrainer(Actor, Configurable):
             # expert_bias_E load-balance bias in MoE. The generator keeps those buffers at the same
             # registered dtype, so casting them here would mismatch its state dict and fail torchstore's
             # dtype check on weight sync.
-            # `state_dict()` keys are canonical, but `named_buffers()` keys keep the activation
-            # checkpoint wrapper's `_checkpoint_wrapped_module` segment (full or selective AC both use
-            # checkpoint_wrapper). Canonicalize the buffer FQNs so an AC-wrapped buffer still matches
-            # its state_dict key; otherwise it is misclassified as a param and wrongly cast.
+            # Strip the AC wrapper's `_checkpoint_wrapped_module` segment so buffer FQNs match state_dict() keys.
             # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
             #   CPU-staged path.
             buffer_names = {
