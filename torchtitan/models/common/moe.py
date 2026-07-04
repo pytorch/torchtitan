@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import spmd_types as spmd
@@ -16,6 +16,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -323,6 +324,79 @@ class TokenChoiceTopKRouter(Module):
         )
 
 
+class _SeqwiseCounts(Module):
+    """Per-sequence routing counts and prob sums (DeepSeek-V3 §A.2 Eqs 18-20).
+
+    Eq 18: ``f_i = N / (K_r * T) * count_i``.
+    Eq 19: ``s'_i,t = s_i,t / sum_j(s_j,t)``.
+    Eq 20: ``P_i = 1/T * sum_t(s'_i,t)``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        top_k: int
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.top_k = config.top_k
+
+    def forward(
+        self,
+        scores_BLE: torch.Tensor,
+        topk_expert_ids_BLK: torch.Tensor,
+    ) -> torch.Tensor:
+        routing_map_BLE = torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
+            -1, topk_expert_ids_BLK, True
+        )
+        counts_BE = routing_map_BLE.sum(dim=1).to(scores_BLE.dtype)
+        probs_BLE = scores_BLE / scores_BLE.sum(dim=-1, keepdim=True)
+        prob_sums_BE = probs_BLE.sum(dim=1)
+        # Single tensor avoids _redistribute_outputs tuple limitation.
+        return torch.cat([counts_BE, prob_sums_BE], dim=-1)
+
+
+class MoELoadBalanceAuxLoss(LoggedAuxLoss):
+    """Per-sequence MoE load-balance gradient."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(LoggedAuxLoss.Config):
+        top_k: int
+        tag: str = "seqwise_lb_loss"
+        # "batch" avoids double-reduction: _SeqwiseCounts already
+        # all-reduces across CP+TP via ShardingConfig.
+        reduce_mesh: str = "batch"
+        # Separate child module so its ShardingConfig inserts the
+        # Partial->Replicate all-reduce at the output boundary,
+        # avoiding an explicit dist.all_reduce in forward code.
+        counts: _SeqwiseCounts.Config = field(init=False)
+
+        def __post_init__(self):
+            self.counts = _SeqwiseCounts.Config(top_k=self.top_k)
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.top_k = config.top_k
+        self._seqwise_counts = config.counts.build()
+
+    def forward(
+        self,
+        scores_BLE: torch.Tensor,
+        topk_expert_ids_BLK: torch.Tensor,
+        *,
+        carrier: torch.Tensor,
+    ) -> torch.Tensor:
+        combined = self._seqwise_counts(scores_BLE, topk_expert_ids_BLK)
+        # Framework already reduced Partial→Replicate on CP+TP at the child
+        # boundary.  Split the concatenated (counts, prob_sums) tensor.
+        E = scores_BLE.size(-1)
+        counts_BE, prob_sums_BE = combined[..., :E], combined[..., E:]
+        num_tokens_B = counts_BE.sum(dim=1) / self.top_k
+        f_BE = counts_BE * (E / (self.top_k * num_tokens_B.unsqueeze(1)))
+        p_BE = prob_sums_BE / num_tokens_B.unsqueeze(1)
+        loss_per_seq_B = (f_BE * p_BE).sum(dim=1)
+        return self.inject(carrier, loss_per_seq_B.sum())
+
+
 class MoE(Module):
     """Mixture of Experts layer.
 
@@ -351,6 +425,7 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        aux_loss: MoELoadBalanceAuxLoss.Config | None = None
         # TODO(pianpwk): Remove this once MoE combine can derive the local
         # sequence shape directly from the input layout.
         seq_dim_tp_sharded: bool = False
@@ -365,6 +440,7 @@ class MoE(Module):
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
+        self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert_E is accumulated in the model forward pass.
@@ -444,6 +520,15 @@ class MoE(Module):
             topk_expert_ids_BLK,
             scores_BLE,
         ) = self.router(x_BLD, self.expert_bias_E)
+
+        # The aux-loss gradient must reach the router scores, which produce
+        # the per-expert gating weights.  Injection before the experts consume
+        # the scores means the gradient propagates into the gating network
+        # while the MoE output tensor stays unchanged (PP contract).
+        if self.training and self.aux_loss is not None:
+            topk_scores_BLK = self.aux_loss(
+                scores_BLE, topk_expert_ids_BLK, carrier=topk_scores_BLK
+            )
 
         # Build a one-hot routing map (B, L, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on

@@ -27,7 +27,12 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    MoE,
+    MoELoadBalanceAuxLoss,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import (
@@ -260,14 +265,24 @@ def make_moe_config(
     experts: GroupedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
+    aux_loss_coeff: float | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    aux_loss = (
+        MoELoadBalanceAuxLoss.Config(
+            coeff=aux_loss_coeff,
+            top_k=router.top_k,
+        )
+        if aux_loss_coeff is not None
+        else None
+    )
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
         router=router,
         experts=experts,
         shared_experts=shared_experts,
+        aux_loss=aux_loss,
     )
 
 
