@@ -25,6 +25,7 @@ from torchtitan.models.common.attention import (
     get_efficient_causal_mask_mod_for_packed_document,
     VarlenAttention,
 )
+from torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import MoE
@@ -219,6 +220,18 @@ class Decoder(BaseModel):
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance
                         )
+
+                # Runtime config fields for aux losses.
+                for _fqn, aux_loss_cfg, _parent, _attr in self.traverse(
+                    LoggedAuxLoss.Config
+                ):
+                    aux_loss_cfg.global_batch_size = config.training.global_batch_size
+                    # Under compile, functionalize isolates AC recomputation's buffer
+                    # mutation from the module -- only the forward path counts.
+                    aux_loss_cfg.ac_doubled = (
+                        config.activation_checkpoint is not None
+                        and not config.compile.enable
+                    )
 
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
