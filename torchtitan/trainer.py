@@ -799,6 +799,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 labels=labels,
                 global_valid_tokens=global_valid_tokens,
             )
+
+            if not loss.isfinite():
+                raise RuntimeError(
+                    f"Loss is not finite (loss={loss.item()}) at step "
+                    f"{self.step}. Dumping the offending microbatch for "
+                    f"debugging -- input_dict: {input_dict}, labels: {labels}, "
+                    f"global_valid_tokens: {global_valid_tokens}"
+                )
+
             accumulated_losses.append(loss.detach())
 
         with sl.log_trace_span("optim"):
