@@ -143,3 +143,41 @@ python -m torchtitan.experiments.rl.train \
 Batch-invariant configs in
 `torchtitan/experiments/rl/examples/alphabet_sort/config_registry.py` all use
 FSDP mixed precision (fp32 master weights, bf16-cast forward) on the trainer:
+
+## Performance: cost of batch-invariant mode
+
+Batch-invariant mode swaps in deterministic kernels (the `batch_invariant_ops`
+Triton mm/addmm/log_softmax, flash attention forced to `num_splits=1`, the `bmm`
+router override) and disables TF32 + reduced-precision reductions, so the raw
+compute is slower. Whether that slowdown shows up end-to-end depends on how
+compute-bound the workload is.
+
+**Experiment setup.** Dense Qwen3-8B on the Search-R1 recipe
+(`rl_grpo_qwen3_8b_search_r1` with and without the `_batch_invariant` variant),
+8xH100, matched TP2/TP2 (trainer `tensor_parallel_degree=2` + generator
+`tensor_parallel_degree=2`), on-policy (`max_offpolicy_steps=0`), generator
+cudagraph ON (`FULL_DECODE_ONLY`) in BOTH runs, 30 training steps, 4 groups x
+group_size 8 = 32 rollouts/step. The two runs differ ONLY in
+`DebugConfig(batch_invariant=...)`. All values are per-step medians.
+
+| metric (median)               | BI OFF             | BI ON     | effect of BI    |
+|-------------------------------|--------------------|-----------|-----------------|
+| wall-clock / step             | 136.4 s            | 133.6 s   | ~1.0x (no cost) |
+| generator ITL (per-token)     | 9.6 ms             | 22.8 ms   | 2.4x slower     |
+| generator decode time         | 177 ms             | 460 ms    | 2.6x slower     |
+| trainer fwd/bwd throughput    | 370 tok/s          | 127 tok/s | 2.9x slower     |
+| trainer full-step throughput  | 11.1 tok/s         | 9.2 tok/s | 1.2x slower     |
+| kl_div max / logprob_diff max | 0.0084 / 1.56 (>0) | 0 / 0     | bitwise parity  |
+
+**Takeaways.**
+
+- Batch-invariant mode makes the raw *compute* ~2.4-2.9x slower (generator
+  per-token latency and trainer fwd/bwd), the cost of the deterministic kernels.
+- End-to-end wall-clock per step is essentially unchanged (~1.0x) for this
+  workload: a Search-R1 step is dominated by non-compute work -- multi-turn
+  rollout orchestration, CPU retrieval round-trips, and on-policy sync waiting
+  for the slowest straggler rollout -- which masks the compute slowdown. On a
+  compute-bound workload (long generations, little retrieval/orchestration) the
+  ~2.5x would surface in wall-clock.
+- The cost buys exact trainer/generator agreement: `kl_div` and `logprob_diff`
+  are 0 at every step with BI ON, versus > 0 (up to 0.008 / 1.56) with BI OFF.
