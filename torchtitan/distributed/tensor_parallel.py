@@ -109,6 +109,10 @@ def maybe_enable_async_tp(
         raise RuntimeError(
             "Async TP requires 'model' in --compile.components and --compile.enable"
         )
+    
+    group_name = tp_mesh.get_group().group_name
+    from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+    enable_symm_mem_for_group(group_name)
 
     torch._inductor.config._micro_pipeline_tp = True
 
