@@ -35,7 +35,12 @@ class _GeneratorHandle(RoutingCandidate):
     """Controller-side metadata for one generator mesh."""
 
     actor: Any
-    """Monarch actor handle for the generator mesh."""
+    """Monarch actor handle for the full generator mesh. Used for fan-out calls
+    that every rank must run."""
+
+    rank0_actor: Any
+    """Cached rank-0 slice of ``actor``. Used for calls that only rank 0 needs
+    to run."""
 
     reserved_load: int = 0
     """Controller-side estimate of in-flight routed generation work."""
@@ -74,7 +79,7 @@ class InterGeneratorRouter(Configurable):
         generation (no draining). When False, each generator is drained before
         its pull.
 
-        Draining only waits for a generator's in-flight ``route`` call (one
+        Draining only waits for a generator's in-flight ``route_rank0`` call (one
         turn) to finish; between turns of a multi-turn rollout the generator is
         idle, so a weight sync may land mid-rollout and successive turns can run
         under different policy versions."""
@@ -87,7 +92,11 @@ class InterGeneratorRouter(Configurable):
     ):
         self._config = config
         self._generators = [
-            _GeneratorHandle(actor=generator) for generator in generators
+            _GeneratorHandle(
+                actor=generator,
+                rank0_actor=generator.flatten("rank").slice(rank=0),
+            )
+            for generator in generators
         ]
         if not self._generators:
             raise ValueError("InterGeneratorRouter requires at least one generator")
@@ -136,22 +145,23 @@ class InterGeneratorRouter(Configurable):
         if h.reserved_load == 0:
             h.idle.set()
 
-    async def route(
+    async def route_rank0(
         self,
         method: str,
         *args,
         routing_ctx: RoutingContext,
         **kwargs,
     ) -> Any:
-        """Dispatch one call to a strategy-chosen serving generator; return its result."""
-
+        """Dispatch one call to a strategy-chosen serving generator's rank 0;
+        return its result.
+        """
         await self._serving.wait()
         candidates = self._candidates()
         assert candidates, "serving event was set with no serving generators"
         h = self._strategy.choose(routing_ctx, candidates)
         self._reserve(h, routing_ctx.estimated_cost)
         try:
-            return await getattr(h.actor, method).call(*args, **kwargs)
+            return await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
         finally:
             self._release(h, routing_ctx.estimated_cost)
 
@@ -194,7 +204,7 @@ class InterGeneratorRouter(Configurable):
                 # Hot swap: pull concurrently with in-flight generation, without
                 # draining. Whether the pull is genuinely concurrent and safe is
                 # up to the generator's implementation.
-                await h.actor.pull_model_state_dict.call(policy_version)
+                await h.rank0_actor.pull_model_state_dict.call_one(policy_version)
             else:
                 # Drain: stop routing to this generator and wait for in-flight
                 # work to finish before pulling, then re-admit it.
@@ -202,7 +212,7 @@ class InterGeneratorRouter(Configurable):
                 try:
                     with sl.log_trace_span("router_drain_wait"):
                         await h.idle.wait()
-                    await h.actor.pull_model_state_dict.call(policy_version)
+                    await h.rank0_actor.pull_model_state_dict.call_one(policy_version)
                 finally:
                     self._set_state(h, _GeneratorState.SERVING)
 

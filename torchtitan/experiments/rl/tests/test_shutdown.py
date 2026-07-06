@@ -233,6 +233,12 @@ class _StubActor:
     def __init__(self, name, events, raises=False):
         self.close = _StubEndpoint(name, events, raises)
 
+    def slice(self, **kwargs):
+        return self
+
+    def __len__(self):
+        return 1
+
 
 class _StubMesh:
     def __init__(self, name, events):
