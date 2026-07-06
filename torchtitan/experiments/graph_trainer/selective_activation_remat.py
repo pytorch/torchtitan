@@ -43,10 +43,9 @@ def _collect_backward_regions(
     """Returns (bwd_start, bwd_end, needs_remat) for each backward region.
 
     Regions are maximal contiguous runs of backward nodes, as [start, end)
-    indices into the graph node list. This is still kind of OK for chunked
-    loss because: (1) we would have errored earlier if there were multiple
-    regions that need recompute, and (2) we only ever do recompute on the
-    last backward.
+    indices into the graph node list. Multiple regions may need recompute
+    (e.g. chunked loss, or FSDP collective splitting fragmenting the
+    backward); ``selective_activation_remat_pass`` rematerializes each.
     """
     regions: list[tuple[int, int, bool]] = []
     bwd_start: int | None = None
@@ -92,8 +91,9 @@ def selective_activation_remat_pass(
     non-strict ``make_fx`` tracing when tracing ``torch.autograd.grad``.
 
     The graph may contain multiple disjoint backward regions (e.g. chunked
-    loss). Regions that do not depend on recomputable forward nodes are
-    skipped. Only one region may require remat; if multiple do, we error.
+    loss, or FSDP collective splitting fragmenting the backward). Regions
+    that do not depend on recomputable forward nodes are skipped; every
+    region that does is rematerialized.
     """
     if not has_recomputable_ops(gm):
         return gm
@@ -109,26 +109,20 @@ def selective_activation_remat_pass(
     if not regions:
         return gm
 
-    # Assumption: chunked-loss regions (e.g. lm_head) do not carry AC, so
-    # at most one backward region depends on must_recompute forward nodes.
-    # If tag_sac_policy starts tagging the lm_head layer with AC, multiple
-    # disjoint backward regions could need remat and this heuristic must
-    # be revisited.
+    # A graph may contain several disjoint backward regions (chunked loss, or
+    # FSDP collective splitting fragmenting the backward), and more than one
+    # may depend on must_recompute forward nodes. Handle every such region:
+    # bwd_nodes below spans all of them, so each must_recompute forward node
+    # is duped in front of its earliest backward consumer regardless of which
+    # region that consumer lives in. Recompute is deterministic, so a dup
+    # shared by consumers in different regions stays numerics-preserving.
     remat_regions = [(s, e) for s, e, needs in regions if needs]
-
-    if len(remat_regions) > 1:
-        raise RuntimeError(
-            f"Detected {len(remat_regions)} disjoint backward regions that require recomputation, "
-            "but remat only supports one such region in a forward-loss-backward graph."
-        )
 
     if not remat_regions:
         return gm
 
-    bwd_start, bwd_end = remat_regions[0]
-
     all_nodes = list(gm.graph.nodes)
-    bwd_nodes = all_nodes[bwd_start:bwd_end]
+    bwd_nodes = [n for start, end in remat_regions for n in all_nodes[start:end]]
     order = {n: i for i, n in enumerate(all_nodes)}
 
     # Map each must_recompute fwd node to the bwd node its dup will be

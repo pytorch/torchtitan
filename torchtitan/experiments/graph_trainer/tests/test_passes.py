@@ -6308,7 +6308,10 @@ class TestSelectiveActivationRematPass(TestCase):
             self.assertEqual(inp.name, e_name + "_recomputed")
         self.assertNotIn(e_name, [n.name for n in nodes])
 
-    def test_multiple_backward_regions_recompute_errors(self):
+    def test_multiple_backward_regions_recompute(self):
+        # Two disjoint backward regions (separated by the forward node ``sep``)
+        # that each depend on a must_recompute forward node. Remat handles both:
+        # ``a`` is recomputed before ``bwd1`` and ``b`` before ``bwd2``.
         graph = torch.fx.Graph()
         inp1 = graph.placeholder("inp1")
         inp2 = graph.placeholder("inp2")
@@ -6323,9 +6326,27 @@ class TestSelectiveActivationRematPass(TestCase):
         for node in (bwd1, bwd2):
             node.meta["autograd_backward"] = True
 
+        a_name, b_name, sep_name = a.name, b.name, sep.name
+
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-        with self.assertRaisesRegex(RuntimeError, "disjoint backward regions"):
-            selective_activation_remat_pass(gm)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+        dups = {n.name for n in nodes if n.name.endswith("_recomputed")}
+        # Both regions rematerialize their own must_recompute input.
+        self.assertEqual(dups, {a_name + "_recomputed", b_name + "_recomputed"})
+
+        # Each backward region reads from its own dup; the originals (all of
+        # whose consumers were backward) are erased. The separating forward
+        # node stays.
+        for inp in bwd1.all_input_nodes:
+            self.assertEqual(inp.name, a_name + "_recomputed")
+        for inp in bwd2.all_input_nodes:
+            self.assertEqual(inp.name, b_name + "_recomputed")
+        node_names = [n.name for n in nodes]
+        self.assertNotIn(a_name, node_names)
+        self.assertNotIn(b_name, node_names)
+        self.assertIn(sep_name, node_names)
 
     def test_forward_consumer_keeps_original(self):
         """When a must_recompute node has both forward and backward
