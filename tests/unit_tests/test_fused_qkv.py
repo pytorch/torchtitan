@@ -194,5 +194,96 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
         self.assertTrue(torch.equal(raw_fixed, xk_fixed))
 
 
+class TestFusedQKVInplaceWrite(unittest.TestCase):
+    """Simulate TorchStore's in-place weight update pattern.
+
+    TorchStore's get_state_dict writes updated weights in-place into the
+    user_state_dict, but FusedQKVLinear's post-hook returns .contiguous()
+    copies that don't share storage with the fused wqkv parameter. Without
+    a subsequent load_state_dict, the model's live weights are never updated.
+    """
+
+    def test_state_dict_entries_do_not_share_storage_with_fused_param(self):
+        """state_dict() post-hook produces detached copies (the bug precondition)."""
+        fused = _build_fused()
+        sd = fused.state_dict()
+
+        self.assertIn("wq.weight", sd)
+        self.assertIn("wk.weight", sd)
+        self.assertIn("wv.weight", sd)
+        self.assertNotIn("wqkv.weight", sd)
+
+        fused_ptr = fused.wqkv.weight.data_ptr()
+        fused_end = (
+            fused_ptr
+            + fused.wqkv.weight.nelement() * fused.wqkv.weight.element_size()
+        )
+        for key in ("wq.weight", "wk.weight", "wv.weight"):
+            t = sd[key]
+            t_ptr = t.data_ptr()
+            t_end = t_ptr + t.nelement() * t.element_size()
+            overlaps = not (t_end <= fused_ptr or t_ptr >= fused_end)
+            self.assertFalse(overlaps, f"{key} should not share storage with wqkv")
+
+    def test_inplace_write_without_load_does_not_update_model(self):
+        """In-place copy into state_dict without load_state_dict leaves the
+        fused parameter unchanged (demonstrates the bug)."""
+        fused = _build_fused()
+        original_wqkv = fused.wqkv.weight.clone()
+
+        sd = fused.state_dict()
+        sd["wq.weight"].copy_(torch.randn_like(sd["wq.weight"]))
+        sd["wk.weight"].copy_(torch.randn_like(sd["wk.weight"]))
+        sd["wv.weight"].copy_(torch.randn_like(sd["wv.weight"]))
+
+        self.assertTrue(torch.equal(fused.wqkv.weight, original_wqkv))
+
+    def test_inplace_write_with_load_updates_model(self):
+        """The fix: load_state_dict after in-place write triggers merge hooks."""
+        fused = _build_fused()
+        original_wqkv = fused.wqkv.weight.clone()
+
+        sd = fused.state_dict()
+        new_wq = torch.randn_like(sd["wq.weight"])
+        new_wk = torch.randn_like(sd["wk.weight"])
+        new_wv = torch.randn_like(sd["wv.weight"])
+        sd["wq.weight"].copy_(new_wq)
+        sd["wk.weight"].copy_(new_wk)
+        sd["wv.weight"].copy_(new_wv)
+
+        fused.load_state_dict(sd, strict=False)
+
+        self.assertFalse(torch.equal(fused.wqkv.weight, original_wqkv))
+
+        sd_after = fused.state_dict()
+        torch.testing.assert_close(sd_after["wq.weight"], new_wq)
+        torch.testing.assert_close(sd_after["wk.weight"], new_wk)
+        torch.testing.assert_close(sd_after["wv.weight"], new_wv)
+
+    def test_forward_reflects_updated_weights(self):
+        """After the fix, forward() uses the new weights."""
+        fused = _build_fused()
+        x = torch.randn(1, 2, _DIM)
+        xq_before, xk_before, xv_before = fused(x)
+
+        sd = fused.state_dict()
+        sd["wq.weight"].copy_(torch.randn_like(sd["wq.weight"]))
+        sd["wk.weight"].copy_(torch.randn_like(sd["wk.weight"]))
+        sd["wv.weight"].copy_(torch.randn_like(sd["wv.weight"]))
+        fused.load_state_dict(sd, strict=False)
+
+        xq_after, xk_after, xv_after = fused(x)
+        self.assertFalse(torch.equal(xq_before, xq_after))
+        self.assertFalse(torch.equal(xk_before, xk_after))
+        self.assertFalse(torch.equal(xv_before, xv_after))
+
+        ref_q = (x @ sd["wq.weight"].T).view(1, 2, _N_HEADS, _HEAD_DIM)
+        ref_k = (x @ sd["wk.weight"].T).view(1, 2, _N_KV_HEADS, _HEAD_DIM)
+        ref_v = (x @ sd["wv.weight"].T).view(1, 2, _N_KV_HEADS, _HEAD_DIM)
+        torch.testing.assert_close(xq_after, ref_q)
+        torch.testing.assert_close(xk_after, ref_k)
+        torch.testing.assert_close(xv_after, ref_v)
+
+
 if __name__ == "__main__":
     unittest.main()
