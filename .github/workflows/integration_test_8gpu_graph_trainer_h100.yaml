@@ -62,6 +62,15 @@ jobs:
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
 
+        # The ARC H100 runner mounts the shared HF cache (/mnt/hf_cache) read-only.
+        # The c4_test loader (torchtitan/hf_datasets/text_datasets.py) calls
+        # datasets.load_dataset non-streaming, which os.makedirs the HF datasets
+        # cache root before loading -- that write fails on the read-only mount and
+        # crashes dataloader build for every debug-model flavor. Point the HF cache
+        # at the writable per-job $RUNNER_TEMP so all test stages can build datasets.
+        export HF_HOME="$RUNNER_TEMP/hf_home"
+        export HF_DATASETS_CACHE="$RUNNER_TEMP/hf_home/datasets"
+
         # Log GPU info / driver version for debugging.
         DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
         echo "CUDA driver version: ${DRIVER_VERSION}"
