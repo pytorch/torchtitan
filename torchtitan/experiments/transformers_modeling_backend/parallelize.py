@@ -28,6 +28,49 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
 
+def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
+    """All-gather k/v across the CP axis inside each flex kernel forward.
+
+    q/k/v reach the flex kernel seq-sharded on the CP axis (tensor dim 2 of the
+    ``(b, heads, seq, dim)`` layout). Attention needs full-length k/v, so we
+    all-gather them across the CP mesh with a funcol collective (autograd-aware:
+    the backward reduce-scatters gradients back to the local shard). q stays
+    sharded, so each rank computes attention for its seq shard against the full
+    keys -- the BlockMask is Q-sharded / KV-full to match.
+
+    This is the explicit-collective analogue of native's ``flex_cp_allgather``
+    path: the kernel runs nested inside the attention module's local_map region
+    where the CP mesh dim is no longer visible to a declarative redistribute, so
+    the gather is done here on local tensors. Called before ``model.parallelize``
+    so the wrap is captured inside the local_map wrapping.
+    """
+    import torch.distributed as dist
+    from torch.distributed.tensor.experimental._context_parallel._attention import (
+        flex_cp_allgather,
+    )
+
+    pg_name = dist._get_process_group_name(cp_mesh.get_group())
+    seq_dim = 2  # (b, heads, seq, dim)
+
+    for module in model.modules():
+        kernel = getattr(module, "_titan_flex_kernel", None)
+        if kernel is None:
+            continue
+
+        def _make_cp_forward(orig_forward):
+            def cp_forward(query, key, value, **kwargs):
+                key = key.contiguous()
+                value = value.contiguous()
+                global_key, global_value = flex_cp_allgather(
+                    key, value, seq_dim, pg_name
+                )
+                return orig_forward(query, global_key, global_value, **kwargs)
+
+            return cp_forward
+
+        kernel.forward = _make_cp_forward(kernel.forward)
+
+
 # ---------------------------------------------------------------------------
 # Main parallelization entry point
 # ---------------------------------------------------------------------------
@@ -59,15 +102,16 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # Flex attention works with FSDP and TP (the TP path runs flex under
-    # local_map; see _flex_attention_torchtitan), but not yet with context
-    # parallelism — that needs a CP-sharded BlockMask and local_map over the CP
-    # axis. Fail loud rather than silently mis-attend across the CP shards.
-    if getattr(model.model.config, "use_flex_attn", False) and parallel_dims.cp_enabled:
+    # Flex attention supports FSDP, TP, and context parallelism. Under CP the
+    # flex kernel's local_map redistributes k/v from seq-sharded to CP-Replicate
+    # (all-gather); see _attach_flex_kernel in hf_sharding.py. The CP-sharded
+    # BlockMask is built and sharded on its Q axis upstream (trainer, ptrr
+    # balancer). PP is not yet wired for flex+CP.
+    use_flex = getattr(model.model.config, "use_flex_attn", False)
+    if use_flex and parallel_dims.cp_enabled and parallel_dims.pp_enabled:
         raise NotImplementedError(
-            "use_flex_attn=True is not yet supported with context parallelism in "
-            "the HF transformers backend (needs a CP-sharded BlockMask + local_map "
-            "over the CP axis). Use flex with FSDP/TP, or disable context parallel."
+            "use_flex_attn=True with context parallelism is not yet supported "
+            "together with pipeline parallelism in the HF transformers backend."
         )
 
     # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
@@ -100,8 +144,16 @@ def parallelize_hf_transformers(
 
         build_and_swap_native_moe(model, parallel_dims)
 
-    # 2. Convert HF modules to Module protocol
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+    # 2. Convert HF modules to Module protocol.
+    # TP/EP always need it. CP-only needs it too when flex is enabled: the flex
+    # kernel's local_map is what all-gathers k/v across the CP axis, and it is
+    # only installed by the sharding pass below.
+    needs_module_protocol = (
+        parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+        or (parallel_dims.cp_enabled and use_flex)
+    )
+    if needs_module_protocol:
         from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
             set_hf_sharding_configs,
         )
@@ -123,6 +175,13 @@ def parallelize_hf_transformers(
             # models, which shard the lm_head output S(-1) under TP).
             enable_loss_parallel=parallel_dims.tp_enabled,
         )
+
+        # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
+        # the CP axis (on the seq dim). Must run before model.parallelize so the
+        # wrap is captured inside the local_map region and operates on the local
+        # (already TP-head-sharded, CP-seq-sharded) tensors.
+        if parallel_dims.cp_enabled and use_flex:
+            _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
 
         # 4. Single parallelize call — handles TP, EP, MoE, everything
         model.parallelize(parallel_dims)

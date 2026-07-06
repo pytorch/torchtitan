@@ -152,20 +152,37 @@ def set_hf_sharding_configs(
 def _attach_flex_kernel(attn: nn.Module) -> None:
     """Attach the flex-attention kernel Module carrying the attention local_map.
 
-    q/k/v reach the HF attention function as ``(b, heads, seq, dim)`` DTensors
-    with heads TP-sharded on tensor dim 1; the flex output is
-    ``(b, seq, heads, dim)`` with heads on dim 2. Declare those as the local_map
-    input/output placements so the Module protocol maps q/k/v to local tensors
-    around the flex HOP (see ``HFFlexKernel``). CP is Replicate here -- flex+CP
-    is guarded in ``parallelize_hf_transformers``, and ``spmd.R`` avoids a
-    same-tensor-dim collision with the TP shard on dim 1.
+    q/k/v reach the HF attention function as ``(b, heads, seq, dim)`` with heads
+    on tensor dim 1 and seq on tensor dim 2; the flex output is
+    ``(b, seq, heads, dim)`` with seq on dim 1 and heads on dim 2. Declare those
+    as the local_map input/output placements so the Module protocol maps q/k/v
+    to local tensors around the flex HOP (see ``HFFlexKernel``).
+
+    Under CP, q/k/v arrive seq-sharded on the CP axis. The local_map treats
+    them as seq-sharded (``S(2)`` on the input); the actual k/v all-gather across
+    the CP axis is done explicitly with a funcol collective inside the kernel
+    forward (see ``_wrap_flex_kernel_cp`` in parallelize.py), because the kernel
+    runs nested inside the attention module's local_map region where the CP mesh
+    dim is no longer visible to a declarative redistribute. The output is
+    seq-sharded on the CP axis (``S(1)`` -- seq is dim 1 after flex transposes).
+    When CP is not enabled the (tp,)-only mesh ignores the CP placement, so this
+    is a no-op for the TP/FSDP-only paths. DP stays ``R`` -- FSDP is applied
+    classically (``apply_fsdp``), not as an spmd DP axis.
     """
     from torchtitan.experiments.transformers_modeling_backend.model import HFFlexKernel
 
-    heads_in = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.S(1)})
-    heads_out = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.S(2)})
+    # Input layout (b, heads, seq, dim): heads on dim 1 (TP), seq on dim 2 (CP).
+    # k/v stay S(2) here; the funcol all-gather in the forward wrap handles CP.
+    heads_in = SpmdLayout({DP: spmd.R, CP: spmd.S(2), TP: spmd.S(1)})
+    # Output layout (b, seq, heads, dim): seq on dim 1 (CP), heads on dim 2 (TP).
+    heads_out = SpmdLayout({DP: spmd.R, CP: spmd.S(1), TP: spmd.S(2)})
     attn._titan_flex_kernel = HFFlexKernel.Config(
         sharding_config=ShardingConfig(
+            in_src_shardings={
+                "query": heads_in,
+                "key": heads_in,
+                "value": heads_in,
+            },
             in_dst_shardings={
                 "query": heads_in,
                 "key": heads_in,
