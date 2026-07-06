@@ -870,13 +870,21 @@ class VLLMGenerator(Actor, Configurable):
         """
         # TODO: with >1 generator, trainer should probably use direct_rdma=False (CPU-staged, fanout-safe)
         # is_rdma_available() is a hardware probe, not a fanout signal.
-        model_sd = self._get_model().model.state_dict()
+        model = self._get_model().model
+        model_sd = model.state_dict()
         await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=model_sd,
             strict=False,
             direct_rdma=is_rdma_available(),
         )
+        # Modules with fused parameters (FusedQKVLinear, FusedSwiGLU) use
+        # state_dict post-hooks to split a single fused weight into multiple
+        # keys (e.g. wqkv -> wq/wk/wv). TorchStore writes into these split
+        # copies, but they don't share storage with the actual fused parameter.
+        # load_state_dict triggers the pre-hooks (_merge_qkv_on_load, etc.)
+        # that fuse the updated splits back into the live parameter.
+        model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async): under hot-swap, prefer per-token weight-version tracking over a full
