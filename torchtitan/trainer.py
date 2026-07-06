@@ -6,6 +6,7 @@
 
 import dataclasses
 import json
+import math
 import os
 import time
 from collections.abc import Iterable, Iterator
@@ -799,15 +800,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 labels=labels,
                 global_valid_tokens=global_valid_tokens,
             )
-
-            if not loss.isfinite():
-                raise RuntimeError(
-                    f"Loss is not finite (loss={loss.item()}) at step "
-                    f"{self.step}. Dumping the offending microbatch for "
-                    f"debugging -- input_dict: {input_dict}, labels: {labels}, "
-                    f"global_valid_tokens: {global_valid_tokens}"
-                )
-
             accumulated_losses.append(loss.detach())
 
         with sl.log_trace_span("optim"):
@@ -860,6 +852,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 global_avg_loss = global_max_loss = float(loss.detach().item())
                 global_ntokens_seen = self.ntokens_seen
+
+        # Crash on invalid loss. global_avg_loss is a SUM reduction, so a infinite
+        # loss on any rank propagates here. This reuses the D2H copy already done
+        # for logging, so it adds no extra sync.
+        # TODO: make this step work even logging is off.
+        if not math.isfinite(global_avg_loss):
+            raise RuntimeError(
+                f"Loss is not finite (global_avg_loss={global_avg_loss}) at "
+                f"step {self.step}. Stopping training."
+            )
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
