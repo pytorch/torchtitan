@@ -46,9 +46,10 @@ class Embedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Runs vocab-parallel embedding when the module has a TP group."""
-        weight = (
-            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        )
+        # Avoid duplicate access of self.weight attr by caching it in local var,
+        # to avoid parametrization based solutions like SimpleFSDP to double parametrize.
+        weight = self.weight
+        weight = weight.to_local() if isinstance(weight, DTensor) else weight
         if self.tp_group is None:
             return F.embedding(
                 input,

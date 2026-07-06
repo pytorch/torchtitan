@@ -100,6 +100,24 @@ class TestEmbeddingConfig(unittest.TestCase):
         self.assertIsInstance(emb, Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
+    def test_forward_reads_weight_once(self):
+        """SimpleFSDP exposes weight as an active property; read it once."""
+        emb = Embedding.Config(num_embeddings=4, embedding_dim=3).build()
+        weight = emb._parameters["weight"]
+        reads = 0
+
+        class CountingEmbedding(emb.__class__):
+            @property
+            def weight(self):
+                nonlocal reads
+                reads += 1
+                return weight
+
+        emb.__class__ = CountingEmbedding
+        out = emb(torch.tensor([1, 2]))
+        self.assertEqual(out.shape, torch.Size([2, 3]))
+        self.assertEqual(reads, 1)
+
 
 class TestEmbedding(DTensorTestBase):
     @property
