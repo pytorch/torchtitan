@@ -119,6 +119,42 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
     )
 
 
+def transformers_modeling_backend_debugmodel_moe_flex() -> TransformersBackendConfig:
+    """MoE debug config with flex attention enabled (use_flex_attn=True).
+
+    Exercises the MoE backend (EP/TP) together with the packed/document-mask
+    flex path, including flex + context parallelism.
+    """
+    return TransformersBackendConfig(
+        loss=CrossEntropyLoss.Config(),
+        hf_assets_path="./tests/assets/tokenizer",
+        hf_model="Qwen/Qwen3-30B-A3B",
+        debug=DebugConfig(print_config=True),
+        model_spec=model_registry("debugmodel_moe_flex"),
+        profiler=Profiler.Config(profile_freq=5),
+        optimizer=default_adamw(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=2048,
+            steps=10,
+        ),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=SelectiveAC.Config(),
+    )
+
+
 def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
     return TransformersBackendConfig(
         hf_model="Qwen/Qwen3-30B-A3B",

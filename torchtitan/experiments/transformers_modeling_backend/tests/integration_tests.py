@@ -104,6 +104,70 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             "transformers_modeling_backend_flex_fsdp+tp",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend Flex FSDP+CP",
+            "transformers_modeling_backend_flex_fsdp+cp",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend Flex TP+CP",
+            "transformers_modeling_backend_flex_tp+cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_moe_flex",
+                    "--parallelism.data_parallel_shard_degree -1",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend Flex MoE EP+CP",
+            "transformers_modeling_backend_flex_moe_ep+cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_moe_flex",
+                    "--parallelism.data_parallel_shard_degree -1",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend Flex MoE TP+EP+CP",
+            "transformers_modeling_backend_flex_moe_tp+ep+cp",
+            ngpu=8,
+        ),
     ]
     return integration_tests_flavors
 

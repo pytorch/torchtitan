@@ -135,6 +135,20 @@ flavors = {
             num_nextn_predict_layers=0,
         ),
     ),
+    "debugmodel_moe_flex": HFTransformerModel.Config(
+        model_config=TitanMoeModelConfig(
+            use_flex_attn=True,
+            dim=2048,
+            n_layers=4,
+            n_heads=16,
+            n_kv_heads=8,
+            intermediate_size=512,
+            num_experts=8,
+            num_experts_per_tok=2,
+            moe_intermediate_size=128,
+            num_nextn_predict_layers=0,
+        ),
+    ),
     "full": HFTransformerModel.Config(
         model_config=TitanModelConfig(),
     ),
