@@ -23,14 +23,15 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from torch._library.opaque_object import OpaqueBase, register_opaque_type
+from torch._custom_class_base import CustomClassBase
+from torch._library.opaque_object import register_custom_class
 
 from torchtitan.tools.logging import logger
 
 _buffer: Any = None  # Global buffer instance
 
 
-class DispatchHandle(OpaqueBase):
+class DispatchHandle(CustomClassBase):
     """Opaque wrapper for HybridEP dispatch handle.
 
     Wraps the deep_ep dispatch handle as an opaque type so it can be returned
@@ -58,7 +59,7 @@ class DispatchHandle(OpaqueBase):
         return "DispatchHandle()", {"DispatchHandle": DispatchHandle}
 
 
-register_opaque_type(DispatchHandle, typ="reference")
+register_custom_class(DispatchHandle, typ="reference")
 
 
 @dataclass
