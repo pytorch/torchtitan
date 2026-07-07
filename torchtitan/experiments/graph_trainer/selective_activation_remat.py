@@ -40,48 +40,46 @@ def _privatize_custom_meta(node: fx.Node) -> None:
         node.meta["custom"] = dict(custom)
 
 
-# Backward regions under these module FQNs are not activation-checkpoint
-# regions and must not drive recompute. A chunked-loss / lm_head backward
-# region can *consume* a must_recompute forward node -- the tied embedding
-# weight and shared rope buffers flow into the loss backward -- but recompute
-# belongs to the model-layer backward, not here. Without excluding them a
-# chunked loss produces one remat region per chunk.
+# Module FQNs whose backward is not an activation-checkpoint region. In a
+# forward-loss-backward graph the backward runs in reverse module order, so the
+# loss / lm_head backward always precedes the model-layer backward. A
+# chunked-loss / lm_head backward can *consume* must_recompute forward nodes
+# (the tied embedding weight and shared rope buffers flow into the loss
+# backward), but recompute belongs to the model-layer backward. These FQNs mark
+# where that model-layer backward begins.
 _NON_AC_MODULE_FQNS = frozenset({"loss", "lm_head"})
-
-
-def _is_loss_region(region_nodes: list[fx.Node]) -> bool:
-    """Whether a backward region is a loss / lm_head region (not an AC region).
-
-    True when the region carries module annotations and every annotated node is
-    under ``loss`` / ``lm_head``. Unannotated regions (e.g. synthetic unit-test
-    graphs) return False, preserving the default remat behavior.
-    """
-    fqns = {_get_module_fqn(n) for n in region_nodes}
-    fqns.discard("")
-    return bool(fqns) and fqns <= _NON_AC_MODULE_FQNS
 
 
 def _collect_backward_regions(
     gm: fx.GraphModule,
 ) -> list[tuple[int, int, bool]]:
-    """Returns (bwd_start, bwd_end, needs_remat) for each backward region.
+    """Returns (bwd_start, bwd_end, needs_remat) for each model-layer backward region.
+
+    Relies on the forward-loss-backward structure: the loss / lm_head backward
+    always precedes the model-layer backward. We find the last loss / lm_head
+    node and collect backward regions only from there on, so chunked-loss
+    backward chunks are never counted as remat regions -- only the model-layer
+    backward that follows is. When there are no loss / lm_head nodes (e.g. a
+    synthetic unit-test graph) collection starts at the beginning.
 
     Regions are maximal contiguous runs of backward nodes, as [start, end)
     indices into the graph node list. ``needs_remat`` is True when a backward
-    node in the region consumes a must_recompute forward node AND the region is
-    not a loss / lm_head region (see ``_is_loss_region``) -- so chunked-loss
-    backward chunks are never counted as remat regions.
+    node in the region consumes a must_recompute forward node.
     """
     all_nodes = list(gm.graph.nodes)
+
+    # Skip everything up to and including the last loss / lm_head node.
+    start_idx = 0
+    for idx, node in enumerate(all_nodes):
+        if _get_module_fqn(node) in _NON_AC_MODULE_FQNS:
+            start_idx = idx + 1
+
     regions: list[tuple[int, int, bool]] = []
     bwd_start: int | None = None
     needs_remat = False
 
-    def close(start: int, end: int) -> None:
-        needs = needs_remat and not _is_loss_region(all_nodes[start:end])
-        regions.append((start, end, needs))
-
-    for idx, node in enumerate(all_nodes):
+    for idx in range(start_idx, len(all_nodes)):
+        node = all_nodes[idx]
         if _is_backward_node(node):
             if bwd_start is None:
                 bwd_start = idx
@@ -91,11 +89,11 @@ def _collect_backward_regions(
             ):
                 needs_remat = True
         elif bwd_start is not None:
-            close(bwd_start, idx)
+            regions.append((bwd_start, idx, needs_remat))
             bwd_start = None
 
     if bwd_start is not None:
-        close(bwd_start, len(all_nodes))
+        regions.append((bwd_start, len(all_nodes), needs_remat))
 
     return regions
 
