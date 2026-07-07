@@ -8,10 +8,19 @@ import unittest
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
+import spmd_types as spmd
 import torch
 import torchtitan.overrides.helion_rope as helion_rope_module
+from spmd_types.checker import typecheck
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.config.override import _REGISTRY
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
 
 # Importing the override module registers the "helion_rope" override. The import
@@ -269,6 +278,75 @@ class TestHelionRoPEKernel(unittest.TestCase):
 
         xq, xk, positions = self._inputs()
         torch.library.opcheck(_helion_rope_fwd, (xq, xk, self.helion.cache, positions))
+
+
+@unittest.skipUnless(_HELION_INSTALLED, "requires helion")
+class TestHelionRoPESpmdTypes(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 1
+
+    @unittest.skipUnless(_HELION_GPU, "requires helion + CUDA")
+    @with_comms
+    def test_typechecked_forward(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, 1, self.world_size),
+            mesh_dim_names=("dp", "cp", "tp"),
+        )
+
+        activation_type = {
+            "dp": spmd.S(0),
+            "cp": spmd.S(1),
+            "tp": spmd.S(2),
+        }
+        cache_type = {"dp": spmd.R, "cp": spmd.R, "tp": spmd.R}
+        positions_type = {
+            "dp": spmd.S(0),
+            "cp": spmd.S(1),
+            "tp": spmd.R,
+        }
+
+        set_spmd_backend("spmd_types")
+        try:
+            dim, seqlen = 64, 16
+            helion = HelionRoPE.Config(dim=dim, max_seq_len=seqlen).build().to(
+                self.device_type
+            )
+            xq = torch.empty(
+                2,
+                seqlen,
+                4,
+                dim,
+                device=self.device_type,
+                dtype=torch.bfloat16,
+            )
+            xk = torch.empty(
+                2,
+                seqlen,
+                2,
+                dim,
+                device=self.device_type,
+                dtype=torch.bfloat16,
+            )
+            positions = (
+                torch.arange(seqlen, device=self.device_type, dtype=torch.int64)
+                .unsqueeze(0)
+                .expand(2, -1)
+                .contiguous()
+            )
+            with set_current_spmd_mesh(mesh), typecheck(
+                strict_mode="strict", local=True
+            ):
+                typed_xq = spmd.assert_type(xq, activation_type)
+                typed_xk = spmd.assert_type(xk, activation_type)
+                typed_positions = spmd.assert_type(positions, positions_type)
+                helion.cache = spmd.assert_type(helion.cache, cache_type)
+                out_q, out_k = helion(typed_xq, typed_xk, typed_positions)
+                spmd.assert_type(out_q, activation_type)
+                spmd.assert_type(out_k, activation_type)
+        finally:
+            set_spmd_backend("default")
 
 
 if __name__ == "__main__":

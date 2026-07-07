@@ -8,19 +8,25 @@ import unittest
 
 import spmd_types as spmd
 import torch
+from spmd_types.checker import typecheck
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
-from torchtitan.models.deepseek_v3.config_registry import (
-    deepseek_v3_debugmodel_minimal_async_ep,
-)
 from torchtitan.overrides.fused_swiglu import (
     fused_grouped_experts,
     FusedGroupedExperts,
+    _fused_silu_and_mul,
     silu_and_mul_backward_kernel,
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
@@ -47,6 +53,10 @@ def _build_fused_grouped_experts() -> FusedGroupedExperts:
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
     def test_minimal_async_ep_config_imports_override(self):
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_minimal_async_ep,
+        )
+
         config = deepseek_v3_debugmodel_minimal_async_ep()
 
         self.assertIn(
@@ -218,6 +228,40 @@ class TestFusedGroupedExpertsNumerics(unittest.TestCase):
         out_fused.sum().backward()
         assert x_stock.grad is not None and x_fused.grad is not None
         torch.testing.assert_close(x_fused.grad, x_stock.grad, atol=2e-2, rtol=2e-2)
+
+
+class TestFusedSwiGLUSpmdTypes(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 1
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    @with_comms
+    def test_fused_silu_and_mul_typechecked_forward(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, 1, self.world_size),
+            mesh_dim_names=("dp", "cp", "tp"),
+        )
+
+        local_type = {
+            "dp": spmd.S(0),
+            "cp": spmd.S(1),
+            "tp": spmd.S(2),
+        }
+        set_spmd_backend("spmd_types")
+        try:
+            gate = torch.empty(2, 3, 16, device=self.device_type, dtype=torch.float32)
+            up = torch.empty(2, 3, 16, device=self.device_type, dtype=torch.float32)
+            with set_current_spmd_mesh(mesh), typecheck(
+                strict_mode="strict", local=True
+            ):
+                typed_gate = spmd.assert_type(gate, local_type)
+                typed_up = spmd.assert_type(up, local_type)
+                out = _fused_silu_and_mul(typed_gate, typed_up)
+                spmd.assert_type(out, local_type)
+        finally:
+            set_spmd_backend("default")
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
