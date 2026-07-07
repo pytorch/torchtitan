@@ -515,6 +515,10 @@ def init_distributed(
         device_id=device_id,
     )
 
+    from torchtitan.distributed.comms import maybe_enable_custom_comm
+
+    maybe_enable_custom_comm(comm_config)
+
     return torch.distributed.get_world_size()
 
 
