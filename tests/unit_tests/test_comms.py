@@ -20,9 +20,9 @@ def _make(numel: int, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
     return torch.empty(numel, dtype=dtype)
 
 
-def _setup(monkeypatch, *, world_size=8, local_world_size=8, multicast=True):
+def _setup(monkeypatch, *, world_size=8, intra_node=True, multicast=True):
     monkeypatch.setattr(comms, "_group_world_size", lambda group_name: world_size)
-    monkeypatch.setattr(comms, "_local_world_size", lambda: local_world_size)
+    monkeypatch.setattr(comms, "_is_intra_node", lambda group_name: intra_node)
     monkeypatch.setattr(comms, "_has_multicast", lambda device_index: multicast)
 
 
@@ -109,10 +109,27 @@ def test_unsupported_world_size_falls_back(monkeypatch):
 
 
 def test_inter_node_falls_back(monkeypatch):
-    # group larger than the local node -> not intra-node.
-    _setup(monkeypatch, world_size=8, local_world_size=4)
+    # a supported world size but ranks span nodes (e.g. a strided group).
+    _setup(monkeypatch, world_size=8, intra_node=False)
     x = _make(_bytes_to_numel(8 * 1024 * 1024))
     assert comms._select_algo(x, "sum", "g") is _Algo.NCCL
+
+
+def test_is_intra_node_detects_strided_group(monkeypatch):
+    # 8 GPUs per node; rank r lives on node r // 8.
+    monkeypatch.setattr(comms, "_local_world_size", lambda: 8)
+    monkeypatch.setattr(comms, "_resolve_process_group", lambda name: object())
+
+    def ranks_for(pg_ranks):
+        monkeypatch.setattr(comms.dist, "get_process_group_ranks", lambda pg: pg_ranks)
+
+    ranks_for([0, 1, 2, 3])  # all on node 0
+    comms._is_intra_node.cache_clear()
+    assert comms._is_intra_node("same_node") is True
+
+    ranks_for([0, 8])  # one rank per node -> spans two nodes
+    comms._is_intra_node.cache_clear()
+    assert comms._is_intra_node("strided") is False
 
 
 def test_misaligned_falls_back(monkeypatch):
