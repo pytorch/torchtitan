@@ -439,7 +439,7 @@ class PolicyTrainer(Actor, Configurable):
         if len(current_lrs) != 1:
             raise ValueError(
                 "RL metrics only support a single optimizer LR for "
-                f"train/lr; got {current_lrs}"
+                f"trainer/lr; got {current_lrs}"
             )
         current_lr = float(current_lrs[0])
 
@@ -467,9 +467,9 @@ class PolicyTrainer(Actor, Configurable):
         return OptimStepOutput(
             policy_version=self.policy_version,
             metrics={
-                "train/grad_norm/mean": float(grad_norm.item()),
-                "train/lr": current_lr,
-                "train/policy_version": float(self.policy_version),
+                "trainer/grad_norm/mean": float(grad_norm.item()),
+                "trainer/lr": current_lr,
+                "trainer/policy_version": float(self.policy_version),
             },
         )
 
