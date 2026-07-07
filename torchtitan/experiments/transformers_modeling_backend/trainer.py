@@ -16,6 +16,7 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
 )
 from torchtitan.observability import structured_logger as sl
+from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
 
@@ -65,7 +66,15 @@ class SFTTrainer(Trainer):
             )
 
             load_balancer = self.config.parallelism.context_parallel_load_balancer
-            if attn_mask_type == "block_causal":
+            if attn_mask_type == "block_causal" and load_balancer == "headtail":
+                # "headtail" is the SDPA default and cannot shard a FlexAttention
+                # BlockMask; switch to the flex-compatible "ptrr". An explicit
+                # None (disable balancing) or "ptrr" is respected.
+                logger.warning(
+                    "context_parallel_load_balancer='headtail' is SDPA-only and "
+                    "cannot shard a block_causal BlockMask; using 'ptrr'. Set it "
+                    "explicitly (ptrr or None) to silence this."
+                )
                 load_balancer = "ptrr"
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
                 inputs,
