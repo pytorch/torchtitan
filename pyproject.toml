@@ -80,3 +80,9 @@ matches = "torchtitan/components/unique_counter.py"
 
 [tool.pyrefly.sub-config.errors]
 no-matching-overload = false
+
+[[tool.pyrefly.sub-config]]
+matches = "torchtitan/distributed/deepep/hybridep.py"
+
+[tool.pyrefly.sub-config.errors]
+missing-module-attribute = false
