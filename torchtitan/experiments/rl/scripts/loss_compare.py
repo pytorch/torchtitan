@@ -129,8 +129,8 @@ def run_training(
         "--generator.debug.deterministic",
         "--trainer.debug.seed=42",
         "--generator.debug.seed=42",
-        "--training-loop.num-training-steps=10",
-        "--training-loop.validation.num-samples=0",
+        "--async-loop.num-training-steps=10",
+        "--async-loop.validation.num-samples=0",
         "--metrics.enable-tensorboard",
         "--metrics.no-enable-wandb",
     ]

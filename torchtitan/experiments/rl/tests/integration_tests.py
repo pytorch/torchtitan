@@ -162,24 +162,31 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
     ]
 
 
-def build_rl_h100_test_list() -> list[OverrideDefinitions]:
+def build_rl_batch_invariant_test_list() -> list[OverrideDefinitions]:
     return [
         OverrideDefinitions(
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
+                    # Debug model (random init): the 0.6B model at TP=4 for both
+                    # trainer and generator OOMs on A10G under batch-invariant
+                    # mode, so exercise the batch-invariant path on the tiny
+                    # debugmodel instead.
+                    "--config rl_grpo_qwen3_debug_varlen_batch_invariant",
                     "--async-loop.num-training-steps 5",
+                    "--hf_assets_path tests/assets/tokenizer",
                     "--async-loop.group-size 2",
                     "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
+                    "--trainer.checkpoint.no-enable",  # use random-init weights
+                    "--generator.checkpoint.no-enable",
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 batch-invariant + deterministic",
-            "rl_grpo_tp2_batch_invariant",
-            ngpu=4,
+            "RL GRPO debug TP=4 batch-invariant + deterministic",
+            "rl_grpo_debug_tp4_batch_invariant",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
@@ -206,7 +213,9 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
 
 _TEST_SUITES = {
     "default": build_rl_test_list,
-    "h100": build_rl_h100_test_list,
+    "batch_invariant": build_rl_batch_invariant_test_list,
+    # Backward-compat alias: the batch-invariant suite used to be H100-only.
+    "h100": build_rl_batch_invariant_test_list,
 }
 
 

@@ -886,3 +886,82 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             debug=batch_invariant_config,
         ),
     )
+
+
+def rl_grpo_qwen3_debug_varlen_batch_invariant() -> Controller.Config:
+    """Dense Qwen3 debug config in deterministic + batch-invariant mode (8 GPUs: 4 gen + 4 train).
+
+    A10G-sized stand-in for ``rl_grpo_qwen3_0_6b_varlen_batch_invariant``. On
+    A10G the 0.6B model at TP=4 for both trainer and generator OOMs once
+    batch-invariant mode is on (its kernels need extra memory), so this uses the
+    tiny debugmodel with random init instead. Trainer and generator both run
+    TP=4 so the reduction order matches for bitwise parity.
+
+    ``drop_zero_std_reward_groups=False`` keeps zero-reward groups. The
+    random-init model produces non-sense completions whose AlphabetSort task
+    reward is always 0.0, so every group has zero-std rewards; dropping them
+    would leave no trainable rows and no training step to exercise. Keeping them
+    still runs the full trainer forward -- which is what the batch-invariant
+    parity check needs -- even though the advantage (and thus the loss) is zero.
+
+    Trainer keeps fp32 master weights; FSDP mixed precision
+    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    forward, matching the bf16 generator.
+    """
+    batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
+    group_size = 8
+    return Controller.Config(
+        model_spec=_qwen3_rl_model_registry("debugmodel", attn_backend="varlen"),
+        hf_assets_path="tests/assets/tokenizer",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=3,
+            num_groups_per_train_step=5,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            # fp32 master weights; FSDP mixed precision casts to bf16 for the
+            # forward (mixed_precision_param="bfloat16" is the default).
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                enable_sequence_parallel=False,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            debug=batch_invariant_config,
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                # Must match the trainer's TP for bitwise parity: a different TP
+                # degree changes reduction order / sharding in the parallel
+                # matmuls and attention, which batch-invariant ops do not undo.
+                tensor_parallel_degree=4,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=50,
+            ),
+            debug=batch_invariant_config,
+        ),
+    )
