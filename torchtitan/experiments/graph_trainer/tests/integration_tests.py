@@ -349,6 +349,10 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "jit_deepseekv3_auto_bucketing",
             ngpu=8,
+            # JIT mode is deprecated; gate with the other JIT flavors. It also
+            # currently hits an upstream inductor bug (control_deps lowering
+            # calls realize() on an ir.Subgraph: "realize NYI on Subgraph").
+            disabled=_JIT_DISABLED,
         ),
         # === aot_fx_trace mode tests ===
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
