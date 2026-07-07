@@ -17,6 +17,9 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``remove_noop_passes.py`` — graph cleanup bundled as ``canonicalize_graph_pass``
   (detach, identity view/slice, back-to-back transpose, view→reshape normalization)
 - ``performance_passes.py`` — opt-in numerics-changing optimizations
+- ``min_cut_rematerialization.py`` — compile-style min-cut rematerialization
+- ``subgraph_regions.py`` — region annotation, invoke_subgraph outlining, and
+  shared region prologue extraction
 - ``selective_activation_remat.py`` — activation rematerialization
 - ``cpu_offload.py`` — CPU offload insertion
 - ``custom_codegen.py`` — custom code generation for profiling/debugging
@@ -25,7 +28,6 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 from __future__ import annotations
 
 import functools
-import time
 import warnings
 from collections.abc import Callable
 
@@ -265,8 +267,8 @@ def apply_graph_passes(
         passes: Ordered list of pass callables, each with signature
             ``(gm, example_inputs, **kwargs) -> gm``.
         compile_config: Optional compile config. When provided and
-            ``debug_graph_passes`` is True, logs timing, op-count diffs,
-            and before/after graphs to tlparse for each pass.
+            ``debug_graph_passes`` is True, logs op-count diffs and
+            before/after graphs to tlparse for each pass.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
     disable_patterns = (
@@ -274,27 +276,19 @@ def apply_graph_passes(
     )
     if disable_patterns:
         passes = _filter_disabled_passes(passes, disable_patterns)
-    pass_names = [_get_pass_name(pass_fn) for pass_fn in passes]
-    pass_list = "\n  ".join(f"{i}. {name}" for i, name in enumerate(pass_names, 1))
-    logger.info(f"Applying {len(passes)} graph passes:\n  {pass_list}")
-    all_passes_start = time.perf_counter()
-    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
+    if debug:
+        tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
     for pass_fn in passes:
         pass_name = _get_pass_name(pass_fn)
         if debug:
             tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}", debug=debug)
             before_snapshot = snapshot_graph(gm)
-            start = time.perf_counter()
         gm = pass_fn(gm, example_inputs)
         assert isinstance(
             gm, torch.fx.GraphModule
         ), f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
         if debug:
-            elapsed = time.perf_counter() - start
-            logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
             tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}", debug=debug)
             after_snapshot = snapshot_graph(gm)
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
-    all_passes_elapsed = time.perf_counter() - all_passes_start
-    logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
     return gm

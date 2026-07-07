@@ -53,6 +53,113 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
     return key not in ["source_fn_stack", "nn_module_stack", "fwd_source_fn_stack"]
 
 
+def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    for node in gm.graph.nodes:
+        if node.op == "placeholder" and "val" in node.meta:
+            val = node.meta["val"]
+            if isinstance(val, FakeTensor):
+                return val.fake_mode
+    return None
+
+
+def _wrap_compiled_artifact_as_graph_module(
+    root: torch.fx.GraphModule,
+    compiled_fn,
+    used_placeholder_indices: list[int],
+) -> torch.fx.GraphModule:
+    def compiled_call(*args):
+        return compiled_fn(*args)
+
+    graph = torch.fx.Graph()
+    placeholders = []
+    output_meta = None
+    for node in root.graph.nodes:
+        if node.op == "placeholder":
+            placeholder = graph.placeholder(node.target)
+            placeholder.meta = node.meta.copy()
+            placeholders.append(placeholder)
+        elif node.op == "output":
+            output_meta = node.meta.copy()
+
+    call_args = tuple(placeholders[i] for i in used_placeholder_indices)
+    call = graph.call_function(compiled_call, args=call_args)
+    if output_meta:
+        call.meta = output_meta
+    graph.output(call)
+    graph.lint()
+
+    wrapped = torch.fx.GraphModule(root, graph)
+    wrapped.meta.update(root.meta)
+    return wrapped
+
+
+def _copy_graph_with_used_placeholders(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> tuple[torch.fx.GraphModule, tuple, list[int]]:
+    original_placeholders = list(gm.graph.find_nodes(op="placeholder"))
+    used_placeholder_indices = [
+        i for i, node in enumerate(original_placeholders) if len(node.users) > 0
+    ]
+    used_placeholders = set(original_placeholders[i] for i in used_placeholder_indices)
+
+    graph = torch.fx.Graph()
+    env = {}
+    for node in gm.graph.nodes:
+        if node.op == "placeholder":
+            if node not in used_placeholders:
+                continue
+            copied = graph.placeholder(node.target)
+            copied.meta = node.meta.copy()
+            env[node] = copied
+        else:
+            env[node] = graph.node_copy(node, lambda n: env[n])
+    graph.lint()
+
+    copied_gm = torch.fx.GraphModule(gm, graph)
+    copied_gm.meta.update(gm.meta)
+    used_example_inputs = tuple(example_inputs[i] for i in used_placeholder_indices)
+    return copied_gm, used_example_inputs, used_placeholder_indices
+
+
+def direct_full_inductor_compilation_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple, *, inductor_configs=None
+) -> torch.fx.GraphModule:
+    """Compile the whole graph with Inductor without regional outlining."""
+    import torch._inductor.config as ic
+
+    fake_mode = _get_fake_mode_from_gm(gm)
+    tracing_ctx = torch._guards.TracingContext(fake_mode)
+    full_inductor_configs = {
+        "reorder_for_peak_memory": True,
+        **dict(inductor_configs or {}),
+    }
+
+    (
+        compile_gm,
+        compile_inputs,
+        used_placeholder_indices,
+    ) = _copy_graph_with_used_placeholders(gm, example_inputs)
+
+    with (
+        torch._guards.tracing(tracing_ctx),
+        ic.patch(full_inductor_configs),
+    ):
+        compiled_fn = torch._inductor.standalone_compile(
+            compile_gm,
+            compile_inputs,
+            dynamic_shapes="from_tracing_context",
+            aot=True,
+            donate_graph_module=False,
+        )
+
+    return _wrap_compiled_artifact_as_graph_module(
+        gm, compiled_fn, used_placeholder_indices
+    )
+
+
 def regional_inductor_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
 ) -> torch.fx.GraphModule:
@@ -75,16 +182,6 @@ def regional_inductor_pass(
             filter to allow distributed collective ops.
     """
     import torch._inductor.config as ic
-    from torch._subclasses.fake_tensor import FakeTensor
-
-    def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
-        """Extract the FakeTensorMode from a graph module's placeholder metadata."""
-        for node in gm.graph.nodes:
-            if node.op == "placeholder" and "val" in node.meta:
-                val = node.meta["val"]
-                if isinstance(val, FakeTensor):
-                    return val.fake_mode
-        return None
 
     # Ensure inductor produces bitwise-equal numerics vs eager.
     ic.eager_numerics.division_rounding = True
@@ -213,7 +310,7 @@ def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
 
 
 def full_inductor_compilation_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple
+    gm: torch.fx.GraphModule, example_inputs: tuple, *, inductor_configs=None
 ) -> torch.fx.GraphModule:
     """Apply full Inductor compilation by tagging every node and delegating
     to :func:`regional_inductor_pass`.
@@ -243,6 +340,13 @@ def full_inductor_compilation_pass(
         gm, skip_flex_attention_check=True
     )
 
+    full_inductor_configs = {
+        # Preserve the mainline full-compile behavior: AOT autograd via
+        # standalone_compile reorders fwd/bwd unless Inductor restores the
+        # peak-memory schedule.
+        "reorder_for_peak_memory": True,
+        **dict(inductor_configs or {}),
+    }
     _migrate_cpu_get_attrs_to_cuda(gm)
     for module in gm.modules():
         if not isinstance(module, torch.fx.GraphModule):
@@ -250,9 +354,17 @@ def full_inductor_compilation_pass(
         for node in module.graph.nodes:
             if node.op in ("placeholder", "output"):
                 continue
-            node.meta.setdefault("custom", {}).setdefault(
+            custom = node.meta.setdefault("custom", {})
+            compile_with_inductor = custom.setdefault(
                 "compile_with_inductor", {"inductor_configs": {}}
             )
+            custom["compile_with_inductor"] = {
+                **compile_with_inductor,
+                "inductor_configs": {
+                    **compile_with_inductor.get("inductor_configs", {}),
+                    **full_inductor_configs,
+                },
+            }
     # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
     # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
     # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
