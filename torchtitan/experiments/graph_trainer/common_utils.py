@@ -10,6 +10,9 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
+from torch._inductor.fx_passes.bucketing import (
+    is_all_gather_into_tensor as is_all_gather,
+)
 from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
@@ -69,6 +72,18 @@ _NOT_IN_LAYERS = -1
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
+
+
+def _has_single_input_placeholder_chain(node: torch.fx.Node) -> bool:
+    while len(node.all_input_nodes) == 1:
+        node = node.all_input_nodes[0]
+        if node.op == "placeholder":
+            return True
+    return False
+
+
+def is_fsdp_unshard_all_gather(node: torch.fx.Node) -> bool:
+    return is_all_gather(node) and _has_single_input_placeholder_chain(node)
 
 
 def _get_layer_id(node: torch.fx.Node) -> int:

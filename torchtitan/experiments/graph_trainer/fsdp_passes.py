@@ -14,12 +14,14 @@ collectives.  They are no-ops when the graph contains no FSDP collectives.
 from __future__ import annotations
 
 import heapq
+import operator
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from typing import Any
 
 import torch
 import torch.fx as fx
+from torch._functorch.partitioners import get_default_op_list
 from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
     BucketMode,
@@ -41,12 +43,108 @@ from torch._inductor.fx_passes.overlap_scheduling import (
     schedule_overlap_bucketing,
 )
 from torch.utils._ordered_set import OrderedSet
+from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
+    is_fsdp_unshard_all_gather,
 )
+from torchtitan.experiments.graph_trainer.subgraph_regions import SUBGRAPH_REGION
 from torchtitan.tools.logging import logger
+
+
+_RESHARD_RECOMPUTE = {
+    CheckpointPolicy.PREFER_RECOMPUTE,
+    CheckpointPolicy.MUST_RECOMPUTE,
+}
+_RESHARD_PASSTHROUGH_TARGETS = {
+    operator.getitem,
+    torch.ops._c10d_functional.wait_tensor.default,
+    torch.ops.aten._to_copy.default,
+    torch.ops.prims.convert_element_type.default,
+}
+
+
+def _in_subgraph_region(node: torch.fx.Node) -> bool:
+    return SUBGRAPH_REGION in (node.meta.get("custom") or {})
+
+
+def _is_recompute(node: torch.fx.Node) -> bool:
+    return node.meta.get("recompute") in _RESHARD_RECOMPUTE
+
+
+def _has_recompute_arg(node: torch.fx.Node, arg_indices) -> bool:
+    for index in arg_indices:
+        if index < len(node.args):
+            arg = node.args[index]
+            if isinstance(arg, torch.fx.Node) and _is_recompute(arg):
+                return True
+    return False
+
+
+def fsdp_reshard_after_forward_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+    *,
+    recompute_consumer_arg_indices=None,
+    skip_subgraph_regions: bool = True,
+) -> torch.fx.GraphModule:
+    """Tag forward SimpleFSDP all-gathers for recompute after forward use."""
+    if recompute_consumer_arg_indices is None:
+        recompute_consumer_arg_indices = {}
+
+    op_types = get_default_op_list()
+    tagged_ag = 0
+    tagged_passthrough = 0
+    tagged_consumers = 0
+    preserved_must_save = 0
+    for node in gm.graph.nodes:
+        if node.op != "call_function" or node.meta.get("autograd_backward", False):
+            continue
+        in_skipped_region = skip_subgraph_regions and _in_subgraph_region(node)
+        if is_fsdp_unshard_all_gather(node):
+            if in_skipped_region:
+                continue
+            if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE:
+                preserved_must_save += 1
+                continue
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            tagged_ag += 1
+            continue
+
+        if (
+            node.target in _RESHARD_PASSTHROUGH_TARGETS or op_types.is_view(node)
+        ) and any(_is_recompute(inp) for inp in node.all_input_nodes):
+            if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE:
+                preserved_must_save += 1
+                continue
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            tagged_passthrough += 1
+            continue
+
+        recompute_arg_indices = recompute_consumer_arg_indices.get(node.target)
+        if (
+            recompute_arg_indices is not None
+            and not in_skipped_region
+            and _has_recompute_arg(node, recompute_arg_indices)
+        ):
+            if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE:
+                preserved_must_save += 1
+                continue
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            tagged_consumers += 1
+
+    if tagged_ag or tagged_passthrough or tagged_consumers or preserved_must_save:
+        logger.debug(
+            "fsdp_reshard_after_forward_pass: tagged %d all-gathers, %d "
+            "passthrough nodes, %d consumers; preserved %d MUST_SAVE nodes",
+            tagged_ag,
+            tagged_passthrough,
+            tagged_consumers,
+            preserved_must_save,
+        )
+    return gm
 
 
 def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
@@ -55,13 +153,7 @@ def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
     that can be arbitrarily prefetched, i.e., if all its recursive inputs are
     single-input operators that leads to a graph input.
     """
-    if is_wait_tensor(node) and is_all_gather(node.args[0]):
-        n: torch.fx.Node = node.all_input_nodes[0]
-        while len(n.all_input_nodes) == 1:
-            if n.all_input_nodes[0].op == "placeholder":
-                return True
-            n = n.all_input_nodes[0]
-    return False
+    return is_wait_tensor(node) and is_fsdp_unshard_all_gather(node.args[0])
 
 
 # Maps an FSDP group_name to an extra group_name created by this pass.

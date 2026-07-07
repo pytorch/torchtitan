@@ -4,12 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from collections import defaultdict
 
 import torch
 from torch._logging import trace_structured
 
 from torchtitan.tools.logging import logger
+
+
+def timing_log(msg: str, *args) -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if torch.distributed.get_rank() != 0:
+            return
+    text = msg % args if args else msg
+    if logger.handlers and logger.isEnabledFor(logging.INFO):
+        logger.info(text)
+    else:
+        print(f"[graph_trainer_timing] {text}", flush=True)
 
 
 def _get_node_target_name(node: torch.fx.Node) -> str:

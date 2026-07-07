@@ -36,6 +36,7 @@ from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
     isolate_ep_process_group_pass,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    fsdp_reshard_after_forward_pass,
     reassign_collective_pgs_pass,
 )
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
@@ -56,6 +57,11 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_identity_view_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.subgraph_regions import (
+    extract_common_fsdp_unshards_pass,
+    SUBGRAPH_REGION,
+    SUBGRAPH_REGION_ROLE,
+)
 from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
     TestCpuOffloadPass,
 )
@@ -92,6 +98,226 @@ class ToyModel(Module):
                 use_reentrant=False,
             )
         return x
+
+
+class TestFSDPReshardAfterForwardPass(TestCase):
+    def _make_graph(self, *, fsdp_all_gather=True, subgraph_region=False):
+        aten = torch.ops.aten
+        c10d = torch.ops._c10d_functional
+        graph = torch.fx.Graph()
+        shard = graph.placeholder("param_shard")
+        indices = graph.placeholder("indices")
+        if fsdp_all_gather:
+            ag_input = shard
+        else:
+            other = graph.placeholder("other")
+            ag_input = graph.call_function(aten.add.Tensor, args=(shard, other))
+        ag = graph.call_function(
+            c10d.all_gather_into_tensor.default, args=(ag_input, 2, "pg")
+        )
+        if subgraph_region:
+            ag.meta["custom"] = {SUBGRAPH_REGION: "loss_head_chunk"}
+        wait = graph.call_function(c10d.wait_tensor.default, args=(ag,))
+        view = graph.call_function(aten.view.default, args=(wait, [4, 4]))
+        embedding = graph.call_function(aten.embedding.default, args=(view, indices))
+        graph.output(embedding)
+        return torch.fx.GraphModule(torch.nn.Module(), graph), {
+            "ag": ag,
+            "wait": wait,
+            "view": view,
+            "embedding": embedding,
+        }
+
+    def test_tags_fsdp_unshard_chain_and_mapped_consumer(self):
+        gm, nodes = self._make_graph()
+        fsdp_reshard_after_forward_pass(
+            gm,
+            recompute_consumer_arg_indices={torch.ops.aten.embedding.default: (0,)},
+        )
+
+        for name in ("ag", "wait", "view", "embedding"):
+            self.assertEqual(
+                nodes[name].meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE
+            )
+
+    def test_does_not_tag_non_fsdp_all_gather(self):
+        gm, nodes = self._make_graph(fsdp_all_gather=False)
+        fsdp_reshard_after_forward_pass(
+            gm,
+            recompute_consumer_arg_indices={torch.ops.aten.embedding.default: (0,)},
+        )
+
+        for name in ("ag", "wait", "view", "embedding"):
+            self.assertNotIn("recompute", nodes[name].meta)
+
+    def test_skip_subgraph_regions(self):
+        gm, nodes = self._make_graph(subgraph_region=True)
+        fsdp_reshard_after_forward_pass(gm)
+        self.assertNotIn("recompute", nodes["ag"].meta)
+
+        gm, nodes = self._make_graph(subgraph_region=True)
+        fsdp_reshard_after_forward_pass(gm, skip_subgraph_regions=False)
+        self.assertEqual(
+            nodes["ag"].meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE
+        )
+
+    def test_consumer_mapping_uses_configured_arg_index(self):
+        aten = torch.ops.aten
+        c10d = torch.ops._c10d_functional
+        graph = torch.fx.Graph()
+        shard = graph.placeholder("param_shard")
+        other = graph.placeholder("other")
+        ag = graph.call_function(
+            c10d.all_gather_into_tensor.default, args=(shard, 2, "pg")
+        )
+        wait = graph.call_function(c10d.wait_tensor.default, args=(ag,))
+        consumer = graph.call_function(aten.add.Tensor, args=(other, wait))
+        graph.output(consumer)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fsdp_reshard_after_forward_pass(
+            gm, recompute_consumer_arg_indices={aten.add.Tensor: (0,)}
+        )
+        self.assertNotIn("recompute", consumer.meta)
+
+        fsdp_reshard_after_forward_pass(
+            gm, recompute_consumer_arg_indices={aten.add.Tensor: (1,)}
+        )
+        self.assertEqual(consumer.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
+
+    def test_preserves_must_save(self):
+        gm, nodes = self._make_graph()
+        nodes["ag"].meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        fsdp_reshard_after_forward_pass(gm)
+        self.assertEqual(nodes["ag"].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertNotIn("recompute", nodes["wait"].meta)
+
+        gm, nodes = self._make_graph()
+        nodes["wait"].meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        fsdp_reshard_after_forward_pass(gm)
+        self.assertEqual(
+            nodes["ag"].meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE
+        )
+        self.assertEqual(nodes["wait"].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertNotIn("recompute", nodes["view"].meta)
+
+        gm, nodes = self._make_graph()
+        nodes["embedding"].meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        fsdp_reshard_after_forward_pass(
+            gm,
+            recompute_consumer_arg_indices={torch.ops.aten.embedding.default: (0,)},
+        )
+        self.assertEqual(
+            nodes["view"].meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE
+        )
+        self.assertEqual(
+            nodes["embedding"].meta["recompute"], CheckpointPolicy.MUST_SAVE
+        )
+
+
+class TestExtractCommonFSDPUnshardsPass(TestCase):
+    def _make_graph(self, *, fsdp_all_gather=True):
+        aten = torch.ops.aten
+        c10d = torch.ops._c10d_functional
+        graph = torch.fx.Graph()
+        shard = graph.placeholder("param_shard")
+        x = graph.placeholder("x")
+        if fsdp_all_gather:
+            ag_input = shard
+        else:
+            other = graph.placeholder("other")
+            ag_input = graph.call_function(aten.add.Tensor, args=(shard, other))
+
+        def mark(node, region):
+            node.meta["custom"] = {
+                SUBGRAPH_REGION: region,
+                SUBGRAPH_REGION_ROLE: "loss_head",
+            }
+            return node
+
+        outputs = []
+        for region in ("chunk0", "chunk1"):
+            ag = mark(
+                graph.call_function(
+                    c10d.all_gather_into_tensor.default, args=(ag_input, 2, "pg")
+                ),
+                region,
+            )
+            wait = mark(
+                graph.call_function(c10d.wait_tensor.default, args=(ag,)), region
+            )
+            pad = mark(
+                graph.call_function(aten.constant_pad_nd.default, args=(wait, [0, 0])),
+                region,
+            )
+            cast = mark(
+                graph.call_function(
+                    torch.ops.prims.convert_element_type.default,
+                    args=(pad, torch.bfloat16),
+                ),
+                region,
+            )
+            view = mark(
+                graph.call_function(aten.view.default, args=(cast, [4, 4])), region
+            )
+            outputs.append(
+                mark(graph.call_function(aten.add.Tensor, args=(view, x)), region)
+            )
+
+        graph.output(tuple(outputs))
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _nodes_with_target(self, gm, target):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.op == "call_function" and node.target is target
+        ]
+
+    def test_extracts_common_unshard_chain_and_marks_must_save(self):
+        gm = self._make_graph()
+        extract_common_fsdp_unshards_pass(gm)
+
+        for target in (
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            torch.ops._c10d_functional.wait_tensor.default,
+            torch.ops.aten.constant_pad_nd.default,
+            torch.ops.prims.convert_element_type.default,
+            torch.ops.aten.view.default,
+        ):
+            nodes = self._nodes_with_target(gm, target)
+            self.assertEqual(len(nodes), 1)
+            self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+            self.assertNotIn(SUBGRAPH_REGION, nodes[0].meta.get("custom", {}))
+            self.assertNotIn(SUBGRAPH_REGION_ROLE, nodes[0].meta.get("custom", {}))
+
+    def test_default_anchor_ignores_non_fsdp_all_gather(self):
+        gm = self._make_graph(fsdp_all_gather=False)
+        extract_common_fsdp_unshards_pass(gm)
+
+        nodes = self._nodes_with_target(
+            gm, torch.ops._c10d_functional.all_gather_into_tensor.default
+        )
+        self.assertEqual(len(nodes), 2)
+        self.assertTrue(all("recompute" not in node.meta for node in nodes))
+
+    def test_custom_anchor_is_honored(self):
+        gm = self._make_graph(fsdp_all_gather=False)
+        c10d = torch.ops._c10d_functional
+
+        def is_any_all_gather(node):
+            return node.target is c10d.all_gather_into_tensor.default
+
+        extract_common_fsdp_unshards_pass(
+            gm,
+            is_unshard_anchor=is_any_all_gather,
+        )
+
+        nodes = self._nodes_with_target(
+            gm, c10d.all_gather_into_tensor.default
+        )
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
 
 class TestReassignCollectivePgsPass(FSDPTest):

@@ -13,9 +13,12 @@ regional_inductor.
 
 from __future__ import annotations
 
+import time
+
 import torch
 from torch.fx.passes.regional_inductor import regional_inductor
 
+from torchtitan.experiments.graph_trainer.debug_utils import timing_log
 from torchtitan.tools.logging import logger
 
 
@@ -51,6 +54,18 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
     if key in ("val", "eager_input_vals"):
         return False
     return key not in ["source_fn_stack", "nn_module_stack", "fwd_source_fn_stack"]
+
+
+def _count_inductor_tagged_nodes(gm: torch.fx.GraphModule) -> int:
+    tagged = 0
+    for module in gm.modules():
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        for node in module.graph.nodes:
+            custom = node.meta.get("custom")
+            if isinstance(custom, dict) and "compile_with_inductor" in custom:
+                tagged += 1
+    return tagged
 
 
 def regional_inductor_pass(
@@ -100,15 +115,23 @@ def regional_inductor_pass(
     # outside torch.compile (e.g. after make_fx tracing in graph_trainer),
     # no TracingContext exists, so we create one from the graph's fake
     # tensor metadata.
+    pass_start = time.perf_counter()
     fake_mode = _get_fake_mode_from_gm(gm)
     tracing_ctx = torch._guards.TracingContext(fake_mode)
+    timing_log(
+        "regional_inductor_pass: start tagged_nodes=%d serializable=%s",
+        _count_inductor_tagged_nodes(gm),
+        serializable,
+    )
 
     if serializable:
+        compile_start = time.perf_counter()
         with (
             torch._guards.tracing(tracing_ctx),
             torch._functorch.config.patch("force_autograd_cache", True),
         ):
             result = regional_inductor(gm, example_inputs)
+        compile_elapsed = time.perf_counter() - compile_start
         from torch._inductor.output_code import RegionalOutputCode
 
         # Override the ops filter after compilation so that
@@ -122,15 +145,27 @@ def regional_inductor_pass(
                 "regional_inductor with serializable=True did not produce "
                 "RegionalOutputCode; distributed ops may not serialize correctly."
             )
+        timing_log(
+            "regional_inductor_pass: regional_inductor %.3fs, total %.3fs",
+            compile_elapsed,
+            time.perf_counter() - pass_start,
+        )
         return result
 
+    compile_start = time.perf_counter()
     with torch._guards.tracing(tracing_ctx):
         gm = regional_inductor(gm, example_inputs)
+    compile_elapsed = time.perf_counter() - compile_start
 
     # regional_inductor may switch to boxed calling convention; reset to
     # default so the graph can be called with positional args as usual.
     gm.graph.set_codegen(torch.fx.graph.CodeGen())
     gm.recompile()
+    timing_log(
+        "regional_inductor_pass: regional_inductor %.3fs, total %.3fs",
+        compile_elapsed,
+        time.perf_counter() - pass_start,
+    )
     return gm
 
 
@@ -213,7 +248,7 @@ def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
 
 
 def full_inductor_compilation_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple
+    gm: torch.fx.GraphModule, example_inputs: tuple, *, inductor_configs=None
 ) -> torch.fx.GraphModule:
     """Apply full Inductor compilation by tagging every node and delegating
     to :func:`regional_inductor_pass`.
@@ -239,28 +274,65 @@ def full_inductor_compilation_pass(
 
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
+    pass_start = time.perf_counter()
+    cudagraph_start = time.perf_counter()
     pre_collapse_cudagraph_compatible = is_cudagraph_compatible(
         gm, skip_flex_attention_check=True
     )
+    cudagraph_elapsed = time.perf_counter() - cudagraph_start
 
+    full_inductor_configs = {
+        # Preserve the mainline full-compile behavior: AOT autograd via
+        # standalone_compile reorders fwd/bwd unless Inductor restores the
+        # peak-memory schedule.
+        "reorder_for_peak_memory": True,
+        **dict(inductor_configs or {}),
+    }
+    migrate_start = time.perf_counter()
     _migrate_cpu_get_attrs_to_cuda(gm)
+    migrate_elapsed = time.perf_counter() - migrate_start
+    annotate_start = time.perf_counter()
+    tagged_nodes = 0
     for module in gm.modules():
         if not isinstance(module, torch.fx.GraphModule):
             continue
         for node in module.graph.nodes:
             if node.op in ("placeholder", "output"):
                 continue
-            node.meta.setdefault("custom", {}).setdefault(
+            tagged_nodes += 1
+            custom = node.meta.setdefault("custom", {})
+            compile_with_inductor = custom.setdefault(
                 "compile_with_inductor", {"inductor_configs": {}}
             )
+            custom["compile_with_inductor"] = {
+                **compile_with_inductor,
+                "inductor_configs": {
+                    **compile_with_inductor.get("inductor_configs", {}),
+                    **full_inductor_configs,
+                },
+            }
+    annotate_elapsed = time.perf_counter() - annotate_start
     # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
     # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
     # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
+    compile_start = time.perf_counter()
     with ic.patch(reorder_for_peak_memory=True):
         result = regional_inductor_pass(gm, example_inputs)
+    compile_elapsed = time.perf_counter() - compile_start
 
     # Carry the pre-collapse cudagraph verdict forward via gm.meta. The
     # collapse is information-destroying; this is how downstream passes
     # know whether the artifact contains hidden cudagraph-incompatible ops.
     result.meta["cudagraph_compatible"] = pre_collapse_cudagraph_compatible
+    timing_log(
+        "full_inductor_compilation_pass: cudagraph_scan %.3fs, "
+        "migrate_attrs %.3fs, annotate %d nodes %.3fs, regional_inductor %.3fs, "
+        "total %.3fs",
+        cudagraph_elapsed,
+        migrate_elapsed,
+        tagged_nodes,
+        annotate_elapsed,
+        compile_elapsed,
+        time.perf_counter() - pass_start,
+    )
     return result

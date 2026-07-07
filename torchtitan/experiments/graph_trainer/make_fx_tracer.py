@@ -6,6 +6,7 @@
 
 import contextlib
 import copy
+import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from torchtitan.experiments.graph_trainer.dynamic_shapes import (
     _tensor_has_mark_unbacked,
     _wrapper_subclass_has_mark_unbacked,
 )
+from torchtitan.experiments.graph_trainer.debug_utils import timing_log
 
 # Tensors and make_fx-safe primitives are allowed as pytree leaves in args.
 # Everything else (callables, custom objects) should be registered as pytree
@@ -378,6 +380,8 @@ def minimal_fx_tracer(
     _check_optimizer_has_module(module, optimizer)
 
     def _trace_with_args(*args: Any, **kwargs: Any) -> TracedResult:
+        trace_start = time.perf_counter()
+        state_start = time.perf_counter()
         model_state, optim_state = extract_train_state(module, optimizer)
         state_fqns = list(model_state.keys())
 
@@ -386,7 +390,9 @@ def minimal_fx_tracer(
         num_state_inputs = len(state_flat)
 
         user_inputs_flat, user_inputs_spec = pytree.tree_flatten((args, kwargs))
+        state_elapsed = time.perf_counter() - state_start
 
+        unwrap_start = time.perf_counter()
         # Validate leaves.
         for leaf in [*state_flat, *user_inputs_flat]:
             if isinstance(leaf, nn.Module):
@@ -424,6 +430,7 @@ def minimal_fx_tracer(
             isinstance(a, torch.Tensor) and _tensor_has_mark_unbacked(a)
             for a in unwrapped_args
         )
+        unwrap_elapsed = time.perf_counter() - unwrap_start
 
         fake_mode = FakeTensorMode(
             allow_non_fake_inputs=True,
@@ -437,6 +444,7 @@ def minimal_fx_tracer(
             if has_mark_unbacked
             else nullcontext()
         )
+        fakeify_start = time.perf_counter()
         with ignore_ctx:
             fake_args = tuple(
                 _fakeify_input(fake_mode, a, input_name=f"input_{i}")
@@ -444,6 +452,7 @@ def minimal_fx_tracer(
                 else a
                 for i, a in enumerate(unwrapped_args)
             )
+        fakeify_elapsed = time.perf_counter() - fakeify_start
 
         output_layouts: dict[int, SubclassLayout] = {}
         num_flat_outputs: int = 0
@@ -490,6 +499,7 @@ def minimal_fx_tracer(
         # _non_strict_tracing_context is required by _patch_autograd_grad() and
         # marks this make_fx pass as the non-strict tracing flow, distinct from
         # other make_fx-based entry points such as non-strict export.
+        make_fx_start = time.perf_counter()
         with (
             fake_mode,
             tracing(ctx),
@@ -503,14 +513,34 @@ def minimal_fx_tracer(
                 record_stack_traces=True,
                 record_module_stack=False,  # don't need nn_module_stack for now
             )(*fake_args)
+        make_fx_elapsed = time.perf_counter() - make_fx_start
 
         # Copy forward annotations to backward nodes.
+        metadata_start = time.perf_counter()
         _copy_fwd_metadata_to_bw_nodes(traced)
+        metadata_elapsed = time.perf_counter() - metadata_start
 
+        runtime_assert_elapsed = 0.0
         if _insert_runtime_asserts:
+            runtime_assert_start = time.perf_counter()
             _insert_runtime_asserts_pass(traced, fake_mode)
+            runtime_assert_elapsed = time.perf_counter() - runtime_assert_start
 
         assert output_spec is not None
+        timing_log(
+            "minimal_fx_tracer: state %.3fs, unwrap %.3fs, fakeify %.3fs, "
+            "make_fx %.3fs, copy_metadata %.3fs, runtime_asserts %.3fs, "
+            "total %.3fs; flat_inputs=%d graph_nodes=%d",
+            state_elapsed,
+            unwrap_elapsed,
+            fakeify_elapsed,
+            make_fx_elapsed,
+            metadata_elapsed,
+            runtime_assert_elapsed,
+            time.perf_counter() - trace_start,
+            num_full_args,
+            sum(1 for _ in traced.graph.nodes),
+        )
         return TracedResult(
             gm=traced,
             example_inputs=fake_args,
