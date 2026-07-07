@@ -77,6 +77,7 @@ from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     _FSDP_BUCKET_META,
+    deduplicate_fsdp_unshard_chains_pass,
     get_transformer_block_bucket_counts,
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
@@ -87,6 +88,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
+    _default_memory_policy_pass,
     _make_default_memory_policy,
     _make_full_memory_policy,
     tag_sac_policy,
@@ -150,6 +152,67 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             ],
             [False, True],
         )
+
+
+class TestFSDPUnshardDedupPass(TestCase):
+    def _duplicate_unshard_graph(self) -> torch.fx.GraphModule:
+        graph = torch.fx.Graph()
+        sharded_param = graph.placeholder("sharded_param")
+        x = graph.placeholder("x")
+
+        all_gather_0 = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(sharded_param, 1, "fsdp_pg"),
+        )
+        wait_0 = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather_0,),
+        )
+        unsharded_0 = graph.call_function(
+            torch.ops.aten.view.default,
+            args=(wait_0, [4]),
+        )
+
+        all_gather_1 = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(sharded_param, 1, "fsdp_pg"),
+        )
+        wait_1 = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather_1,),
+        )
+        unsharded_1 = graph.call_function(
+            torch.ops.aten.view.default,
+            args=(wait_1, [4]),
+        )
+
+        params = graph.call_function(
+            torch.ops.aten.add.Tensor,
+            args=(unsharded_0, unsharded_1),
+        )
+        out = graph.call_function(torch.ops.aten.add.Tensor, args=(params, x))
+        graph.output(out)
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        gm.graph.lint()
+        gm.recompile()
+        return gm
+
+    def test_duplicate_fsdp_unshard_chains_are_canonicalized(self) -> None:
+        gm = self._duplicate_unshard_graph()
+
+        self.assertEqual(
+            sum(1 for node in gm.graph.nodes if is_all_gather(node)),
+            2,
+        )
+
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        self.assertEqual(
+            sum(1 for node in gm.graph.nodes if is_all_gather(node)),
+            1,
+        )
+        gm.graph.lint()
 
 
 class ToyModel(Module):
@@ -1386,6 +1449,64 @@ class TestApplySACPass(TestCase):
         wait_node = nodes[1]
         self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
         self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_default_policy_saves_fsdp_unshard_when_not_resharding(self):
+        """Saves the helper-selected FSDP unshard output only when needed."""
+        cases = (
+            ("never", 1, CheckpointPolicy.MUST_SAVE),
+            # Under PP, the default FSDP policy keeps params unsharded across
+            # forward/backward, so SAC must save the same unshard boundary.
+            ("default", 2, CheckpointPolicy.MUST_SAVE),
+            ("always", 1, CheckpointPolicy.PREFER_RECOMPUTE),
+        )
+
+        for reshard_after_forward, pp_degree, expected_wait_policy in cases:
+            with self.subTest(
+                reshard_after_forward=reshard_after_forward,
+                pp_degree=pp_degree,
+            ):
+                (
+                    gm,
+                    all_gather,
+                    wait,
+                    view,
+                ) = self._fsdp_unshard_test_graph()
+                config = SimpleNamespace(
+                    parallelism=SimpleNamespace(
+                        fsdp_reshard_after_forward=reshard_after_forward,
+                        pipeline_parallel_degree=pp_degree,
+                    )
+                )
+
+                _default_memory_policy_pass(gm, config=config)
+
+                self.assertEqual(
+                    all_gather.meta["recompute"],
+                    CheckpointPolicy.PREFER_RECOMPUTE,
+                )
+                self.assertEqual(wait.meta["recompute"], expected_wait_policy)
+                self.assertEqual(
+                    view.meta["recompute"],
+                    CheckpointPolicy.PREFER_RECOMPUTE,
+                )
+
+    def _fsdp_unshard_test_graph(self):
+        graph = torch.fx.Graph()
+        param = graph.placeholder("param")
+        x = graph.placeholder("x")
+        all_gather = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(param, 1, "0"),
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather,),
+        )
+        view = graph.call_function(torch.ops.aten.view.default, args=(wait, [4]))
+        out = graph.call_function(torch.ops.aten.add.Tensor, args=(view, x))
+        graph.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        return gm, all_gather, wait, view
 
     def test_boundary_nodes_forced_to_must_save(self):
         """Nodes at AC region boundaries should be forced to MUST_SAVE."""
@@ -3308,6 +3429,10 @@ class TestChunkPasses(TestCase):
 
         self.assertLess(
             names.index("canonicalize_graph_pass"),
+            names.index("deduplicate_fsdp_unshard_chains_pass"),
+        )
+        self.assertLess(
+            names.index("deduplicate_fsdp_unshard_chains_pass"),
             names.index("tag_with_memory_policy_pass"),
         )
         self.assertLess(

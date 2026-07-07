@@ -906,7 +906,7 @@ class VLLMGenerator(Actor, Configurable):
 
         self._pull_model_state_dict_future: asyncio.Future[int] | None = None
 
-        # Background asyncio.Task running _engine_loop; None until the first generate/pull starts it.
+        # Background asyncio.Task running _engine_loop; None until start_engine_loop starts it.
         self._engine_loop_task: asyncio.Task | None = None
 
         logger.info("Generator initialized with vLLM engine")
@@ -941,6 +941,21 @@ class VLLMGenerator(Actor, Configurable):
         sl.set_step(step, relative_step=relative_step)
 
     @endpoint
+    async def start_engine_loop(self) -> None:
+        """Start the background engine loop on every rank (one-time, idempotent)."""
+        if self._engine_loop_task is None:
+            self._engine_loop_task = asyncio.create_task(self._engine_loop())
+
+    def _rank0_check_engine_loop_running(self, endpoint_name: str) -> None:
+        """Guard for the rank-0-only endpoints"""
+        assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
+        if self._engine_loop_task is None:
+            raise RuntimeError(
+                "engine loop not started; call start_engine_loop on all ranks "
+                f"before {endpoint_name}"
+            )
+
+    @endpoint
     @sl.log_trace_span("generate")
     async def generate(
         self,
@@ -950,12 +965,13 @@ class VLLMGenerator(Actor, Configurable):
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
-    ) -> Completion | None:
+    ) -> Completion:
         """Generates one completion for one prompt.
 
-        Returns the `Completion` on rank 0 and `None` on followers. The completion carries its
-        own per-generation metrics (`Completion.metrics`), which the controller attaches to the
-        rollout turn.
+        Can be accepted by rank 0 only (rank 0 owns the queue + futures and
+        drives the followers through the engine loop). Returns the `Completion`,
+        which carries its own per-generation metrics (`Completion.metrics`) that
+        the controller attaches to the rollout turn.
 
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
@@ -969,20 +985,11 @@ class VLLMGenerator(Actor, Configurable):
 
         Example:
 
-            completion = await generator.generate.call(
+            completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
                 [1, 2, 3], request_id="step=3/group=0/sample=0/turn=0",
             )
-            # rank 0 -> Completion(token_ids=[...], metrics=[Metric("generator/queue_time_ms", ...)]);
-            # followers -> None
         """
-
-        # Starting requires asyncio, which isn't available in the sync __init__.
-        # Start on first call; no-op after.
-        await self._ensure_engine_loop()
-
-        # Only rank 0 owns the queue + futures moving forward.
-        if self._rank != 0:
-            return None
+        self._rank0_check_engine_loop_running("generate")
 
         sampling = (
             sampling_config if sampling_config is not None else self.config.sampling
@@ -1009,11 +1016,6 @@ class VLLMGenerator(Actor, Configurable):
 
         # Await outside the lock so other generate / pull calls can proceed meanwhile.
         return await generation_future
-
-    async def _ensure_engine_loop(self) -> None:
-        """Start the single background engine loop on first use (idempotent); runs until `close()`."""
-        if self._engine_loop_task is None:
-            self._engine_loop_task = asyncio.create_task(self._engine_loop())
 
     @sl.log_trace_span("engine_loop")
     async def _engine_loop(self) -> None:
@@ -1199,13 +1201,7 @@ class VLLMGenerator(Actor, Configurable):
         # TODO: if an incoming request is received while another pull request is queued
         # we should drop the older request and pull the latest version instead
 
-        # Starting requires asyncio, which isn't available in the sync __init__.
-        # Start on first call; no-op after.
-        await self._ensure_engine_loop()
-
-        # Only rank 0 owns the queue + futures moving forward.
-        if self._rank != 0:
-            return
+        self._rank0_check_engine_loop_running("pull_model_state_dict")
 
         # A placeholder future for the engine loop to resolve once the pull has been applied.
         pull_model_state_dict_future: asyncio.Future[
@@ -1284,6 +1280,16 @@ class VLLMGenerator(Actor, Configurable):
                     for state_name, layout in sharding_config.state_shardings.items():
                         fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
                         layouts[fqn] = layout
+
+                    # FusedSwiGLU keeps its sharding on the fused w13 parameter,
+                    # but its state dict exposes split w1.weight/w3.weight
+                    # (_split_w13_on_save). Mirror w13's layout onto the split
+                    # keys -- slicing the gate/up dim of an S(0) w13 yields S(0)
+                    # w1/w3, which is what the DTensor path gets implicitly.
+                    w13_layout = sharding_config.state_shardings.get("w13")
+                    if w13_layout is not None:
+                        for proj_name in ("w1", "w3"):
+                            layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
 
                 if isinstance(module, FusedQKVLinear):
                     # FusedQKVLinear exposes split wq/wk/wv state-dict keys while

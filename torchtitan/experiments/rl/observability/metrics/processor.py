@@ -64,8 +64,9 @@ class MetricsProcessor(Configurable):
                 # --- learning signals (not perf, but you want them in the same glance) ---
                 "loss/mean",
                 "rollout_reward/_mean",
-                "train/grad_norm/mean",
-                "train/lr",
+                "trainer/entropy/mean",
+                "trainer/grad_norm/mean",
+                "trainer/lr",
             ]
         )
         """Regex search patterns selecting console keys for train log lines.

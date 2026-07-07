@@ -6,7 +6,6 @@
 
 from typing import Any
 
-import spmd_types as spmd
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -35,17 +34,10 @@ from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
 )
 from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.model import FluxModel
+from torchtitan.models.flux.sharding import annotate_dp_cp_params_as_r
 from torchtitan.tools.logging import logger
-
-
-def annotate_dp_cp_params_as_r(model: nn.Module, parallel_dims: ParallelDims) -> None:
-    # TODO(pianpwk): Infer these from the active SPMD mesh instead.
-    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
-        for param in model.parameters():
-            spmd.assert_type(param, spmd.R)
 
 
 def parallelize_flux(
@@ -63,6 +55,7 @@ def parallelize_flux(
 
     if parallelism.spmd_backend == "spmd_types":
         model.parallelize(parallel_dims)
+        annotate_dp_cp_params_as_r(model, parallel_dims)
     elif parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims.get_mesh("cp"))
 
@@ -75,8 +68,6 @@ def parallelize_flux(
         dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
         dp_mesh_dims = None
         assert dp_mesh is not None
-    if parallelism.spmd_backend == "spmd_types":
-        annotate_dp_cp_params_as_r(model, parallel_dims)
     apply_fsdp(
         model,
         dp_mesh,
@@ -268,15 +259,12 @@ def parallelize_encoders(
     # pyrefly: ignore [missing-attribute]
     for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)
-    # pyrefly: ignore [no-matching-overload]
     fully_shard(hf_module, **fsdp_config)
 
     if enable_symm_mem:
-        # pyrefly: ignore [bad-argument-type]
         enable_fsdp_symm_mem(hf_module)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
-    # pyrefly: ignore [bad-argument-type]
     disable_fsdp_gradient_division(hf_module)
 
     logger.info("Applied fully_shard to the T5 encoder model")

@@ -460,7 +460,7 @@ class TestLogToConsole:
         (-0.001234, "-0.0012"),
         (99.999, "100.00"),
         (5, "5.0"),
-        # Very small values fall back to scientific so train/lr ≈ 2e-6
+        # Very small values fall back to scientific so trainer/lr ≈ 2e-6
         # doesn't render as `0.00000`.
         (2e-6, "2.0e-06"),
         (1e-5, "0.00001"),  # boundary: 5 decimals still resolves the digit

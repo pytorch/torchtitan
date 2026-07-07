@@ -6,8 +6,9 @@
 
 import fnmatch
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from typing import Any, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -24,6 +25,11 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
+
+
+BOXED_CODEGEN_META = "graph_trainer_boxed_codegen"
+LossResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, dict[str, Any]]
+AnnotatedLossFn: TypeAlias = Callable[..., LossResult]
 
 
 @contextmanager
@@ -89,12 +95,86 @@ def _maybe_materialize_grad_for_param_layout(
     return materialized_grad
 
 
+def set_graph_module_boxed_codegen(
+    gm: torch.fx.GraphModule,
+    *,
+    boxed: bool,
+) -> torch.fx.GraphModule:
+    """Set the FX calling convention and record it in graph metadata.
+
+    Args:
+        gm: Graph module whose generated Python wrapper should be updated.
+        boxed: Whether the wrapper should accept one mutable argument list and
+            clear it after placeholder extraction.
+
+    Returns:
+        The same graph module after recompilation if the calling convention
+        changed.
+    """
+
+    if gm.meta.get(BOXED_CODEGEN_META) is boxed:
+        return gm
+    codegen = torch.fx.graph._BoxedCodeGen() if boxed else torch.fx.graph.CodeGen()
+    gm.graph.set_codegen(codegen)
+    gm.recompile()
+    gm.meta[BOXED_CODEGEN_META] = boxed
+    return gm
+
+
+def ensure_boxed_graph_module(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+    """Use boxed FX codegen for runtime-owned graph modules.
+
+    Args:
+        gm: Graph module to box.
+
+    Returns:
+        The same graph module with boxed FX codegen enabled.
+    """
+
+    return set_graph_module_boxed_codegen(gm, boxed=True)
+
+
 _MODULE_FQN = "module_fqn"
 _EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
 _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def compute_annotated_loss(
+    loss_fn: AnnotatedLossFn,
+    pred: torch.Tensor,
+    labels: torch.Tensor,
+    loss_kwargs: dict[str, Any] | None = None,
+) -> torch.Tensor:
+    """Compute the loss tensor with the same FX metadata convention as GraphTrainer."""
+    annotated_loss_fn = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)
+    result = annotated_loss_fn(pred, labels, **(loss_kwargs or {}))
+    if isinstance(result, tuple):
+        if len(result) != 2:
+            raise ValueError(
+                "GraphTrainer loss functions must return a loss tensor or "
+                "(loss tensor, metrics)."
+            )
+        loss, _metrics = result
+        return loss
+    return result
+
+
+def accumulate_param_grads_(
+    params: Iterable[torch.Tensor],
+    grads: Iterable[torch.Tensor | None],
+) -> None:
+    """Accumulate explicit graph-produced gradients into live parameters."""
+    for param, grad in zip(params, grads, strict=True):
+        if grad is None:
+            continue
+        grad = _maybe_materialize_grad_for_param_layout(param, grad)
+        if param.grad is None:
+            param.grad = grad
+        else:
+            param.grad += grad
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
