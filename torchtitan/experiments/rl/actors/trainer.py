@@ -13,6 +13,7 @@ import torch
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -438,7 +439,7 @@ class PolicyTrainer(Actor, Configurable):
         if len(current_lrs) != 1:
             raise ValueError(
                 "RL metrics only support a single optimizer LR for "
-                f"train/lr; got {current_lrs}"
+                f"trainer/lr; got {current_lrs}"
             )
         current_lr = float(current_lrs[0])
 
@@ -466,9 +467,9 @@ class PolicyTrainer(Actor, Configurable):
         return OptimStepOutput(
             policy_version=self.policy_version,
             metrics={
-                "train/grad_norm/mean": float(grad_norm.item()),
-                "train/lr": current_lr,
-                "train/policy_version": float(self.policy_version),
+                "trainer/grad_norm/mean": float(grad_norm.item()),
+                "trainer/lr": current_lr,
+                "trainer/policy_version": float(self.policy_version),
             },
         )
 
@@ -503,9 +504,12 @@ class PolicyTrainer(Actor, Configurable):
             # expert_bias_E load-balance bias in MoE. The generator keeps those buffers at the same
             # registered dtype, so casting them here would mismatch its state dict and fail torchstore's
             # dtype check on weight sync.
+            # Strip the AC wrapper's `_checkpoint_wrapped_module` segment so buffer FQNs match state_dict() keys.
             # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
             #   CPU-staged path.
-            buffer_names = {name for name, _ in self.model.named_buffers()}
+            buffer_names = {
+                canonical_fqn(name) for name, _ in self.model.named_buffers()
+            }
             state_dict = {
                 name: (
                     tensor if name in buffer_names else tensor.to(self._transfer_dtype)
