@@ -42,7 +42,7 @@ from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
 
-def _maybe_apply_numa_binding(gpu_index: int, device_type: str) -> None:
+def _maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
     """Pin this process to the NUMA node of its GPU for local memory bandwidth.
 
     On multi-NUMA machines (e.g. GB200 NVLink-C2C), pinned-memory allocations
@@ -58,13 +58,13 @@ def _maybe_apply_numa_binding(gpu_index: int, device_type: str) -> None:
     )
 
     _maybe_apply_numa_binding_to_current_process(
-        gpu_index=gpu_index,
+        device_index=device_index,
         numa_options=NumaOptions(
             affinity_mode=AffinityMode.NODE,
             should_fall_back_if_binding_fails=True,
         ),
     )
-    logger.info("NUMA binding applied for GPU %d", gpu_index)
+    logger.info("NUMA binding applied for GPU %d", device_index)
 
 
 def make_fwd_bwd_step(model, loss_fn):
