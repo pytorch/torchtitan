@@ -26,6 +26,7 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
+from torchtitan.distributed.comms import maybe_enable_custom_comm
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -514,6 +515,8 @@ def init_distributed(
         _ranks=ranks if ranks is not None else [],
         device_id=device_id,
     )
+
+    maybe_enable_custom_comm(comm_config)
 
     return torch.distributed.get_world_size()
 

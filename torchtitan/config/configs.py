@@ -298,6 +298,15 @@ class CommConfig:
     NOTE: local_tensor is an experimental feature and automatically uses fake_backend internally.
     """
 
+    enable_custom_comm: bool = False
+    """
+    Route functional all_reduce through TorchTitan's custom communication backend
+    (intra-node symmetric-memory one-shot/two-shot/multimem with NCCL fallback).
+    Eager only. Off by default: it reduces in a different order than NCCL, so loss
+    is not bit-identical to the NCCL baseline (validate as a computation change).
+    Automatically disabled under debug.deterministic.
+    """
+
 
 @dataclass(kw_only=True, slots=True)
 class DebugConfig:
