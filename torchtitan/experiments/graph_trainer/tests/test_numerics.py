@@ -7,10 +7,13 @@
 import copy
 import importlib.util
 import math
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import torch
 from torch.distributed._composable.fsdp import fully_shard
@@ -151,6 +154,75 @@ def run_loss_compare_close(
         )
 
 
+@contextmanager
+def _log_rank(log_rank: int) -> Iterator[None]:
+    previous_log_rank = os.environ.get("LOG_RANK")
+    os.environ["LOG_RANK"] = str(log_rank)
+    try:
+        yield
+    finally:
+        if previous_log_rank is None:
+            os.environ.pop("LOG_RANK", None)
+        else:
+            os.environ["LOG_RANK"] = previous_log_rank
+
+
+def _losses_are_equal(
+    baseline_losses: dict[int, float],
+    test_losses: dict[int, float],
+) -> bool:
+    if baseline_losses.keys() != test_losses.keys():
+        print(
+            "Step mismatch: "
+            f"baseline={sorted(baseline_losses)} test={sorted(test_losses)}"
+        )
+        return False
+
+    for step in sorted(baseline_losses):
+        if baseline_losses[step] != test_losses[step]:
+            print(
+                "Loss mismatch at "
+                f"step={step}: baseline={baseline_losses[step]!r} "
+                f"test={test_losses[step]!r}"
+            )
+            return False
+    return True
+
+
+def _extract_losses_from_rank_tensorboard(
+    job_dump_folder: str,
+    tb_folder: str,
+    rank: int,
+) -> dict[int, float]:
+    from scripts.loss_compare import TB_LOSS_TAG
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    base_path = os.path.join(job_dump_folder, tb_folder)
+    timestamp_dirs = [
+        path
+        for path in os.listdir(base_path)
+        if os.path.isdir(os.path.join(base_path, path))
+    ]
+    rank_event_dirs = [
+        os.path.join(base_path, timestamp_dir, f"rank_{rank}")
+        for timestamp_dir in timestamp_dirs
+        if os.path.isdir(os.path.join(base_path, timestamp_dir, f"rank_{rank}"))
+    ]
+    if len(rank_event_dirs) != 1:
+        raise RuntimeError(
+            f"Expected one TensorBoard rank_{rank} directory under {base_path}, "
+            f"found {rank_event_dirs}."
+        )
+
+    event_accumulator = EventAccumulator(rank_event_dirs[0])
+    event_accumulator.Reload()
+    losses = {
+        scalar.step: scalar.value for scalar in event_accumulator.Scalars(TB_LOSS_TAG)
+    }
+    print(f"Extracted {len(losses)} losses from {rank_event_dirs[0]}")
+    return losses
+
+
 LLAMA3_PARALLELISM = (
     "--parallelism.tensor_parallel_degree=2"
     " --parallelism.data_parallel_shard_degree=4"
@@ -270,6 +342,108 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
         test_options_extra=DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS
         + DSV3_EP_OVERLAP_GRAPH_BITWISE,
     )
+
+
+GRAPH_PP_DSV3_PP_OPTIONS = (
+    "--parallelism.pipeline_parallel_degree=2"
+    " --parallelism.data_parallel_shard_degree=4"
+    " --parallelism.expert_parallel_degree=2"
+    " --training.local_batch_size=8"
+    " --training.global_batch_size=32"
+    # Eager PP cannot be the baseline for ZBVZeroBubble or DualPipeV here:
+    # FlexAttention needs torch.compile, and torch.compile is incompatible with
+    # those eager PP schedules. Compare GraphPP schedules against eager
+    # Interleaved1F1B instead. TorchTitan gradient clipping is applied per
+    # local rank, so different PP schedules can produce different clip
+    # coefficients even when pre-clip grads are bitwise equal. Disable clipping
+    # to isolate GraphPP graph execution from that schedule-level effect.
+    " --training.max_norm=inf"
+)
+
+
+GRAPH_PP_DSV3_TEST_PARALLELISM = (
+    "--compile.mode aot_fx_trace"
+    " --compile.inductor_compilation regional"
+    f" {GRAPH_PP_DSV3_PP_OPTIONS}"
+)
+
+
+def _run_graph_pp_deepseek_v3_loss_compare(schedule: str) -> bool:
+    """Run exact loss_compare for eager Interleaved1F1B PP vs GraphPP."""
+    from scripts.loss_compare import create_seed_checkpoint, run_training
+
+    baseline_options = (
+        f"{GRAPH_PP_DSV3_PP_OPTIONS}"
+        " --parallelism.pipeline_parallel_schedule=Interleaved1F1B"
+        " --metrics.save_for_all_ranks"
+    )
+    test_options = (
+        f"{GRAPH_PP_DSV3_TEST_PARALLELISM}"
+        f" --parallelism.pipeline_parallel_schedule={schedule}"
+        " --metrics.save_for_all_ranks"
+    )
+
+    baseline_module = "graph_trainer.deepseek_v3"
+    baseline_config = "graph_trainer_deepseek_v3_debugmodel_eager_pp"
+    test_module = "graph_trainer.deepseek_v3"
+    test_config = "graph_trainer_deepseek_v3_debugmodel"
+    baseline_tb_folder = "tb_baseline"
+    test_tb_folder = "tb_test"
+    baseline_loss_rank = 4
+    test_loss_rank = 0 if schedule in {"ZBVZeroBubble", "DualPipeV"} else 4
+
+    # loss_compare.py and core metrics choose one logging rank per run. The
+    # eager Interleaved1F1B baseline owns loss on the first rank of the last PP
+    # stage, while V-style GraphPP schedules own loss on rank 0. Save TB for
+    # all ranks in this experiment-local test, then compare the full-precision
+    # scalars from the ranks that actually own loss.
+    with tempfile.TemporaryDirectory() as job_dump_folder:
+        create_seed_checkpoint(
+            True,
+            baseline_module,
+            baseline_config,
+            None,
+            job_dump_folder,
+        )
+        with _log_rank(baseline_loss_rank):
+            run_training(
+                "baseline",
+                baseline_module,
+                baseline_config,
+                baseline_options,
+                STEPS,
+                True,
+                None,
+                job_dump_folder,
+                8,
+                tb_folder=baseline_tb_folder,
+            )
+        baseline_losses = _extract_losses_from_rank_tensorboard(
+            job_dump_folder,
+            baseline_tb_folder,
+            baseline_loss_rank,
+        )
+
+        with _log_rank(test_loss_rank):
+            run_training(
+                "test",
+                test_module,
+                test_config,
+                test_options,
+                STEPS,
+                True,
+                None,
+                job_dump_folder,
+                8,
+                tb_folder=test_tb_folder,
+            )
+        test_losses = _extract_losses_from_rank_tensorboard(
+            job_dump_folder,
+            test_tb_folder,
+            test_loss_rank,
+        )
+
+    return _losses_are_equal(baseline_losses, test_losses)
 
 
 QWEN3_PARALLELISM = (
@@ -437,6 +611,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_dsv3_ep_overlap_moe_batch_aot_fx_trace_vs_eager_chunked(self):
         self.assertTrue(_run_deepseek_v3_ep_overlap_moe_batch_loss_compare())
+
+    def test_graph_pp_moe_dsv3_aot_fx_trace_vs_eager(self):
+        for schedule in ("Interleaved1F1B", "ZBVZeroBubble", "DualPipeV"):
+            with self.subTest(schedule=schedule):
+                self.assertTrue(_run_graph_pp_deepseek_v3_loss_compare(schedule))
 
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(

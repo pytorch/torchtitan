@@ -293,12 +293,20 @@ class Controller(Configurable):
                     )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
-                # TODO: Replace trainer dtype constraint to use mixed
-                #  training enabled by FSDP.
-                if self.trainer.training.dtype != "bfloat16":
+                # The trainer forward must compute in bf16 to match the bf16
+                # generator, via FSDP mixed precision. The trainer always wraps
+                # the model in FSDP (even at data_parallel_shard_degree=1, where
+                # FSDP acts purely as a mixed-precision boundary), so
+                # mixed_precision_param == "bfloat16" casts the fp32 master
+                # weights to bf16 for the forward before any matmul.
+                if self.trainer.training.mixed_precision_param != "bfloat16":
                     raise ValueError(
-                        f"batch_invariant requires bfloat16 training dtype, "
-                        f"got {self.trainer.training.dtype!r}"
+                        "batch_invariant requires the trainer forward to compute "
+                        "in bfloat16 to match the generator. Set "
+                        "training.mixed_precision_param='bfloat16' (fp32 master "
+                        "weights, bf16-cast forward via FSDP mixed precision). "
+                        "Got mixed_precision_param="
+                        f"{self.trainer.training.mixed_precision_param!r}."
                     )
                 if self.generator.model_dtype != "bfloat16":
                     raise ValueError(
@@ -430,7 +438,9 @@ class Controller(Configurable):
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            result = await self.generator_router.route(
+            # Dispatches to the chosen generator's rank-0 intake via call_one, so
+            # it returns the Completion directly (no ValueMesh unwrap).
+            return await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,
@@ -445,7 +455,6 @@ class Controller(Configurable):
                     session_id=routing_session_id,
                 ),
             )
-            return self._get_rank_0_value(result)
 
         return generate
 
@@ -582,6 +591,12 @@ class Controller(Configurable):
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
+
+        # Start each generator's engine loop on all ranks once, before any
+        # rank-0-only generate / pull (rank 0 drives the followers through this
+        # loop, so every rank must be running it first).
+        with sl.log_trace_span("generator_start_engine_loop"):
+            await self.generator_router.fanout("start_engine_loop")
 
         # Initial weight sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
