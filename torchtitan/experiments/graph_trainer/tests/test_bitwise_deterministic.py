@@ -489,6 +489,13 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_llama)
 
+    @unittest.skip(
+        # FlexAttention eager golden values drift with the torch nightly and
+        # are not re-baselineable across builds (cross-check: local != CI for
+        # 2 of 3 flex variants). These check eager-vs-golden, not the
+        # aot_fx_trace == eager invariant (covered by the loss-compare tests).
+        "FlexAttn eager goldens drift with torch nightly; not re-baselineable (#3876)"
+    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -578,6 +585,13 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             ),
         )
 
+    @unittest.skip(
+        # FlexAttention eager golden values drift with the torch nightly and
+        # are not re-baselineable across builds (cross-check: local != CI for
+        # 2 of 3 flex variants). These check eager-vs-golden, not the
+        # aot_fx_trace == eager invariant (covered by the loss-compare tests).
+        "FlexAttn eager goldens drift with torch nightly; not re-baselineable (#3876)"
+    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -763,6 +777,13 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_qwen3)
 
+    @unittest.skip(
+        # FlexAttention eager golden values drift with the torch nightly and
+        # are not re-baselineable across builds (cross-check: local != CI for
+        # 2 of 3 flex variants). These check eager-vs-golden, not the
+        # aot_fx_trace == eager invariant (covered by the loss-compare tests).
+        "FlexAttn eager goldens drift with torch nightly; not re-baselineable (#3876)"
+    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
