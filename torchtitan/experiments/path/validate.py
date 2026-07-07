@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Any, List
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -18,6 +19,7 @@ from torchtitan.components.unique_counter import StringUniqueCounter
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.tools.logging import logger
 from xx.common.helpers import parse_info
 from xx.training.lib.checkpoint import wait_for_checkpoint
 from xx.release_tests.lib.base_report import ReportFormat
@@ -48,6 +50,7 @@ class PathValidator(BaseValidator):
         mixed_precision_param: str
         reports: dict[str, list[int]] = field(default_factory=dict)
         miniray: dict[str, Any] = field(default_factory=dict)
+        save_predictions: bool = False
 
     def __init__(
         self,
@@ -85,7 +88,7 @@ class PathValidator(BaseValidator):
             local_batch_size=self.local_batch_size,
             validation_steps=self.config.steps,
         )
-        #TODO centralize training_id
+        # TODO centralize training_id
         self.training_id = os.getenv("REPORTERV2_TRAINING_ID") or "local"
         self.unique_segment_counter = StringUniqueCounter(f"unique_ids:{self.training_id}:path:validation")
         self.report_runner = ReportRunner(metrics_processor=self.metrics_processor, enabled=global_rank() == 0)
@@ -101,6 +104,7 @@ class PathValidator(BaseValidator):
             total_samples = torch.zeros((), device=device)
             metric_sums: dict[str, torch.Tensor] = {}
             validation_segment_names: set[str] = set()
+            pred_records: list[dict[str, Any]] = []
             batch_mesh = self.parallel_dims.get_optional_mesh("batch")
             loss_mesh = self.parallel_dims.get_optional_mesh("loss")
             for num_steps, (input_dict, targets) in enumerate(self.dataloader):
@@ -121,6 +125,14 @@ class PathValidator(BaseValidator):
                 with self.validation_context():
                     pred = model_parts[0](input_dict)
                     loss_vec, metrics = self.loss_fn(pred, targets)
+
+                if self.config.save_predictions:
+                    infos = [parse_info(x) for x in input_dict["info"].cpu().numpy()]
+                    arrays = {k: v.double().cpu().numpy().round(4) for k, v in pred.items()}
+                    pred_records.extend(
+                        {"name": info["name"], "fidx": int(info["fidx"])} | {k: v[i].tolist() for k, v in arrays.items()}
+                        for i, info in enumerate(infos)
+                    )
 
                 loss_sum = loss_vec.float().sum()
                 batch_metric_sums = {k: v.float().sum() for k, v in metrics.items() if k != "loss"}
@@ -146,6 +158,8 @@ class PathValidator(BaseValidator):
                 else self.unique_segment_counter.local_count()
             )
             self.metrics_processor.log_validation(loss=loss, step=step, extra_metrics=extra_metrics)
+            if self.config.save_predictions:
+                self._save_predictions(pred_records, step, batch_mesh)
             self._submit_reports(step)
         finally:
             for model in model_parts:
@@ -157,10 +171,25 @@ class PathValidator(BaseValidator):
         finally:
             self.dataloader.close()
 
+    def _save_predictions(self, records: list[dict[str, Any]], step: int, batch_mesh) -> None:
+        from reporterv2.storage import store_put
+
+        if batch_mesh is not None:
+            group = batch_mesh.get_group()
+            gathered: list[list[dict[str, Any]] | None] = [None] * group.size()
+            dist.all_gather_object(gathered, records, group=group)
+            records = [record for rank_records in gathered for record in rank_records]
+        if global_rank() != 0:
+            return
+        try:
+            store_put(f"runs/{self.training_id}/reports/val_preds.{step}.json", json.dumps(records))
+        except Exception:
+            logger.warning(f"failed to save val predictions for step {step}", exc_info=True)
+
     def _submit_reports(self, step: int) -> None:
         current_checkpoint = f'{self.training_id}/{step}'
 
-        def _run_report(TestCls: type, test_config: Any, wait_for_checkpoint_keys: List[str]) -> tuple[Any, ...]:
+        def _run_report(TestCls: type, test_config: Any, wait_for_checkpoint_keys: list[str]) -> tuple[Any, ...]:
             for k in wait_for_checkpoint_keys:
                 wait_for_checkpoint(current_checkpoint, k)
             return (TestCls(test_config).run_report(),)
