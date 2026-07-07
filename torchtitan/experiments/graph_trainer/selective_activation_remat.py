@@ -18,7 +18,10 @@ from torch._functorch.partitioners import (
     must_recompute,
 )
 
-from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_module_fqn,
+    _is_backward_node,
+)
 
 
 log = logging.getLogger(__name__)
@@ -37,21 +40,48 @@ def _privatize_custom_meta(node: fx.Node) -> None:
         node.meta["custom"] = dict(custom)
 
 
+# Backward regions under these module FQNs are not activation-checkpoint
+# regions and must not drive recompute. A chunked-loss / lm_head backward
+# region can *consume* a must_recompute forward node -- the tied embedding
+# weight and shared rope buffers flow into the loss backward -- but recompute
+# belongs to the model-layer backward, not here. Without excluding them a
+# chunked loss produces one remat region per chunk.
+_NON_AC_MODULE_FQNS = frozenset({"loss", "lm_head"})
+
+
+def _is_loss_region(region_nodes: list[fx.Node]) -> bool:
+    """Whether a backward region is a loss / lm_head region (not an AC region).
+
+    True when the region carries module annotations and every annotated node is
+    under ``loss`` / ``lm_head``. Unannotated regions (e.g. synthetic unit-test
+    graphs) return False, preserving the default remat behavior.
+    """
+    fqns = {_get_module_fqn(n) for n in region_nodes}
+    fqns.discard("")
+    return bool(fqns) and fqns <= _NON_AC_MODULE_FQNS
+
+
 def _collect_backward_regions(
     gm: fx.GraphModule,
 ) -> list[tuple[int, int, bool]]:
     """Returns (bwd_start, bwd_end, needs_remat) for each backward region.
 
     Regions are maximal contiguous runs of backward nodes, as [start, end)
-    indices into the graph node list. Multiple regions may need recompute
-    (e.g. chunked loss, or FSDP collective splitting fragmenting the
-    backward); ``selective_activation_remat_pass`` rematerializes each.
+    indices into the graph node list. ``needs_remat`` is True when a backward
+    node in the region consumes a must_recompute forward node AND the region is
+    not a loss / lm_head region (see ``_is_loss_region``) -- so chunked-loss
+    backward chunks are never counted as remat regions.
     """
+    all_nodes = list(gm.graph.nodes)
     regions: list[tuple[int, int, bool]] = []
     bwd_start: int | None = None
     needs_remat = False
 
-    for idx, node in enumerate(gm.graph.nodes):
+    def close(start: int, end: int) -> None:
+        needs = needs_remat and not _is_loss_region(all_nodes[start:end])
+        regions.append((start, end, needs))
+
+    for idx, node in enumerate(all_nodes):
         if _is_backward_node(node):
             if bwd_start is None:
                 bwd_start = idx
@@ -61,11 +91,11 @@ def _collect_backward_regions(
             ):
                 needs_remat = True
         elif bwd_start is not None:
-            regions.append((bwd_start, idx, needs_remat))
+            close(bwd_start, idx)
             bwd_start = None
 
     if bwd_start is not None:
-        regions.append((bwd_start, idx + 1, needs_remat))
+        close(bwd_start, len(all_nodes))
 
     return regions
 
@@ -90,10 +120,11 @@ def selective_activation_remat_pass(
     ``node.meta["autograd_backward"] == True``, set by both Dynamo and
     non-strict ``make_fx`` tracing when tracing ``torch.autograd.grad``.
 
-    The graph may contain multiple disjoint backward regions (e.g. chunked
-    loss, or FSDP collective splitting fragmenting the backward). Regions
-    that do not depend on recomputable forward nodes are skipped; every
-    region that does is rematerialized.
+    The graph may contain multiple disjoint backward regions (e.g. one per
+    chunk of a chunked loss). ``_collect_backward_regions`` excludes loss /
+    lm_head regions from remat even when they consume must_recompute forward
+    nodes, so recompute is driven only by the model-layer backward. Exactly one
+    remat region is expected; more than one is an error.
     """
     if not has_recomputable_ops(gm):
         return gm
@@ -109,20 +140,25 @@ def selective_activation_remat_pass(
     if not regions:
         return gm
 
-    # A graph may contain several disjoint backward regions (chunked loss, or
-    # FSDP collective splitting fragmenting the backward), and more than one
-    # may depend on must_recompute forward nodes. Handle every such region:
-    # bwd_nodes below spans all of them, so each must_recompute forward node
-    # is duped in front of its earliest backward consumer regardless of which
-    # region that consumer lives in. Recompute is deterministic, so a dup
-    # shared by consumers in different regions stays numerics-preserving.
+    # Loss / lm_head backward regions are already filtered out by
+    # _collect_backward_regions, so the remaining needs-remat regions are the
+    # model-layer AC regions; exactly one is expected.
     remat_regions = [(s, e) for s, e, needs in regions if needs]
+
+    if len(remat_regions) > 1:
+        raise RuntimeError(
+            f"Detected {len(remat_regions)} disjoint backward regions that require "
+            "recomputation, but remat supports only one such region in a "
+            "forward-loss-backward graph."
+        )
 
     if not remat_regions:
         return gm
 
+    bwd_start, bwd_end = remat_regions[0]
+
     all_nodes = list(gm.graph.nodes)
-    bwd_nodes = [n for start, end in remat_regions for n in all_nodes[start:end]]
+    bwd_nodes = all_nodes[bwd_start:bwd_end]
     order = {n: i for i, n in enumerate(all_nodes)}
 
     # Map each must_recompute fwd node to the bwd node its dup will be

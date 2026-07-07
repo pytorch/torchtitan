@@ -79,6 +79,23 @@ def _set_deterministic(seed: int = SEED) -> None:
 _TOKENIZER_PATH = "./tests/assets/tokenizer"
 
 
+# ``test_eager_self_deterministic`` pins eager loss/model/grad to hardcoded
+# golden values. torchtitan builds against the torch *nightly* (not a pinned
+# release), so eager numerics drift with upstream kernel/codegen changes --
+# in practice about weekly -- which makes hardcoded goldens unmaintainable:
+# they need near-weekly re-blessing and cannot even be re-based reliably,
+# since a dev's local nightly and CI's nightly can differ. The invariant that
+# actually matters, aot_fx_trace == eager, is covered by the loss-compare /
+# precompile tests, which compare within a single run and are immune to
+# nightly drift. Skip unconditionally until torch is pinned or the goldens are
+# replaced with a tolerance-based check. See #3876.
+_EAGER_GOLDEN_SKIP_REASON = (
+    "eager golden hashes are unmaintainable against the moving torch nightly "
+    "(numerics drift ~weekly); aot_fx_trace == eager is covered by the "
+    "loss-compare tests instead. See #3876."
+)
+
+
 @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
 class BitwiseDeterministicBase(unittest.TestCase):
     """Base class for bitwise determinism tests.
@@ -358,6 +375,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_llama)
 
+    @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -421,6 +439,7 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_deepseekv3)
 
+    @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -489,13 +508,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_llama)
 
-    @unittest.skip(
-        # FlexAttention eager golden values drift with the torch nightly and
-        # are not re-baselineable across builds (cross-check: local != CI for
-        # 2 of 3 flex variants). These check eager-vs-golden, not the
-        # aot_fx_trace == eager invariant (covered by the loss-compare tests).
-        "FlexAttn eager goldens drift with torch nightly; not re-baselineable (#3876)"
-    )
+    @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -585,13 +598,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             ),
         )
 
-    @unittest.skip(
-        # FlexAttention eager golden values drift with the torch nightly and
-        # are not re-baselineable across builds (cross-check: local != CI for
-        # 2 of 3 flex variants). These check eager-vs-golden, not the
-        # aot_fx_trace == eager invariant (covered by the loss-compare tests).
-        "FlexAttn eager goldens drift with torch nightly; not re-baselineable (#3876)"
-    )
+    @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -709,6 +716,7 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel_moe"
     annotate_model = staticmethod(annotate_qwen3)
 
+    @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -777,13 +785,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_qwen3)
 
-    @unittest.skip(
-        # FlexAttention eager golden values drift with the torch nightly and
-        # are not re-baselineable across builds (cross-check: local != CI for
-        # 2 of 3 flex variants). These check eager-vs-golden, not the
-        # aot_fx_trace == eager invariant (covered by the loss-compare tests).
-        "FlexAttn eager goldens drift with torch nightly; not re-baselineable (#3876)"
-    )
+    @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
