@@ -27,6 +27,31 @@ from .onnx_checkpoint import PathOnnxCheckpointManager
 from .validate import PathValidator, segment_names_from_info
 
 
+def final_checkpoint_config(
+    *, flavor: str, stem: str, seed: int | None, steps: int
+) -> CheckpointManager.Config:
+    reporterv2_host = os.getenv("REPORTERV2_HOST")
+    report_user = os.getenv("REPORT_USER") or getpass.getuser()
+    if reporterv2_host:
+        return PathOnnxCheckpointManager.Config(
+            enable=True,
+            checkpoint_base_folder=f"{reporterv2_host.rstrip('/')}/checkpoint",
+            checkpoint_id_format="step-",
+            folder=f"{report_user}/{flavor}/{stem}_s{seed}",
+            interval=steps,
+            keep_latest_k=0,
+        )
+    return CheckpointManager.Config(
+        enable=True,
+        folder=(
+            f"/raid.unprotected/reports/{report_user}_reports"
+            f"/prune_10m/vit/checkpoints/{flavor}/{stem}_s{seed}"
+        ),
+        interval=steps,
+        keep_latest_k=0,
+    )
+
+
 class PathTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
@@ -46,16 +71,11 @@ class PathTrainer(Trainer):
                 }
             if self.dataloader.limit and not self.checkpoint.enable:
                 stem = os.path.splitext(os.path.basename(self.dataloader.dataset))[0]
-                report_user = os.getenv("REPORT_USER") or getpass.getuser()
-                self.checkpoint = CheckpointManager.Config(
-                    enable=True,
-                    folder=(
-                        f"/raid.unprotected/reports/{report_user}_reports"
-                        f"/prune_10m/vit/checkpoints/{self.model_spec.flavor}"
-                        f"/{stem}_s{self.debug.seed}"
-                    ),
-                    interval=self.training.steps,
-                    keep_latest_k=0,
+                self.checkpoint = final_checkpoint_config(
+                    flavor=self.model_spec.flavor,
+                    stem=stem,
+                    seed=self.debug.seed,
+                    steps=self.training.steps,
                 )
 
     def __init__(self, config: Config):

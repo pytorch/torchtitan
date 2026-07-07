@@ -6,18 +6,16 @@
 
 from __future__ import annotations
 
-import getpass
 import os
 from dataclasses import replace
 
 from xx.common.basedir import XX_BASEDIR
 from xx.datasets.constants import DEFAULT_10M_TRAIN_LIST
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 
 from ..path.config_registry import dp_degrees as _dp_degrees, vit as _vit
-from ..path.trainer import PathTrainer
+from ..path.trainer import final_checkpoint_config, PathTrainer
 
 BIG_FLAVOR = "w2048"
 BIG_STEPS = 15360
@@ -31,20 +29,13 @@ def _ckpt(seed: int, dataset: str | None = None) -> PathTrainer.Config:
     cfg = _vit(BIG_FLAVOR, mup=True, lr=BIG_LR)
     dataset = dataset or cfg.dataloader.dataset
     stem = os.path.splitext(os.path.basename(dataset))[0]
-    report_user = os.getenv("REPORT_USER") or getpass.getuser()
     return replace(
         cfg,
         training=replace(cfg.training, steps=BIG_STEPS),
         dataloader=replace(cfg.dataloader, dataset=dataset),
         debug=replace(cfg.debug, seed=seed),
-        checkpoint=CheckpointManager.Config(
-            enable=True,
-            folder=(
-                f"/raid.unprotected/reports/{report_user}_reports"
-                f"/prune_10m/vit/checkpoints/{BIG_FLAVOR}/{stem}_s{seed}"
-            ),
-            interval=BIG_STEPS,
-            keep_latest_k=0,
+        checkpoint=final_checkpoint_config(
+            flavor=BIG_FLAVOR, stem=stem, seed=seed, steps=BIG_STEPS
         ),
     )
 
