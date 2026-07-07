@@ -58,7 +58,7 @@ def _maybe_apply_numa_binding(gpu_index: int, device_type: str) -> None:
     )
 
     _maybe_apply_numa_binding_to_current_process(
-        gpu_index=gpu_index,
+        device_index=gpu_index,
         numa_options=NumaOptions(
             affinity_mode=AffinityMode.NODE,
             should_fall_back_if_binding_fails=True,
