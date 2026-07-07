@@ -819,7 +819,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
 
 
 def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
-    """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
+    """On-policy GRPO config for Qwen3-0.6B (8 GPUs: 4 gen + 4 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
 
@@ -859,7 +859,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=4,
                 enable_sequence_parallel=False,
             ),
             checkpoint=CheckpointManager.Config(
@@ -875,7 +875,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -889,24 +889,17 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
 
 
 def rl_grpo_qwen3_debug_varlen_batch_invariant() -> Controller.Config:
-    """Dense Qwen3 debug config in deterministic + batch-invariant mode (8 GPUs: 4 gen + 4 train).
+    """Dense Qwen3 debugmodel, deterministic + batch-invariant (8 GPUs: 4 gen + 4 train).
 
-    A10G-sized stand-in for ``rl_grpo_qwen3_0_6b_varlen_batch_invariant``. On
-    A10G the 0.6B model at TP=4 for both trainer and generator OOMs once
-    batch-invariant mode is on (its kernels need extra memory), so this uses the
-    tiny debugmodel with random init instead. Trainer and generator both run
-    TP=4 so the reduction order matches for bitwise parity.
+    A10G stand-in for ``rl_grpo_qwen3_0_6b_varlen_batch_invariant``: the 0.6B
+    model OOMs at TP=4 on A10G under batch-invariant mode, so use the random-init
+    debugmodel. Trainer and generator both run TP=4 so reduction order matches for
+    bitwise parity, and FSDP casts the fp32 master weights to bf16 for the forward
+    to match the bf16 generator.
 
-    ``drop_zero_std_reward_groups=False`` keeps zero-reward groups. The
-    random-init model produces non-sense completions whose AlphabetSort task
-    reward is always 0.0, so every group has zero-std rewards; dropping them
-    would leave no trainable rows and no training step to exercise. Keeping them
-    still runs the full trainer forward -- which is what the batch-invariant
-    parity check needs -- even though the advantage (and thus the loss) is zero.
-
-    Trainer keeps fp32 master weights; FSDP mixed precision
-    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
-    forward, matching the bf16 generator.
+    ``drop_zero_std_reward_groups=False``: the random-init model scores 0.0 reward
+    everywhere, so every group has zero-std rewards; dropping them would leave no
+    rows and skip the trainer forward the parity check needs (loss stays zero).
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8

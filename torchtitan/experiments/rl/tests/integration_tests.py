@@ -159,20 +159,11 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_checkpoint_resume",
             ngpu=8,
         ),
-    ]
-
-
-def build_rl_batch_invariant_test_list() -> list[OverrideDefinitions]:
-    return [
         OverrideDefinitions(
             [
                 [
                     "--module alphabet_sort",
-                    # Debug model (random init): the 0.6B model at TP=4 for both
-                    # trainer and generator OOMs on A10G under batch-invariant
-                    # mode, so exercise the batch-invariant path on the tiny
-                    # debugmodel instead.
-                    "--config rl_grpo_qwen3_debug_varlen_batch_invariant",
+                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
                     "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--async-loop.group-size 2",
@@ -184,8 +175,8 @@ def build_rl_batch_invariant_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO debug TP=4 batch-invariant + deterministic",
-            "rl_grpo_debug_tp4_batch_invariant",
+            "RL GRPO 0.6B TP=4 batch-invariant + deterministic",
+            "rl_grpo_0_6b_tp4_batch_invariant",
             ngpu=8,
         ),
         OverrideDefinitions(
@@ -209,14 +200,6 @@ def build_rl_batch_invariant_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
     ]
-
-
-_TEST_SUITES = {
-    "default": build_rl_test_list,
-    "batch_invariant": build_rl_batch_invariant_test_list,
-    # Backward-compat alias: the batch-invariant suite used to be H100-only.
-    "h100": build_rl_batch_invariant_test_list,
-}
 
 
 def run_single_test(
@@ -291,12 +274,6 @@ def main():
         help="Specific test to run (default: all)",
     )
     parser.add_argument(
-        "--test_suite",
-        default="default",
-        choices=list(_TEST_SUITES.keys()),
-        help="Which test suite to run (default: default)",
-    )
-    parser.add_argument(
         "--ngpu",
         default=4,
         type=int,
@@ -312,7 +289,7 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    test_list = _TEST_SUITES[args.test_suite]()
+    test_list = build_rl_test_list()
     run_tests(args, test_list)
 
 
