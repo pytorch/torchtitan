@@ -440,7 +440,7 @@ class Controller(Configurable):
         ) -> Completion | None:
             # Dispatches to the chosen generator's rank-0 intake via call_one, so
             # it returns the Completion directly (no ValueMesh unwrap).
-            return await self.generator_router.route_rank0(
+            return await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,

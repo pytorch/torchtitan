@@ -79,7 +79,7 @@ class InterGeneratorRouter(Configurable):
         generation (no draining). When False, each generator is drained before
         its pull.
 
-        Draining only waits for a generator's in-flight ``route_rank0`` call (one
+        Draining only waits for a generator's in-flight ``route`` call (one
         turn) to finish; between turns of a multi-turn rollout the generator is
         idle, so a weight sync may land mid-rollout and successive turns can run
         under different policy versions."""
@@ -145,7 +145,7 @@ class InterGeneratorRouter(Configurable):
         if h.reserved_load == 0:
             h.idle.set()
 
-    async def route_rank0(
+    async def route(
         self,
         method: str,
         *args,

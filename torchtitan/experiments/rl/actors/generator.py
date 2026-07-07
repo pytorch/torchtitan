@@ -946,7 +946,7 @@ class VLLMGenerator(Actor, Configurable):
         if self._engine_loop_task is None:
             self._engine_loop_task = asyncio.create_task(self._engine_loop())
 
-    def _check_rank0_engine_loop_running(self, endpoint_name: str) -> None:
+    def _rank0_check_engine_loop_running(self, endpoint_name: str) -> None:
         """Guard for the rank-0-only endpoints"""
         assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
         if self._engine_loop_task is None:
@@ -989,7 +989,7 @@ class VLLMGenerator(Actor, Configurable):
                 [1, 2, 3], request_id="step=3/group=0/sample=0/turn=0",
             )
         """
-        self._check_rank0_engine_loop_running("generate")
+        self._rank0_check_engine_loop_running("generate")
 
         sampling = (
             sampling_config if sampling_config is not None else self.config.sampling
@@ -1201,7 +1201,7 @@ class VLLMGenerator(Actor, Configurable):
         # TODO: if an incoming request is received while another pull request is queued
         # we should drop the older request and pull the latest version instead
 
-        self._check_rank0_engine_loop_running("pull_model_state_dict")
+        self._rank0_check_engine_loop_running("pull_model_state_dict")
 
         # A placeholder future for the engine loop to resolve once the pull has been applied.
         pull_model_state_dict_future: asyncio.Future[
