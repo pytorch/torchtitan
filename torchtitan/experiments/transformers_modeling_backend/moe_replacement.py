@@ -8,7 +8,8 @@
 
 Two-phase replacement:
   Phase 1 (init time): ``prepare_native_moe_configs`` probes the HF MoE block
-      and builds a ``MoE.Config``, stored on each layer as ``_native_moe_config``.
+      and builds a Titan ``MoE.Config``, stored on each layer as
+      ``_native_moe_config``.
   Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
       ``set_moe_sharding_config`` on each stored config, builds the Titan MoE,
       initializes it, and swaps it into the layer. Actual parallelization
@@ -47,7 +48,7 @@ from torchtitan.tools.logging import logger
 
 
 def prepare_native_moe_configs(model: nn.Module, config) -> None:
-    """Probe each MoE layer and store a ``MoE.Config`` for later build.
+    """Probe each HF MoE layer and store a Titan ``MoE.Config`` for later build.
 
     Called during ``HFTransformerModel.__init__`` on meta device.
     Does NOT instantiate the Titan MoE modules yet -- that happens in Phase 2.
@@ -527,7 +528,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         if shared_info["has_sigmoid_gate"]:
             # SharedExperts is a FeedForward subclass, so w1/w2/w3 stay flat
             # (no nested ``ffn.`` level) and are directly shardable by
-            # set_moe_sharding_config -- no temporary-swap workaround needed.
+            # set_moe_sharding_config.
             shared_experts = SharedExperts.Config(
                 w1=ffn_config.w1,
                 w2=ffn_config.w2,

@@ -159,12 +159,8 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # Only the default (DTensor) sharding backend is wired for this backend today.
-    # spmd_types/full_dtensor rename the FSDP mesh axis (dp_shard, not fsdp) and
-    # need Titan-native embedding + attention kernels that aren't installed here
-    # yet, so they would otherwise fail deep inside with a cryptic "Invalid mesh
-    # dim: 'fsdp'". Fail loud with a clear message. TODO: wire spmd_types (next
-    # PR) -- see the migration TODO in hf_sharding.py.
+    # Only the "default" sharding backend is wired here.
+    # TODO: wire spmd_types (next PR) -- see the migration TODO in hf_sharding.py.
     if parallel_dims.spmd_backend != "default":
         raise NotImplementedError(
             f"The HF transformers backend only supports spmd_backend='default' "
