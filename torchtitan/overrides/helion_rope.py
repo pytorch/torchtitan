@@ -366,7 +366,11 @@ if _HELION_IMPORT_ERROR is None:
         rope_cache: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.empty_like(grad_xq_out), torch.empty_like(grad_xk_out)
+        # The real op makes incoming grads contiguous before allocating outputs.
+        return (
+            torch.empty_like(grad_xq_out, memory_format=torch.contiguous_format),
+            torch.empty_like(grad_xk_out, memory_format=torch.contiguous_format),
+        )
 
     def _fwd_setup_context(ctx, inputs, output) -> None:
         xq, xk, rope_cache, positions = inputs
