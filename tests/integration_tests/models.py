@@ -10,23 +10,38 @@ import dataclasses
 from tests.integration_tests import OverrideDefinitions
 
 
-def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Inject ``--parallelism.spmd_backend`` into every model test variant."""
+def _enable_spmd_backend(
+    t: OverrideDefinitions, backend: str
+) -> OverrideDefinitions | None:
+    """Inject ``--parallelism.spmd_backend`` into every model test variant.
+
+    Returns ``None`` when no compatible variant remains (e.g. every variant of a
+    test enables torch.compile, which the spmd_types backend cannot run).
+    """
     test_name = f"{t.test_name}_{backend}"
     new_args = []
     for variant in t.override_args:
+        # spmd_types cannot run under torch.compile: dynamo cannot trace its
+        # tensor-subclass machinery
+        if backend == "spmd_types" and any("compile.enable" in arg for arg in variant):
+            continue
+        # qwen3_5 is not wired for the spmd_types backend yet: its parallelize
+        # path resolves the legacy flattened ``fsdp`` mesh axis
+        if backend == "spmd_types" and any(
+            "--module qwen3_5" in arg for arg in variant
+        ):
+            continue
         variant = tuple(
             arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
         )
         prefix = [f"--parallelism.spmd_backend {backend}"]
         suffix = []
-        # Compile, PP, and explicit AC modes are not compatible with SPMD
-        # typechecking yet; keep those as backend-only coverage.
+        # PP and explicit AC modes are not compatible with SPMD typechecking
+        # yet; keep those as backend-only coverage.
         if backend == "spmd_types" and not any(
             token in arg
             for arg in variant
             for token in (
-                "compile.enable",
                 "pipeline_parallel_degree",
                 "activation-checkpoint:",
             )
@@ -34,6 +49,8 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
             prefix.append("--debug.spmd_typechecking")
             suffix.append("activation-checkpoint:none")
         new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
+    if not new_args:
+        return None
     return dataclasses.replace(
         t,
         override_args=tuple(new_args),
@@ -208,7 +225,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
     ]
 
+    spmd_tests = [_enable_spmd_backend(t, "spmd_types") for t in model_tests]
     return [
         *model_tests,
-        *[_enable_spmd_backend(t, "spmd_types") for t in model_tests],
+        *[t for t in spmd_tests if t is not None],
     ]
