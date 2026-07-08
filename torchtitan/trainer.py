@@ -263,6 +263,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             batch_degree, batch_rank = 1, 0
 
+        if config.training.global_batch_size < 0:
+            config.training.global_batch_size = (
+                config.training.local_batch_size * batch_degree
+            )
+
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq, debug=config.training.gc_debug
@@ -348,10 +353,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = config.training.local_batch_size * batch_degree
         assert global_batch_size > 0
         assert (
             global_batch_size % (config.training.local_batch_size * batch_degree) == 0
