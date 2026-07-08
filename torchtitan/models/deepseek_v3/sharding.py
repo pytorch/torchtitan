@@ -20,14 +20,13 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
-from torchtitan.models.deepseek_v3.model import Attention, MTPTransformerBlock
+from torchtitan.models.deepseek_v3.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
         DeepSeekV3Model,
         DeepSeekV3TransformerBlock,
-        MTPTransformerBlock,
     )
 
 
@@ -61,10 +60,16 @@ def set_deepseek_v3_sharding_config(
         _set_deepseek_v3_layer_sharding(
             layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
         )
+    if config.mtp is not None and config.mtp.num_mtp_layers > 0:
+        _set_deepseek_v3_mtp_sharding(
+            config.mtp,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
+        )
 
 
 def _set_deepseek_v3_layer_sharding(
-    layer_cfg: "DeepSeekV3TransformerBlock.Config | MTPTransformerBlock.Config",
+    layer_cfg: "DeepSeekV3TransformerBlock.Config",
     *,
     enable_sp: bool,
     enable_ep: bool,
@@ -143,19 +148,37 @@ def _set_deepseek_v3_layer_sharding(
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
 
-    if isinstance(layer_cfg, MTPTransformerBlock.Config):
-        activation = (
-            dense_sequence_parallel_placement()
-            if enable_sp
-            else dense_activation_placement(tp=spmd.I)
-        )
-        layer_cfg.enorm.sharding_config = norm
-        layer_cfg.hnorm.sharding_config = norm
-        layer_cfg.eh_proj.sharding_config = ShardingConfig(
-            state_shardings={
-                "weight": dense_param_placement(tp=spmd.R),
-                "bias": dense_param_placement(tp=spmd.R),
-            },
-            in_src_shardings={"input": activation},
-            out_src_shardings=activation,
-        )
+
+def _set_deepseek_v3_mtp_sharding(
+    mtp_cfg,
+    *,
+    enable_sp: bool,
+    enable_ep: bool,
+) -> None:
+    activation = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    norm = norm_config(enable_sp=enable_sp)
+
+    # Decoder.Config.update_from_config materializes this as an
+    # MTPTransformerBlock.Config before sharding runs. This function only fills
+    # placements, mirroring how the main DeepSeek-V3 layer config is handled.
+    mtp_layer_cfg = mtp_cfg.inner_block_config
+
+    _set_deepseek_v3_layer_sharding(
+        mtp_layer_cfg.inner_block_config,
+        enable_sp=enable_sp,
+        enable_ep=enable_ep,
+    )
+    mtp_layer_cfg.enorm.sharding_config = norm
+    mtp_layer_cfg.hnorm.sharding_config = norm
+    mtp_layer_cfg.final_norm.sharding_config = norm
+    mtp_layer_cfg.eh_proj.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R),
+        },
+        in_src_shardings={"input": activation},
+        out_src_shardings=activation,
+    )
