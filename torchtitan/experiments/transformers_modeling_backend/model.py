@@ -7,9 +7,11 @@
 import copy
 import importlib
 import math
+import os
 from dataclasses import dataclass, field, fields, MISSING
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.nn import init
 from torch.nn.attention.flex_attention import and_masks
@@ -1078,7 +1080,26 @@ class HFTransformerModel(BaseModel):
         if self._skip_lm_head:
             return output.last_hidden_state
         output = self.model.lm_head(output.last_hidden_state)
+
+        # Numerical-test hook: when HF_BACKEND_LOGIT_DUMP=<dir> is set, append
+        # this rank's per-forward logits (+ CP coordinate) to a file. Used by
+        # tests/run_cp_pp_numerical.sh to compare CP-only vs CP+PP logits from a
+        # shared seed checkpoint. Off (no overhead) unless the env var is set.
+        _dump_dir = os.environ.get("HF_BACKEND_LOGIT_DUMP")
+        if _dump_dir is not None:
+            self._maybe_dump_logits(_dump_dir, output)
+
         return output
+
+    def _maybe_dump_logits(self, dump_dir: str, logits: torch.Tensor) -> None:
+        """Append this rank's logits (one entry per forward) for numerical tests."""
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        cp_coord = self.cp_mesh.get_local_rank() if self.cp_mesh is not None else 0
+        recs = getattr(self, "_logit_dump_recs", None)
+        if recs is None:
+            recs = self._logit_dump_recs = []
+        recs.append((cp_coord, logits.detach().float().cpu()))
+        torch.save(recs, os.path.join(dump_dir, f"logits_rank{rank}.pt"))
 
     def verify_module_protocol(self) -> None:
         """Skip recursive verification for HuggingFace model internals.

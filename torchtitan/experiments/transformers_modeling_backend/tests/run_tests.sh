@@ -13,3 +13,7 @@ echo "=== Unit tests ==="
 echo ""
 echo "=== Integration tests ==="
 bash "$SCRIPT_DIR/run_moe_tests.sh" "$NGPU" "$STEPS"
+
+echo ""
+echo "=== CP+PP numerical equivalence (logit-level; needs 4 GPUs, self-skips) ==="
+python -m torchtitan.experiments.transformers_modeling_backend.tests.cp_pp_numerical
