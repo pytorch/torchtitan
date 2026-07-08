@@ -50,7 +50,7 @@ jobs:
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      timeout: 90
+      timeout: 60
       script: |
         set -eux
 
@@ -114,14 +114,15 @@ jobs:
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"
 
-        # RL Loss Guard: deterministic loss regression check. The debug config
-        # sets drop_zero_std_reward_groups=False and uses a random-init model, so
-        # every reward group is zero-std -> zero advantage -> loss is exactly 0.0
-        # (the golden rl_grpo_cuda.txt is all zeros, arch-independent).
+        # RL Loss Guard: deterministic loss regression check on the REAL Qwen3-0.6B
+        # (--hf-assets-path=$MODEL_PATH). Real weights -> completions earn varied
+        # rewards -> non-zero group std -> non-zero advantage -> meaningful,
+        # full-precision losses (a random-init model gives all-zero loss). The
+        # golden is arch-specific; regenerate on A10G if the loss curve changes.
         LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
         python torchtitan/experiments/rl/scripts/loss_compare.py \
-          --hf-assets-path tests/assets/tokenizer \
+          --hf-assets-path "$MODEL_PATH" \
           --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
-          --config rl_grpo_qwen3_debug_varlen_batch_invariant \
+          --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
           --import-result "$LOSS_FILE" \
           --assert-equal
