@@ -163,20 +163,24 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_debug_varlen_batch_invariant",
-                    "--async-loop.num-training-steps 5",
-                    "--hf_assets_path tests/assets/tokenizer",
+                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
+                    "--async-loop.num-training-steps 3",
+                    # Real 0.6B (loaded weights via the suite --hf_assets_path) so
+                    # weights actually update across steps, and on-policy (lockstep)
+                    # so generator and trainer share weights -- the per-step
+                    # bit_wise/logprob_diff/max must then be 0, verifying kernel
+                    # batch-invariance AND weight sync (stronger than the static
+                    # random-init debug model, whose weights never change).
+                    "--async-loop.max-offpolicy-steps 0",
                     "--async-loop.group-size 2",
                     "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
-                    "--generator.sampling.max_tokens 256",
-                    "--trainer.checkpoint.no-enable",  # use random-init weights
-                    "--generator.checkpoint.no-enable",
+                    "--generator.sampling.max_tokens 128",
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO debug TP=4 batch-invariant + deterministic",
-            "rl_grpo_debug_tp4_batch_invariant",
+            "RL GRPO 0.6B TP=4 batch-invariant + deterministic",
+            "rl_grpo_0_6b_tp4_batch_invariant",
             ngpu=8,
         ),
         OverrideDefinitions(
