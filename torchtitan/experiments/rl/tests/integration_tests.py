@@ -165,12 +165,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
                     "--async-loop.num-training-steps 3",
-                    # Real 0.6B (loaded weights via the suite --hf_assets_path) so
-                    # weights actually update across steps, and on-policy (lockstep)
-                    # so generator and trainer share weights -- the per-step
-                    # bit_wise/logprob_diff/max must then be 0, verifying kernel
-                    # batch-invariance AND weight sync (stronger than the static
-                    # random-init debug model, whose weights never change).
+                    # On-policy (lockstep) + real weights that update each step:
+                    # trainer/generator weights match, so bit_wise/logprob_diff/max == 0.
                     "--async-loop.max-offpolicy-steps 0",
                     "--async-loop.group-size 2",
                     "--async-loop.batcher.batch.seq-len 1024",
