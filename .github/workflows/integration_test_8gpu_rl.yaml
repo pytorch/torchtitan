@@ -97,6 +97,20 @@ jobs:
         # but the CI docker image only has CUDA runtime, not the toolkit.
         uv pip install nvidia-cuda-nvcc
 
+        # RL Loss Guard runs FIRST, in a clean container, so a lingering port from
+        # the E2E suite can't collide with the generator's distributed init
+        # (EADDRINUSE). Deterministic loss regression check on the REAL Qwen3-0.6B
+        # (--hf-assets-path=$MODEL_PATH): real weights -> varied rewards -> non-zero
+        # advantage -> meaningful, full-precision losses (random init gives all
+        # zeros). The golden is arch-specific; regenerate on A10G if it changes.
+        LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
+        python torchtitan/experiments/rl/scripts/loss_compare.py \
+          --hf-assets-path "$MODEL_PATH" \
+          --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
+          --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
+          --import-result "$LOSS_FILE" \
+          --assert-equal
+
         # Bitwise trainer/generator parity tests (batch-invariant). Varlen (TP=4)
         # and Flex (TP=2) run as separate torchrun invocations so each backend
         # gets a fresh process group and vLLM engine; nproc matches each config's
@@ -113,16 +127,3 @@ jobs:
         python -m torchtitan.experiments.rl.tests.integration_tests \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"
-
-        # RL Loss Guard: deterministic loss regression check on the REAL Qwen3-0.6B
-        # (--hf-assets-path=$MODEL_PATH). Real weights -> completions earn varied
-        # rewards -> non-zero group std -> non-zero advantage -> meaningful,
-        # full-precision losses (a random-init model gives all-zero loss). The
-        # golden is arch-specific; regenerate on A10G if the loss curve changes.
-        LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
-        python torchtitan/experiments/rl/scripts/loss_compare.py \
-          --hf-assets-path "$MODEL_PATH" \
-          --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
-          --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
-          --import-result "$LOSS_FILE" \
-          --assert-equal
