@@ -8,6 +8,7 @@ import os
 import tempfile
 import unittest
 import uuid
+from unittest import mock
 
 import fsspec
 
@@ -96,3 +97,26 @@ class TestRemoteOps(unittest.TestCase):
         # A missing remote path must not raise (parity with local rmtree),
         # otherwise a failed purge would kill the background purge thread.
         filesystem.rmtree(f"{self.root}/does-not-exist")
+
+
+class TestListdirDirectoryMarker(unittest.TestCase):
+    """Object stores (GCS, S3) can list a directory-marker entry for the listed
+    directory itself; ``os.listdir`` never returns the directory, so ``listdir``
+    must drop it while keeping a child that shares the parent's basename."""
+
+    def test_self_marker_is_dropped_by_full_path(self):
+        fake_fs = mock.Mock()
+        fake_fs.ls.return_value = [
+            "bucket/ckpt",  # directory marker for the listed dir itself
+            "bucket/ckpt/",  # same self-entry with a trailing slash
+            "bucket/ckpt/step-10",
+            "bucket/ckpt/step-20",
+            "bucket/ckpt/ckpt",  # legitimate child sharing the parent basename
+        ]
+        with mock.patch.object(
+            filesystem, "_resolve", return_value=(fake_fs, "bucket/ckpt")
+        ):
+            result = filesystem.listdir("gs://bucket/ckpt")
+
+        self.assertEqual(sorted(result), ["ckpt", "step-10", "step-20"])
+        fake_fs.ls.assert_called_once_with("bucket/ckpt", detail=False)

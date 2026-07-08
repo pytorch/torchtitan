@@ -63,10 +63,21 @@ def listdir(path: str | os.PathLike) -> list[str]:
     fsspec's ``ls`` returns full paths, so remote entries are reduced to their
     basename to keep downstream ``step-(\\d+)`` matching and ``os.path.join``
     logic unchanged.
+
+    Object-store backends (GCS, S3) may include a directory-marker entry for
+    ``path`` itself (e.g. a zero-byte ``bucket/ckpt/`` object). ``os.listdir``
+    never returns the directory itself, so that self-entry is dropped. Entries
+    are compared by full normalized path, not basename, so a legitimate child
+    that happens to share the parent's basename is kept.
     """
     if is_remote(path):
         fs, p = _resolve(path)
-        return [os.path.basename(entry.rstrip("/")) for entry in fs.ls(p, detail=False)]
+        self_entry = p.rstrip("/")
+        return [
+            os.path.basename(entry.rstrip("/"))
+            for entry in fs.ls(p, detail=False)
+            if entry.rstrip("/") != self_entry
+        ]
     return os.listdir(path)
 
 
