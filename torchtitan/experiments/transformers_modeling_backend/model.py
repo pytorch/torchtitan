@@ -261,11 +261,6 @@ class HFTransformerModel(BaseModel):
             self._titan_injected_model_args["attn_implementation"] = attn_implementation
             self.attn_implementation = attn_implementation
             if attn_implementation == "flex_torchtitan":
-                # HF model code has more dynamo guards than native TorchTitan,
-                # causing extra recompilations during TP warmup.
-                import torch._dynamo.config
-
-                torch._dynamo.config.cache_size_limit = 64
                 AttentionInterface._global_mapping[
                     attn_implementation
                 ] = _flex_torchtitan_attention_forward
