@@ -24,8 +24,24 @@ from . import model_registry
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
+    # Enable compile / graph capture path
+    config.compile.enable = True
+    config.compile.enable_xpugraph = True
+
     return config
 
+def graph_trainer_llama3_8b_xpugraph():
+    config = graph_trainer_llama3_8b()
+
+    # Enable compile / graph capture path
+    config.compile.enable = True
+    config.compile.enable_xpugraph = True
+
+    # Keep these disabled for XPUGraph-only
+    config.compile.enable_fsdp_ag_rs_overlap = False
+
+
+    return config
 
 def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     """Debug model on the test-only SDPA backend.
@@ -70,6 +86,149 @@ def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
 def graph_trainer_llama3_8b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_8b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_llama3_8b_compile_minimal() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_8b()
+    config.hf_assets_path = "/home/guoqiong/models/Meta-Llama-3.1-8B-Instruct"
+
+    config.metrics.log_freq = 1
+
+    config.checkpoint.interval = 2000
+
+    # Avoid validation during benchmark by setting freq > training.steps.
+    # steps must be positive or -1, so use 1 instead of 0.
+    config.validator.freq = 2000
+    config.validator.steps = 1
+    config.profiler.enable_profiling = False
+    config.dataloader.dataset = "c4_test"
+
+    config.compile.enable = True
+    config.compile.pass_pipeline = "default"
+    config.compile.enable_fsdp_ag_rs_overlap = False
+    config.compile.enable_xpugraph = False
+    config.compile.enable_cudagraph = False
+    config.compile.disable_passes = [
+        "joint_transformer_block_bucketing_reordering_pass",
+        "annotate_flex_attention_for_regional_inductor_pass",
+        "xpugraph_pass",
+        "cudagraph_pass",
+    ]
+
+    return config
+
+
+def graph_trainer_llama3_8b_bucketing() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_8b()
+    config.hf_assets_path = "/home/guoqiong/models/Meta-Llama-3.1-8B-Instruct"
+
+    config.metrics.log_freq = 1
+
+    config.checkpoint.interval = 2000
+
+    # Avoid validation during benchmark by setting freq > training.steps.
+    # steps must be positive or -1, so use 1 instead of 0.
+    config.validator.freq = 2000
+    config.validator.steps = 1
+    config.profiler.enable_profiling = False
+    config.dataloader.dataset = "c4_test"
+
+    config.compile.enable = True
+    config.compile.pass_pipeline = "default"
+    config.compile.enable_fsdp_ag_rs_overlap = False
+    config.compile.enable_xpugraph = False
+    config.compile.enable_cudagraph = False
+    config.compile.disable_passes = [
+        "xpugraph_pass",
+        "cudagraph_pass",
+    ]
+
+    return config
+
+
+def graph_trainer_llama3_8b_fsdp_ag_rs_overlap() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_8b()
+    config.hf_assets_path = "/home/guoqiong/models/Meta-Llama-3.1-8B-Instruct"
+
+    config.metrics.log_freq = 1
+
+    config.checkpoint.interval = 2000
+
+    # Avoid validation during benchmark by setting freq > training.steps.
+    # steps must be positive or -1, so use 1 instead of 0.
+    config.validator.freq = 2000
+    config.validator.steps = 1
+    config.profiler.enable_profiling = False
+    config.dataloader.dataset = "c4_test"
+
+    config.compile.enable = True
+    config.compile.pass_pipeline = "default"
+    config.compile.enable_fsdp_ag_rs_overlap = True
+    config.compile.enable_xpugraph = False
+    config.compile.enable_cudagraph = False
+    config.compile.disable_passes = [
+        "joint_transformer_block_bucketing_reordering_pass",
+        "annotate_flex_attention_for_regional_inductor_pass",
+        "xpugraph_pass",
+        "cudagraph_pass",
+    ]
+
+    return config
+
+
+def graph_trainer_llama3_8b_bucketing_fsdp_ag_rs_overlap() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_8b()
+    config.hf_assets_path = "/home/guoqiong/models/Meta-Llama-3.1-8B-Instruct"
+
+    config.metrics.log_freq = 1
+
+    config.checkpoint.interval = 2000
+
+    # Avoid validation during benchmark by setting freq > training.steps.
+    # steps must be positive or -1, so use 1 instead of 0.
+    config.validator.freq = 2000
+    config.validator.steps = 1
+    config.profiler.enable_profiling = False
+    config.dataloader.dataset = "c4_test"
+
+    config.compile.enable = True
+    config.compile.pass_pipeline = "default"
+    config.compile.enable_fsdp_ag_rs_overlap = True
+    config.compile.enable_xpugraph = False
+    config.compile.enable_cudagraph = False
+    config.compile.disable_passes = [
+        "xpugraph_pass",
+        "cudagraph_pass",
+    ]
+
+    return config
+
+
+def graph_trainer_llama3_8b_bucketing_fsdp_ag_rs_overlap_xpugraph() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_8b()
+    config.hf_assets_path = "/home/guoqiong/models/Meta-Llama-3.1-8B-Instruct"
+
+    config.metrics.log_freq = 1
+
+    config.checkpoint.interval = 2000
+
+    # Avoid validation during benchmark by setting freq > training.steps.
+    # steps must be positive or -1, so use 1 instead of 0.
+    config.validator.freq = 2000
+    config.validator.steps = 1
+    config.profiler.enable_profiling = False
+    config.dataloader.dataset = "c4_test"
+
+    config.compile.enable = True
+    config.compile.pass_pipeline = "default"
+    config.compile.enable_fsdp_ag_rs_overlap = True
+    config.compile.enable_xpugraph = True
+    config.compile.enable_cudagraph = False
+    config.compile.disable_passes = [
+        "cudagraph_pass",
+    ]
+
     return config
 
 
