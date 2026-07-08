@@ -97,11 +97,12 @@ jobs:
         # but the CI docker image only has CUDA runtime, not the toolkit.
         uv pip install nvidia-cuda-nvcc
 
-        # Bitwise trainer/generator parity tests (TP=2, batch-invariant). Varlen
-        # and Flex run as separate torchrun invocations so each backend gets a
-        # fresh process group and vLLM engine.
+        # Bitwise trainer/generator parity tests (batch-invariant). Varlen (TP=4)
+        # and Flex (TP=2) run as separate torchrun invocations so each backend
+        # gets a fresh process group and vLLM engine; nproc matches each config's
+        # tensor_parallel_degree (the test builds ParallelDims from it).
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=4 -m pytest \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
