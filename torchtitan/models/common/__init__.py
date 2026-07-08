@@ -23,7 +23,7 @@ from .attention import (
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
-from .feed_forward import compute_ffn_hidden_dim, FeedForward
+from .feed_forward import compute_ffn_hidden_dim, FeedForward, SharedExperts
 from .moe import MoE
 from .nn_modules import (
     Conv1d,
@@ -48,6 +48,7 @@ __all__ = [
     "Decoder",
     "Embedding",
     "FeedForward",
+    "SharedExperts",
     "FlexAttention",
     "BaseQKVLinear",
     "FusedQKVLinear",

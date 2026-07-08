@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 
-__all__ = ["FeedForward", "compute_ffn_hidden_dim"]
+__all__ = ["FeedForward", "SharedExperts", "compute_ffn_hidden_dim"]
 
 
 def compute_ffn_hidden_dim(
@@ -52,3 +52,25 @@ class FeedForward(Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+
+class SharedExperts(FeedForward):
+    """SwiGLU shared expert with a per-token sigmoid gate.
+
+    The output is ``sigmoid(gate(x)) * ffn(x)``. Inherits ``w1/w2/w3`` from
+    FeedForward so weight FQNs are flat (no nested ``ffn.`` level), which keeps
+    the shared-expert weights directly shardable. Models without a shared-expert
+    gate use a plain ``FeedForward`` instead.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FeedForward.Config):
+        gate: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.gate = config.gate.build()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = super().forward(x)
+        return torch.sigmoid(self.gate(x)) * out

@@ -35,12 +35,12 @@ from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 if TYPE_CHECKING:
+    from torchtitan.models.common import SharedExperts
     from torchtitan.models.qwen3_5.model import (
         GatedDeltaNet,
         Qwen35Attention,
         Qwen35Model,
         Qwen35TransformerBlock,
-        SharedExperts,
     )
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 

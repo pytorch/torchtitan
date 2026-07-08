@@ -15,7 +15,6 @@ Two-phase replacement:
       happens later via ``model.parallelize(parallel_dims)``.
 """
 
-from dataclasses import dataclass
 from functools import partial
 
 import spmd_types as spmd
@@ -30,11 +29,15 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
     make_token_dispatcher_config,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.decoder_sharding import (
+    dense_activation_placement,
+    dense_param_placement,
+)
+from torchtitan.models.common.feed_forward import SharedExperts
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.common.nn_modules import Linear
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
 
 
@@ -98,13 +101,6 @@ def build_and_swap_native_moe(
         if moe_config is None:
             continue
 
-        # For GatedSharedExpert, temporarily swap to the inner FeedForward
-        # config so set_moe_sharding_config can access .w1/.w2/.w3 directly.
-        gated_shared = None
-        if isinstance(moe_config.shared_experts, GatedSharedExpert.Config):
-            gated_shared = moe_config.shared_experts
-            moe_config.shared_experts = gated_shared.ffn
-
         _, expert_layout = _get_expert_param_info()
         set_moe_sharding_config(
             moe_config,
@@ -113,9 +109,18 @@ def build_and_swap_native_moe(
             expert_param_layout=expert_layout,
         )
 
-        # Restore GatedSharedExpert config with sharding from inner FFN
-        if gated_shared is not None:
-            moe_config.shared_experts = gated_shared
+        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but leaves the
+        # SharedExperts sigmoid gate to model-specific code. Replicate it (weight
+        # and output), matching qwen3_5's _set_shared_expert_gate_sharding.
+        shared = moe_config.shared_experts
+        if isinstance(shared, SharedExperts.Config):
+            shared.gate.sharding_config = ShardingConfig(
+                state_shardings={
+                    "weight": dense_param_placement(tp=spmd.R),
+                    "bias": dense_param_placement(tp=spmd.R),
+                },
+                out_dst_shardings=dense_activation_placement(tp=spmd.R),
+            )
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -461,27 +466,6 @@ def _probe_layer_level_moe(layer: nn.Module, config) -> dict:
 # ---------------------------------------------------------------------------
 
 
-class GatedSharedExpert(Module):
-    """Wraps a FeedForward shared expert with a learned sigmoid gate.
-
-    Matches the Qwen3.5 pattern: ``sigmoid(gate(x)) * shared_expert(x)``.
-    The gate is a single-output linear: ``nn.Linear(dim, 1, bias=False)``.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        ffn: FeedForward.Config
-        gate: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.ffn = config.ffn.build()
-        self.gate = config.gate.build()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(self.gate(x)) * self.ffn(x)
-
-
 # ---------------------------------------------------------------------------
 # Config building
 # ---------------------------------------------------------------------------
@@ -569,8 +553,13 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
-            shared_experts = GatedSharedExpert.Config(
-                ffn=ffn_config,
+            # SharedExperts is a FeedForward subclass, so w1/w2/w3 stay flat
+            # (no nested ``ffn.`` level) and are directly shardable by
+            # set_moe_sharding_config -- no temporary-swap workaround needed.
+            shared_experts = SharedExperts.Config(
+                w1=ffn_config.w1,
+                w2=ffn_config.w2,
+                w3=ffn_config.w3,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=1,

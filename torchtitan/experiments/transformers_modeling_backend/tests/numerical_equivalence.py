@@ -60,6 +60,27 @@ _MODEL_CONFIGS = {
         attn_implementation="sdpa",
         use_cache=False,
     ),
+    # Qwen2-MoE: sigmoid-gated shared expert (out = sigmoid(gate(x)) * ffn(x)).
+    # Exercises the SharedExperts path; deepseek_v2/v3 cover additive shared
+    # experts, so this is the only config that hits the gated variant.
+    "qwen2_moe": dict(
+        model_type="qwen2_moe",
+        hidden_size=2048,
+        intermediate_size=6144,
+        moe_intermediate_size=768,
+        shared_expert_intermediate_size=2048,
+        num_experts=8,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        norm_topk_prob=False,
+        num_hidden_layers=1,
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        vocab_size=256,
+        max_position_embeddings=64,
+        attn_implementation="sdpa",
+        use_cache=False,
+    ),
     "mixtral": dict(
         model_type="mixtral",
         hidden_size=4096,

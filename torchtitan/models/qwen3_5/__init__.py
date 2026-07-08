@@ -12,7 +12,12 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 
-from torchtitan.models.common import Conv1d, Embedding, Linear  # noqa: F401
+from torchtitan.models.common import (  # noqa: F401
+    Conv1d,
+    Embedding,
+    Linear,
+    SharedExperts,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
@@ -35,7 +40,6 @@ from .model import (
     Qwen35Model,
     Qwen35TransformerBlock,
     RMSNormGated,
-    SharedExperts,
 )
 from .parallelize import parallelize_qwen3_5, pipeline_qwen3_5
 from .rope import MRoPE
