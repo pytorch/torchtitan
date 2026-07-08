@@ -4,13 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Replace HF MoE blocks with native TorchTitan MoE modules.
+"""Replace HF MoE blocks with Titan MoE modules.
 
 Two-phase replacement:
   Phase 1 (init time): ``prepare_native_moe_configs`` probes the HF MoE block
       and builds a ``MoE.Config``, stored on each layer as ``_native_moe_config``.
   Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
-      ``set_moe_sharding_config`` on each stored config, builds the native MoE,
+      ``set_moe_sharding_config`` on each stored config, builds the Titan MoE,
       initializes it, and swaps it into the layer. Actual parallelization
       happens later via ``model.parallelize(parallel_dims)``.
 """
@@ -47,7 +47,7 @@ def prepare_native_moe_configs(model: nn.Module, config) -> None:
     """Probe each MoE layer and store a ``MoE.Config`` for later build.
 
     Called during ``HFTransformerModel.__init__`` on meta device.
-    Does NOT instantiate native modules yet — that happens in Phase 2.
+    Does NOT instantiate the Titan MoE modules yet -- that happens in Phase 2.
     """
     for layer in model.layers.values():
         if not getattr(layer, "moe_enabled", False):
@@ -65,7 +65,7 @@ def prepare_native_moe_configs(model: nn.Module, config) -> None:
         moe_config = _build_moe_config(moe_params, config)
         layer._native_moe_config = moe_config
 
-    logger.info("Prepared native MoE configs for all MoE layers")
+    logger.info("Prepared Titan MoE configs for all MoE layers")
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +77,11 @@ def build_and_swap_native_moe(
     model: nn.Module,
     parallel_dims: ParallelDims,
 ) -> None:
-    """Build native MoE modules and swap them into the model.
+    """Build Titan MoE modules and swap them into the model.
 
     For each MoE layer with a stored ``_native_moe_config``:
     1. Set sharding config on the MoE.Config (now that EP/TP is known)
-    2. Build the native MoE module
+    2. Build the Titan MoE module
     3. Initialize parameters and buffers
     4. Swap into the layer's MoE attribute, set ``layer.moe`` for load-balancing hook
 
@@ -125,7 +125,7 @@ def build_and_swap_native_moe(
         native_moe.to_empty(device=torch.device("cpu"))
         native_moe.init_states(buffer_device=torch.device("cpu"))
 
-        # Swap the native MoE into the layer's original attribute
+        # Swap the Titan MoE into the layer's original attribute
         # (``mlp`` for most models, ``feed_forward`` for Llama4).
         moe_attr = _get_moe_attr_name(layer)
         setattr(layer, moe_attr, native_moe)
@@ -133,7 +133,7 @@ def build_and_swap_native_moe(
 
         # For layer-level MoE (Gemma4), the original router and experts
         # are layer-level siblings of the dense MLP. After swapping in
-        # the native MoE at ``layer.mlp``, disable the HF forward's
+        # the Titan MoE at ``layer.mlp``, disable the HF forward's
         # separate MoE path (which references ``self.router`` and
         # ``self.experts``) and delete the original modules to prevent
         # duplicate parameter registration.
@@ -155,14 +155,14 @@ def build_and_swap_native_moe(
                     delattr(layer, norm_name)
 
         # Llama4 decoder forward unpacks ``(output, router_logits)`` when
-        # ``is_moe_layer`` is True.  The native MoE returns a plain tensor,
+        # ``is_moe_layer`` is True.  The Titan MoE returns a plain tensor,
         # so disable the unpacking.
         if getattr(layer, "is_moe_layer", False):
             layer.is_moe_layer = False
 
         del layer._native_moe_config
 
-    logger.info("Built and swapped native MoE modules into the model")
+    logger.info("Built and swapped Titan MoE modules into the model")
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ def _get_moe_attr_name(layer: nn.Module) -> str:
     """Return the attribute name holding the MoE block on a decoder layer.
 
     Most models use ``mlp``; Llama4 uses ``feed_forward``.
-    For layer-level MoE (Gemma4), the native MoE replaces ``mlp``.
+    For layer-level MoE (Gemma4), the Titan MoE replaces ``mlp``.
     """
     for name in ("mlp", "feed_forward"):
         if hasattr(layer, name):
@@ -202,7 +202,7 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
         config: The HF model config with MoE-related attributes.
 
     Returns:
-        Dict with all parameters needed to build a native ``MoE.Config``.
+        Dict with all parameters needed to build a Titan ``MoE.Config``.
     """
     gate = getattr(moe_block, "gate", None) or getattr(moe_block, "router", None)
     experts = moe_block.experts
@@ -334,7 +334,7 @@ def _resolve_score_func(gate: nn.Module | None, config) -> str:
             return scoring_func
         raise ValueError(
             f"Unsupported scoring function '{scoring_func}'. "
-            "Native MoE router supports 'softmax' and 'sigmoid'."
+            "Titan MoE router supports 'softmax' and 'sigmoid'."
         )
 
     return "softmax"
@@ -385,7 +385,7 @@ def _probe_layer_level_moe(layer: nn.Module, config) -> dict:
     """Probe layer-level MoE (Gemma4) where router/experts are layer siblings.
 
     The dense MLP is treated as a shared expert: its output is summed with
-    the routed expert output in the original HF forward. The native MoE
+    the routed expert output in the original HF forward. The Titan MoE
     replaces ``layer.mlp`` and contains all three components (router,
     experts, shared_experts=dense MLP).
     """

@@ -40,7 +40,7 @@ class HFFlexKernel(Module):
     local tensors so the document ``mask_mod`` -- which closes over a plain
     ``positions`` tensor -- sees plain tensors, and the output is wrapped back
     head-sharded. Expressing the sharding declaratively
-    (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with native
+    (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with Titan's own
     attention and lets it ride the ``spmd_types`` backend switch, instead of a
     hand-rolled ``local_map`` call.
 
@@ -668,7 +668,7 @@ class HFTransformerModel(BaseModel):
         """
         This patch modifies a Hugging Face Llama-like model's weight initialization to match
         the initialization scheme used in TorchTitan. This is crucial for ensuring
-        bit-for-bit reproducibility when converting checkpoints between the native
+        bit-for-bit reproducibility when converting checkpoints between the
         TorchTitan format and the Hugging Face format.
 
         The patch targets the following aspects of the model:

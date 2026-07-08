@@ -38,7 +38,7 @@ def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
     sharded, so each rank computes attention for its seq shard against the full
     keys -- the BlockMask is Q-sharded / KV-full to match.
 
-    This is the explicit-collective analogue of native's ``flex_cp_allgather``
+    This is the explicit-collective analogue of Titan's ``flex_cp_allgather``
     path: the kernel runs nested inside the attention module's local_map region
     where the CP mesh dim is no longer visible to a declarative redistribute, so
     the gather is done here on local tensors. Called before ``model.parallelize``
@@ -89,7 +89,7 @@ def parallelize_hf_transformers(
     """Apply parallelism to the HF model using the titan Module protocol.
 
     Flow:
-    1. Build and swap native MoE modules (sets _sharding_config on MoE tree)
+    1. Build and swap Titan MoE modules (sets _sharding_config on MoE tree)
     2. Convert all remaining HF nn.Modules to Module protocol via __class__ swap
     3. Set ShardingConfig on every module based on its role
     4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
@@ -136,7 +136,7 @@ def parallelize_hf_transformers(
         )
         logger.info("Un-tied embedding/lm_head weights for FSDP compatibility")
 
-    # 1. Build and swap native MoE (sets _sharding_config, does NOT parallelize)
+    # 1. Build and swap Titan MoE (sets _sharding_config, does NOT parallelize)
     if any(getattr(b, "moe_enabled", False) for b in model.layers):
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             build_and_swap_native_moe,
@@ -199,7 +199,7 @@ def parallelize_hf_transformers(
         ac_config.build(dump_folder=dump_folder).apply(model)
 
     # Compile after AC wrapping and before FSDP. Compile the whole transformer
-    # block (including native MoE) via the shared core helper — the previous
+    # block (including Titan MoE) via the shared core helper — the previous
     # MoE-only ``apply_compile_sparse`` workaround is obsolete now that
     # whole-block MoE compile works (pytorch/torchtitan#3409 fixed upstream).
     if model_compile_enabled:
@@ -260,7 +260,7 @@ def apply_fsdp(
     When EP is enabled (``ep_degree > 1``), uses flat FSDP with
     ``shard_placement_fn`` to route expert params to ``dp_mod_ep_mesh``
     and other params to ``dp_mesh`` within a single ``fully_shard`` call
-    per transformer block — matching native titan's approach and avoiding
+    per transformer block — matching Titan's approach and avoiding
     nested FSDP hooks that cause SAC op-count mismatches during recompute.
     """
     mp_policy = MixedPrecisionPolicy(

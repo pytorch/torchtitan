@@ -14,7 +14,7 @@ Two complementary pieces live here:
   prefix (plus tied-embedding handling). Used by the checkpoint system.
 
 - ``hf_to_titan_moe_state_dict`` / ``titan_to_hf_moe_state_dict`` -- functions
-  that convert MoE expert weights between HF and titan layouts after the native
+  that convert MoE expert weights between HF and Titan layouts after the Titan
   MoE replacement (fused ``gate_up_proj`` <-> separate gate/up split, plus router
   and shared-expert key renames). Non-MoE keys pass through. Used by the
   numerical-equivalence and round-trip tests. Parameter names (e.g. ``w1`` vs

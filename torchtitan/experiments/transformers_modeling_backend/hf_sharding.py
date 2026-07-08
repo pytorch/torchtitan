@@ -10,14 +10,14 @@ Sets ``_sharding_config`` on every HF sub-module so that a single
 ``model.parallelize(parallel_dims)`` call handles all TP distribution
 and forward wrapping via the Module protocol.
 
-Unlike native titan models (which use ``local_map`` on inner attention
+Unlike Titan's own models (which use ``local_map`` on inner attention
 to convert DTensors to local tensors before SDPA), HF attention
 internals (view, RoPE, SDPA) operate directly on DTensors. This works
 because DTensor dispatch handles these ops transparently. The rotary
 embedding's buffers are also distributed so its computed cos/sin are
 DTensors, avoiding mixed plain-Tensor / DTensor errors in RoPE.
 
-MoE layers are already native Module instances with ShardingConfig and
+MoE layers are already Titan Module instances with ShardingConfig and
 are handled by ``model.parallelize()`` directly.
 
 TODO: this DTensor-based sharding path is transitional. Core is migrating to
@@ -73,7 +73,7 @@ def set_hf_sharding_configs(
     """Set ``_sharding_config`` on all HF modules for TP/EP parallelization.
 
     Root-level and per-layer modules all use ``_sharding_config``.
-    MoE layers are skipped (already have ShardingConfig from native MoE).
+    MoE layers are skipped (already have ShardingConfig from Titan MoE).
     Actual DTensor distribution happens later in ``model.parallelize()``.
 
     Args:
@@ -132,7 +132,7 @@ def set_hf_sharding_configs(
     # Completeness backstop: every parameter/buffer-bearing module this function
     # is responsible for must have a sharding config, or it silently mixes a
     # plain tensor with a DTensor under TP and crashes deep in forward. Covers
-    # root modules and every decoder layer; the native MoE subtree is configured
+    # root modules and every decoder layer; the Titan MoE subtree is configured
     # separately by set_moe_sharding_config, so it is excluded per layer.
     for name in ("tok_embeddings", "norm", "lm_head", "rotary_emb"):
         mod = getattr(model, name, None)
@@ -202,7 +202,7 @@ def _set_layer_sharding_configs(
     """Set ``_sharding_config`` on each sub-module of a decoder layer.
 
     Covers norms, attention projections, and (for non-MoE layers) dense MLP.
-    MoE layers have their own ShardingConfig from the native MoE swap. When
+    MoE layers have their own ShardingConfig from the Titan MoE swap. When
     ``use_flex`` is set, also attaches the flex-attention kernel Module that
     carries the attention local_map (see ``_attach_flex_kernel``).
     """
@@ -291,32 +291,25 @@ def _set_layer_sharding_configs(
         if norm is not None:
             norm._sharding_config = _replicate_config(norm)
 
-    # GLM-5 DSA indexer — a small auxiliary subtree with its own nested
+    # GLM-5 DSA indexer -- a small auxiliary subtree with its own nested
     # projections (e.g. wq_b/wk). Replicating its weights is necessary but not
-    # sufficient under TP: its @torch.no_grad() forward uses scatter_/index ops
-    # (and the surrounding attention does index_mask.scatter_(topk_indices)),
-    # which DTensor's eager dispatch cannot handle, so it crashes with a
-    # "mixed Tensor and DTensor" error.
+    # sufficient under TP: its @torch.no_grad() forward uses in-place scatter_ and
+    # fancy-index ops (and the surrounding attention does
+    # index_mask.scatter_(topk_indices)), which DTensor has no eager dispatch
+    # rules for, so it crashes with a "mixed Tensor and DTensor" error.
     #
-    # TODO: this is a pure DTensor artifact. The fix is NOT a DTensor-era
-    # workaround (NoParallel / local_map are both deprecated and being removed);
-    # it is the ``spmd_backend="spmd_types"`` execution path, where state and
-    # activations are plain local shards (no tensor subclass) and these
-    # index/scatter ops run natively. The declarative ShardingConfig/SpmdLayout
-    # this file emits is already backend-agnostic, so once spmd_types is wired
-    # into the eager Module path this whole branch (and the fail-loud below) can
-    # be deleted — the indexer needs no special handling on local tensors.
-    # Until then, fail loud under TP; replicate (a no-op that resolves to no
-    # mesh) otherwise so FSDP/EP keep working.
+    # TODO: move transformer backend off the DTensor sharding path onto spmd_types
+    # which will eliminate the error
+    #
+    # Until then: fail loud under TP; otherwise replicate the indexer weights (a
+    # no-op that resolves to no mesh) so FSDP/EP keep working.
     if hasattr(attn, "indexer"):
         if enable_sp:
             raise NotImplementedError(
-                f"{type(attn).__name__}: the DSA indexer is not supported under "
+                f"{type(attn).__name__}: the DSA indexer is currently not supported under "
                 "tensor parallelism with the DTensor sharding backend (its no_grad "
                 "forward uses scatter_/index ops that DTensor cannot dispatch). "
-                "This resolves under spmd_backend='spmd_types' (local tensors); "
-                "until that is wired into the eager path, run this model with "
-                "FSDP/EP and no TP."
+                "This model only runs under FSDP/EP and no TP."
             )
         for sub in attn.indexer.modules():
             sub._sharding_config = _replicate_config(sub)
@@ -429,7 +422,7 @@ def _first_forward_arg(module: nn.Module) -> str:
 
 
 def _moe_subtree(layer: nn.Module) -> nn.Module | None:
-    """Return the native MoE module on a layer, or None for dense layers.
+    """Return the Titan MoE module on a layer, or None for dense layers.
 
     The MoE subtree is configured by ``set_moe_sharding_config`` (not this
     file), so it is excluded from the completeness backstop below.
@@ -455,7 +448,7 @@ def _assert_all_states_sharded(
     undeclared module, so unhandled modules fail loud rather than silently
     slipping through the cases above.
 
-    ``skip`` lists module subtrees configured elsewhere (e.g. the native MoE,
+    ``skip`` lists module subtrees configured elsewhere (e.g. the Titan MoE,
     handled by ``set_moe_sharding_config``); they and their descendants are not
     checked here.
     """

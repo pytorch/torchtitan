@@ -43,7 +43,7 @@ def convert_hf_to_module(model: nn.Module) -> None:
     traversal that ``Module.parallelize()`` uses) and swaps each plain
     ``nn.Module``'s ``__class__`` to a ``Module``-wrapped version.
 
-    Modules that are already ``Module`` instances (e.g., native MoE,
+    Modules that are already ``Module`` instances (e.g., Titan MoE,
     ``HFTransformerModel`` itself) are skipped.
     """
     for child in model.children():
