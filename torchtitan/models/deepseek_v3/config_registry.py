@@ -31,15 +31,19 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
 
 def _configure_debug_mtp(config: Trainer.Config) -> None:
     config.mtp = MTPBlock.Config(num_mtp_layers=1, loss_scaling_factor=0.3)
+    assert config.model_spec is not None
+    config.loss = MTPLoss.Config(
+        global_vocab_size=decoder_vocab_size(config.model_spec),
+    )
 
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
-    mtp_config = MTPBlock.Config(num_mtp_layers=1, loss_scaling_factor=0.3)
     return Trainer.Config(
-        mtp=mtp_config,
-        loss=MTPLoss.Config(
-            global_vocab_size=decoder_vocab_size(model_spec),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -68,6 +72,12 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
     )
 
 
+def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    _configure_debug_mtp(config)
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry(
@@ -75,7 +85,6 @@ def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
     )
-    _configure_debug_mtp(config)
     return config
 
 
@@ -85,7 +94,6 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
         "debugmodel",
         moe_comm_backend="minimal_async_ep",
     )
-    _configure_debug_mtp(config)
     enable_fused_swiglu(config)
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,

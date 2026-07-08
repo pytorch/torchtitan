@@ -55,7 +55,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.enorm.weight": "layers.{}.enorm.weight",
             "model.layers.{}.hnorm.weight": "layers.{}.hnorm.weight",
             "model.layers.{}.eh_proj.weight": "layers.{}.eh_proj.weight",
-            "model.layers.{}.shared_head.norm.weight": "layers.{}.final_norm.weight",
+            "model.layers.{}.shared_head.norm.weight": "layers.{}.mtp_norm.weight",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }
@@ -89,7 +89,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             if layer_idx >= num_main_layers:
                 if not any(
                     new_key.startswith(f"layers.{{}}.{name}.")
-                    for name in ("enorm", "hnorm", "eh_proj", "final_norm")
+                    for name in ("enorm", "hnorm", "eh_proj", "mtp_norm")
                 ):
                     new_key = new_key.replace(
                         "layers.{}.",
