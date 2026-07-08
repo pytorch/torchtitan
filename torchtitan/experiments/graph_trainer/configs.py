@@ -71,6 +71,7 @@ class GraphTrainerCompileConfig(CompileConfig):
         jit: standard torch.compile() with custom backend (deprecated)
     """
 
+
     backend: str = "aot_eager"
 
     passes: list[str] = field(default_factory=list)
@@ -78,6 +79,8 @@ class GraphTrainerCompileConfig(CompileConfig):
     Additional compiler pass names to apply.
     In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
     """
+
+
 
     enable_passes: bool = True
     """When False, skip optional graph passes (both default and user-configured).
@@ -118,6 +121,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     selectors with ``|`` and quote the full argument in the shell. For example:
     ``layers.*.moe.router.gate::aten.mm.dtype | layers.*.attention.wkv_a::aten.mm.default``.
     """
+
+    enable_inductor_overlap_scheduling: bool = False
+    """Enable Inductor analytical compute/communication overlap scheduling."""
 
     pass_pipeline: str = "default"
     """Pass pipeline selection. Controls which graph pass pipeline, post-init
