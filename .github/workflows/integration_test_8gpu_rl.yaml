@@ -100,9 +100,11 @@ jobs:
         # Bitwise trainer/generator parity tests (TP=2, batch-invariant). Varlen
         # and Flex run as separate torchrun invocations so each backend gets a
         # fresh process group and vLLM engine.
-        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
-        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
 
         # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
