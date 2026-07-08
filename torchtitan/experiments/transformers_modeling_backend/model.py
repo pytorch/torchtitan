@@ -153,13 +153,9 @@ _REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v2", "deepseek_v3"})
 def _get_moe_attr_name(layer: nn.Module) -> str | None:
     """Return the attribute name holding the MoE block on a decoder layer.
 
-    Most models use ``mlp``; Llama4 uses ``feed_forward``.  Returns ``None``
-    if neither is present.
+    Models use ``mlp``.  Returns ``None`` if not present.
     """
-    for name in ("mlp", "feed_forward"):
-        if hasattr(layer, name):
-            return name
-    return None
+    return "mlp" if hasattr(layer, "mlp") else None
 
 
 class HFTransformerModel(BaseModel):
@@ -594,7 +590,7 @@ class HFTransformerModel(BaseModel):
         #
         # - "native": use the model's own built-in experts unchanged (valid for
         #   every model; the only valid choice for models that can't take a
-        #   settable implementation, e.g. Llama4 which uses bmm).
+        #   settable implementation).
         # - "grouped_mm"/"batched_mm"/"eager": require a model that supports a
         #   settable experts implementation (the @use_experts_implementation
         #   decorator, probed up front as a classmethod). If the model can't, the
@@ -629,7 +625,6 @@ class HFTransformerModel(BaseModel):
 
         for layer in self.model.model.layers.values():
             # Detect MoE layers by checking for gate/router and experts sub-modules.
-            # Some models (Llama4) use ``feed_forward`` instead of ``mlp``.
             # Gemma4 has router/experts as siblings of the dense MLP at the
             # layer level (not inside ``mlp``).
             moe_attr = _get_moe_attr_name(layer)

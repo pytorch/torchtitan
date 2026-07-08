@@ -35,14 +35,9 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import HFTransformerModel
 
-# Keys that had transposed gate_up_proj layout (E, H, 2*I) instead of
-# (E, 2*I, H). Populated by ``hf_to_titan_moe_state_dict`` so
-# ``titan_to_hf_moe_state_dict`` can reverse the transpose.
-_TRANSPOSED_GATE_UP_PROJ_KEYS: set[str] = set()
-
 # Mapping from titan key -> original HF key for keys where the reverse
-# regex would produce a different result than the original (e.g. Llama4's
-# ``router.weight`` vs the default ``gate.weight``).
+# regex would produce a different result than the original (e.g. a
+# ``router.weight`` that must map back exactly rather than to ``gate.weight``).
 _TITAN_TO_ORIGINAL_HF_KEY: dict[str, str] = {}
 
 
@@ -180,18 +175,10 @@ def hf_to_titan_moe_state_dict(
     titan_state_dict = {}
 
     for key, value in hf_state_dict.items():
-        # Handle fused gate_up_proj -> gate + up
+        # Handle fused gate_up_proj -> gate + up. HF MoE models use the
+        # standard (E, 2*I, H) layout, so dim 1 is 2*I.
         if key.endswith("experts.gate_up_proj"):
             prefix = key[: -len("experts.gate_up_proj")]
-            down_key = f"{prefix}experts.down_proj"
-            transposed = False
-            if down_key in hf_state_dict:
-                dp = hf_state_dict[down_key]
-                if value.shape[1] == dp.shape[2] and value.shape[1] != dp.shape[1]:
-                    transposed = True
-            if transposed:
-                value = value.transpose(1, 2).contiguous()
-                _TRANSPOSED_GATE_UP_PROJ_KEYS.add(key)
             intermediate_size = value.shape[1] // 2
             titan_state_dict[f"{prefix}experts.{gate_name}"] = value[
                 :, :intermediate_size, :
@@ -201,15 +188,10 @@ def hf_to_titan_moe_state_dict(
             ]
             continue
 
-        # Handle expert down_proj with potential transpose
+        # Handle expert down_proj rename.
         if key.endswith("experts.down_proj"):
             prefix = key[: -len("experts.down_proj")]
-            gate_key = f"{prefix}experts.gate_up_proj"
-            new_key = f"{prefix}experts.{down_name}"
-            if gate_key in _TRANSPOSED_GATE_UP_PROJ_KEYS:
-                value = value.transpose(1, 2).contiguous()
-                _TITAN_TO_ORIGINAL_HF_KEY[new_key] = key
-            titan_state_dict[new_key] = value
+            titan_state_dict[f"{prefix}experts.{down_name}"] = value
             continue
 
         # Try regex patterns
@@ -245,7 +227,6 @@ def titan_to_hf_moe_state_dict(
     gate_name, down_name, up_name = _expert_names()
     gate_suffix = f"experts.{gate_name}"
     up_suffix = f"experts.{up_name}"
-    down_suffix = f"experts.{down_name}"
     patterns = _build_titan_to_hf_patterns()
     hf_state_dict = {}
 
@@ -269,8 +250,6 @@ def titan_to_hf_moe_state_dict(
             fused_value = torch.cat(
                 [titan_state_dict[g_key], titan_state_dict[u_key]], dim=1
             )
-            if hf_key in _TRANSPOSED_GATE_UP_PROJ_KEYS:
-                fused_value = fused_value.transpose(1, 2).contiguous()
             hf_state_dict[hf_key] = fused_value
             fused.add(g_key)
             fused.add(u_key)
@@ -280,10 +259,7 @@ def titan_to_hf_moe_state_dict(
             continue
 
         if key in _TITAN_TO_ORIGINAL_HF_KEY:
-            original_key = _TITAN_TO_ORIGINAL_HF_KEY[key]
-            if key.endswith(down_suffix) and original_key.endswith("experts.down_proj"):
-                value = value.transpose(1, 2).contiguous()
-            hf_state_dict[original_key] = value
+            hf_state_dict[_TITAN_TO_ORIGINAL_HF_KEY[key]] = value
             continue
 
         converted = False

@@ -312,9 +312,7 @@ def apply_fsdp(
             )
 
             assert dp_mod_ep_mesh is not None
-            moe_module = getattr(transformer_block, "mlp", None) or getattr(
-                transformer_block, "feed_forward", None
-            )
+            moe_module = getattr(transformer_block, "mlp", None)
             experts = moe_module.experts
             expert_params = set(experts.parameters())
             num_local_experts = experts.num_experts // ep_degree

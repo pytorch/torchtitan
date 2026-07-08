@@ -272,12 +272,10 @@ def _transfer_weights_via_adapter(hf_moe_block, titan_moe):
     """
     from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
         _TITAN_TO_ORIGINAL_HF_KEY,
-        _TRANSPOSED_GATE_UP_PROJ_KEYS,
         hf_to_titan_moe_state_dict,
     )
 
     # Clear global adapter state from any previous model's conversion
-    _TRANSPOSED_GATE_UP_PROJ_KEYS.clear()
     _TITAN_TO_ORIGINAL_HF_KEY.clear()
 
     hf_sd = hf_moe_block.state_dict()
@@ -301,14 +299,11 @@ def _transfer_weights_layer_level(hf_layer, titan_moe):
     """
     from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
         _TITAN_TO_ORIGINAL_HF_KEY,
-        _TRANSPOSED_GATE_UP_PROJ_KEYS,
         hf_to_titan_moe_state_dict,
     )
 
-    # Clear global adapter state from any previous model's conversion
-    # to prevent cross-model contamination (e.g. Llama4's transposed
-    # layout leaking into Gemma4's standard layout).
-    _TRANSPOSED_GATE_UP_PROJ_KEYS.clear()
+    # Clear global adapter state from any previous model's conversion to
+    # prevent cross-model key mappings from leaking between models.
     _TITAN_TO_ORIGINAL_HF_KEY.clear()
 
     # Collect router + experts state dicts

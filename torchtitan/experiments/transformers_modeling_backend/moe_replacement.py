@@ -130,8 +130,7 @@ def build_and_swap_native_moe(
         native_moe.to_empty(device=torch.device("cpu"))
         native_moe.init_states(buffer_device=torch.device("cpu"))
 
-        # Swap the Titan MoE into the layer's original attribute
-        # (``mlp`` for most models, ``feed_forward`` for Llama4).
+        # Swap the Titan MoE into the layer's original ``mlp`` attribute.
         moe_attr = _get_moe_attr_name(layer)
         setattr(layer, moe_attr, native_moe)
         object.__setattr__(layer, "moe", native_moe)
@@ -159,12 +158,6 @@ def build_and_swap_native_moe(
                 if hasattr(layer, norm_name):
                     delattr(layer, norm_name)
 
-        # Llama4 decoder forward unpacks ``(output, router_logits)`` when
-        # ``is_moe_layer`` is True.  The Titan MoE returns a plain tensor,
-        # so disable the unpacking.
-        if getattr(layer, "is_moe_layer", False):
-            layer.is_moe_layer = False
-
         del layer._native_moe_config
 
     logger.info("Built and swapped Titan MoE modules into the model")
@@ -178,15 +171,12 @@ def build_and_swap_native_moe(
 def _get_moe_attr_name(layer: nn.Module) -> str:
     """Return the attribute name holding the MoE block on a decoder layer.
 
-    Most models use ``mlp``; Llama4 uses ``feed_forward``.
-    For layer-level MoE (Gemma4), the Titan MoE replaces ``mlp``.
+    Models use ``mlp``; for layer-level MoE (Gemma4) the Titan MoE
+    replaces ``mlp`` too.
     """
-    for name in ("mlp", "feed_forward"):
-        if hasattr(layer, name):
-            return name
-    raise AttributeError(
-        f"Layer {type(layer).__name__} has neither 'mlp' nor 'feed_forward'"
-    )
+    if hasattr(layer, "mlp"):
+        return "mlp"
+    raise AttributeError(f"Layer {type(layer).__name__} has no 'mlp'")
 
 
 def _get_moe_block(layer: nn.Module) -> nn.Module:
@@ -215,28 +205,10 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     num_experts = _resolve_num_experts(experts, gate, moe_block, config)
     dim = config.hidden_size
 
-    # Intermediate size: HF MoE models use fused gate_up_proj.
-    # Standard layout: (E, 2*I, H) — dim 1 is 2*I.
-    # Llama4 layout: (E, H, 2*I) — dim 2 is 2*I (transposed).
+    # Intermediate size: HF MoE models use fused gate_up_proj with the
+    # standard (E, 2*I, H) layout, so dim 1 is 2*I.
     if hasattr(experts, "gate_up_proj"):
-        shape = experts.gate_up_proj.shape
-        # Standard: shape[1] == 2*I, shape[2] == H == dim
-        # Transposed: shape[1] == H == dim, shape[2] == 2*I
-        if shape[2] == dim and shape[1] != dim:
-            # Standard layout
-            moe_intermediate_size = shape[1] // 2
-        elif shape[1] == dim and shape[2] != dim:
-            # Transposed layout (Llama4)
-            moe_intermediate_size = shape[2] // 2
-        else:
-            # Both dims match H (e.g. 2*I == H), fall back to config
-            if (
-                hasattr(config, "moe_intermediate_size")
-                and config.moe_intermediate_size
-            ):
-                moe_intermediate_size = config.moe_intermediate_size
-            else:
-                moe_intermediate_size = shape[1] // 2
+        moe_intermediate_size = experts.gate_up_proj.shape[1] // 2
     elif hasattr(config, "moe_intermediate_size") and config.moe_intermediate_size:
         moe_intermediate_size = config.moe_intermediate_size
     else:
@@ -250,7 +222,7 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     # Route normalization: some models (Mixtral, Qwen3.5) always normalize
     # but don't have a config flag. Detect by checking if norm_topk_prob is
     # absent (meaning the router hardcodes normalization).
-    # Sigmoid models (Llama4) without explicit norm_topk_prob default to
+    # Sigmoid-routing models without explicit norm_topk_prob default to
     # False — sigmoid outputs are used directly as scores without normalization.
     if hasattr(config, "norm_topk_prob"):
         route_norm = config.norm_topk_prob

@@ -321,8 +321,7 @@ def _set_layer_sharding_configs(
 
     # --- Dense MLP (non-MoE layers only) ---
     if not getattr(layer, "moe_enabled", False):
-        mlp_attr = "mlp" if hasattr(layer, "mlp") else "feed_forward"
-        mlp = getattr(layer, mlp_attr)
+        mlp = layer.mlp
 
         mlp_arg = _first_forward_arg(mlp)
         mlp._sharding_config = ShardingConfig(
@@ -430,11 +429,7 @@ def _moe_subtree(layer: nn.Module) -> nn.Module | None:
     """
     if not getattr(layer, "moe_enabled", False):
         return None
-    for moe_attr in ("mlp", "feed_forward"):
-        moe = getattr(layer, moe_attr, None)
-        if moe is not None:
-            return moe
-    return None
+    return getattr(layer, "mlp", None)
 
 
 def _assert_all_states_sharded(
