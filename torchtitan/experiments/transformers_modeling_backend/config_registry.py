@@ -157,8 +157,12 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            # Keep this small: this debug model uses the full Qwen3 vocab
+            # (~152k), so cross-entropy materializes a
+            # local_batch_size * seq_len * vocab logits tensor. batch=8,
+            # seq=2048 is ~9GB in fp32 and OOMs the 22GB CI GPUs.
+            local_batch_size=1,
+            seq_len=1024,
             steps=10,
         ),
         dataloader=ChatDataLoader.Config(
