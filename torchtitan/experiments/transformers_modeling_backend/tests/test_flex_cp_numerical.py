@@ -26,7 +26,9 @@ from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import cp_shard
 from torchtitan.experiments.transformers_modeling_backend.config_registry import (
+    transformers_modeling_backend_debugmodel,
     transformers_modeling_backend_debugmodel_flex,
+    transformers_modeling_backend_debugmodel_moe,
     transformers_modeling_backend_debugmodel_moe_flex,
 )
 
@@ -41,6 +43,11 @@ def main():
         "--balancer", default="none", choices=["none", "headtail", "ptrr"]
     )
     parser.add_argument("--moe", action="store_true", help="use the flex MoE model")
+    parser.add_argument(
+        "--no_flex",
+        action="store_true",
+        help="use SDPA attention (ring CP) instead of flex",
+    )
     args = parser.parse_args()
     balancer = None if args.balancer == "none" else args.balancer
 
@@ -64,12 +71,20 @@ def main():
     )
     dist_utils.set_spmd_backend(args.backend)
 
-    # Build the job config (flex debug), tweak for a small deterministic run.
-    cfg = (
-        transformers_modeling_backend_debugmodel_moe_flex()
-        if args.moe
-        else transformers_modeling_backend_debugmodel_flex()
-    )
+    # Build the job config, tweak for a small deterministic run. --no_flex
+    # selects the SDPA debug config (ring CP) instead of the flex one.
+    if args.no_flex:
+        cfg = (
+            transformers_modeling_backend_debugmodel_moe()
+            if args.moe
+            else transformers_modeling_backend_debugmodel()
+        )
+    else:
+        cfg = (
+            transformers_modeling_backend_debugmodel_moe_flex()
+            if args.moe
+            else transformers_modeling_backend_debugmodel_flex()
+        )
     cfg.hf_model = args.hf_model
     cfg.training.seq_len = args.seq_len
     cfg.training.local_batch_size = args.bs
@@ -155,9 +170,11 @@ def main():
         full_mask_cp,
         load_balancer_type=balancer,
     )
+    _fm = tuple(full_mask_cp.shape) if full_mask_cp is not None else None
+    _lm = tuple(loc_mask.shape) if loc_mask is not None else None
     print(
         f"[rank {rank}] balancer={args.balancer} loc_input={tuple(loc_input.shape)} "
-        f"full_mask={tuple(full_mask_cp.shape)} loc_mask={tuple(loc_mask.shape)}"
+        f"full_mask={_fm} loc_mask={_lm}"
     )
 
     with torch.no_grad():

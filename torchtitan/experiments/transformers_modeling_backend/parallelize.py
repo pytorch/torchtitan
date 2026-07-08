@@ -71,6 +71,63 @@ def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         kernel.forward = _make_cp_forward(kernel.forward)
 
 
+def _wire_sdpa_attention_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
+    """Enable ring attention for the SDPA path under context parallelism.
+
+    Registers a CP-aware SDPA attention function that re-expresses the local
+    (sequence-sharded) q/k/v as DTensors sharded on the CP axis, so PyTorch's
+    context-parallel dispatcher runs ring attention -- handling causal masking
+    and load balancing across ranks. The trainer shards inputs/positions on the
+    seq axis (headtail balancer for SDPA), so q/k/v arrive locally seq-sharded;
+    this only wraps them for the dispatcher and unwraps the output back to a
+    local tensor. Unlike the flex path (explicit k/v all-gather with a full-KV
+    BlockMask), SDPA has no mask, so correctness relies on the dispatcher's
+    is_causal ring rather than a materialized mask.
+    """
+    import torch.nn.functional as F
+    from torch.distributed.tensor import DTensor, Shard
+    from torch.distributed.tensor.experimental._context_parallel._attention import (
+        _enable_context_parallel_dispatcher,
+    )
+    from transformers.integrations.sdpa_attention import repeat_kv
+    from transformers.modeling_utils import AttentionInterface
+
+    _enable_context_parallel_dispatcher()
+    impl = model.model.config._attn_implementation
+    placement = [Shard(2)]  # q/k/v are (b, heads, seq, dim); seq on dim 2
+
+    def _cp_sdpa(module, query, key, value, attention_mask, **kwargs):
+        # Expand GQA kv heads to full heads before the ring dispatcher. SDPA's
+        # enable_gqa broadcast path does not compose with CP ring attention (it
+        # yields mixed Tensor/DTensor ops); repeat_kv gives plain MHA, which the
+        # dispatcher handles. Then call SDPA directly (mirroring HF's shim:
+        # is_causal when there's no explicit mask) on seq-sharded DTensors.
+        n_rep = getattr(module, "num_key_value_groups", 1) or 1
+        if n_rep > 1:
+            key = repeat_kv(key, n_rep)
+            value = repeat_kv(value, n_rep)
+        query = DTensor.from_local(query, cp_mesh, placement, run_check=False)
+        key = DTensor.from_local(key, cp_mesh, placement, run_check=False)
+        value = DTensor.from_local(value, cp_mesh, placement, run_check=False)
+        is_causal = (
+            query.shape[2] > 1
+            and attention_mask is None
+            and getattr(module, "is_causal", True)
+        )
+        out = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            scale=kwargs.get("scaling"),
+            is_causal=is_causal,
+        )
+        out = out.to_local() if isinstance(out, DTensor) else out
+        return out.transpose(1, 2).contiguous(), None
+
+    AttentionInterface._global_mapping[impl] = _cp_sdpa
+
+
 # ---------------------------------------------------------------------------
 # Main parallelization entry point
 # ---------------------------------------------------------------------------
@@ -102,16 +159,37 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    # Only the default (DTensor) sharding backend is wired for this backend today.
+    # spmd_types/full_dtensor rename the FSDP mesh axis (dp_shard, not fsdp) and
+    # need native embedding + attention kernels that aren't installed here yet, so
+    # they would otherwise fail deep inside with a cryptic "Invalid mesh dim:
+    # 'fsdp'". Fail loud with a clear message. TODO: wire spmd_types (next PR) --
+    # see the migration TODO in hf_sharding.py.
+    if parallel_dims.spmd_backend != "default":
+        raise NotImplementedError(
+            f"The HF transformers backend only supports spmd_backend='default' "
+            f"today; got '{parallel_dims.spmd_backend}'. spmd_types/full_dtensor "
+            "are not yet wired for this backend (FSDP mesh resolution, native "
+            "embedding, and attention kernels are pending)."
+        )
+
     # Flex attention supports FSDP, TP, and context parallelism. Under CP the
     # flex kernel's local_map redistributes k/v from seq-sharded to CP-Replicate
     # (all-gather); see _attach_flex_kernel in hf_sharding.py. The CP-sharded
     # BlockMask is built and sharded on its Q axis upstream (trainer, ptrr
     # balancer). PP is not yet wired for flex+CP.
     use_flex = getattr(model.model.config, "use_flex_attn", False)
+    # flex + CP + PP is blocked: the flex BlockMask is CP-sharded via cp_shard
+    # (ptrr balancer), which fails under PP microbatching with "num_tasks 1 must
+    # be divisible by group_size" -- the per-microbatch task count breaks the
+    # mask sharding. SDPA + CP + PP works (no BlockMask to shard). TODO: plumb
+    # the CP BlockMask through PP microbatches.
     if use_flex and parallel_dims.cp_enabled and parallel_dims.pp_enabled:
         raise NotImplementedError(
             "use_flex_attn=True with context parallelism is not yet supported "
-            "together with pipeline parallelism in the HF transformers backend."
+            "together with pipeline parallelism in the HF transformers backend "
+            "(the CP-sharded flex BlockMask does not compose with PP "
+            "microbatching). Use SDPA attention for CP+PP, or CP/PP separately."
         )
 
     # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
@@ -183,6 +261,20 @@ def parallelize_hf_transformers(
             maybe_enable_async_tp(
                 parallelism, compile_config, parallel_dims.get_mesh("tp")
             )
+
+    # SDPA (non-flex) + CP: wire ring attention. The flex+CP path is handled
+    # inside the module-protocol block above (_wrap_flex_kernel_cp). Without
+    # this, SDPA under CP would attend only to each rank's local shard (silently
+    # wrong). TP+CP is only supported via flex (SDPA q/k/v are already TP
+    # DTensors, which the CP DTensor wrap cannot compose with here).
+    if parallel_dims.cp_enabled and not use_flex:
+        if parallel_dims.tp_enabled:
+            raise NotImplementedError(
+                "SDPA attention with tensor parallelism + context parallelism is "
+                "not supported. Use flex attention (use_flex_attn=True) for TP+CP, "
+                "or run context parallelism without tensor parallelism."
+            )
+        _wire_sdpa_attention_cp(model, parallel_dims.get_mesh("cp"))
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components

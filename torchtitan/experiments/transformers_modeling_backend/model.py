@@ -1050,6 +1050,12 @@ class HFTransformerModel(BaseModel):
             # here is safe.
             if attention_masks is None:
                 attention_masks = self.get_attention_masks(positions)
+        elif positions is not None:
+            # SDPA path: honor the passed positions so RoPE is correct. Under CP
+            # these are the sequence-sharded global positions (load-balancer
+            # permuted), which is exactly what RoPE needs for each local shard --
+            # a plain arange would use the wrong positions.
+            kwargs["position_ids"] = positions
         else:
             local_seq_len = self.max_seq_len
             local_seq_len //= (
