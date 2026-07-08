@@ -154,6 +154,23 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             [
                 [
                     "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule 1F1B",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend Flex CP+PP",
+            "transformers_modeling_backend_flex_cp+pp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
                     "--config transformers_modeling_backend_debugmodel_moe_flex",
                     "--parallelism.data_parallel_shard_degree -1",
                     "--parallelism.expert_parallel_degree 2",

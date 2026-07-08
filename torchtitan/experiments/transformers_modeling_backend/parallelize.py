@@ -173,24 +173,15 @@ def parallelize_hf_transformers(
             "embedding, and attention kernels are pending)."
         )
 
-    # Flex attention supports FSDP, TP, and context parallelism. Under CP the
-    # flex kernel's local_map redistributes k/v from seq-sharded to CP-Replicate
-    # (all-gather); see _attach_flex_kernel in hf_sharding.py. The CP-sharded
-    # BlockMask is built and sharded on its Q axis upstream (trainer, ptrr
-    # balancer). PP is not yet wired for flex+CP.
+    # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
+    # the flex kernel's local_map redistributes k/v from seq-sharded to
+    # CP-Replicate (all-gather); see _attach_flex_kernel in hf_sharding.py. The
+    # CP-sharded BlockMask is built and sharded on its Q axis upstream (trainer,
+    # ptrr balancer). Note: the ptrr balancer requires the number of Q blocks
+    # (seq_len / flex BLOCK_SIZE) to be divisible by the CP degree; too-short
+    # sequences raise "num_tasks N must be divisible by group_size" from the
+    # balancer -- this is a CP+ptrr constraint, independent of PP.
     use_flex = getattr(model.model.config, "use_flex_attn", False)
-    # flex + CP + PP is blocked: the flex BlockMask is CP-sharded via cp_shard
-    # (ptrr balancer), which fails under PP microbatching with "num_tasks 1 must
-    # be divisible by group_size" -- the per-microbatch task count breaks the
-    # mask sharding. SDPA + CP + PP works (no BlockMask to shard). TODO: plumb
-    # the CP BlockMask through PP microbatches.
-    if use_flex and parallel_dims.cp_enabled and parallel_dims.pp_enabled:
-        raise NotImplementedError(
-            "use_flex_attn=True with context parallelism is not yet supported "
-            "together with pipeline parallelism in the HF transformers backend "
-            "(the CP-sharded flex BlockMask does not compose with PP "
-            "microbatching). Use SDPA attention for CP+PP, or CP/PP separately."
-        )
 
     # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
     # Some models (Gemma4) share the embedding and lm_head weight
