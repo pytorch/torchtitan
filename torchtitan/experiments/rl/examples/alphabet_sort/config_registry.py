@@ -838,6 +838,11 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             num_training_steps=10,
             num_groups_per_train_step=8,
             group_size=group_size,
+            # Fully on-policy (lockstep). Off-policy lag (the default 3) makes the
+            # loss guard non-deterministic: the tail training step's rollouts
+            # depend on async generator/trainer timing, which varies run-to-run on
+            # A10G. 0 also matches this config's "true on-policy" intent.
+            max_offpolicy_steps=0,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
