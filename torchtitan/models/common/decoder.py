@@ -284,21 +284,15 @@ class Decoder(BaseModel):
         output = self.lm_head(h) if self.lm_head is not None else h
         return output
 
-    def _create_flex_attention_mask_for_document(
+    def _create_flex_attention_mask(
         self,
         positions: torch.Tensor,
         attn_config: BaseAttention.Config,
-        *,
-        extra_mask_mods: Sequence[_mask_mod_signature] = (),
+        mask_mods: Sequence[_mask_mod_signature],
     ) -> AttentionMasksType:
-        """Build the flex-attention mask. extra_mask_mods are ANDed onto the base
-        causal + packed-document mask, e.g. a sliding window."""
+        """Build a flex-attention BlockMask from mask_mods (ANDed together),
+        respecting the config's block_size and batch-invariant mode."""
         assert isinstance(attn_config.inner_attention, FlexAttention.Config)
-        mask_mods = [
-            get_causal_mask_mod(),
-            get_efficient_causal_mask_mod_for_packed_document(positions),
-            *extra_mask_mods,
-        ]
         B = positions.shape[0]
         seq_len = positions.shape[1]
         return create_attention_mask(
@@ -315,6 +309,21 @@ class Decoder(BaseModel):
             # on the particular batch
             # for batch invariance, we disable this optimization
             separate_full_blocks=not is_in_batch_invariant_mode(),
+        )
+
+    def _create_flex_attention_mask_for_document(
+        self,
+        positions: torch.Tensor,
+        attn_config: BaseAttention.Config,
+    ) -> AttentionMasksType:
+        """Build the standard causal + packed-document flex-attention mask."""
+        return self._create_flex_attention_mask(
+            positions,
+            attn_config,
+            [
+                get_causal_mask_mod(),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            ],
         )
 
     def get_attention_masks(

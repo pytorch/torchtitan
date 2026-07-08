@@ -20,6 +20,8 @@ from torchtitan.models.common.attention import (
     BaseQKVLinear,
     create_varlen_metadata_for_document,
     FlexAttention,
+    get_causal_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     VarlenAttention,
 )
@@ -270,11 +272,15 @@ class GptOssModel(Decoder):
         if isinstance(inner_attn, VarlenAttention.Config):
             return create_varlen_metadata_for_document(positions)
         elif isinstance(inner_attn, FlexAttention.Config):
+            base_mask_mods = [
+                get_causal_mask_mod(),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            ]
             # Full-attention (causal + document) mask, used by layers without a
             # sliding window.
             masks: dict[str, BlockMask] = {
-                "basic_mask": self._create_flex_attention_mask_for_document(
-                    positions, attn_cfg
+                "basic_mask": self._create_flex_attention_mask(
+                    positions, attn_cfg, base_mask_mods
                 )
             }
 
@@ -288,12 +294,10 @@ class GptOssModel(Decoder):
                     window = layer.attention.sliding_window_size
                     break
             if window is not None:
-                masks[
-                    "sliding_window_mask"
-                ] = self._create_flex_attention_mask_for_document(
+                masks["sliding_window_mask"] = self._create_flex_attention_mask(
                     positions,
                     attn_cfg,
-                    extra_mask_mods=[get_sliding_window_mask_mod(window)],
+                    [*base_mask_mods, get_sliding_window_mask_mod(window)],
                 )
 
             return masks
