@@ -126,6 +126,54 @@ def deepseek_v3_16b() -> Trainer.Config:
     )
 
 
+def deepseek_v3_16b_fp8_blockwise() -> Trainer.Config:
+    """DeepSeek V3 16B with blockwise FP8 (1x128 / 128x128 scaling) applied to
+    both dense/MoE-adjacent linears and the routed-expert grouped GEMMs."""
+    config = deepseek_v3_16b()
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "16B",
+        attn_backend="flex",
+        converters=[
+            Float8LinearConverter.Config(
+                recipe_name="blockwise",
+                filter_fqns=["lm_head", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+            Float8GroupedExpertsConverter.Config(
+                recipe_name="fp8_blockwise",
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
+def deepseek_v3_debugmodel_fp8_blockwise() -> Trainer.Config:
+    """Debug-model variant of the blockwise FP8 recipe for quick smoke tests."""
+    config = deepseek_v3_debugmodel()
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            Float8LinearConverter.Config(
+                recipe_name="blockwise",
+                filter_fqns=["lm_head", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+            Float8GroupedExpertsConverter.Config(
+                recipe_name="fp8_blockwise",
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
 def deepseek_v3_16b_hybridep() -> Trainer.Config:
     config = deepseek_v3_16b()
     config.model_spec = model_registry(
