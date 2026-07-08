@@ -52,7 +52,7 @@ class MTPTransformerBlock(Module):
         enorm: RMSNorm.Config
         hnorm: RMSNorm.Config
         eh_proj: Linear.Config
-        final_norm: RMSNorm.Config
+        mtp_norm: RMSNorm.Config
 
         @classmethod
         def from_inner_block_config(
@@ -80,7 +80,7 @@ class MTPTransformerBlock(Module):
                     out_features=dim,
                     bias=False,
                 ),
-                final_norm=RMSNorm.Config(normalized_shape=dim),
+                mtp_norm=RMSNorm.Config(normalized_shape=dim),
             )
 
     def __init__(
@@ -95,7 +95,7 @@ class MTPTransformerBlock(Module):
         self.hnorm = config.hnorm.build()
         self.eh_proj = config.eh_proj.build()
         self.inner = config.inner_block_config.build()
-        self.final_norm = config.final_norm.build()
+        self.mtp_norm = config.mtp_norm.build()
 
     @property
     def moe_enabled(self) -> bool:
@@ -124,7 +124,7 @@ class MTPTransformerBlock(Module):
             torch.cat([self.enorm(input_offset), self.hnorm(prev_embed)], dim=-1)
         )
         h = self.inner(h, attention_masks, positions)
-        return self.final_norm(h)
+        return self.mtp_norm(h)
 
 
 class MTPBlock(Module):

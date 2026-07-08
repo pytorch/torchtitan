@@ -174,7 +174,7 @@ def _set_deepseek_v3_mtp_sharding(
     )
     mtp_layer_cfg.enorm.sharding_config = norm
     mtp_layer_cfg.hnorm.sharding_config = norm
-    mtp_layer_cfg.final_norm.sharding_config = norm
+    mtp_layer_cfg.mtp_norm.sharding_config = norm
     mtp_layer_cfg.eh_proj.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
