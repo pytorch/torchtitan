@@ -80,19 +80,6 @@ class TrainingConfig:
     many temporary files.
     """
 
-    num_mtp_modules: int = 0
-    """
-    Number of multi-token prediction (MTP) modules to append after the main
-    transformer layers. Each MTP module predicts an additional future token.
-    Only supported for DeepSeek-V3. 0 means disabled.
-    """
-
-    mtp_loss_weight: float = 0.3
-    """
-    Weight of the multi-token prediction auxiliary loss. The total loss is:
-    main_loss + mtp_loss_weight * sum(mtp_losses) / num_mtp_modules.
-    Only used when num_mtp_modules > 0.
-    """
 
 @dataclass(kw_only=True, slots=True)
 class ParallelismConfig:

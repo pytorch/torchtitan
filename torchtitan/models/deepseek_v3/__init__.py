@@ -17,6 +17,8 @@ from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
+    MTPBlock,
+    MTPTransformerBlock,
     RMSNorm,
     RoPE,
     TransformerBlock,
@@ -37,7 +39,6 @@ from .model import (
     Attention,
     DeepSeekV3Model,
     DeepSeekV3TransformerBlock,
-    MTPTransformerBlock,
 )
 from .parallelize import parallelize_deepseekv3
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
@@ -45,6 +46,7 @@ from .state_dict_adapter import DeepSeekV3StateDictAdapter
 __all__ = [
     "parallelize_deepseekv3",
     "DeepSeekV3Model",
+    "MTPBlock",
     "MTPTransformerBlock",
     "deepseekv3_configs",
 ]

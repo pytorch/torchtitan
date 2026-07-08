@@ -29,6 +29,11 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
     VarlenAttention,
 )
+from torchtitan.models.common.mtp import (
+    merge_mtp_context_parallel_input,
+    MTPContextParallelInput,
+    split_mtp_context_parallel_input,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -163,33 +168,48 @@ def prepare_context_parallel_input(
         extra_kwargs["positions"] = positions
         extra_kwargs["attention_masks"] = attention_masks
         return inputs, labels, extra_kwargs
+    else:
+        # CP shards every provided tensor along sequence dim. Split the extended
+        # [S + K] MTP tensors into aligned S-token main and shifted views first,
+        # so each rank receives matching local windows for model input and loss.
+        mtp_input = split_mtp_context_parallel_input(
+            inputs,
+            labels,
+            num_mtp_modules=num_mtp_modules,
+        )
+        positions = extra_kwargs["positions"]
 
-    main_inputs = inputs[:, :-num_mtp_modules]
-    mtp_inputs = inputs[:, num_mtp_modules:]
-    main_labels = labels[:, :-num_mtp_modules]
-    mtp_labels = labels[:, num_mtp_modules:]
-    positions = extra_kwargs["positions"]
-
-    (
-        main_inputs,
-        main_labels,
-        mtp_inputs,
-        mtp_labels,
-        positions,
-    ), attention_masks = cp_shard(
-        cp_mesh,
-        (main_inputs, main_labels, mtp_inputs, mtp_labels, positions),
-        attention_masks,
-        load_balancer_type,
-    )
-
-    mtp_inputs_tail = mtp_inputs[:, -num_mtp_modules:]
-    mtp_labels_tail = mtp_labels[:, -num_mtp_modules:]
-
-    inputs = torch.cat([main_inputs, mtp_inputs_tail], dim=-1)
-    labels = torch.cat([main_labels, mtp_labels_tail], dim=-1)
-    extra_kwargs["positions"] = positions
-    extra_kwargs["attention_masks"] = attention_masks
+        (
+            main_inputs,
+            main_labels,
+            mtp_inputs,
+            mtp_labels,
+            positions,
+        ), attention_masks = cp_shard(
+            cp_mesh,
+            (
+                mtp_input.main_inputs,
+                mtp_input.main_labels,
+                mtp_input.mtp_inputs,
+                mtp_input.mtp_labels,
+                positions,
+            ),
+            attention_masks,
+            load_balancer_type,
+        )
+        # Restore the local [local_S + K] layout expected by Decoder/MTP loss by
+        # appending the local tail from the shifted view after CP sharding.
+        inputs, labels = merge_mtp_context_parallel_input(
+            MTPContextParallelInput(
+                main_inputs=main_inputs,
+                main_labels=main_labels,
+                mtp_inputs=mtp_inputs,
+                mtp_labels=mtp_labels,
+            ),
+            num_mtp_modules=num_mtp_modules,
+        )
+        extra_kwargs["positions"] = positions
+        extra_kwargs["attention_masks"] = attention_masks
 
     return inputs, labels, extra_kwargs
 

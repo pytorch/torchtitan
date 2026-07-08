@@ -83,6 +83,10 @@ class Decoder(BaseModel):
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
 
+        # Multi-Token Prediction. When set, the forward pass produces a list of
+        # logits: main prediction followed by one prediction per MTP depth.
+        mtp: "MTPBlock.Config | None" = None
+
         @property
         def first_attention(self) -> BaseAttention.Config | None:
             """Attention config of the first layer that has one, else None.
@@ -193,6 +197,22 @@ class Decoder(BaseModel):
                             "(expert_parallel_degree > 1)."
                         )
 
+            if self.mtp is not None and self.mtp.num_mtp_layers > 0:
+                from torchtitan.models.common.mtp import MTPBlock
+
+                # Build the MTP layer config before model-specific sharding
+                # runs. Sharding code then only fills placements on the ready
+                # config tree instead of constructing MTP configs itself.
+                inner_cfg = (
+                    self.mtp.inner_block_config
+                    if self.mtp.inner_block_config is not None
+                    else self.layers[-1]
+                )
+                self.mtp.inner_block_config = MTPBlock.mtp_layer_config(
+                    inner_cfg,
+                    dim=self.dim,
+                )
+
             maybe_update_minimal_async_ep_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip
@@ -243,6 +263,13 @@ class Decoder(BaseModel):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.lm_head.weight
 
+        mtp_cfg = config.mtp
+        self.mtp_block = (
+            mtp_cfg.build()
+            if mtp_cfg is not None and mtp_cfg.num_mtp_layers > 0
+            else None
+        )
+
     def init_states(
         self,
         *,
@@ -268,6 +295,17 @@ class Decoder(BaseModel):
         # positions to the right parameter (it would otherwise land in the
         # attention_masks slot and break the maskless SDPA backend).
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        mtp_tokens = tokens
+        if self.mtp_block is not None and self.mtp_block.num_depths > 0:
+            if self.tok_embeddings is None:
+                raise ValueError("MTP decoder forward requires token embeddings.")
+            # Dataloaders provide [main sequence + K future tokens]. Main
+            # decoder layers consume only the first S tokens; MTP layers consume
+            # the shifted S-token views built from the full extended tensor.
+            tokens = self.mtp_block.prepare_main_tokens(tokens)
+            if positions is not None and positions.shape[1] == mtp_tokens.shape[1]:
+                positions = positions[:, : tokens.shape[1]]
+
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
@@ -275,12 +313,29 @@ class Decoder(BaseModel):
 
         h = self.norm(h) if self.norm is not None else h
 
+        # MTP extends the main prediction with one prediction per depth.
+        if self.mtp_block is not None and self.mtp_block.num_depths > 0:
+            mtp_hidden_states = self.mtp_block(
+                mtp_tokens,
+                h,
+                self.tok_embeddings,
+                attention_masks,
+                positions,
+            )
+            h = [h] + mtp_hidden_states
+
         # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
         # calls .requires_grad on all stage inputs, which fails on bool kwargs.
         # TODO: fix PP backward upstream to skip non-tensor inputs
         if self._skip_lm_head:
             return h
-        output = self.lm_head(h) if self.lm_head is not None else h
+        if isinstance(h, list):
+            output = [
+                self.lm_head(item) if self.lm_head is not None else item
+                for item in h
+            ]
+        else:
+            output = self.lm_head(h) if self.lm_head is not None else h
         return output
 
     def _create_flex_attention_mask_for_document(
