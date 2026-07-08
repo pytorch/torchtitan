@@ -195,6 +195,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
+        if isinstance(grad_output, DTensor):
+            grad_output = grad_output.to_local()
         log_probs, labels_1d = ctx.saved_tensors
         safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
         out_of_range = (safe_labels < ctx.vocab_start) | (
