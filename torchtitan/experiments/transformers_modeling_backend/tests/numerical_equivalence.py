@@ -4,13 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Numerical equivalence test: HF native MoE vs titan-replaced MoE.
+"""Numerical equivalence test: HF's own MoE vs Titan-replaced MoE.
 
 For each supported HF MoE model, this script:
 1. Creates a single-layer HF model with production-scale dimensions and random weights
-2. Runs forward on the HF-native MoE block (using grouped_mm experts)
-3. Builds the equivalent native titan MoE, transfers weights from HF
-4. Runs forward on the titan MoE block with the same input
+2. Runs forward on the HF model's own MoE block (using grouped_mm experts)
+3. Builds the equivalent Titan MoE, transfers weights from HF
+4. Runs forward on the Titan MoE block with the same input
 5. Compares outputs via KL divergence, cosine similarity, and max abs diff
 
 Note on numerical precision:
@@ -293,7 +293,7 @@ def _transfer_weights_via_adapter(hf_moe_block, titan_moe):
 def _transfer_weights_layer_level(hf_layer, titan_moe):
     """Transfer weights for layer-level MoE (Gemma4).
 
-    Router and experts are at the layer level in HF.  The titan native MoE
+    Router and experts are at the layer level in HF.  The Titan MoE
     has ``router.gate``, ``experts.{w1,w2,w3}``.  We collect the relevant
     HF state dict entries, apply the adapter, and load into titan.
     """

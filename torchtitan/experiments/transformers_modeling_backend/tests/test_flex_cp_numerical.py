@@ -113,7 +113,7 @@ def main():
             )
 
             build_and_swap_native_moe(m, parallel_dims)
-            m.to(device)  # swap builds native experts on CPU; move them back
+            m.to(device)  # swap builds Titan MoE experts on CPU; move them back
         return m, model_config
 
     # --- Reference: full-sequence forward, no parallelism ---

@@ -7,7 +7,7 @@
 """Numerical equivalence test with full pretrained weights.
 
 Loads real HF checkpoints, extracts the first MoE block, transfers weights
-to a native titan MoE, and compares forward outputs. This validates that
+to a Titan MoE, and compares forward outputs. This validates that
 the weight transfer and routing logic are correct with production weights,
 not just random initialization.
 

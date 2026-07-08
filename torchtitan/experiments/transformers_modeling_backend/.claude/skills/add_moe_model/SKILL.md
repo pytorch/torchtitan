@@ -1,6 +1,6 @@
 ---
 name: add_moe_model
-description: Add a new HF MoE model to the transformers_modeling_backend experiment. Use when the user provides a HuggingFace model ID and wants to integrate it with titan's native MoE, or invokes /add_moe_model.
+description: Add a new HF MoE model to the transformers_modeling_backend experiment. Use when the user provides a HuggingFace model ID and wants to integrate it with Titan's MoE, or invokes /add_moe_model.
 ---
 
 # Add HF MoE Model to Transformers Backend
@@ -40,7 +40,7 @@ extended for new models. Expected changes include:
   params/buffers but no config will mix a plain tensor with a DTensor and crash
   under TP (the `_assert_all_states_sharded` backstop now makes that a loud
   setup-time error for any param/buffer-bearing dense-path module — root
-  modules and every decoder layer, excluding the natively-configured MoE). For a genuinely new module, shard it
+  modules and every decoder layer, excluding the Titan-swapped MoE). For a genuinely new module, shard it
   (`colwise_config`/`rowwise_config`) if it has a clear TP layout, otherwise
   default to `_replicate_config(module)` (replicate weights, no TP). If a new
   module type doesn't fit any existing helper, that's a signal to stop and think
@@ -148,14 +148,14 @@ Call `_probe_hf_moe_block(moe_block, config)` from
   case the dense MLP is functionally a **shared expert** — it runs on
   every token and its output is summed with the routed expert output.
   The correct mapping is to treat the dense MLP as `shared_experts`
-  inside titan's native `MoE` module and replace `layer.mlp` with the
-  full native MoE (router + experts + shared_experts). This way the
+  inside Titan's `MoE` module and replace `layer.mlp` with the
+  full Titan MoE (router + experts + shared_experts). This way the
   entire block has a single `ShardingConfig` and TP/EP work correctly.
   Fix in `moe_replacement.py`: when probing, detect that the dense MLP
   is a shared expert, include it in `shared_expert_info`, and when
-  swapping, replace `layer.mlp` with the native MoE that includes the
+  swapping, replace `layer.mlp` with the Titan MoE that includes the
   dense MLP as its shared expert. Wire the router and expert weights
-  from the layer-level attributes into the native MoE.
+  from the layer-level attributes into the Titan MoE.
 
 ### 1e. Probe attention for ShardingConfig
 
@@ -286,7 +286,7 @@ real config. Override everything else for a small single-GPU test:
 ## Phase 3: Run Numerical Equivalence
 
 **HF is the gold standard.** The numerical equivalence test compares
-titan's native MoE output against HF's output. The test must run HF's
+Titan's MoE output against HF's output. The test must run HF's
 forward pass unmodified — do NOT patch, monkey-patch, or alter HF's
 computation to make the test pass. The only permitted modifications to
 close accuracy gaps are **temporary changes to titan core code**, which
@@ -592,7 +592,7 @@ with the new model:
    - Shared experts (none/additive/sigmoid-gated/layer-level)
    - Attention type (GQA/MLA/DSA/custom)
    - Any unsupported features and their impact
-   - Summary of differences from titan native
+   - Summary of differences from Titan's MoE
 
 3. Add a row to the **Parallelism Support** table (FSDP and FSDP+EP).
 
@@ -639,7 +639,7 @@ experts is a true blocker requiring upstream changes.
 | `trust_remote_code` import error | Config loading | Try without `trust_remote_code` first |
 | `num_hidden_layers=1` has no MoE layer | Test config | Set `first_k_dense_replace=0` or increase layers |
 | State dict keys missing after round-trip | `state_dict_adapter.py` | Add patterns in `_build_hf_to_titan_patterns()` / `_build_titan_to_hf_patterns()` |
-| Layer-level MoE (router/experts are siblings of dense MLP) | `moe_replacement.py` | Treat dense MLP as shared expert inside native MoE; replace `layer.mlp` with full MoE block containing router + experts + shared_experts(=dense MLP) |
+| Layer-level MoE (router/experts are siblings of dense MLP) | `moe_replacement.py` | Treat dense MLP as shared expert inside the Titan MoE; replace `layer.mlp` with full MoE block containing router + experts + shared_experts(=dense MLP) |
 | TP fails with mixed DTensor/Tensor | `hf_sharding.py` | Module has undeclared buffers — use `_replicate_config(module)` which dynamically enumerates all params and buffers |
 | Embedding has extra buffers (e.g. `embed_scale`) | `hf_sharding.py` | Already handled — `set_hf_sharding_configs` enumerates embedding buffers dynamically |
 

@@ -90,8 +90,8 @@ class TitanMoeModelConfig(TitanModelConfig):
     (numerical reference for debugging). "grouped_mm"/"batched_mm"/"eager" require
     a model that supports a settable experts implementation (the
     `@use_experts_implementation` decorator) — requesting one on a model that does
-    not raises. "native" uses the model's own built-in experts kernel unchanged
-    (the only valid choice for non-settable models).
+    not raises. "native" uses the HF model's own built-in experts kernel
+    unchanged (the only valid choice for non-settable models).
     """
 
     load_balance_coeff: float | None = 1e-3

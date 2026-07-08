@@ -590,9 +590,9 @@ class HFTransformerModel(BaseModel):
         # TitanMoeModelConfig.experts_implementation. Honor it or fail — never
         # silently substitute a different kernel than the user asked for.
         #
-        # - "native": use the model's own built-in experts unchanged (valid for
-        #   every model; the only valid choice for models that can't take a
-        #   settable implementation).
+        # - "native": use the HF model's own built-in experts kernel unchanged
+        #   (valid for every model; the only valid choice for models that can't
+        #   take a settable implementation).
         # - "grouped_mm"/"batched_mm"/"eager": require a model that supports a
         #   settable experts implementation (the @use_experts_implementation
         #   decorator, probed up front as a classmethod). If the model can't, the
@@ -611,7 +611,7 @@ class HFTransformerModel(BaseModel):
                     f"{model_class_name} does not support a settable experts "
                     f"implementation, so experts_implementation='{impl}' cannot "
                     "be honored. Set experts_implementation='native' to use the "
-                    "model's built-in experts kernel."
+                    "HF model's built-in experts kernel."
                 )
 
         self.model = model_cls(config=config)
@@ -760,10 +760,10 @@ class HFTransformerModel(BaseModel):
 
             if isinstance(module, attention_cls):
                 # Initialize weights and biases for q, k, v projections with
-                # std=0.02, matching native models. Besides full-rank q/k/v,
+                # std=0.02, matching Titan models. Besides full-rank q/k/v,
                 # cover the MLA low-rank projections (DeepSeek V2/V3, GLM):
                 # q_a_proj/q_b_proj (low-rank Q) and kv_a_proj_with_mqa/kv_b_proj
-                # (low-rank KV). Native deepseek_v3 inits all of wq_a/wq_b/wkv_a/
+                # (low-rank KV). Titan's deepseek_v3 inits all of wq_a/wq_b/wkv_a/
                 # wkv_b at std=0.02 too; only the output proj is depth-scaled.
                 # The MLA RMSNorms (q_a_layernorm/kv_a_layernorm) are handled by
                 # the norm branch below. Missing these left them at their

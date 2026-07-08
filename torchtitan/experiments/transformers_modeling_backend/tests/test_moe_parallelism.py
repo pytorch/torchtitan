@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Tests for native MoE replacement in the HF Transformers modeling backend.
+"""Tests for Titan MoE replacement in the HF Transformers modeling backend.
 
 These tests verify that the two-phase MoE replacement (probe → build → swap)
-produces correct native MoE modules and that they work under EP, TP, and EP+TP.
+produces correct Titan MoE modules and that they work under EP, TP, and EP+TP.
 
 Run with:
     python -m pytest torchtitan/experiments/transformers_modeling_backend/tests/test_moe_parallelism.py -x -v
@@ -307,10 +307,10 @@ class TestPrepareNativeMoeConfigs(unittest.TestCase):
 
 
 class TestNativeMoeBuildAndSwap(unittest.TestCase):
-    """Test building and swapping native MoE modules (single device, no parallelism)."""
+    """Test building and swapping Titan MoE modules (single device, no parallelism)."""
 
     def test_build_produces_native_moe(self):
-        """Building from MoE.Config produces a native MoE with correct shapes."""
+        """Building from MoE.Config produces a Titan MoE with correct shapes."""
         model, config = _create_tiny_qwen3moe_model(num_hidden_layers=1)
         _prepare_layers(model)
 
@@ -369,7 +369,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for MoE forward")
     def test_native_moe_forward(self):
-        """Native MoE forward produces correct output shape."""
+        """Titan MoE forward produces correct output shape."""
         model, config = _create_tiny_qwen3moe_model(num_hidden_layers=1)
         _prepare_layers(model)
 
@@ -398,7 +398,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for MoE backward")
     def test_native_moe_backward(self):
-        """Native MoE backward pass produces gradients."""
+        """Titan MoE backward pass produces gradients."""
         model, config = _create_tiny_qwen3moe_model(num_hidden_layers=1)
         _prepare_layers(model)
 
@@ -436,10 +436,10 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
 
 class TestNativeMoeLoadBalancing(unittest.TestCase):
-    """Test that native MoE exposes the load-balancing contract."""
+    """Test that the Titan MoE exposes the load-balancing contract."""
 
     def test_native_moe_exposes_load_balance_attrs(self):
-        """Native MoE has tokens_per_expert, expert_bias, load_balance_coeff."""
+        """Titan MoE has tokens_per_expert, expert_bias, load_balance_coeff."""
         model, config = _create_tiny_qwen3moe_model(num_hidden_layers=1)
         _prepare_layers(model)
 
@@ -496,7 +496,7 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         )
 
     def test_optimizer_hook_updates_expert_bias(self):
-        """register_moe_load_balancing_hook works with native MoE."""
+        """register_moe_load_balancing_hook works with the Titan MoE."""
         model, config = _create_tiny_qwen3moe_model(num_hidden_layers=1)
         _prepare_layers(model)
 

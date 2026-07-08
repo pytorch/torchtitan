@@ -161,16 +161,16 @@ def parallelize_hf_transformers(
 
     # Only the default (DTensor) sharding backend is wired for this backend today.
     # spmd_types/full_dtensor rename the FSDP mesh axis (dp_shard, not fsdp) and
-    # need native embedding + attention kernels that aren't installed here yet, so
-    # they would otherwise fail deep inside with a cryptic "Invalid mesh dim:
-    # 'fsdp'". Fail loud with a clear message. TODO: wire spmd_types (next PR) --
-    # see the migration TODO in hf_sharding.py.
+    # need Titan-native embedding + attention kernels that aren't installed here
+    # yet, so they would otherwise fail deep inside with a cryptic "Invalid mesh
+    # dim: 'fsdp'". Fail loud with a clear message. TODO: wire spmd_types (next
+    # PR) -- see the migration TODO in hf_sharding.py.
     if parallel_dims.spmd_backend != "default":
         raise NotImplementedError(
             f"The HF transformers backend only supports spmd_backend='default' "
             f"today; got '{parallel_dims.spmd_backend}'. spmd_types/full_dtensor "
-            "are not yet wired for this backend (FSDP mesh resolution, native "
-            "embedding, and attention kernels are pending)."
+            "are not yet wired for this backend (FSDP mesh resolution, "
+            "Titan-native embedding, and attention kernels are pending)."
         )
 
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
