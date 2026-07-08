@@ -163,7 +163,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
+                    "--config rl_grpo_qwen3_debug_varlen_batch_invariant",
                     "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--async-loop.group-size 2",
@@ -175,8 +175,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO 0.6B TP=4 batch-invariant + deterministic",
-            "rl_grpo_0_6b_tp4_batch_invariant",
+            "RL GRPO debug TP=4 batch-invariant + deterministic",
+            "rl_grpo_debug_tp4_batch_invariant",
             ngpu=8,
         ),
         OverrideDefinitions(

@@ -119,6 +119,6 @@ jobs:
         python torchtitan/experiments/rl/scripts/loss_compare.py \
           --hf-assets-path tests/assets/tokenizer \
           --dump-folder "$RUNNER_TEMP/rl_loss_guard" \
-          --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
+          --config rl_grpo_qwen3_debug_varlen_batch_invariant \
           --import-result "$LOSS_FILE" \
           --assert-equal
