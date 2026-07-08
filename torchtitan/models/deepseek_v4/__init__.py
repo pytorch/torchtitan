@@ -581,8 +581,230 @@ def _debugmodel(
     )
 
 
+def _deepseek_v4_flash(
+    moe_comm_backend: str = "standard",
+    non_blocking_capacity_factor: float | None = None,
+    enable_indexer_loss: bool = True,
+) -> DeepSeekV4Model.Config:
+    dim = 4096
+    n_layers = 43
+    vocab_size = 129280
+    n_heads = 64
+    head_dim = 512
+    rope_head_dim = 64
+    q_lora_rank = 1024
+    o_lora_rank = 1024
+    n_groups = 8
+    compress_ratios = (1, 1) + (4, 128) * 20 + (4,)
+    window_size = 128
+    norm_eps = 1e-6
+    index_n_heads = 64
+    index_head_dim = 128
+    index_topk = 512
+    moe_inter_dim = 2048
+    num_experts = 256
+    num_shared_experts = 1
+    top_k = 6
+    n_hash_layers = 3
+    route_norm = True
+    route_scale = 1.5
+    load_balance_coeff = 1e-3
+    hc_mult = 4
+    sinkhorn_iters = 20
+    hc_eps = 1e-6
+    dense_layers = set()
+    max_seq_len = 4096
+    compress_rope_theta = 160000.0
+    original_seq_len = 65536
+
+    rope = ComplexRoPE.Config(
+        dim=rope_head_dim,
+        max_seq_len=max_seq_len,
+        theta=10000.0,
+        scaling="none",
+    )
+    rope_compress = ComplexRoPE.Config(
+        dim=rope_head_dim,
+        max_seq_len=max_seq_len,
+        theta=compress_rope_theta,
+        scaling="yarn",
+        rope_factor=16.0,
+        beta_fast=32.0,
+        beta_slow=1.0,
+        original_seq_len=original_seq_len,
+    )
+
+    layers = _build_v4_layers(
+        n_layers=n_layers,
+        dim=dim,
+        n_heads=n_heads,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        q_lora_rank=q_lora_rank,
+        o_lora_rank=o_lora_rank,
+        n_groups=n_groups,
+        compress_ratios=compress_ratios,
+        window_size=window_size,
+        norm_eps=norm_eps,
+        index_n_heads=index_n_heads,
+        index_head_dim=index_head_dim,
+        index_topk=index_topk,
+        moe_inter_dim=moe_inter_dim,
+        num_experts=num_experts,
+        num_shared_experts=num_shared_experts,
+        top_k=top_k,
+        vocab_size=vocab_size,
+        n_hash_layers=n_hash_layers,
+        route_norm=route_norm,
+        route_scale=route_scale,
+        load_balance_coeff=load_balance_coeff,
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
+        rope=rope,
+        rope_compress=rope_compress,
+        hc_mult=hc_mult,
+        sinkhorn_iters=sinkhorn_iters,
+        hc_eps=hc_eps,
+        dense_layers=dense_layers,
+        enable_indexer_loss=enable_indexer_loss,
+    )
+
+    return DeepSeekV4Model.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        norm_eps=norm_eps,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=layers,
+        hc_mult=hc_mult,
+        compress_ratios=compress_ratios,
+        n_layers=n_layers,
+    )
+
+
+def _deepseek_v4_pro(
+    moe_comm_backend: str = "standard",
+    non_blocking_capacity_factor: float | None = None,
+    enable_indexer_loss: bool = True,
+) -> DeepSeekV4Model.Config:
+    dim = 7168
+    n_layers = 61
+    vocab_size = 129280
+    n_heads = 128
+    head_dim = 512
+    rope_head_dim = 64
+    q_lora_rank = 1536
+    o_lora_rank = 1024
+    n_groups = 16
+    compress_ratios = (128,) + (128, 4) * 30
+    window_size = 128
+    norm_eps = 1e-6
+    index_n_heads = 64
+    index_head_dim = 128
+    index_topk = 1024
+    moe_inter_dim = 3072
+    num_experts = 384
+    num_shared_experts = 1
+    top_k = 6
+    n_hash_layers = 3
+    route_norm = True
+    route_scale = 1.5
+    load_balance_coeff = 1e-3
+    hc_mult = 4
+    sinkhorn_iters = 20
+    hc_eps = 1e-6
+    dense_layers = set()
+    max_seq_len = 4096
+    compress_rope_theta = 160000.0
+    original_seq_len = 65536
+
+    rope = ComplexRoPE.Config(
+        dim=rope_head_dim,
+        max_seq_len=max_seq_len,
+        theta=10000.0,
+        scaling="none",
+    )
+    rope_compress = ComplexRoPE.Config(
+        dim=rope_head_dim,
+        max_seq_len=max_seq_len,
+        theta=compress_rope_theta,
+        scaling="yarn",
+        rope_factor=16.0,
+        beta_fast=32.0,
+        beta_slow=1.0,
+        original_seq_len=original_seq_len,
+    )
+
+    layers = _build_v4_layers(
+        n_layers=n_layers,
+        dim=dim,
+        n_heads=n_heads,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        q_lora_rank=q_lora_rank,
+        o_lora_rank=o_lora_rank,
+        n_groups=n_groups,
+        compress_ratios=compress_ratios,
+        window_size=window_size,
+        norm_eps=norm_eps,
+        index_n_heads=index_n_heads,
+        index_head_dim=index_head_dim,
+        index_topk=index_topk,
+        moe_inter_dim=moe_inter_dim,
+        num_experts=num_experts,
+        num_shared_experts=num_shared_experts,
+        top_k=top_k,
+        vocab_size=vocab_size,
+        n_hash_layers=n_hash_layers,
+        route_norm=route_norm,
+        route_scale=route_scale,
+        load_balance_coeff=load_balance_coeff,
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
+        rope=rope,
+        rope_compress=rope_compress,
+        hc_mult=hc_mult,
+        sinkhorn_iters=sinkhorn_iters,
+        hc_eps=hc_eps,
+        dense_layers=dense_layers,
+        enable_indexer_loss=enable_indexer_loss,
+    )
+
+    return DeepSeekV4Model.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        norm_eps=norm_eps,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=layers,
+        hc_mult=hc_mult,
+        compress_ratios=compress_ratios,
+        n_layers=n_layers,
+    )
+
+
 deepseek_v4_configs = {
     "debugmodel": _debugmodel,
+    "deepseek_v4_flash": _deepseek_v4_flash,
+    "deepseek_v4_pro": _deepseek_v4_pro,
 }
 
 
