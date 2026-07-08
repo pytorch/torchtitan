@@ -114,7 +114,10 @@ jobs:
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"
 
-        # RL Loss Guard: deterministic loss regression check
+        # RL Loss Guard: deterministic loss regression check. The debug config
+        # sets drop_zero_std_reward_groups=False and uses a random-init model, so
+        # every reward group is zero-std -> zero advantage -> loss is exactly 0.0
+        # (the golden rl_grpo_cuda.txt is all zeros, arch-independent).
         LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
         python torchtitan/experiments/rl/scripts/loss_compare.py \
           --hf-assets-path tests/assets/tokenizer \
