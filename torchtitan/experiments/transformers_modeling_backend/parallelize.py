@@ -167,13 +167,6 @@ def parallelize_hf_transformers(
         set_hf_sharding_configs(
             model,
             enable_sp=parallel_dims.tp_enabled,
-            # Loss parallelism shards the lm_head output on the vocab dim (S(-1)).
-            # Main removed the ParallelismConfig.disable_loss_parallel field and
-            # the loss_parallel() train-context; core cross_entropy_loss now
-            # detects a vocab-sharded DTensor pred and runs vocab-parallel CE
-            # directly. Enable it exactly when TP is active (matches core TP
-            # models, which shard the lm_head output S(-1) under TP).
-            enable_loss_parallel=parallel_dims.tp_enabled,
         )
 
         # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across

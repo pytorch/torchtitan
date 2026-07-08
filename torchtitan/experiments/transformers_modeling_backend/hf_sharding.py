@@ -68,7 +68,6 @@ def set_hf_sharding_configs(
     model: nn.Module,
     *,
     enable_sp: bool,
-    enable_loss_parallel: bool,
 ) -> None:
     """Set ``_sharding_config`` on all HF modules for TP/EP parallelization.
 
@@ -79,10 +78,7 @@ def set_hf_sharding_configs(
     Args:
         model: The HFTransformerModel with Module-converted children.
         enable_sp: Whether sequence parallelism is enabled (TP > 1).
-        enable_loss_parallel: Whether to shard lm_head output for loss parallel.
     """
-    loss_tp: spmd.PerMeshAxisSpmdType = spmd.S(-1) if enable_loss_parallel else spmd.R
-
     # Root-level modules — nn.Identity modules are skipped (no params).
     if model.tok_embeddings is not None and not isinstance(
         model.tok_embeddings, nn.Identity
@@ -112,7 +108,12 @@ def set_hf_sharding_configs(
             in_dst_shardings={
                 "input": dense_activation_placement(tp=spmd.R),
             },
-            out_dst_shardings=dense_activation_placement(tp=loss_tp),
+            # Vocab-shard the lm_head output S(-1) unconditionally, mirroring
+            # core's set_decoder_sharding_config. The S(-1) TP placement is a
+            # no-op when TP is absent from the runtime mesh, so no flag is
+            # needed: core cross_entropy_loss detects the vocab-sharded pred
+            # (spmd_types: tp mesh size > 1) and runs vocab-parallel CE.
+            out_dst_shardings=dense_activation_placement(tp=spmd.S(-1)),
         )
 
     # Rotary embedding — distribute buffers (inv_freq) and wrap inputs
