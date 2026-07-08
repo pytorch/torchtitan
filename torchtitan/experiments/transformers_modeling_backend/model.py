@@ -757,9 +757,24 @@ class HFTransformerModel(BaseModel):
                     init_std = 0.02 / (2 * config.num_hidden_layers) ** 0.5
 
             if isinstance(module, attention_cls):
-                # Initialize weights and biases for q, k, v projections
-                # (some models use q_a_proj/q_b_proj instead of q_proj)
-                for proj_name in ["q_proj", "k_proj", "v_proj"]:
+                # Initialize weights and biases for q, k, v projections with
+                # std=0.02, matching native models. Besides full-rank q/k/v,
+                # cover the MLA low-rank projections (DeepSeek V2/V3, GLM):
+                # q_a_proj/q_b_proj (low-rank Q) and kv_a_proj_with_mqa/kv_b_proj
+                # (low-rank KV). Native deepseek_v3 inits all of wq_a/wq_b/wkv_a/
+                # wkv_b at std=0.02 too; only the output proj is depth-scaled.
+                # The MLA RMSNorms (q_a_layernorm/kv_a_layernorm) are handled by
+                # the norm branch below. Missing these left them at their
+                # construction-time values (not reset by init).
+                for proj_name in [
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "q_a_proj",
+                    "q_b_proj",
+                    "kv_a_proj_with_mqa",
+                    "kv_b_proj",
+                ]:
                     proj = getattr(module, proj_name, None)
                     if proj is None:
                         continue
