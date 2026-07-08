@@ -6308,7 +6308,48 @@ class TestSelectiveActivationRematPass(TestCase):
             self.assertEqual(inp.name, e_name + "_recomputed")
         self.assertNotIn(e_name, [n.name for n in nodes])
 
-    def test_multiple_backward_regions_recompute_errors(self):
+    def test_loss_region_excluded_from_remat(self):
+        # Two disjoint backward regions, each consuming a must_recompute forward
+        # node: one is a chunked-loss region (module_fqn 'loss') and one is a
+        # model-layer AC region (module_fqn 'layers.0.*'). Only the model-layer
+        # region drives remat; the loss region is left untouched (no error).
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        a = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        b = graph.call_function(torch.ops.aten.clone.default, args=(inp2,))
+        bwd_loss = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
+        sep = graph.call_function(torch.ops.aten.neg.default, args=(inp1,))
+        bwd_layer = graph.call_function(torch.ops.aten.mul.Tensor, args=(b, b))
+        graph.output((bwd_loss, sep, bwd_layer))
+        for node in (a, b):
+            node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        bwd_loss.meta["autograd_backward"] = True
+        bwd_loss.meta["custom"] = {"module_fqn": "loss"}
+        bwd_layer.meta["autograd_backward"] = True
+        bwd_layer.meta["custom"] = {"module_fqn": "layers.0.attention"}
+        a_name, b_name = a.name, b.name
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+        node_names = [n.name for n in nodes]
+        dups = {n.name for n in nodes if n.name.endswith("_recomputed")}
+        # Only the model-layer region's input is rematerialized.
+        self.assertEqual(dups, {b_name + "_recomputed"})
+        for inp in bwd_layer.all_input_nodes:
+            self.assertEqual(inp.name, b_name + "_recomputed")
+        self.assertNotIn(b_name, node_names)
+        # The loss region is untouched: its recompute input stays and is still
+        # read directly (not remat'd, not erased).
+        self.assertIn(a_name, node_names)
+        for inp in bwd_loss.all_input_nodes:
+            self.assertEqual(inp.name, a_name)
+
+    def test_multiple_model_layer_regions_recompute_errors(self):
+        # Two disjoint *model-layer* backward regions that both need remat is
+        # still unsupported and must error (remat handles a single such region).
         graph = torch.fx.Graph()
         inp1 = graph.placeholder("inp1")
         inp2 = graph.placeholder("inp2")
@@ -6320,8 +6361,10 @@ class TestSelectiveActivationRematPass(TestCase):
         graph.output((bwd1, sep, bwd2))
         for node in (a, b):
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
-        for node in (bwd1, bwd2):
-            node.meta["autograd_backward"] = True
+        bwd1.meta["autograd_backward"] = True
+        bwd1.meta["custom"] = {"module_fqn": "layers.0.attention"}
+        bwd2.meta["autograd_backward"] = True
+        bwd2.meta["custom"] = {"module_fqn": "layers.1.attention"}
 
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
         with self.assertRaisesRegex(RuntimeError, "disjoint backward regions"):

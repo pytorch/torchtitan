@@ -327,6 +327,10 @@ class BaseLoss(ABC, Configurable):
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
+                    )
         return loss, {}
 
 
@@ -354,6 +358,10 @@ class CrossEntropyLoss(BaseLoss):
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
+                    )
         return loss, {}
 
 
@@ -737,9 +745,6 @@ class ChunkedLossWrapper(BaseLoss):
                     logits, label_chunk, global_valid_tokens, **chunk_inputs
                 )
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
-                if get_spmd_backend() == "spmd_types":
-                    # V -> P reinterpret, after exiting local region.
-                    spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
                 total_loss = total_loss + chunk_loss.detach()
 
                 if requires_grad:

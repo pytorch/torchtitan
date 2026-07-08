@@ -23,14 +23,14 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from torch._library.opaque_object import OpaqueBase, register_opaque_type
+from torch._library.opaque_object import CustomClassBase, register_opaque_type
 
 from torchtitan.tools.logging import logger
 
 _buffer: Any = None  # Global buffer instance
 
 
-class DispatchHandle(OpaqueBase):
+class DispatchHandle(CustomClassBase):
     """Opaque wrapper for HybridEP dispatch handle.
 
     Wraps the deep_ep dispatch handle as an opaque type so it can be returned
