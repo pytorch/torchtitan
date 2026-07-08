@@ -60,3 +60,85 @@ def deepseek_v4_debugmodel() -> Trainer.Config:
             interval=100,
         ),
     )
+
+
+def deepseek_v4_flash() -> Trainer.Config:
+    model_spec = model_registry("deepseek_v4_flash")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        profiler=Profiler.Config(
+            enable_profiling=False,
+            profile_freq=10,
+            profiler_active=10,
+            profiler_warmup=0,
+        ),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_spec,
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=default_adamw(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=1,
+            seq_len=4096,
+            steps=10,
+        ),
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=1,
+        ),
+        activation_checkpoint=None,
+        compile=CompileConfig(enable=False),
+        checkpoint=CheckpointManager.Config(
+            enable=False,
+            interval=100,
+        ),
+    )
+
+
+def deepseek_v4_pro() -> Trainer.Config:
+    model_spec = model_registry("deepseek_v4_pro")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        profiler=Profiler.Config(
+            enable_profiling=False,
+            profile_freq=10,
+            profiler_active=10,
+            profiler_warmup=0,
+        ),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_spec,
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=default_adamw(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=1,
+            seq_len=4096,
+            steps=10,
+        ),
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=1,
+        ),
+        activation_checkpoint=None,
+        compile=CompileConfig(enable=False),
+        checkpoint=CheckpointManager.Config(
+            enable=False,
+            interval=100,
+        ),
+    )
