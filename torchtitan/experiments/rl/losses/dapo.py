@@ -78,7 +78,9 @@ class DAPOLoss(BaseLoss):
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
-        trainer_logprobs = compute_logprobs(logits, labels)
+        trainer_logprobs, token_entropy = compute_logprobs(
+            logits, labels, return_entropy=True
+        )
         # A non-finite generator logprob (notably under cudagraph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner
         # than nan->0, which trains it as if it were on-policy). `response_mask` keeps
@@ -123,6 +125,8 @@ class DAPOLoss(BaseLoss):
                     (~torch.isfinite(generator_logprobs)).float() * response_mask
                 ).sum()
                 / loss_denominator,
+                # Mean per-token log-ratio (log p_trainer - log q_generator) over
+                # sampled tokens. This is the k1 Monte-Carlo estimate of -KL(q || p).
                 "bit_wise/logprob_diff/mean": diff_for_metrics.float().sum()
                 / loss_denominator,
                 "bit_wise/ratio_tokens_different/mean": (
@@ -130,6 +134,9 @@ class DAPOLoss(BaseLoss):
                 ).sum()
                 / loss_denominator,
                 "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
+                # Mean trainer-policy entropy H(p) over response tokens.
+                "trainer/entropy/mean": (token_entropy * response_mask).sum()
+                / loss_denominator,
             }
 
         return loss, metrics

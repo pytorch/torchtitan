@@ -612,6 +612,13 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     def test_moe_dsv3_ep_overlap_moe_batch_aot_fx_trace_vs_eager_chunked(self):
         self.assertTrue(_run_deepseek_v3_ep_overlap_moe_batch_loss_compare())
 
+    @unittest.skip(
+        # Flaky on H100 CI: the DSv3 MoE EP all-to-all is not bitwise
+        # deterministic under --debug.deterministic (ALLTOALL_BASE reduction
+        # order varies across NCCL/driver), so the aot_fx_trace vs eager loss
+        # compare diverges by ~2e-5. Passes bitwise locally. See #3874.
+        "flaky: DSv3 MoE EP all-to-all nondeterminism under --debug.deterministic (#3874)"
+    )
     def test_graph_pp_moe_dsv3_aot_fx_trace_vs_eager(self):
         for schedule in ("Interleaved1F1B", "ZBVZeroBubble", "DualPipeV"):
             with self.subTest(schedule=schedule):

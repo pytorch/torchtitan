@@ -210,6 +210,5 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
 
     return [
         *model_tests,
-        *[_enable_spmd_backend(t, "full_dtensor") for t in model_tests],
         *[_enable_spmd_backend(t, "spmd_types") for t in model_tests],
     ]

@@ -327,6 +327,10 @@ class BaseLoss(ABC, Configurable):
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
+                    )
         return loss, {}
 
 
@@ -354,6 +358,10 @@ class CrossEntropyLoss(BaseLoss):
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
+                    )
         return loss, {}
 
 
@@ -372,12 +380,24 @@ class MSELoss(BaseLoss):
 def compute_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
-) -> torch.Tensor:
-    """Compute per-position logprobs from logits and labels.
+    *,
+    return_entropy: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Per-position logprobs from logits and labels, optionally with entropy.
 
     Output shape matches input: ``[batch, seq_len]``. Any DTensor placement
     handling is centralized here so RL losses that call ``compute_logprobs`` do
     not need to duplicate the vocab-gather logic.
+
+    When ``return_entropy`` is set, also returns per-token Shannon entropy
+    ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, shape
+    ``[batch, seq_len]``. Both share the single vocab gather + fp32 upcast.
+    Entropy is a metric only, so it is computed under ``no_grad``: it never
+    contributes gradient and must not build an autograd graph over the [B, L, V]
+    softmax.
+
+    Returns ``logprobs`` when ``return_entropy`` is False, else
+    ``(logprobs, entropy)``.
     """
     if isinstance(logits, DTensor):
         # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
@@ -406,13 +426,22 @@ def compute_logprobs(
             dst=spmd.I,
         )
 
+    # Single bf16->fp32 upcast, reused by both logprobs and (optionally) entropy.
+    logits = logits.float()
     B, L, V = logits.shape
-    return -F.cross_entropy(
-        logits.float().reshape(B * L, V),
+    logprobs = -F.cross_entropy(
+        logits.reshape(B * L, V),
         labels.reshape(B * L),
         reduction="none",
         ignore_index=IGNORE_INDEX,
     ).reshape(B, L)
+    if not return_entropy:
+        return logprobs
+    with torch.no_grad():
+        entropy = torch.logsumexp(logits, dim=-1) - (
+            torch.softmax(logits, dim=-1) * logits
+        ).sum(dim=-1)
+    return logprobs, entropy
 
 
 class GradAccumulator:
@@ -716,9 +745,6 @@ class ChunkedLossWrapper(BaseLoss):
                     logits, label_chunk, global_valid_tokens, **chunk_inputs
                 )
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
-                if get_spmd_backend() == "spmd_types":
-                    # V -> P reinterpret, after exiting local region.
-                    spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
                 total_loss = total_loss + chunk_loss.detach()
 
                 if requires_grad:
