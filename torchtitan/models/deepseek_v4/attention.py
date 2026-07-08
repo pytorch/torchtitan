@@ -5,12 +5,13 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.distributed.aux_loss import inject_aux_loss
-from torchtitan.distributed.utils import dist_max, dist_mean
+from torchtitan.distributed.utils import dist_max, dist_mean, get_spmd_backend
 from torchtitan.models.common.attention import (
     BaseAttention,
     create_attention_mask,
@@ -21,6 +22,14 @@ from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 
 from .compressor import Compressor, Indexer
+
+
+def _assert_spmd_attention_type(tensor, *, tp):
+    if get_spmd_backend() == "spmd_types":
+        spmd.assert_type(
+            tensor,
+            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": tp},
+        )
 
 
 class DSAIndexerAuxLoss(Module):
@@ -439,17 +448,24 @@ class Attention(BaseAttention):
         rd = self.rope_head_dim
 
         qr = self.q_norm(self.wq_a(x))
-        q = self.wq_b(qr).unflatten(-1, (self.n_heads, self.head_dim))
+        _assert_spmd_attention_type(qr, tp=spmd.R)
+        q = self.wq_b(qr)
+        with spmd.local():
+            q = q.view(bsz, seqlen, -1, self.head_dim)
+            _assert_spmd_attention_type(q, tp=spmd.S(2))
         q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
 
         kv = self.wkv(x)
         kv = self.kv_norm(kv)
+        _assert_spmd_attention_type(kv, tp=spmd.R)
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
 
         q_rope, kv_rope = self.rope(q_rope, kv_rope.unsqueeze(2), positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
+        _assert_spmd_attention_type(q, tp=spmd.S(2))
+        _assert_spmd_attention_type(kv, tp=spmd.R)
 
         kv_compress = compress_topk_idxs = index_score = None
 
@@ -477,10 +493,12 @@ class Attention(BaseAttention):
         attn_sink_param = self.attn_sink.weight.squeeze(-1)
         if kv_compress is None:
             kv_compress = kv.new_empty((bsz, 0, self.head_dim))
+            _assert_spmd_attention_type(kv_compress, tp=spmd.R)
         if compress_topk_idxs is None:
             compress_topk_idxs = torch.empty(
                 (bsz, seqlen, 0), dtype=torch.int64, device=x.device
             )
+            _assert_spmd_attention_type(compress_topk_idxs, tp=spmd.R)
         attn_out = self.inner_attention(
             q, kv, attn_sink_param, kv_compress, compress_topk_idxs,
         )
@@ -506,11 +524,17 @@ class Attention(BaseAttention):
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
         o_rope = self.rope(o_rope, o_rope, positions)[0]
         o = torch.cat([o_nope, o_rope], dim=-1)
+        _assert_spmd_attention_type(o, tp=spmd.S(2))
 
-        n_local_groups = self.n_groups // (self.n_heads // o.shape[2])
-        o = o.view(bsz, seqlen, n_local_groups, -1)
-        # wo_a is a Linear module; access its weight directly for the grouped
-        # einsum (not a standard Linear forward).
-        wo_a = self.wo_a.weight.view(n_local_groups, self.o_lora_rank, -1)
+        with spmd.local():
+            n_local_groups = self.n_groups // (self.n_heads // o.shape[2])
+            o = o.view(bsz, seqlen, n_local_groups, -1)
+            _assert_spmd_attention_type(o, tp=spmd.S(2))
+            # wo_a is a Linear module; access its weight directly for the grouped
+            # einsum (not a standard Linear forward).
+            wo_a = self.wo_a.weight.view(n_local_groups, self.o_lora_rank, -1)
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        return self.wo_b(o.reshape(bsz, seqlen, -1))
+        with spmd.local():
+            o = o.reshape(bsz, seqlen, -1)
+            _assert_spmd_attention_type(o, tp=spmd.S(2))
+        return self.wo_b(o)

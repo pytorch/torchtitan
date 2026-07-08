@@ -7,13 +7,23 @@ import math
 from dataclasses import dataclass
 from functools import partial
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
+
+
+def _assert_spmd_replicated_activation(tensor):
+    if get_spmd_backend() == "spmd_types":
+        spmd.assert_type(
+            tensor,
+            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},
+        )
 
 
 def _make_hadamard_mat(n: int, device: torch.device | str | None = None) -> torch.Tensor:
@@ -96,6 +106,7 @@ class Compressor(Module):
             kv_rope.unsqueeze(2), kv_rope.unsqueeze(2), comp_positions
         )[0]
         kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
+        _assert_spmd_replicated_activation(kv)
         return kv
 
 
@@ -166,10 +177,13 @@ class Indexer(Module):
         bsz, seqlen, _ = x.size()
         rd = self.rope_head_dim
         q = self.wq_b(qr)
-        q = q.view(bsz, seqlen, self.num_index_heads, self.head_dim)
+        with spmd.local():
+            q = q.view(bsz, seqlen, self.num_index_heads, self.head_dim)
+            _assert_spmd_replicated_activation(q)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
         q_rope = self.rope(q_rope, q_rope, positions)[0]
         q = torch.cat([q_nope, q_rope], dim=-1)
+        _assert_spmd_replicated_activation(q)
         hadamard_mat = self.hadamard_mat.to(device=q.device, dtype=q.dtype)
         q = self._rotate_activation(q, hadamard_mat)
         k = self.compressor(x, positions=positions)
@@ -187,4 +201,6 @@ class Indexer(Module):
         )
         mask = topk_idxs >= compress_causal_limit
         compress_topk_idxs = torch.where(mask, -1, topk_idxs + offset)
+        _assert_spmd_replicated_activation(compress_topk_idxs)
+        _assert_spmd_replicated_activation(index_score)
         return compress_topk_idxs, index_score

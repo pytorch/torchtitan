@@ -27,6 +27,7 @@ _attn_sink_placement = dense_param_placement(tp=spmd.S(0))
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
+_replicated_layout = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.R})
 
 
 if TYPE_CHECKING:
@@ -129,7 +130,7 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.R)
+        else dense_activation_placement(tp=spmd.I)
     )
 
     at.sharding_config = ShardingConfig(
@@ -148,10 +149,10 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
     # Sub-module configs are declared as fields on Attention.Config, so we
     # can set sharding_config directly (same pattern as deepseek_v3).
     at.wq_a.sharding_config = _replicate_weight
-    at.q_norm.sharding_config = norm_config(enable_sp=False)
+    at.q_norm.sharding_config = _replicate_weight
     at.wq_b.sharding_config = colwise_config()
     at.wkv.sharding_config = _replicate_weight
-    at.kv_norm.sharding_config = norm_config(enable_sp=False)
+    at.kv_norm.sharding_config = _replicate_weight
     # wo_a is a Linear holding a grouped LoRA-A weight used via einsum (not a
     # standard matmul). Colwise sharding distributes the weight along dim-0.
     at.wo_a.sharding_config = colwise_config()
@@ -182,7 +183,7 @@ def set_compressor_sharding(compressor_cfg):
     )
     compressor_cfg.wkv.sharding_config = _replicate_weight
     compressor_cfg.wgate.sharding_config = _replicate_weight
-    compressor_cfg.norm.sharding_config = norm_config(enable_sp=False)
+    compressor_cfg.norm.sharding_config = _replicate_weight
     compressor_cfg.ape.sharding_config = _replicate_weight
 
 
@@ -191,12 +192,16 @@ def set_indexer_sharding(indexer_cfg):
     indexer_cfg.sharding_config = ShardingConfig(
         state_shardings={"hadamard_mat": _dense_param_rep},
         in_src_shardings={
-            "compress_causal_mask": replicated_activation,
-            "compress_causal_limit": replicated_activation,
+            "x": replicated_activation,
+            "qr": replicated_activation,
+            "compress_causal_mask": _replicated_layout,
+            "compress_causal_limit": _replicated_layout,
         },
         in_dst_shardings={
-            "compress_causal_mask": replicated_activation,
-            "compress_causal_limit": replicated_activation,
+            "x": replicated_activation,
+            "qr": replicated_activation,
+            "compress_causal_mask": _replicated_layout,
+            "compress_causal_limit": _replicated_layout,
         },
     )
     indexer_cfg.rope.sharding_config = ShardingConfig(
@@ -235,7 +240,7 @@ def set_deepseek_v4_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.R)
+        else dense_activation_placement(tp=spmd.I)
     )
 
     set_deepseek_v4_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
