@@ -118,7 +118,7 @@ jobs:
         LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
         python torchtitan/experiments/rl/scripts/loss_compare.py \
           --hf-assets-path tests/assets/tokenizer \
-          --dump-folder "$RUNNER_TEMP/rl_loss_guard" \
+          --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
           --config rl_grpo_qwen3_debug_varlen_batch_invariant \
           --import-result "$LOSS_FILE" \
           --assert-equal
