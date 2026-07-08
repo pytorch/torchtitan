@@ -270,6 +270,39 @@ class TestHelionRoPEKernel(unittest.TestCase):
         xq, xk, positions = self._inputs()
         torch.library.opcheck(_helion_rope_fwd, (xq, xk, self.helion.cache, positions))
 
+    def test_backward_custom_op_opcheck_with_noncontiguous_grads(self):
+        from torchtitan.overrides.helion_rope import _helion_rope_bwd
+
+        grad_xq_out = torch.randn(
+            self.seqlen,
+            2,
+            8,
+            self.dim,
+            device=self.device,
+            dtype=torch.bfloat16,
+        ).transpose(0, 1)
+        grad_xk_out = torch.randn(
+            self.seqlen,
+            2,
+            1,
+            self.dim,
+            device=self.device,
+            dtype=torch.bfloat16,
+        ).transpose(0, 1)
+        positions = (
+            torch.arange(self.seqlen, device=self.device, dtype=torch.int32)
+            .unsqueeze(0)
+            .expand(2, -1)
+            .contiguous()
+        )
+
+        self.assertFalse(grad_xq_out.is_contiguous())
+        self.assertFalse(grad_xk_out.is_contiguous())
+        torch.library.opcheck(
+            _helion_rope_bwd,
+            (grad_xq_out, grad_xk_out, self.helion.cache, positions),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
