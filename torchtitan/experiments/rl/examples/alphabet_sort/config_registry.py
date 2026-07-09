@@ -652,6 +652,48 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     return config
 
 
+def rl_grpo_qwen3_moe_debug_hybridep() -> Controller.Config:
+    """Debug MoE config on the HybridEP backend with a cudagraph-capturable generator
+    (8 GPUs: 4 gen + 4 train).
+
+    Same EP/TP/DP layout as ``rl_grpo_qwen3_moe_debug_varlen``, but the MoE uses the
+    HybridEP comm backend. The trainer and generator share one ``model_spec`` yet need
+    opposite HybridEP dispatch modes:
+
+    - Trainer: runs eagerly and backprops, so it needs the blocking, dropless path
+      (capacity factor ``None``). That is the shared model_spec's default, so the
+      trainer needs no override.
+    - Generator: captures a CUDA graph, so it needs the static, host-sync-free
+      non-blocking path (a float capacity factor). The generator-only ``hybridep_override``
+      sets it via a per-entry ``capacity_factor`` kwarg, so the two actors
+      diverge from one shared spec without a hardcoded per-actor branch. (This mirrors
+      how the ``deepep`` recipe above flips only the generator's dispatch via
+      ``deepep_inference``.)
+
+    ``capacity_factor`` in (0, 1] tunes the non-blocking sizing: 1.0 is worst-case /
+    dropless; lower saves memory but may drop tokens.
+    """
+    config = rl_grpo_qwen3_moe_debug_varlen()
+    config.model_spec = model_registry(
+        "debugmodel_moe", attn_backend="varlen", moe_comm_backend="hybridep"
+    )
+    # Generator-only: switch HybridEP dispatch to the non-blocking, cudagraph-safe path
+    # by passing a float capacity_factor as a kwarg to the shared override module. The
+    # trainer keeps the shared spec's default (None -> blocking, dropless, backward-able).
+    config.generator.override = OverrideConfig(
+        imports=[
+            (
+                "torchtitan.distributed.deepep.hybridep_override",
+                {"capacity_factor": 0.0325},
+            )
+        ]
+    )
+    config.generator.cudagraph = VLLMCudagraphConfig(
+        enable=True, mode="FULL_AND_PIECEWISE"
+    )
+    return config
+
+
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 

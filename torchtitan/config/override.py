@@ -32,9 +32,10 @@ See ``torchtitan/overrides/README.md`` for the full design document.
 from __future__ import annotations
 
 import importlib
+import json
 from dataclasses import dataclass, field, fields, is_dataclass
 from fnmatch import fnmatch
-from typing import cast, TYPE_CHECKING, TypeVar
+from typing import Any, cast, TYPE_CHECKING, TypeVar
 
 from torchtitan.tools.logging import logger
 
@@ -46,36 +47,97 @@ if TYPE_CHECKING:
 # Precise return type for ``derive``: the constructed ``target_config`` class.
 _ConfigT = TypeVar("_ConfigT", bound="Configurable.Config")
 
+# One ``override.imports`` entry: a bare module path, or a ``(module_path,
+# kwargs)`` tuple whose ``kwargs`` are forwarded to that module's override
+# factories. Kept as a runtime object (not just an annotation) so the CLI parser
+# can register a tyro rule keyed on ``list[OverrideImport]``.
+OverrideImport = str | tuple[str, dict[str, Any]]
+
 
 @dataclass(kw_only=True, slots=True)
 class OverrideConfig:
-    imports: list[str] = field(default_factory=list)
+    imports: list[OverrideImport] = field(default_factory=list)
     """
-    Python module paths to import for override registration.
+    Modules to import for override registration, each optionally carrying kwargs.
+
+    An entry is either:
+
+    - a module path string, e.g. ``"torchtitan.overrides.fused_swiglu"``; or
+    - a ``(module_path, kwargs)`` tuple, e.g.
+      ``("my_pkg.triton_rope", {"block_size": 256})``. The ``kwargs`` are passed
+      to every override factory registered by that module when it is applied, so
+      two config trees can share one override module yet configure it
+      differently (e.g. the RL trainer and generator activate one HybridEP
+      dispatch module with opposite capacity factors).
 
     Each module is imported once at startup, triggering any ``@override``
     decorators it defines. Only overrides registered by these modules (or their
-    submodules) are applied — not the entire global registry.
+    submodules) are applied -- not the entire global registry.
 
-    Example: ``["torchtitan.overrides.fused_swiglu", "vendor_x.kernels"]``
+    On the CLI, ``--override.imports`` takes space- or comma-separated module
+    paths; attach kwargs to a module with ``module=<json-object>`` (see
+    :func:`parse_cli_imports`), e.g.
+    ``--override.imports 'my_pkg.triton_rope={"block_size": 256}'``.
 
     See ``torchtitan/overrides/README.md`` for details.
     """
+
+
+def parse_cli_imports(tokens: list[str]) -> list[OverrideImport]:
+    """Parse ``--override.imports`` CLI tokens into ``imports`` entries.
+
+    Each token is one of:
+
+    - ``module=<json-object>`` -- a module path whose kwargs follow the name
+      directly (one token), e.g. ``my_pkg.triton_rope={"block_size": 256}``; or
+    - a plain module path, or a comma-separated group of them (``a.b,c.d``),
+      for entries without kwargs.
+
+    So ``["fused_swiglu", 'my_pkg.triton_rope={"block_size": 256}']`` parses to
+    ``["fused_swiglu", ("my_pkg.triton_rope", {"block_size": 256})]``. A token
+    with kwargs must be a single shell token, so quote it.
+    """
+    entries: list[OverrideImport] = []
+    for token in tokens:
+        module, sep, raw_kwargs = token.partition("=")
+        if sep:
+            # module=<json>: kwargs attached directly to this module. A module
+            # path never contains '=', so the first '=' is always the separator
+            # and any '=' inside the JSON is preserved.
+            kwargs = json.loads(raw_kwargs)
+            if not isinstance(kwargs, dict):
+                raise ValueError(
+                    f"override.imports kwargs for '{module}' must be a JSON "
+                    f"object, got {raw_kwargs!r}."
+                )
+            entries.append((module, kwargs))
+        else:
+            entries.extend(part for part in token.split(",") if part)
+    return entries
+
+
+def format_cli_imports(entries: list[OverrideImport]) -> list[str]:
+    """Serialize ``imports`` entries back to CLI tokens (inverse of the parse)."""
+    return [
+        entry if isinstance(entry, str) else f"{entry[0]}={json.dumps(entry[1])}"
+        for entry in entries
+    ]
 
 
 @dataclass
 class Override:
     """A single registered override.
 
-    ``factory`` constructs the replacement config from the matched config.
-    ``fqns`` selects which matched nodes the override claims (see
-    :func:`override`). ``exact`` restricts the match to exactly ``target_cls``
-    rather than subclasses.
+    ``factory`` constructs the replacement config from the matched config, plus
+    any keyword arguments supplied by the ``override.imports`` entry that
+    activated this override. ``fqns`` selects which matched nodes the override
+    claims (see :func:`override`). ``exact`` restricts the match to exactly
+    ``target_cls`` rather than subclasses.
     """
 
     name: str
     target_cls: type[Configurable.Config]
-    factory: Callable[[Configurable.Config], Configurable.Config]
+    factory: Callable[..., Configurable.Config]
     fqns: list[str] | None
     description: str
     origin_module: str
@@ -120,7 +182,12 @@ def override(
             ``target``. The default ``False`` preserves subclass matching, useful
             when a replacement is valid for the full target contract.
 
-    The decorated function takes the matched config and returns its replacement.
+    The decorated function takes the matched config as its first positional
+    argument and returns its replacement. It may also declare keyword parameters
+    (or ``**kwargs``); those are filled from the ``(module_path, kwargs)`` entry
+    that activated the override, letting one override module be configured per
+    actor (e.g. trainer vs. generator). A kwarg the factory does not accept
+    raises ``TypeError`` at apply time (normal Python argument binding).
 
     Example — fuse MoE only on the later layers::
 
@@ -226,36 +293,67 @@ def derive(
     return cast(_ConfigT, target_cls(**kwargs))
 
 
-def _resolve_active(imports: list[str]) -> list[Override]:
-    """Return overrides registered by the listed import modules (or submodules).
+def _resolve_active(
+    entries: list[tuple[str, dict[str, Any]]]
+) -> list[tuple[Override, dict[str, Any]]]:
+    """Pair each active override with the kwargs of the entry that activated it.
 
     Provenance is the module where the factory is defined (``fn.__module__``),
     matched against each listed import by exact name or submodule prefix. This
     keeps application strictly limited to the user's ``override.imports`` even
     when other code paths have registered overrides into the global table.
+
+    When several listed modules are prefixes of one override's origin (e.g.
+    ``"pkg"`` and ``"pkg.sub"``), the most specific (longest) one supplies its
+    kwargs. An entry that carries kwargs but activates no override is a mistake
+    (wrong module path, or its kwargs were shadowed by a more specific entry),
+    so it raises rather than silently dropping the kwargs.
     """
-    prefixes = tuple(imports)
-    active = []
+    resolved: list[tuple[Override, dict[str, Any]]] = []
+    used = [False] * len(entries)
     for ov in _REGISTRY.values():
         origin = ov.origin_module
-        if any(origin == p or origin.startswith(p + ".") for p in prefixes):
-            active.append(ov)
-    return active
+        candidates = [
+            i
+            for i, (mod, _) in enumerate(entries)
+            if origin == mod or origin.startswith(mod + ".")
+        ]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda i: len(entries[i][0]))
+        used[best] = True
+        resolved.append((ov, entries[best][1]))
+
+    for i, (mod, kwargs) in enumerate(entries):
+        if kwargs and not used[i]:
+            raise ValueError(
+                f"override.imports entry '{mod}' passed kwargs {sorted(kwargs)} "
+                "but activated no override. Check the module path and that it "
+                "registers an @override (and is not shadowed by a more specific "
+                "listed module)."
+            )
+    return resolved
 
 
 @dataclass
 class _Claim:
-    """One (override, matched node) pair, collected before any mutation."""
+    """One (override, matched node) pair, collected before any mutation.
+
+    ``kwargs`` are the values from the ``override.imports`` entry that activated
+    the override, forwarded to its factory when the claim is applied.
+    """
 
     ov: Override
     fqn: str
     cfg: Configurable.Config
     parent: object | None
     attr: str | int | None
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 def _collect_claims(
-    active: list[Override], config_root: Configurable.Config
+    resolved: list[tuple[Override, dict[str, Any]]],
+    config_root: Configurable.Config,
 ) -> list[_Claim]:
     """Traverse the original tree and gather every node each override claims.
 
@@ -263,12 +361,21 @@ def _collect_claims(
     are never re-traversed, so one override cannot affect another's matches.
     """
     claims: list[_Claim] = []
-    for ov in active:
+    for ov, kwargs in resolved:
         for fqn, cfg, parent, attr in config_root.traverse(ov.target_cls):
             if ov.exact and type(cfg) is not ov.target_cls:
                 continue
             if ov.matches(fqn):
-                claims.append(_Claim(ov=ov, fqn=fqn, cfg=cfg, parent=parent, attr=attr))
+                claims.append(
+                    _Claim(
+                        ov=ov,
+                        fqn=fqn,
+                        cfg=cfg,
+                        parent=parent,
+                        attr=attr,
+                        kwargs=kwargs,
+                    )
+                )
     return claims
 
 
@@ -320,7 +427,12 @@ def apply_overrides(
 
     Returns a list of human-readable log lines describing each replacement.
     """
-    for mod_path in override_config.imports:
+    # Each entry is a bare module path or a (module_path, kwargs) tuple; the
+    # kwargs are forwarded to that module's factories (see OverrideConfig.imports).
+    entries: list[tuple[str, dict[str, Any]]] = [
+        (e, {}) if isinstance(e, str) else (e[0], e[1]) for e in override_config.imports
+    ]
+    for mod_path, _ in entries:
         try:
             importlib.import_module(mod_path)
         except ImportError as e:
@@ -328,13 +440,15 @@ def apply_overrides(
                 f"Failed to import override module '{mod_path}': {e}"
             ) from e
 
-    active = _resolve_active(override_config.imports)
-    claims = _collect_claims(active, config_root)
+    resolved = _resolve_active(entries)
+    claims = _collect_claims(resolved, config_root)
     _check_node_conflicts(claims)
 
     replacements: list[str] = []
     for c in claims:
-        new_cfg = c.ov.factory(c.cfg)
+        # ``**{}`` for a bare (no-kwargs) entry is just ``factory(cfg)``; a kwarg
+        # the factory does not accept raises TypeError here, naming the factory.
+        new_cfg = c.ov.factory(c.cfg, **c.kwargs)
         if isinstance(c.parent, list) and isinstance(c.attr, int):
             c.parent[c.attr] = new_cfg
         elif isinstance(c.attr, str):
@@ -344,9 +458,14 @@ def apply_overrides(
                 f"Override '{c.ov.name}' claims root config '{c.fqn}', "
                 "which cannot be replaced in place."
             )
+        kwargs_note = (
+            " with " + ", ".join(f"{k}={v!r}" for k, v in c.kwargs.items())
+            if c.kwargs
+            else ""
+        )
         replacements.append(
             f"[Override] {c.ov.name}: {c.fqn} "
-            f"{type(c.cfg).__qualname__} -> {type(new_cfg).__qualname__}"
+            f"{type(c.cfg).__qualname__} -> {type(new_cfg).__qualname__}{kwargs_note}"
         )
 
     if replacements:

@@ -358,6 +358,82 @@ class TestOverride(unittest.TestCase):
             self.assertIn("->", line)
 
 
+class TestOverrideKwargs(unittest.TestCase):
+    """``override.imports`` entries may carry kwargs forwarded to the factory."""
+
+    def setUp(self):
+        clear_overrides()
+
+    def tearDown(self):
+        clear_overrides()
+
+    def test_same_module_different_kwargs_per_actor(self):
+        # The motivating case: two config trees share one override module but
+        # pass different kwargs (e.g. RL trainer vs. generator capacity factor).
+        @override("per_actor", target=ComponentA.Config, fqns=["child"])
+        def per_actor(cfg: ComponentA.Config, *, extra: int) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=extra)
+
+        trainer_cfg = ParentComponent.Config()
+        generator_cfg = ParentComponent.Config()
+        apply_overrides(OverrideConfig(imports=[(__name__, {"extra": 1})]), trainer_cfg)
+        apply_overrides(
+            OverrideConfig(imports=[(__name__, {"extra": 2})]), generator_cfg
+        )
+
+        self.assertEqual(trainer_cfg.child.extra, 1)
+        self.assertEqual(generator_cfg.child.extra, 2)
+
+    def test_bare_string_entry_calls_factory_without_kwargs(self):
+        # A bare-string entry keeps the pre-kwargs contract: no kwargs passed.
+        @override("no_kw", target=ComponentA.Config, fqns=["child"])
+        def no_kw(cfg: ComponentA.Config, *, extra: int = 9) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=extra)
+
+        parent_cfg = ParentComponent.Config()
+        apply_overrides(OverrideConfig(imports=[__name__]), parent_cfg)
+        self.assertEqual(parent_cfg.child.extra, 9)
+
+    def test_unknown_kwarg_raises(self):
+        @override("strict_kw", target=ComponentA.Config)
+        def strict_kw(cfg: ComponentA.Config, *, extra: int) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=extra)
+
+        # A kwarg the factory does not accept is a plain TypeError from the call.
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument"):
+            apply_overrides(
+                OverrideConfig(imports=[(__name__, {"typo": 1})]),
+                ParentComponent.Config(),
+            )
+
+    def test_kwargs_for_no_matching_override_raises(self):
+        # kwargs that activate no override is a misconfiguration, not a silent
+        # no-op (the registry is empty here after setUp's clear_overrides).
+        with self.assertRaisesRegex(ValueError, "activated no override"):
+            apply_overrides(
+                OverrideConfig(imports=[("torchtitan.config.override", {"x": 1})]),
+                ParentComponent.Config(),
+            )
+
+    def test_parse_cli_imports(self):
+        from torchtitan.config.override import parse_cli_imports
+
+        # Plain modules (comma- or space-separated) and modules whose kwargs are
+        # attached to the name as ``module=<json>`` -- the CLI grammar backing
+        # ``--override.imports``.
+        self.assertEqual(parse_cli_imports(["a.b,c.d"]), ["a.b", "c.d"])
+        self.assertEqual(
+            parse_cli_imports(['mod={"block_size": 256, "flag": null}']),
+            [("mod", {"block_size": 256, "flag": None})],
+        )
+        self.assertEqual(
+            parse_cli_imports(["plain", 'mod={"x": 1}']),
+            ["plain", ("mod", {"x": 1})],
+        )
+        with self.assertRaisesRegex(ValueError, "must be a JSON object"):
+            parse_cli_imports(["mod=123"])
+
+
 class TestDerive(unittest.TestCase):
     def test_copies_shared_and_applies_deltas(self):
         src = ComponentA.Config(dim=99)

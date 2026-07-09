@@ -110,14 +110,19 @@ class TritonRoPE(RoPE):
 
 @override("triton_rope", target=RoPE.Config,
           description="Triton rotary embedding, ~2x faster on A100+")
-def triton_rope(cfg: RoPE.Config) -> TritonRoPE.Config:
+def triton_rope(cfg: RoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
     # `derive` copies every field shared with RoPE.Config; the factory states
-    # only its deltas. See "Deriving the replacement config" below.
-    return derive(cfg, TritonRoPE.Config, block_size=128)
+    # only its deltas. See "Deriving the replacement config" below. `block_size`
+    # defaults to 128 but can be tuned per config tree via a per-entry kwarg
+    # (see "Optional per-entry kwargs" below).
+    return derive(cfg, TritonRoPE.Config, block_size=block_size)
 ```
 
-The factory receives the matched config and returns its replacement. *Which*
-instances it applies to is controlled declaratively by `fqns` (see
+The factory receives the matched config as its first positional argument and
+returns its replacement. It may declare keyword parameters (like `block_size`
+above) that callers fill via a `(module_path, kwargs)` import entry; a bare
+module-path entry uses their defaults. *Which* instances the factory applies to
+is controlled declaratively by `fqns` (see
 [per-instance targeting](#per-instance-targeting)), not by inspecting fields
 inside the factory.
 
@@ -150,20 +155,54 @@ the matched node is being replaced and detached. `derive` is most valuable when
 the replacement subclasses the target (the common drop-in case), where new core
 fields are inherited and thus carried over for free.
 
-**Configuration is code.** An override takes no CLI flags (it runs after CLI
-parsing), so the override module *is* its configuration: bake sensible defaults
-into the factory (above, `block_size=128`). A user who wants different values
-imports their own module that registers a factory with their deltas — e.g.
-`derive(cfg, TritonRoPE.Config, block_size=256)`. We deliberately don't add a
-CLI-settable `kwargs` dict (untyped, error-prone) or a typed override-`Config`
-parsed at config-construction time (which would re-couple the config registry to
-the override package, defeating the no-touch goal).
+**Configuration is code.** By default the override module *is* its
+configuration: the factory bakes in sensible defaults (above, `block_size=128`),
+so a bare `override.imports` entry needs no other input.
+
+**Optional per-entry kwargs.** When two config trees need the *same* override
+module configured *differently*, a factory can expose keyword parameters and each
+`override.imports` entry can supply them as a `(module_path, kwargs)` tuple
+instead of a bare string; the `kwargs` are forwarded to that module's factories.
+For `triton_rope` above, two trees can pick different block sizes without a
+second module:
+
+```python
+# one tree tunes block_size=128 (the default), another 256:
+OverrideConfig(imports=["my_pkg.triton_rope"])                      # -> 128
+OverrideConfig(imports=[("my_pkg.triton_rope", {"block_size": 256})])
+```
+
+(The RL trainer and generator use this to activate one HybridEP dispatch module
+with opposite `capacity_factor` values — blocking `None` for the trainer, a float
+for the cudagraph-capturing generator — instead of two modules or a hardcoded
+per-actor branch.)
+
+The factory declares the keyword parameters it accepts (or `**kwargs`); a kwarg
+it does not accept raises rather than silently no-op'ing. On the CLI, attach
+kwargs to the module name as `module=<json-object>` (quote it as a single shell
+token; `my_pkg.triton_rope` is a placeholder for your own module):
+
+```bash
+torchtitan_train --module llama3 --config llama3_8b \
+    --override.imports 'my_pkg.triton_rope={"block_size": 256}'
+```
+
+JSON keeps the values typed (numbers, `null`, strings, nesting), so the same
+entry works from Python or the CLI. We still avoid a typed override-`Config`
+parsed at config-construction time, which would re-couple the config registry to
+the override package and defeat the no-touch goal.
 
 ### Activation
 
 ```bash
+# One or more modules, space- or comma-separated:
 torchtitan_train --module llama3 --config llama3_8b \
     --override.imports torchtitan.overrides.fused_swiglu
+
+# A module with per-entry kwargs -- attached to the name as module=<json>,
+# quoted as one shell token (my_pkg.triton_rope is a placeholder for your module):
+torchtitan_train --module llama3 --config llama3_8b \
+    --override.imports 'my_pkg.triton_rope={"block_size": 256}'
 ```
 
 ### Application
@@ -461,7 +500,6 @@ for the full recipe.
   recipe from "Custom kernels and `torch.compile`". `helion` is an optional
   dependency, so the module imports without it and falls back to the PyTorch RoPE
   when it (or CUDA) is unavailable; it is checkpoint-compatible with stock.
-
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
 shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
 one): each attention module owns a `rope` submodule (`RoPE.Config`), so a custom
@@ -476,7 +514,7 @@ RoPE is an ordinary component override.
 | `torchtitan/protocols/model_spec.py` | `ModelSpec.traverse` exposes the nested model config to the traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field; applies overrides after `update_from_config`, before builds. |
 | `torchtitan/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
-| `tests/unit_tests/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, `derive`. |
+| `tests/unit_tests/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 
 Overriding a component requires no changes to any model's `config_registry.py`
 or `__init__.py` — that is the point of the design.
@@ -484,7 +522,10 @@ or `__init__.py` — that is the point of the design.
 ## At a Glance
 
 - **Activation.** Explicit opt-in via `override.imports`; only overrides
-  registered by the listed modules (provenance-checked) are applied.
+  registered by the listed modules (provenance-checked) are applied. An entry
+  may carry kwargs (a `(module_path, kwargs)` tuple in Python, or
+  `module=<json>` on the CLI) to configure the same module differently per
+  config tree.
 - **Conflicts.** Per-node, not per-class: overrides may share a target class as
   long as their claimed nodes are disjoint; same-node or ancestor/descendant
   claims error.
