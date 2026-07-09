@@ -167,7 +167,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-training-steps 3",
                     # The config defaults to trainer TP=2 + 3 generators TP=2. Override
                     # to trainer TP=4 + 1 generator TP=4 so batch-invariant mode fits
-                    # A10G (~20GB/GPU): TP=2 shards less per GPU and OOMs with BI on.
+                    # A10G: TP=2 shards less per GPU and OOMs with BI on.
                     "--trainer.parallelism.tensor_parallel_degree 4",
                     "--generator.parallelism.tensor_parallel_degree 4",
                     "--num_generators 1",
