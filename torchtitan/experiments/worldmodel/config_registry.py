@@ -23,7 +23,6 @@ from .dataset_config import (
     _dataloader_config,
     BASE_DIR_GT_10M,
     DEFAULT_10M_TRAIN_LIST,
-    FEATURE_DIR,
     IMAGE_SIZE,
 )
 from .loss import WorldModelLoss
@@ -44,7 +43,6 @@ __all__ = [
     "BASE_DIR_GT_10M",
     "COMPRESSOR_MODEL",
     "DEFAULT_10M_TRAIN_LIST",
-    "FEATURE_DIR",
     "IMAGE_SIZE",
     "LATENT_CHANNELS",
     "LATENT_SIZE",
@@ -135,12 +133,12 @@ def worldmodel() -> WorldModelTrainer.Config:
             dataloader=_dataloader_config(split="val", fill_once=True),
             pose_dropout=0.0,
             noise_scheduler_steps=10,
-            no_noise_conditioning_frames_prob=0.0,
+            no_noise_prefill_frames_prob=0.0,
             fake_timesteps_prob=0.0,
         ),
         pose_dropout=0.1,
         noise_scheduler_steps=10,
-        no_noise_conditioning_frames_prob=0.5,
+        no_noise_prefill_frames_prob=0.5,
         fake_timesteps_prob=0.5,
         debug=DebugConfig(seed=0),
     )

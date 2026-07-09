@@ -21,9 +21,11 @@ SCHEDULER_FUNCTIONS: dict[str, Callable] = {
 
 class RFScheduler(torch.nn.Module):
     no_noise_timestep_value: float = 0.0
+    full_noise_timestep_value: float = 1.0
     timesteps: torch.Tensor
     dt: torch.Tensor
     no_noise_timestep: torch.Tensor
+    full_noise_timestep: torch.Tensor
 
     def __init__(self, steps: int = 15, inference_schedule: str = "linear", **kwargs):
         super().__init__()
@@ -33,6 +35,7 @@ class RFScheduler(torch.nn.Module):
         self.register_buffer("timesteps", scheduler_function(timesteps, **kwargs))
         self.register_buffer("dt", -torch.diff(self.timesteps))
         self.register_buffer("no_noise_timestep", torch.tensor(self.no_noise_timestep_value, dtype=torch.float32))
+        self.register_buffer("full_noise_timestep", torch.tensor(self.full_noise_timestep_value, dtype=torch.float32))
 
     def sample_timestep(self, shape: tuple) -> torch.Tensor:
         nt = torch.randn(shape, device=self.timesteps.device)
@@ -51,13 +54,16 @@ class RFScheduler(torch.nn.Module):
 
 class IdentityScheduler(torch.nn.Module):
     no_noise_timestep_value: float = 0.0
+    full_noise_timestep_value: float = 1.0
     no_noise_timestep: torch.Tensor
+    full_noise_timestep: torch.Tensor
     timesteps: torch.Tensor
 
     def __init__(self, steps: int = 15, *args, **kwargs):
         super().__init__()
         self.num_timesteps = steps + 1
         self.register_buffer("no_noise_timestep", torch.tensor(self.no_noise_timestep_value, dtype=torch.float32))
+        self.register_buffer("full_noise_timestep", torch.tensor(self.full_noise_timestep_value, dtype=torch.float32))
         self.register_buffer("timesteps", torch.full((self.num_timesteps,), self.no_noise_timestep_value, dtype=torch.float32))
 
     def sample_timestep(self, shape: tuple, *args, **kwargs) -> torch.Tensor:

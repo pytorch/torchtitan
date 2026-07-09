@@ -182,11 +182,11 @@ def build_package(
             io_model_config.plan_head.attention_impl = "SDPA"
         io_model = build_meta_model(io_model_config)
         assert io_model.config.transformer.attention_mask != "NONE"
-        num_conditioning_frames = io_model.config.input_size[0] - 1
+        num_prefill_frames = io_model.config.input_size[0] - 1
         model_io = io_model.get_model_io(
             dtype=torch.bfloat16,
             steps=1,
-            num_conditioning_frames=num_conditioning_frames,
+            num_prefill_frames=num_prefill_frames,
         )
         del io_model, io_model_config
         model = build_meta_model(model_config)

@@ -81,9 +81,9 @@ def _prepare_worldmodel_batch(
     scheduler: RFScheduler,
     discrete_timesteps: torch.Tensor,
     pose_dropout: float,
-    inference_conditioning_frames: int,
+    inference_prefill_frames: int,
     future_size_frames: int,
-    no_noise_conditioning_frames_prob: float,
+    no_noise_prefill_frames_prob: float,
     fake_timesteps_prob: float,
     train: bool,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -115,16 +115,16 @@ def _prepare_worldmodel_batch(
         pose_mask = torch.ones(
             (batch_size, num_frames), device=device, dtype=torch.bool
         )
-        if inference_conditioning_frames < num_frames:
+        if inference_prefill_frames < num_frames:
             drop = torch.rand((batch_size, 1), device=device) < pose_dropout
-            pose_mask[:, inference_conditioning_frames:] = drop
+            pose_mask[:, inference_prefill_frames:] = drop
         augments[pose_mask] = 0
         eulers[pose_mask] = 0
 
         mask = torch.ones_like(latents, device=device, dtype=torch.bool)
         fake_timesteps = timesteps.clone()
-        if torch.rand((), device=device) < no_noise_conditioning_frames_prob:
-            end = min(inference_conditioning_frames, num_frames)
+        if torch.rand((), device=device) < no_noise_prefill_frames_prob:
+            end = min(inference_prefill_frames, num_frames)
             mask[:, :end] = False
             timesteps[:, :end] = scheduler.no_noise_timestep
             fake_timesteps[:, :end] = scheduler.no_noise_timestep
@@ -156,7 +156,7 @@ class WorldModelValidator(BaseValidator):
         dataloader: WorldModelDataLoader.Config
         pose_dropout: float
         noise_scheduler_steps: int
-        no_noise_conditioning_frames_prob: float
+        no_noise_prefill_frames_prob: float
         fake_timesteps_prob: float
 
         def __post_init__(self) -> None:
@@ -243,9 +243,9 @@ class WorldModelValidator(BaseValidator):
                     scheduler=scheduler,
                     discrete_timesteps=discrete_timesteps,
                     pose_dropout=self.config.pose_dropout,
-                    inference_conditioning_frames=self.config.dataloader.inference_conditioning_frames,
+                    inference_prefill_frames=self.config.dataloader.inference_prefill_frames,
                     future_size_frames=self.config.dataloader.future_size_frames,
-                    no_noise_conditioning_frames_prob=self.config.no_noise_conditioning_frames_prob,
+                    no_noise_prefill_frames_prob=self.config.no_noise_prefill_frames_prob,
                     fake_timesteps_prob=self.config.fake_timesteps_prob,
                     train=False,
                 )
@@ -313,7 +313,7 @@ class WorldModelTrainer(Trainer):
         float8: WorldModelFloat8Config = field(default_factory=WorldModelFloat8Config)
         pose_dropout: float
         noise_scheduler_steps: int
-        no_noise_conditioning_frames_prob: float
+        no_noise_prefill_frames_prob: float
         fake_timesteps_prob: float
 
         def __post_init__(self) -> None:
@@ -381,9 +381,9 @@ class WorldModelTrainer(Trainer):
                 scheduler=self.train_noise_scheduler,
                 discrete_timesteps=self.discrete_timesteps,
                 pose_dropout=self.config.pose_dropout,
-                inference_conditioning_frames=self.config.dataloader.inference_conditioning_frames,
+                inference_prefill_frames=self.config.dataloader.inference_prefill_frames,
                 future_size_frames=self.config.dataloader.future_size_frames,
-                no_noise_conditioning_frames_prob=self.config.no_noise_conditioning_frames_prob,
+                no_noise_prefill_frames_prob=self.config.no_noise_prefill_frames_prob,
                 fake_timesteps_prob=self.config.fake_timesteps_prob,
                 train=True,
             )
@@ -645,7 +645,7 @@ def _stock_trainer_mock_config() -> WorldModelTrainer.Config:
     config.validator.enable = False
     config.pose_dropout = 0.0
     config.noise_scheduler_steps = 2
-    config.no_noise_conditioning_frames_prob = 0.0
+    config.no_noise_prefill_frames_prob = 0.0
     config.fake_timesteps_prob = 0.0
     config.debug.seed = 0
     return config

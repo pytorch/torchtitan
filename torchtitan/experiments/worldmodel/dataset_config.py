@@ -5,8 +5,6 @@ from xx.datasets.constants import BASE_DIR_GT_10M, DEFAULT_10M_TRAIN_LIST
 from .dataset import WorldModelDataLoader
 from .model_config import COMPRESSOR_MODEL, LATENT_CHANNELS, LATENT_SIZE
 
-
-FEATURE_DIR = "http://data-ssd.comma.life/vae_model_features"
 IMAGE_SIZE = (128, 256)
 
 
@@ -29,7 +27,7 @@ def _dataloader_config(
     context_size_frames: int = 10,
     future_size_frames: int = 5,
     max_future_frames: int = 50,
-    inference_conditioning_frames: int = 14,
+    inference_prefill_frames: int = 14,
     fps: int = 5,
     train_skip: int = 40,
     val_skip: int = 800,
@@ -56,7 +54,7 @@ def _dataloader_config(
         context_size_frames=context_size_frames,
         future_size_frames=future_size_frames,
         max_future_frames=max_future_frames,
-        inference_conditioning_frames=inference_conditioning_frames,
+        inference_prefill_frames=inference_prefill_frames,
         fps=fps,
         train_skip=train_skip,
         val_skip=val_skip,

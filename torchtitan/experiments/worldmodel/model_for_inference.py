@@ -204,14 +204,14 @@ class WorldModelForInference(WorldModel):
         batch_size: int = 1,
         dtype: torch.dtype = torch.bfloat16,
         steps: int = 1,
-        num_conditioning_frames: int = 14,
+        num_prefill_frames: int = 14,
     ) -> dict[str, dict[str, torch.Size] | dict[str, torch.dtype]]:
         inputs = self.example_inputs(self.config, batch_size=batch_size, dtype=dtype, device=self.pos_embed.device)
         outputs = self.generate(
             **inputs,
             dtype=dtype,
             steps=steps,
-            num_conditioning_frames=num_conditioning_frames,
+            num_prefill_frames=num_prefill_frames,
         )
         return ModelIO(
             in_shape={key: value.shape for key, value in inputs.items()},
@@ -225,23 +225,23 @@ class WorldModelForInference(WorldModel):
             block.compile(mode="max-autotune-no-cudagraphs")
 
     @torch.no_grad()
-    def setup_inference_attention_attrs(self, device: torch.device, num_conditioning_frames: int) -> None:
+    def setup_inference_attention_attrs(self, device: torch.device, num_prefill_frames: int) -> None:
         if self.config.transformer.attention_mask == "NONE":
-            self.inference_masks[num_conditioning_frames] = (None, None)
+            self.inference_masks[num_prefill_frames] = (None, None)
             return
 
-        if num_conditioning_frames in self.inference_masks:
-            prefill_mask = self.inference_masks[num_conditioning_frames][0]
+        if num_prefill_frames in self.inference_masks:
+            prefill_mask = self.inference_masks[num_prefill_frames][0]
             if prefill_mask is not None and getattr(prefill_mask, "device", None) == device:
                 return
 
         mask_fn = _mask_fn(self.config.transformer)
         if mask_fn is None:
-            self.inference_masks[num_conditioning_frames] = (None, None)
+            self.inference_masks[num_prefill_frames] = (None, None)
             return
 
         block_size = self.config.transformer.block_size
-        cut_off = num_conditioning_frames * self.config.num_spatial_patches
+        cut_off = num_prefill_frames * self.config.num_spatial_patches
         decode_len = block_size - cut_off
 
         def mask_fn_with_offset(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor) -> torch.Tensor:
@@ -269,7 +269,7 @@ class WorldModelForInference(WorldModel):
         else:
             raise ValueError(f"unknown attention_impl {self.config.transformer.attention_impl}")
 
-        self.inference_masks[num_conditioning_frames] = (prefill_mask, decode_mask)
+        self.inference_masks[num_prefill_frames] = (prefill_mask, decode_mask)
 
     def cleanup_inference_attention_attrs(self) -> None:
         self.inference_masks = {}
@@ -383,18 +383,18 @@ class WorldModelForInference(WorldModel):
         fidxs: torch.Tensor,
         *,
         steps: int = 15,
-        num_conditioning_frames: int = 14,
+        num_prefill_frames: int = 14,
         dtype: torch.dtype = torch.bfloat16,
         inference_schedule: str = "linear",
         cfg: float = 0.0,
         return_trajectory: bool = False,
         **scheduler_kwargs: Any,
     ) -> dict[str, torch.Tensor]:
-        assert self.config.transformer.attention_mask != "NONE" or num_conditioning_frames == 0, "prefill and decode masks only make sense if we have some causal attention masking"
+        assert self.config.transformer.attention_mask != "NONE" or num_prefill_frames == 0, "prefill and decode masks only make sense if we have some causal attention masking"
 
         batch, frames = latents.shape[:2]
-        if not 0 <= num_conditioning_frames <= frames:
-            raise ValueError(f"num_conditioning_frames={num_conditioning_frames} must be in [0, {frames}]")
+        if not 0 <= num_prefill_frames <= frames:
+            raise ValueError(f"num_prefill_frames={num_prefill_frames} must be in [0, {frames}]")
 
         latents = latents.to(dtype=dtype)
         device = latents.device
@@ -419,7 +419,7 @@ class WorldModelForInference(WorldModel):
                 fidxs,
                 input_pos_mask_pair=None,
             )
-            start = max(0, num_conditioning_frames - 1)
+            start = max(0, num_prefill_frames - 1)
             output_latents = self.unscale_latents(latents[:, start:])
             outputs = {"latents": output_latents}
             if "plan" in model_output:
@@ -433,9 +433,9 @@ class WorldModelForInference(WorldModel):
 
         scheduler = RFScheduler(steps=steps, inference_schedule=inference_schedule, **scheduler_kwargs).to(device=device)
         self.setup_caches(batch, self.config.num_patches, dtype=_cache_dtype_for_device(device), device=device)
-        self.setup_inference_attention_attrs(device, num_conditioning_frames)
+        self.setup_inference_attention_attrs(device, num_prefill_frames)
 
-        latents[:, :num_conditioning_frames] = self.scale_latents(latents[:, :num_conditioning_frames])
+        latents[:, :num_prefill_frames] = self.scale_latents(latents[:, :num_prefill_frames])
         self._prefill(
             latents=latents,
             augments_pos_ref_augment=augments_pos_ref_augment,
@@ -443,18 +443,18 @@ class WorldModelForInference(WorldModel):
             pose_mask=pose_mask,
             fidxs=fidxs,
             scheduler=scheduler,
-            num_conditioning_frames=num_conditioning_frames,
+            num_prefill_frames=num_prefill_frames,
         )
 
-        future = latents[:, num_conditioning_frames:]
-        future, model_output, trajectory = self._decode(
-            future=future,
+        decode_frames = latents[:, num_prefill_frames:]
+        decode_frames, model_output, trajectory = self._decode(
+            decode_frames=decode_frames,
             augments_pos_ref_augment=augments_pos_ref_augment,
             ref_augment_from_augments_euler=ref_augment_from_augments_euler,
             pose_mask=pose_mask,
             fidxs=fidxs,
             scheduler=scheduler,
-            num_conditioning_frames=num_conditioning_frames,
+            num_prefill_frames=num_prefill_frames,
             cfg=cfg,
             steps=steps,
             return_trajectory=return_trajectory,
@@ -464,7 +464,7 @@ class WorldModelForInference(WorldModel):
             self.cleanup_caches()
             raise ValueError("model outputs contain inf/nan")
 
-        outputs = {"latents": self.unscale_latents(future)}
+        outputs = {"latents": self.unscale_latents(decode_frames)}
         if "plan" in model_output:
             outputs["plan"] = model_output["plan"]
         if trajectory is not None:
@@ -480,24 +480,24 @@ class WorldModelForInference(WorldModel):
         pose_mask: torch.Tensor,
         fidxs: torch.Tensor,
         scheduler: RFScheduler,
-        num_conditioning_frames: int,
+        num_prefill_frames: int,
     ) -> dict[str, torch.Tensor]:
-        if num_conditioning_frames <= 0:
+        if num_prefill_frames <= 0:
             return {}
 
         batch = latents.shape[0]
         device = latents.device
-        input_pos = torch.arange(0, num_conditioning_frames * self.config.num_spatial_patches, device=device)
-        timesteps = torch.ones((batch, num_conditioning_frames), device=device, dtype=torch.float32) * scheduler.no_noise_timestep
-        prefill_mask, _ = self.inference_masks[num_conditioning_frames]
+        input_pos = torch.arange(0, num_prefill_frames * self.config.num_spatial_patches, device=device)
+        timesteps = torch.ones((batch, num_prefill_frames), device=device, dtype=torch.float32) * scheduler.no_noise_timestep
+        prefill_mask, _ = self.inference_masks[num_prefill_frames]
         input_pos_mask_pair = InputPosMaskPair(input_pos=input_pos, input_mask=prefill_mask)
         return self(
-            latents[:, :num_conditioning_frames],
+            latents[:, :num_prefill_frames],
             timesteps,
-            augments_pos_ref_augment[:, :num_conditioning_frames],
-            ref_augment_from_augments_euler[:, :num_conditioning_frames],
-            pose_mask[:, :num_conditioning_frames],
-            fidxs[:, :num_conditioning_frames],
+            augments_pos_ref_augment[:, :num_prefill_frames],
+            ref_augment_from_augments_euler[:, :num_prefill_frames],
+            pose_mask[:, :num_prefill_frames],
+            fidxs[:, :num_prefill_frames],
             input_pos_mask_pair=input_pos_mask_pair,
         )
 
@@ -510,25 +510,25 @@ class WorldModelForInference(WorldModel):
         pose_mask: torch.Tensor,
         fidxs: torch.Tensor,
         scheduler: RFScheduler,
-        num_conditioning_frames: int,
+        num_prefill_frames: int,
         cfg: float,
         steps: int,
         return_trajectory: bool,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor | None]:
         device = future.device
         input_pos = torch.arange(
-            num_conditioning_frames * self.config.num_spatial_patches,
-            (num_conditioning_frames + future.shape[1]) * self.config.num_spatial_patches,
+            num_prefill_frames * self.config.num_spatial_patches,
+            (num_prefill_frames + future.shape[1]) * self.config.num_spatial_patches,
             device=device,
         )
-        _, decode_mask = self.inference_masks[num_conditioning_frames]
+        _, decode_mask = self.inference_masks[num_prefill_frames]
         input_pos_mask_pair = InputPosMaskPair(input_pos=input_pos, input_mask=decode_mask)
         return self.forward_n_steps(
             future,
-            augments_pos_ref_augment[:, num_conditioning_frames:],
-            ref_augment_from_augments_euler[:, num_conditioning_frames:],
-            pose_mask[:, num_conditioning_frames:],
-            fidxs[:, num_conditioning_frames:],
+            augments_pos_ref_augment[:, num_prefill_frames:],
+            ref_augment_from_augments_euler[:, num_prefill_frames:],
+            pose_mask[:, num_prefill_frames:],
+            fidxs[:, num_prefill_frames:],
             input_pos_mask_pair,
             cfg,
             scheduler,
@@ -560,7 +560,7 @@ def main() -> None:
         **inputs,
         dtype=torch.bfloat16,
         steps=2,
-        num_conditioning_frames=14,
+        num_prefill_frames=14,
     )
     print(
         {

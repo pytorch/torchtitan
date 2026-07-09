@@ -23,7 +23,7 @@ class _DiffusionConfig:
     context_size_frames: int
     future_size_frames: int
     max_future_frames: int
-    inference_conditioning_frames: int
+    inference_prefill_frames: int
     fps: int
     train_skip: int
     val_skip: int
@@ -92,7 +92,7 @@ class WorldModelDataLoader(BaseDataLoader):
         context_size_frames: int
         future_size_frames: int
         max_future_frames: int
-        inference_conditioning_frames: int
+        inference_prefill_frames: int
         fps: int
         train_skip: int
         val_skip: int
@@ -105,8 +105,8 @@ class WorldModelDataLoader(BaseDataLoader):
             total_frames = self.context_size_frames + self.future_size_frames
             if total_frames <= 0:
                 raise ValueError("context_size_frames + future_size_frames must be positive")
-            if self.inference_conditioning_frames > total_frames:
-                raise ValueError("inference_conditioning_frames must fit in total frames")
+            if self.inference_prefill_frames > total_frames:
+                raise ValueError("inference_prefill_frames must fit in total frames")
             if self.shuffle_size <= 0:
                 raise ValueError("shuffle_size must be positive")
 
@@ -214,7 +214,7 @@ class WorldModelDataLoader(BaseDataLoader):
                 context_size_frames=config.context_size_frames,
                 future_size_frames=config.future_size_frames,
                 max_future_frames=config.max_future_frames,
-                inference_conditioning_frames=config.inference_conditioning_frames,
+                inference_prefill_frames=config.inference_prefill_frames,
                 fps=config.fps,
                 train_skip=config.train_skip,
                 val_skip=config.val_skip,
