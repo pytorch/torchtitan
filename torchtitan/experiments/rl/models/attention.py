@@ -212,10 +212,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
         extra_kwargs: dict[str, Any] = {}
 
-        # Batch-invariant mode forces num_splits=1 to prevent non-deterministic
-        # split-k reductions. The FA2 auto-num_splits NaN workaround for
-        # pytorch/pytorch#179760 was dropped once the upstream flash-attention fix
-        # landed via pytorch/pytorch#185281.
+        # Batch-invariant mode forces num_splits=1 for deterministic split-k.
         if is_in_batch_invariant_mode():
             extra_kwargs["num_splits"] = 1
 
