@@ -39,7 +39,6 @@ Example usages:
 
 import argparse
 import os
-import shlex
 import subprocess
 import sys
 import unittest
@@ -147,7 +146,7 @@ def run_training(
         "--async-loop.validation.num-samples=0",
         "--metrics.enable-tensorboard",
         "--metrics.no-enable-wandb",
-        *shlex.split(options),
+        *options.split(),
     ]
 
     log_print(f"Running: {' '.join(cmd)}")
