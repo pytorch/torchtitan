@@ -212,7 +212,6 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
         extra_kwargs: dict[str, Any] = {}
 
-        # Batch-invariant mode forces num_splits=1 for deterministic split-k.
         if is_in_batch_invariant_mode():
             extra_kwargs["num_splits"] = 1
 

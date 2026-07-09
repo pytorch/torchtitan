@@ -147,10 +147,7 @@ class VarlenAttention(Module):
 
         varlen_kwargs: dict[str, Any] = {}
 
-        # Batch-invariant mode forces num_splits=1 to prevent non-deterministic
-        # split-k reductions; ROCm's _flash_attention_forward rejects num_splits,
-        # so only set it off ROCm.
-        if is_in_batch_invariant_mode() and torch.version.hip is None:
+        if is_in_batch_invariant_mode():
             varlen_kwargs["num_splits"] = 1
 
         # Forward enable_gqa from GQAttention when Q and KV head counts differ
