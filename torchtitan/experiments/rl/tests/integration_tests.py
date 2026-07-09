@@ -38,7 +38,11 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-training-steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--num_generators 3",
+                    # PROBE: single generator (no concurrent-generator rendezvous
+                    # port race) to isolate whether the OOB-gather failure is the
+                    # multi-generator collision or num_splits=auto. Restore to 3
+                    # once confirmed.
+                    "--num_generators 1",
                     "--async-loop.group-size 2",
                     "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
@@ -52,7 +56,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             ],
             "RL GRPO TP=2 no compile",
             "rl_grpo_tp2_no_compile",
-            ngpu=8,
+            ngpu=4,
         ),
         OverrideDefinitions(
             [
