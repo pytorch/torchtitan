@@ -5,10 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import inspect
 from dataclasses import dataclass
 
 import torch
-from torch.nn.attention.flex_attention import and_masks
+from torch.nn.attention.flex_attention import and_masks, create_block_mask
 
 from torchtitan.distributed.minimal_async_ep.api import (
     maybe_update_minimal_async_ep_config,
@@ -32,6 +33,10 @@ from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
+
+_supports_separate_full_blocks = (
+    "separate_full_blocks" in inspect.signature(create_block_mask).parameters
+)
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -295,20 +300,16 @@ class Decoder(BaseModel):
         ]
         B = positions.shape[0]
         seq_len = positions.shape[1]
-        return create_attention_mask(
-            and_masks(*mask_mods),
-            B,
-            None,
-            seq_len,
-            seq_len,
+        kwargs = dict(
             device=positions.device,
             BLOCK_SIZE=attn_config.inner_attention.block_size,
-            # when separate_full_blocks = True, kernel iterates through
-            # full blocks first (blocks where all elements are unmasked)
-            # but which blocks are "full" vs "partial" changes depending
-            # on the particular batch
-            # for batch invariance, we disable this optimization
-            separate_full_blocks=not is_in_batch_invariant_mode(),
+        )
+        if _supports_separate_full_blocks:
+            # Iterating full blocks first is faster but which blocks are "full"
+            # vs "partial" changes per batch -- disable for batch invariance.
+            kwargs["separate_full_blocks"] = not is_in_batch_invariant_mode()
+        return create_attention_mask(
+            and_masks(*mask_mods), B, None, seq_len, seq_len, **kwargs
         )
 
     def get_attention_masks(

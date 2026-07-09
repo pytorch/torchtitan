@@ -371,8 +371,7 @@ class PolicyTrainer(Actor, Configurable):
             dict[str, float]: Globally-reduced metrics.
         """
         logger.debug(
-            f"{os.getpid()=} PolicyTrainer forward_backward "
-            f"step {self.policy_version}"
+            f"{os.getpid()=} PolicyTrainer forward_backward step {self.policy_version}"
         )
 
         # RL does not support pipeline parallelism yet, so the trainer
