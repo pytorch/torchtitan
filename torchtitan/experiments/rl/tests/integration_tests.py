@@ -36,13 +36,11 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-loop.num-training-steps 5",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    # trainer FSDP=2 (dp_shard=2, tp=1) + 3 generators TP=2 = 8 GPUs.
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    # PROBE: single generator (no concurrent-generator rendezvous
-                    # port race) to isolate whether the OOB-gather failure is the
-                    # multi-generator collision or num_splits=auto. Restore to 3
-                    # once confirmed.
-                    "--num_generators 1",
+                    "--num_generators 3",
                     "--async-loop.group-size 2",
                     "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
@@ -54,9 +52,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 no compile",
-            "rl_grpo_tp2_no_compile",
-            ngpu=4,
+            "RL GRPO trainer FSDP=2 + gen TP=2 no compile",
+            "rl_grpo_fsdp2_gen_tp2_no_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
@@ -64,8 +62,11 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-loop.num-training-steps 5",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    # trainer FSDP=2 (dp_shard=2, tp=1) + 3 generators TP=2 = 8 GPUs.
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 2",
+                    "--num_generators 3",
                     "--async-loop.group-size 2",
                     "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
@@ -75,9 +76,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 compile",
-            "rl_grpo_tp2_compile",
-            ngpu=4,
+            "RL GRPO trainer FSDP=2 + gen TP=2 compile",
+            "rl_grpo_fsdp2_gen_tp2_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
