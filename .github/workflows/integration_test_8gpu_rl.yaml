@@ -104,10 +104,8 @@ jobs:
         # advantage -> meaningful, full-precision losses (random init gives all
         # zeros). The golden is arch-specific; regenerate on A10G if it changes.
         LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
-        # The config defaults to trainer TP=2 + 3 generators TP=2; override to
-        # trainer TP=4 + 1 generator TP=4 so batch-invariant mode fits A10G and the
-        # run matches the arch-specific golden (generated at TP=4). loss_compare
-        # forwards these extra flags verbatim to train.py.
+        # Override to trainer TP=4 + 1 generator TP=4 (forwarded to train.py): the
+        # config's TP=2 OOMs with batch-invariant on A10G; the golden is from TP=4.
         python torchtitan/experiments/rl/scripts/loss_compare.py \
           --hf-assets-path "$MODEL_PATH" \
           --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
