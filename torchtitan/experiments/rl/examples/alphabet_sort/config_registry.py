@@ -853,10 +853,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            # fp32 master weights; FSDP mixed precision casts to bf16 for the
-            # forward (mixed_precision_param="bfloat16" is the TrainingConfig
-            # default), aligning the trainer forward with the bf16 generator.
-            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
