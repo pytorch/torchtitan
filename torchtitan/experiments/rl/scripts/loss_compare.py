@@ -261,10 +261,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Reuse the reference-file helpers from the pre-training loss_compare so we
-    # don't maintain two copies. That script lives at the repo root under
-    # scripts/, which the editable install does not expose on sys.path, so add
-    # the repo root before importing (works whether run as a script or -m).
+    # scripts/loss_compare.py (repo root) isn't on the editable-install
+    # sys.path; add it, then reuse its reference-file I/O helpers.
     repo_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), *([os.pardir] * 4))
     )
