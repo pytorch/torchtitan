@@ -19,11 +19,12 @@ from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
 from vllm.model_executor.layers.attention import Attention
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
     FlashAttentionMetadata,
+    FlashAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
@@ -52,6 +53,13 @@ class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_impl_cls():
         return PyTorchVarlenAttentionImpl
+
+    @staticmethod
+    def get_builder_cls():
+        class PyTorchVarlenAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+            _cudagraph_support = AttentionCGSupport.ALWAYS
+
+        return PyTorchVarlenAttentionMetadataBuilder
 
 
 class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
@@ -146,7 +154,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
-        max_seqlen_q = attn_metadata.max_query_len
+        # Pin max_seqlen_q to the total token count for safe cudagraph capture and use
+        # the linearize FA3 combine kernel to preserve performance.
+        max_seqlen_q = num_actual_tokens
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
