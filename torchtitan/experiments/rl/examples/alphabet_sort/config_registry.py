@@ -819,7 +819,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
 
 
 def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
-    """On-policy GRPO config for Qwen3-0.6B (8 GPUs: 4 gen + 4 train).
+    """On-policy GRPO config for Qwen3-0.6B (8 GPUs: trainer TP=2 + 3 generators TP=2).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
 
@@ -834,6 +834,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
     return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_generators=3,
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=8,
@@ -855,7 +856,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
             ),
             checkpoint=CheckpointManager.Config(
@@ -871,7 +872,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=2,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(

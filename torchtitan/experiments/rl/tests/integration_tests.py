@@ -36,9 +36,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-loop.num-training-steps 5",
-                    # trainer FSDP=2 (dp_shard=2, TP=1) + 3 generators each TP=2 = 8 GPUs.
-                    "--trainer.parallelism.data_parallel_shard_degree 2",
-                    "--trainer.parallelism.tensor_parallel_degree 1",
+                    "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--num_generators 3",
                     "--async-loop.group-size 2",
@@ -52,8 +50,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO trainer FSDP=2 + gen TP=2 no compile",
-            "rl_grpo_fsdp2_gen_tp2_no_compile",
+            "RL GRPO TP=2 no compile",
+            "rl_grpo_tp2_no_compile",
             ngpu=8,
         ),
         OverrideDefinitions(
@@ -167,6 +165,12 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
                     "--async-loop.num-training-steps 3",
+                    # The config defaults to trainer TP=2 + 3 generators TP=2. Override
+                    # to trainer TP=4 + 1 generator TP=4 so batch-invariant mode fits
+                    # A10G (~20GB/GPU): TP=2 shards less per GPU and OOMs with BI on.
+                    "--trainer.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.tensor_parallel_degree 4",
+                    "--num_generators 1",
                     # On-policy (lockstep) + real weights that update each step:
                     # trainer/generator weights match, so bit_wise/logprob_diff/max == 0.
                     "--async-loop.max-offpolicy-steps 0",
