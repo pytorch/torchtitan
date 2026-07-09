@@ -147,8 +147,9 @@ class VarlenAttention(Module):
 
         varlen_kwargs: dict[str, Any] = {}
 
-        # Batch-invariant mode forces num_splits=1 for deterministic split-k
-        # (off ROCm, which rejects num_splits).
+        # Batch-invariant mode forces num_splits=1 to prevent non-deterministic
+        # split-k reductions; ROCm's _flash_attention_forward rejects num_splits,
+        # so only set it off ROCm.
         if is_in_batch_invariant_mode() and torch.version.hip is None:
             varlen_kwargs["num_splits"] = 1
 
