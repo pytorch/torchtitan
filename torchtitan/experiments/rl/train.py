@@ -109,6 +109,26 @@ class PerHostProvisioner:
         return env
 
 
+def _distinct_free_ports(count: int) -> list[int]:
+    """Return ``count`` distinct currently-free TCP ports.
+
+    Used to give each single-host proc mesh its own torch.distributed rendezvous
+    port. Without this every mesh auto-picks a port independently, and
+    concurrently-spawned generators race to bind the same one -- surfacing as
+    EADDRINUSE, or (when a late binder connects to a peer's store instead)
+    cross-wired process groups that corrupt collectives and later trip a
+    device-side assert mid-decode.
+    """
+    import portpicker
+
+    ports: list[int] = []
+    while len(ports) < count:
+        port = portpicker.pick_unused_port()
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+
 @dataclass
 class HostMeshes:
     trainer: HostMesh
@@ -213,14 +233,20 @@ def spawn_proc_mesh(
         ]
     else:
         # Single-node mode: partition GPUs on this_host() via
-        # CUDA_VISIBLE_DEVICES
+        # CUDA_VISIBLE_DEVICES. Each mesh (trainer + every generator) shares the
+        # host, so give each its own MASTER_PORT; otherwise concurrently-spawned
+        # generators race to bind the same auto-picked rendezvous port.
         host_mesh = this_host()
         provisioner = PerHostProvisioner(total_gpus=total_gpus)
+        master_ports = _distinct_free_ports(1 + num_generators)
         trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
             bootstrap=_preimport_torch,
             bootstrap_command=default_bootstrap_cmd().with_env(
-                provisioner.allocate(trainer_world_size)
+                provisioner.allocate(
+                    trainer_world_size,
+                    extra_env={"MASTER_PORT": str(master_ports[0])},
+                )
             ),
         )
         generator_meshes = [
@@ -229,11 +255,15 @@ def spawn_proc_mesh(
                 bootstrap=_preimport_torch,
                 bootstrap_command=default_bootstrap_cmd().with_env(
                     provisioner.allocate(
-                        per_generator_world_size, extra_env=generator_env
+                        per_generator_world_size,
+                        extra_env={
+                            **(generator_env or {}),
+                            "MASTER_PORT": str(master_ports[1 + i]),
+                        },
                     )
                 ),
             )
-            for _ in range(num_generators)
+            for i in range(num_generators)
         ]
 
     return trainer_mesh, generator_meshes
