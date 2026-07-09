@@ -21,7 +21,11 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common import Conv1d, FeedForward, Linear
-from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    BaseAttention,
+    create_varlen_metadata_for_document,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -36,32 +40,32 @@ def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
 
 
-def _cu_seqlens_from_positions(positions: torch.Tensor) -> torch.Tensor | None:
-    """Build FLA ``cu_seqlens`` from packed ``positions`` ([B, L], restart at 0 per sample).
+def _gdn_cu_seqlens(positions: torch.Tensor) -> torch.Tensor | None:
+    """FLA ``cu_seqlens`` for packed GatedDeltaNet, or None for a single sequence.
 
     The RL batcher packs several training samples into one row and restarts
-    ``positions`` at 0 at each sample (and each pad region). For linear-attention
-    (GatedDeltaNet) the recurrent state and causal conv must RESET at those
-    boundaries; softmax layers get a block-diagonal mask, but the FLA kernels need
-    ``cu_seqlens`` instead. We flatten [B, L] row-major to one [1, B*L] varlen
-    sequence, so every boundary (row start, within-row sample start, pad start) is a
-    ``positions == 0`` index. Mirrors open-instruct's ``_compute_packing_kwargs``.
+    ``positions`` at 0 at each sample. GatedDeltaNet must reset its recurrent state
+    and causal conv at those boundaries (full attention gets a block-diagonal mask
+    instead). We reuse :func:`create_varlen_metadata_for_document` -- the same
+    ``positions == 0`` document convention used to build the full-attention masks --
+    so both attention types agree on the boundaries.
 
-    Returns None when there is a single sample (no interior boundary), so the
-    non-packed / generator path is unchanged (bitwise identical).
+    Unlike full attention, GatedDeltaNet always needs these boundaries regardless of
+    the full-attention backend, so the caller derives them from ``positions`` rather
+    than reading them off ``attention_masks`` (which is a flex ``BlockMask`` -- or
+    ``None`` for a pipeline stage with no full-attention layers -- and carries no
+    ``cu_seqlens``). Returns None for a single unpacked sequence so the generator /
+    eval path stays on the non-varlen kernel (bitwise unchanged).
     """
     # MRoPE passes 3D positions [B, L, 3]; the sample boundary is the reset of the
     # temporal component. Text (RL) positions are 2D [B, L].
     if positions.dim() == 3:
         positions = positions[..., 0]
-    flat = positions.reshape(-1)
-    total = flat.numel()
-    starts = torch.nonzero(flat == 0, as_tuple=False).squeeze(-1).to(torch.int32)
-    # No interior boundary (single sample starting at 0) -> let callers skip varlen.
-    if starts.numel() <= 1:
+    cu_seqlens = create_varlen_metadata_for_document(positions).cu_seq_q
+    # A single unpacked sequence yields [0, total]; skip the varlen path.
+    if cu_seqlens.numel() <= 2:
         return None
-    end = torch.tensor([total], device=positions.device, dtype=torch.int32)
-    return torch.cat([starts, end])
+    return cu_seqlens
 
 
 def _torch_native_gated_delta(
@@ -419,16 +423,13 @@ class GatedDeltaNet(Module):
         return F.silu(x).transpose(1, 2)
 
     def forward(
-        self, x: torch.Tensor, positions: torch.Tensor | None = None
+        self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None
     ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
 
-        # When several samples are packed into a row, `positions` restarts at 0 per
-        # sample; derive cu_seqlens so the conv AND recurrent state reset at each
-        # boundary. None (single sample / generator decode) -> unchanged path.
-        cu_seqlens = (
-            _cu_seqlens_from_positions(positions) if positions is not None else None
-        )
+        # cu_seqlens holds the packed sample boundaries (computed once at the model
+        # level); it resets the causal conv AND the recurrent state at each boundary.
+        # None (single unpacked sequence / generator decode) -> unchanged path.
 
         # Shapes:
         #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
@@ -595,14 +596,15 @@ class Qwen35TransformerBlock(Module):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = self.attention_norm(x)
         if self.full_attn:
             h = self.attn(h, attention_masks, positions)
         else:
-            # GatedDeltaNet needs positions to reset conv/recurrent state at packed
-            # sample boundaries (softmax uses attention_masks instead).
-            h = self.attn(h, positions)
+            # GatedDeltaNet resets its conv/recurrent state at the packed sample
+            # boundaries in cu_seqlens (full attention uses attention_masks instead).
+            h = self.attn(h, cu_seqlens)
         x = x + h
 
         h = self.ffn_norm(x)
@@ -883,8 +885,15 @@ class Qwen35Model(Decoder):
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
+        # GatedDeltaNet packing boundaries, computed once and shared across layers
+        # (see _gdn_cu_seqlens). Derived from the same document positions as the
+        # full-attention masks, but independent of the attention backend so it is
+        # correct for a pipeline stage that holds only GatedDeltaNet layers.
+        cu_seqlens = _gdn_cu_seqlens(
+            positions if positions is not None else rope_positions
+        )
         for layer in self.layers.values():
-            x = layer(x, attention_masks, rope_positions)
+            x = layer(x, attention_masks, rope_positions, cu_seqlens)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:
