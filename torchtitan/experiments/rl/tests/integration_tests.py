@@ -36,7 +36,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-loop.num-training-steps 5",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    # trainer FSDP=2 (dp_shard=2, TP=1) + 3 generators each TP=2 = 8 GPUs.
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--num_generators 3",
                     "--async-loop.group-size 2",
@@ -50,8 +52,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 no compile",
-            "rl_grpo_tp2_no_compile",
+            "RL GRPO trainer FSDP=2 + gen TP=2 no compile",
+            "rl_grpo_fsdp2_gen_tp2_no_compile",
             ngpu=8,
         ),
         OverrideDefinitions(
