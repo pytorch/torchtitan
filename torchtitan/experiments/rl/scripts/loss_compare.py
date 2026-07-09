@@ -39,6 +39,7 @@ Example usages:
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 import unittest
@@ -113,13 +114,14 @@ def run_training(
     hf_assets_path: str,
     dump_folder: str,
     config: str,
-    extra_args: list[str] | None = None,
+    options: str = "",
 ) -> None:
     """Run RL GRPO training as a subprocess.
 
-    ``extra_args`` are forwarded verbatim to train.py after the fixed
-    reproducibility flags. Use them to override config defaults for the
-    runner at hand (e.g. parallelism that fits the CI GPUs) without
+    ``options`` is a string of extra train.py flags appended after the fixed
+    reproducibility flags (mirrors the --baseline-options/--test-options
+    convention in scripts/loss_compare.py). Use it to override config defaults
+    for the runner at hand (e.g. parallelism that fits the CI GPUs) without
     perturbing the shared config or the golden loss curve.
     """
     cmd = [
@@ -145,7 +147,7 @@ def run_training(
         "--async-loop.validation.num-samples=0",
         "--metrics.enable-tensorboard",
         "--metrics.no-enable-wandb",
-        *(extra_args or []),
+        *shlex.split(options),
     ]
 
     log_print(f"Running: {' '.join(cmd)}")
@@ -250,9 +252,15 @@ def main() -> None:
         action="store_true",
         help="Assert losses match the reference file exactly.",
     )
+    parser.add_argument(
+        "--options",
+        default="",
+        help="Extra train.py flags appended to the run (e.g. parallelism "
+        "overrides to fit the CI GPUs). Mirrors --baseline-options/"
+        "--test-options in scripts/loss_compare.py.",
+    )
 
-    # Unknown args are forwarded to train.py (e.g. CI parallelism overrides).
-    args, extra_train_args = parser.parse_known_args()
+    args = parser.parse_args()
 
     # Reuse the reference-file helpers from the pre-training loss_compare so we
     # don't maintain two copies. That script lives at the repo root under
@@ -278,7 +286,7 @@ def main() -> None:
         args.assert_equal = True
 
     # Run training
-    run_training(args.hf_assets_path, args.dump_folder, args.config, extra_train_args)
+    run_training(args.hf_assets_path, args.dump_folder, args.config, args.options)
 
     # Extract losses from TensorBoard
     actual_losses = extract_losses_from_tensorboard(args.dump_folder)
