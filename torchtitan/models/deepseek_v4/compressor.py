@@ -14,7 +14,7 @@ from torch import nn
 
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import RoPE, SingleComplexRoPE
 from torchtitan.protocols.module import Module
 
 
@@ -39,6 +39,7 @@ class Compressor(Module):
     class Config(Module.Config):
         dim: int
         rope: RoPE.Config
+        single_rope: SingleComplexRoPE.Config
         head_dim: int = 512
         rope_head_dim: int = 64
         compress_ratio: int = 4
@@ -60,6 +61,7 @@ class Compressor(Module):
         self.overlap = cfg.compress_ratio == 4
         self.rotate = cfg.rotate
         self.rope = cfg.rope.build()
+        self.single_rope = cfg.single_rope.build()
 
         self.wkv = cfg.wkv.build()
         self.wgate = cfg.wgate.build()
@@ -102,9 +104,7 @@ class Compressor(Module):
         kv = (kv * score.softmax(dim=2)).sum(dim=2)
         kv = self.norm(kv.to(dtype))
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
-        kv_rope = self.rope(
-            kv_rope.unsqueeze(2), kv_rope.unsqueeze(2), comp_positions
-        )[0]
+        kv_rope = self.single_rope(kv_rope.unsqueeze(2), comp_positions)
         kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
         _assert_spmd_replicated_activation(kv)
         return kv
@@ -115,6 +115,7 @@ class Indexer(Module):
     class Config(Module.Config):
         dim: int
         rope: RoPE.Config
+        single_rope: SingleComplexRoPE.Config
         num_index_heads: int = 64
         index_head_dim: int = 128
         index_topk: int = 512
@@ -138,6 +139,7 @@ class Indexer(Module):
         self.softmax_scale = cfg.index_head_dim**-0.5
         self.compress_ratio = cfg.compress_ratio
         self.rope = cfg.rope.build()
+        self.single_rope = cfg.single_rope.build()
 
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
@@ -181,7 +183,7 @@ class Indexer(Module):
             q = q.view(bsz, seqlen, self.num_index_heads, self.head_dim)
             _assert_spmd_replicated_activation(q)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
-        q_rope = self.rope(q_rope, q_rope, positions)[0]
+        q_rope = self.single_rope(q_rope, positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         _assert_spmd_replicated_activation(q)
         hadamard_mat = self.hadamard_mat.to(device=q.device, dtype=q.dtype)

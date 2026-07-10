@@ -58,9 +58,7 @@ def dense_token_ids_sequence_parallel_placement() -> SpmdLayout:
     )
 
 
-def set_dsa_flex_attention_sharding(
-    inner_attention_cfg, *, compress_ratio: int
-) -> None:
+def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
     query_states = dense_activation_placement(tp=spmd.S(2))
     replicated_activation = dense_activation_placement(tp=spmd.R)
 
@@ -69,7 +67,7 @@ def set_dsa_flex_attention_sharding(
         "kv_states": replicated_activation,
         "attn_sink": _attn_sink_placement,
         "kv_compress": replicated_activation,
-        "compress_topk_idxs": replicated_activation,
+        "topk_idxs": replicated_activation,
     }
     grad_placements = [
         query_states,
@@ -107,7 +105,7 @@ def set_dsa_indexer_aux_loss_sharding(indexer_aux_loss_cfg) -> None:
     }
 
     indexer_aux_loss_cfg.sharding_config = ShardingConfig(
-        state_shardings={"loss_value": _dense_param_rep},
+        state_shardings={"_acc": _dense_param_rep},
         in_src_shardings=input_shardings,
         in_dst_shardings=dict(input_shardings),
         out_src_shardings=query_states,
@@ -142,9 +140,7 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
         },
     )
 
-    set_dsa_flex_attention_sharding(
-        at.inner_attention, compress_ratio=at.compress_ratio
-    )
+    set_dsa_flex_attention_sharding(at.inner_attention)
 
     # Sub-module configs are declared as fields on Attention.Config, so we
     # can set sharding_config directly (same pattern as deepseek_v3).
@@ -165,6 +161,9 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
     at.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": _dense_param_rep},
     )
+    at.single_rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": _dense_param_rep},
+    )
 
     if at.compressor is not None:
         set_compressor_sharding(at.compressor)
@@ -179,6 +178,9 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
 def set_compressor_sharding(compressor_cfg):
     # wkv, wgate, norm, and ape are all sub-module Config fields.
     compressor_cfg.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": _dense_param_rep},
+    )
+    compressor_cfg.single_rope.sharding_config = ShardingConfig(
         state_shardings={"cache": _dense_param_rep},
     )
     compressor_cfg.wkv.sharding_config = _replicate_weight
@@ -205,6 +207,9 @@ def set_indexer_sharding(indexer_cfg):
         },
     )
     indexer_cfg.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": _dense_param_rep},
+    )
+    indexer_cfg.single_rope.sharding_config = ShardingConfig(
         state_shardings={"cache": _dense_param_rep},
     )
     indexer_cfg.wq_b.sharding_config = ShardingConfig(
