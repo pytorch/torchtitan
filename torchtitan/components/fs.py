@@ -7,14 +7,17 @@
 import os
 import posixpath
 
-from fsspec.core import url_to_fs
+from fsspec.core import split_protocol, url_to_fs
+
+
+def is_fsspec(path: str) -> bool:
+    protocol, _ = split_protocol(path)
+    return protocol is not None
 
 
 def join_path(path: str, *parts: str) -> str:
     if not parts:
         return path
-    if "://" in parts[0]:
-        return posixpath.join(parts[0].rstrip("/"), *parts[1:])
     if not path:
         return posixpath.join(*parts)
     return posixpath.join(path.rstrip("/"), *parts)

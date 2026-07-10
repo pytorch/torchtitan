@@ -448,7 +448,11 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return
 
-        self.folder = fs.join_path(base_folder, config.folder)
+        self.folder = (
+            config.folder
+            if fs.is_fsspec(config.folder)
+            else fs.join_path(base_folder, config.folder)
+        )
         self.interval = config.interval
 
         self.states = states
