@@ -80,7 +80,15 @@ class PlanViT(BaseModel):
 
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             nparams = sum(p.numel() for p in model.parameters())
-            return nparams, 6 * nparams
+            tokens = self.pos_embedding.num_embeddings
+            attn = (
+                12
+                * len(self.blocks)
+                * tokens
+                * tokens
+                * self.pos_embedding.embedding_dim
+            )
+            return nparams, 6 * nparams * tokens + attn
 
     def __init__(self, config: Config):
         super().__init__()
