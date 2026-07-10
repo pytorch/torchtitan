@@ -504,7 +504,7 @@ class WorldModelForInference(WorldModel):
     def _decode(
         self,
         *,
-        future: torch.Tensor,
+        decode_frames: torch.Tensor,
         augments_pos_ref_augment: torch.Tensor,
         ref_augment_from_augments_euler: torch.Tensor,
         pose_mask: torch.Tensor,
@@ -515,16 +515,16 @@ class WorldModelForInference(WorldModel):
         steps: int,
         return_trajectory: bool,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor | None]:
-        device = future.device
+        device = decode_frames.device
         input_pos = torch.arange(
             num_prefill_frames * self.config.num_spatial_patches,
-            (num_prefill_frames + future.shape[1]) * self.config.num_spatial_patches,
+            (num_prefill_frames + decode_frames.shape[1]) * self.config.num_spatial_patches,
             device=device,
         )
         _, decode_mask = self.inference_masks[num_prefill_frames]
         input_pos_mask_pair = InputPosMaskPair(input_pos=input_pos, input_mask=decode_mask)
         return self.forward_n_steps(
-            future,
+            decode_frames,
             augments_pos_ref_augment[:, num_prefill_frames:],
             ref_augment_from_augments_euler[:, num_prefill_frames:],
             pose_mask[:, num_prefill_frames:],
