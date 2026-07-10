@@ -10,15 +10,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.distributed.aux_loss import inject_aux_loss
-from torchtitan.distributed.utils import dist_max, dist_mean, get_spmd_backend
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import (
     BaseAttention,
     create_attention_mask,
     FlexAttention,
 )
+from torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import RoPE, SingleComplexRoPE
 from torchtitan.protocols.module import Module
 
 from .compressor import Compressor, Indexer
@@ -32,31 +32,54 @@ def _assert_spmd_attention_type(tensor, *, tp):
         )
 
 
-class DSAIndexerAuxLoss(Module):
+def get_window_topk_idxs(
+    window_size: int,
+    bsz: int,
+    seqlen: int,
+    device,
+) -> torch.Tensor:
+    window = min(seqlen, window_size)
+    base = torch.arange(seqlen, device=device).unsqueeze(1)
+    idxs = (base - window + 1).clamp(0) + torch.arange(window, device=device)
+    idxs = torch.where(idxs > base, -1, idxs)
+    return idxs.unsqueeze(0).expand(bsz, -1, -1)
+
+
+def get_compress_topk_idxs(
+    compress_ratio: int,
+    bsz: int,
+    seqlen: int,
+    device,
+    *,
+    offset: int,
+) -> torch.Tensor:
+    compress_len = seqlen // compress_ratio
+    if compress_len == 0:
+        return torch.empty((bsz, seqlen, 0), dtype=torch.int64, device=device)
+
+    idxs = torch.arange(compress_len, device=device).repeat(seqlen, 1)
+    causal_limit = torch.arange(1, seqlen + 1, device=device).unsqueeze(1)
+    causal_limit = causal_limit // compress_ratio
+    idxs = torch.where(idxs >= causal_limit, -1, idxs + offset)
+    return idxs.unsqueeze(0).expand(bsz, -1, -1)
+
+
+class DSAIndexerAuxLoss(LoggedAuxLoss):
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(LoggedAuxLoss.Config):
         num_heads: int
         softmax_scale: float
         window_size: int
+        coeff: float = 1.0
+        tag: str = "dsa_indexer_loss"
         eps: float = 1e-10
 
     def __init__(self, config: Config) -> None:
-        super().__init__()
+        super().__init__(config)
         self.num_heads = config.num_heads
         self.softmax_scale = config.softmax_scale
         self.window_size = config.window_size
         self.eps = config.eps
-        self.register_buffer(
-            "loss_value",
-            torch.zeros((), dtype=torch.float32),
-            persistent=False,
-        )
-
-    def _init_self_buffers(self, *, buffer_device=None):
-        if buffer_device is None:
-            buffer_device = self.loss_value.device
-        with torch.device(buffer_device):
-            self.loss_value = torch.zeros((), dtype=torch.float32)
 
     def _selected_main_attn_dist(
         self,
@@ -146,26 +169,9 @@ class DSAIndexerAuxLoss(Module):
             index_score,
             compress_topk_idxs,
         )
-        if self.training:
-            self.loss_value.copy_(loss.detach().float())
-        return inject_aux_loss(carrier, loss)
-
-
-def collect_dsa_indexer_loss_metrics(model_parts, parallel_dims) -> dict[str, float]:
-    modules = [
-        m
-        for model_part in model_parts
-        for m in model_part.modules()
-        if isinstance(m, DSAIndexerAuxLoss)
-    ]
-    if not modules:
-        return {}
-    batch_mesh = parallel_dims.get_optional_mesh("batch")
-    layer_values = torch.stack([m.loss_value.detach() for m in modules])
-    return {
-        "dsa_indexer_loss/mean": dist_mean(layer_values.mean(), batch_mesh),
-        "dsa_indexer_loss/max": dist_max(layer_values.max(), batch_mesh),
-    }
+        if self.global_batch_size is None:
+            raise RuntimeError("DSAIndexerAuxLoss requires global_batch_size.")
+        return self.inject(carrier, loss * self.global_batch_size)
 
 
 class DSAFlexAttention(FlexAttention):
@@ -184,107 +190,27 @@ class DSAFlexAttention(FlexAttention):
         self.block_size = config.block_size
         self.return_lse = config.return_lse
 
-    def _create_window_mask(
+    def _create_topk_mask(
         self,
         *,
+        topk_idxs: torch.Tensor,
         bsz: int,
         seqlen: int,
         kv_len: int,
         device,
     ):
         sink_idx = kv_len
-
-        def window_mask_mod(b, h, q_idx, kv_idx):
-            in_window = (
-                (kv_idx < seqlen)
-                & (kv_idx <= q_idx)
-                & (q_idx - kv_idx < self.window_size)
-            )
-            is_sink = kv_idx == sink_idx
-            return in_window | is_sink
-
-        return create_attention_mask(
-            window_mask_mod,
-            bsz,
-            None,
-            seqlen,
-            kv_len + 1,
-            device=device,
-            BLOCK_SIZE=self.block_size,
-            separate_full_blocks=False,
-        )
-
-    def _create_indexer_block_causal_mask(
-        self,
-        *,
-        compress_topk_idxs: torch.Tensor,
-        bsz: int,
-        seqlen: int,
-        kv_len: int,
-        device,
-    ):
-        compress_len = seqlen // self.compress_ratio
-        sink_idx = kv_len
-        topk = compress_topk_idxs.size(-1)
+        topk = topk_idxs.size(-1)
 
         def v4_sparse_mask_mod(b, h, q_idx, kv_idx):
-            in_window = (
-                (kv_idx < seqlen)
-                & (kv_idx <= q_idx)
-                & (q_idx - kv_idx < self.window_size)
-            )
-            selected_compress = compress_topk_idxs[b, q_idx, 0] == kv_idx
-            for idx in range(1, topk):
-                selected_compress = selected_compress | (
-                    compress_topk_idxs[b, q_idx, idx] == kv_idx
-                )
-            in_compressed_topk = (
-                (kv_idx >= seqlen)
-                & (kv_idx < seqlen + compress_len)
-                & selected_compress
-            )
+            selected = kv_idx < 0
+            for idx in range(topk):
+                selected = selected | (topk_idxs[b, q_idx, idx] == kv_idx)
             is_sink = kv_idx == sink_idx
-            return in_window | in_compressed_topk | is_sink
+            return selected | is_sink
 
         return create_attention_mask(
             v4_sparse_mask_mod,
-            bsz,
-            None,
-            seqlen,
-            kv_len + 1,
-            device=device,
-            BLOCK_SIZE=self.block_size,
-            separate_full_blocks=False,
-        )
-
-    def _create_compress_causal_mask(
-        self,
-        *,
-        bsz: int,
-        seqlen: int,
-        kv_len: int,
-        device,
-    ):
-        compress_len = seqlen // self.compress_ratio
-        sink_idx = kv_len
-
-        def compress_causal_mask_mod(b, h, q_idx, kv_idx):
-            in_window = (
-                (kv_idx < seqlen)
-                & (kv_idx <= q_idx)
-                & (q_idx - kv_idx < self.window_size)
-            )
-            compress_idx = kv_idx - seqlen
-            in_compressed_causal = (
-                (kv_idx >= seqlen)
-                & (kv_idx < seqlen + compress_len)
-                & (compress_idx < (q_idx + 1) // self.compress_ratio)
-            )
-            is_sink = kv_idx == sink_idx
-            return in_window | in_compressed_causal | is_sink
-
-        return create_attention_mask(
-            compress_causal_mask_mod,
             bsz,
             None,
             seqlen,
@@ -300,48 +226,28 @@ class DSAFlexAttention(FlexAttention):
         kv_states,
         attn_sink,
         kv_compress,
-        compress_topk_idxs,
+        topk_idxs,
     ):
-        if self.compress_ratio > 1 and kv_compress is None:
-            raise ValueError(
-                "DSAFlexAttention requires kv_compress when compress_ratio > 1"
-            )
+        if kv_compress is None:
+            raise ValueError("DSAFlexAttention requires kv_compress")
+        if topk_idxs is None:
+            raise ValueError("DSAFlexAttention requires topk_idxs")
 
         bsz, seqlen, _, head_dim = query_states.size()
-        if self.compress_ratio > 1:
-            kv_states = torch.cat([kv_states, kv_compress], dim=1)
+        kv_states = torch.cat([kv_states, kv_compress], dim=1)
         kv_len = kv_states.size(1)
 
         sink_kv = kv_states.new_zeros((bsz, 1, head_dim))
         kv_states = torch.cat([kv_states, sink_kv], dim=1)
         key_value_states = kv_states.unsqueeze(2)
 
-        if self.compress_ratio == 4:
-            if compress_topk_idxs is None:
-                raise ValueError(
-                    "DSAFlexAttention block causal mask requires compress_topk_idxs"
-                )
-            block_mask = self._create_indexer_block_causal_mask(
-                compress_topk_idxs=compress_topk_idxs,
-                bsz=bsz,
-                seqlen=seqlen,
-                kv_len=kv_len,
-                device=query_states.device,
-            )
-        elif self.compress_ratio > 1:
-            block_mask = self._create_compress_causal_mask(
-                bsz=bsz,
-                seqlen=seqlen,
-                kv_len=kv_len,
-                device=query_states.device,
-            )
-        else:
-            block_mask = self._create_window_mask(
-                bsz=bsz,
-                seqlen=seqlen,
-                kv_len=kv_len,
-                device=query_states.device,
-            )
+        block_mask = self._create_topk_mask(
+            topk_idxs=topk_idxs,
+            bsz=bsz,
+            seqlen=seqlen,
+            kv_len=kv_len,
+            device=query_states.device,
+        )
         sink_idx = kv_len
 
         def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
@@ -369,6 +275,7 @@ class Attention(BaseAttention):
         n_heads: int
         inner_attention: Module.Config
         rope: RoPE.Config
+        single_rope: SingleComplexRoPE.Config
         head_dim: int = 512
         rope_head_dim: int = 64
         q_lora_rank: int = 1024
@@ -417,6 +324,7 @@ class Attention(BaseAttention):
         self.layer_id = cfg.layer_id
         self.n_layers = cfg.n_layers
         self.rope = cfg.rope.build()
+        self.single_rope = cfg.single_rope.build()
 
         # Build all sub-modules from their configs.
         self.wq_a = cfg.wq_a.build()
@@ -468,6 +376,12 @@ class Attention(BaseAttention):
         _assert_spmd_attention_type(kv, tp=spmd.R)
 
         kv_compress = compress_topk_idxs = index_score = None
+        topk_idxs = get_window_topk_idxs(
+            self.window_size,
+            bsz,
+            seqlen,
+            x.device,
+        )
 
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
             base = torch.arange(seqlen, device=x.device).unsqueeze(1)
@@ -482,6 +396,14 @@ class Attention(BaseAttention):
                 x.detach(), qr.detach(),
                 compress_causal_mask, compress_causal_limit,
                 positions=positions,
+                offset=kv.size(1),
+            )
+        elif self.compress_ratio > 1:
+            compress_topk_idxs = get_compress_topk_idxs(
+                self.compress_ratio,
+                bsz,
+                seqlen,
+                x.device,
                 offset=kv.size(1),
             )
 
@@ -499,8 +421,10 @@ class Attention(BaseAttention):
                 (bsz, seqlen, 0), dtype=torch.int64, device=x.device
             )
             _assert_spmd_attention_type(compress_topk_idxs, tp=spmd.R)
+        topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
+        _assert_spmd_attention_type(topk_idxs, tp=spmd.R)
         attn_out = self.inner_attention(
-            q, kv, attn_sink_param, kv_compress, compress_topk_idxs,
+            q, kv, attn_sink_param, kv_compress, topk_idxs,
         )
         if isinstance(attn_out, tuple):
             o, attn_lse = attn_out
@@ -522,7 +446,7 @@ class Attention(BaseAttention):
             )
 
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
-        o_rope = self.rope(o_rope, o_rope, positions)[0]
+        o_rope = self.single_rope(o_rope, positions, inverse=True)
         o = torch.cat([o_nope, o_rope], dim=-1)
         _assert_spmd_attention_type(o, tp=spmd.S(2))
 
