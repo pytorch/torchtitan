@@ -36,7 +36,6 @@ from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 DP = MeshAxisName.DP
-CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 if TYPE_CHECKING:
@@ -69,15 +68,10 @@ def _replicate_norm() -> ShardingConfig:
 def vision_activation_placement(
     *, tp: spmd.PerMeshAxisSpmdType = spmd.I
 ) -> SpmdLayout:
-    """Placement for vision-only local activations.
-
-    Vision payloads are handled in a local SPMD region, so DP/CP do not denote
-    global batch/sequence shard dimensions here.
-    """
+    """Placement for vision-only local activations."""
     return SpmdLayout(
         {
             DP: spmd.R,
-            CP: spmd.R,
             TP: tp,
         }
     )
