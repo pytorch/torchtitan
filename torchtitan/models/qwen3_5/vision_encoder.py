@@ -10,12 +10,14 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import CosSinRoPE
+from torchtitan.models.common.rope import _maybe_wrap_positions, CosSinRoPE
 from torchtitan.protocols.module import Module, ModuleDict
 
 _compiled_create_block_mask = torch.compile(create_block_mask)
@@ -88,12 +90,24 @@ def _compute_learned_pos_embeds(
     )
 
     for (h, w), indices in hw_to_indices.items():
-        pos_hw = F.interpolate(
-            pos_grid,
-            size=[h, w],
-            mode="bilinear",
-            align_corners=True,
-        )
+        if isinstance(pos_grid, DTensor):
+            pos_hw = local_map(
+                F.interpolate,
+                out_placements=(pos_grid.placements,),
+            )(
+                pos_grid,
+                size=[h, w],
+                mode="bilinear",
+                align_corners=True,
+            )
+        else:
+            pos_hw = F.interpolate(
+                pos_grid,
+                size=[h, w],
+                mode="bilinear",
+                align_corners=True,
+            )
+
         # (1, dim, h, w) → (h*w, dim)
         pos_hw = pos_hw.squeeze(0).permute(1, 2, 0).reshape(-1, dim).to(dtype)
 
@@ -251,6 +265,7 @@ class VisionRotaryEmbedding(Module):
         seq = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
+        seq = _maybe_wrap_positions(seq, self.inv_freq)
         return torch.outer(seq, self.inv_freq)
 
 
@@ -485,13 +500,25 @@ class Qwen35VisionEncoder(Module):
             self.config.dim,
         )
 
-        rope_cache = _compute_2d_rope_cache(
-            self._cached_freq_table,
-            grid_thw,
-            max_num_patch,
-            self.spatial_merge_size,
-            head_dim,
-        )
+        if isinstance(self._cached_freq_table, DTensor):
+            rope_cache = local_map(
+                _compute_2d_rope_cache,
+                out_placements=(self._cached_freq_table.placements,),
+            )(
+                self._cached_freq_table,
+                grid_thw,
+                max_num_patch,
+                self.spatial_merge_size,
+                head_dim,
+            )
+        else:
+            rope_cache = _compute_2d_rope_cache(
+                self._cached_freq_table,
+                grid_thw,
+                max_num_patch,
+                self.spatial_merge_size,
+                head_dim,
+            )
 
         return learned_pos, rope_cache
 
