@@ -14,7 +14,6 @@ import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, cast, Literal
-from urllib.parse import urlparse
 
 import torch
 import torch.distributed as dist
@@ -30,7 +29,6 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.checkpoint.storage import StorageWriter
 from torch.distributed.tensor import DTensor
 from torchtitan.components import fs
 from torchtitan.components.dataloader import BaseDataLoader
@@ -155,7 +153,13 @@ def purge_thread(purge_queue: queue.Queue):
             assert isinstance(path, str)
             logger.info("Checkpointer is deleting %s.", path)
             begin = time.monotonic()
-            fs.rm(path, recursive=True)
+            try:
+                fs.rm(path, recursive=True)
+            except Exception as error:
+                logger.warning(
+                    "Checkpointer failed to delete %s: %s. Skipping.", path, error
+                )
+                continue
             logger.info(
                 "Checkpointer deleted %s in %.2f seconds.",
                 path,
@@ -390,10 +394,9 @@ class CheckpointManager(Configurable):
 
             if self.initial_load_path:
                 self.initial_load_path = self.initial_load_path.strip()
-                parsed_initial_load_path = urlparse(self.initial_load_path)
                 if not (
                     self.initial_load_path.startswith("/")
-                    or parsed_initial_load_path.scheme
+                    or "://" in self.initial_load_path
                 ):
                     raise ValueError(
                         "initial_load_path must be absolute or a valid fsspec URL: "
@@ -556,7 +559,7 @@ class CheckpointManager(Configurable):
 
         ret: Future | AsyncSaveResponse | None = None
 
-        storage_writer: StorageWriter | None = None
+        storage_writer: HuggingFaceStorageWriter | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
 
         # HF Format Conversion
@@ -584,6 +587,7 @@ class CheckpointManager(Configurable):
             # The internal consolidation is disabled here and instead
             # `consolidate_safetensors_files_on_every_rank` is used later to manage
             # the multi-file merging process.
+
         # Execution Dispatch
         checkpoint_save_id = (
             None if to_hf else checkpoint_id
@@ -797,7 +801,7 @@ class CheckpointManager(Configurable):
         from_hf = False
         from_quantized = False
 
-        if not self._checkpoint_folder_exists():
+        if not fs.isdir(self.folder):
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
@@ -812,7 +816,7 @@ class CheckpointManager(Configurable):
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
-                if not self._checkpoint_exists(checkpoint_id, from_hf=from_hf):
+                if not fs.isdir(checkpoint_id):
                     raise ValueError(
                         f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
                     )
@@ -861,7 +865,7 @@ class CheckpointManager(Configurable):
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
 
-            if not self._checkpoint_exists(checkpoint_id, from_hf=False):
+            if not fs.isdir(checkpoint_id):
                 raise FileNotFoundError(
                     f"--checkpoint.load_step={step} not found at {checkpoint_id}"
                 )
@@ -962,17 +966,6 @@ class CheckpointManager(Configurable):
         (e.g., 'checkpoints/step-100')."""
         folder = folder or self.folder
         return fs.join_path(folder, f"step-{step}")
-
-    def _checkpoint_folder_exists(self, folder: str = "") -> bool:
-        folder = folder or self.folder
-        return fs.isdir(folder)
-
-    def _checkpoint_exists(self, checkpoint_id: str, from_hf: bool) -> bool:
-        metadata_names = ["model.safetensors.index.json"] if from_hf else [".metadata"]
-        return fs.exists(checkpoint_id) or any(
-            fs.exists(fs.join_path(checkpoint_id, metadata_name))
-            for metadata_name in metadata_names
-        )
 
     def _list_checkpoint_steps(
         self, folder: str, *, require_metadata: bool
@@ -1123,11 +1116,7 @@ class CheckpointManager(Configurable):
         additional guards (like participating_rank) without duplicating
         the purge loop in _purge_stale_checkpoints.
         """
-        return (
-            self.keep_latest_k > 0
-            and dist.get_rank() == 0
-            and self._checkpoint_folder_exists()
-        )
+        return self.keep_latest_k > 0 and dist.get_rank() == 0 and fs.isdir(self.folder)
 
     def _purge_stale_checkpoints(self):
         """Remove older checkpoint directories from storage to maintain
