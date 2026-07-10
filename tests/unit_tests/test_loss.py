@@ -517,6 +517,46 @@ class TestChunkedLossWrapper(unittest.TestCase):
             model_chunked.output.weight.grad, model_ref.output.weight.grad
         )
 
+    def test_backward_scale_scales_all_chunked_gradients(self):
+        torch.manual_seed(42)
+        B, L, D, V, num_chunks = 2, 12, 5, 17, 3
+        backward_scale = torch.tensor(8.0)
+        model_ref, _ = self._make_model_and_loss(D, V, num_chunks)
+        model_chunked, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        model_chunked.output.load_state_dict(model_ref.output.state_dict())
+
+        hidden = torch.randn(B, L, D)
+        labels = torch.randint(0, V, (B, L))
+        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        ref_hidden = hidden.detach().clone().requires_grad_(True)
+        chunk_hidden = hidden.detach().clone().requires_grad_(True)
+
+        ref_loss = ref_hidden.new_zeros((), dtype=torch.float32)
+        for h_chunk, label_chunk in zip(
+            torch.chunk(ref_hidden, num_chunks, dim=1),
+            torch.chunk(labels, num_chunks, dim=1),
+        ):
+            ref_loss = ref_loss + cross_entropy_loss(
+                model_ref.output(h_chunk.contiguous()),
+                label_chunk.contiguous(),
+            )
+        ref_loss = ref_loss / global_valid_tokens
+        (ref_loss * backward_scale).backward()
+        chunk_loss, _ = chunked_loss(
+            chunk_hidden,
+            labels,
+            global_valid_tokens,
+            backward_scale=backward_scale,
+        )
+        chunk_loss.backward()
+
+        torch.testing.assert_close(chunk_loss, ref_loss)
+        torch.testing.assert_close(chunk_hidden.grad, ref_hidden.grad)
+        torch.testing.assert_close(
+            model_chunked.output.weight.grad,
+            model_ref.output.weight.grad,
+        )
+
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""
         torch.manual_seed(42)

@@ -310,6 +310,17 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
         )
 
 
+def test_fp16_varlen_config_sets_trainer_and_generator_precision():
+    from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+        rl_grpo_qwen3_0_6b_varlen_fp16,
+    )
+
+    config = rl_grpo_qwen3_0_6b_varlen_fp16()
+
+    assert config.trainer.training.mixed_precision_param == "float16"
+    assert config.generator.model_dtype == "float16"
+
+
 # --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---
 
 

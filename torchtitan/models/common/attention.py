@@ -82,6 +82,12 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
+def _resolve_varlen_attention_dtype(dtype: torch.dtype) -> torch.dtype:
+    if dtype in (torch.float16, torch.bfloat16):
+        return dtype
+    return torch.bfloat16
+
+
 class VarlenAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -139,11 +145,12 @@ class VarlenAttention(Module):
         v_TNH = v_BLNH.reshape(T, -1, H)
 
         # Some operators can upcast under AMP, but varlen attention currently only
-        # supports bf16/fp16 inputs. If this changes, or fp16 training support
-        # is added, this may need to be revisited.
-        q_TNH = q_TNH.to(torch.bfloat16)
-        k_TNH = k_TNH.to(torch.bfloat16)
-        v_TNH = v_TNH.to(torch.bfloat16)
+        # supports bf16/fp16 inputs. Preserve low-precision inputs for fp16
+        # training; otherwise fall back to bf16 for the attention kernel.
+        attn_dtype = _resolve_varlen_attention_dtype(q_TNH.dtype)
+        q_TNH = q_TNH.to(attn_dtype)
+        k_TNH = k_TNH.to(attn_dtype)
+        v_TNH = v_TNH.to(attn_dtype)
 
         varlen_kwargs: dict[str, Any] = {}
 
