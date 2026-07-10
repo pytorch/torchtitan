@@ -67,7 +67,7 @@ def _torch_native_gated_delta(
     k = _l2norm(k.float(), dim=-1)
     v, g, beta = v.float(), g.float(), beta.float()
 
-    output = torch.zeros(B, L, H, D_v, dtype=torch.float32, device=q.device)
+    output = torch.zeros_like(v, dtype=torch.float32)
     state = torch.zeros(B, H, D_k, D_v, dtype=torch.float32, device=q.device)
 
     for t in range(L):
