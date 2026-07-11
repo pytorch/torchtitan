@@ -14,16 +14,25 @@ meshes.
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
+import torch
+
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
+from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 
-from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
+from torchtitan.distributed.spmd_types import (
+    current_spmd_mesh,
+    spmd_layout_to_dtensor_placements,
+    spmd_mesh_size,
+)
 
 
 __all__ = [
     "LocalMapConfig",
+    "RedistributionSpec",
     "ShardingConfig",
     "SpmdLayout",
     "resolve_placements",
@@ -62,8 +71,40 @@ class LocalMapConfig:
         return {"repr": repr(self)}
 
 
+class RedistributionSpec(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        axis: MeshAxisName
+        src: spmd.PerMeshAxisSpmdType
+        dst: spmd.PerMeshAxisSpmdType
+        fwd_op_dtype: torch.dtype | None = None
+        fwd_out_dtype: torch.dtype | None = None
+        bwd_op_dtype: torch.dtype | None = None
+        bwd_out_dtype: torch.dtype | None = None
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        axis = self.config.axis.value
+        if self.config.src == self.config.dst or spmd_mesh_size(axis) == 1:
+            return x
+        backward_options = {"op_dtype": self.config.bwd_op_dtype or x.dtype}
+        if self.config.bwd_out_dtype is not None:
+            backward_options["out_dtype"] = self.config.bwd_out_dtype
+        return spmd.redistribute(
+            x,
+            current_spmd_mesh().get_group(axis),  # pyrefly: ignore[missing-attribute]
+            src=self.config.src,
+            dst=self.config.dst,
+            op_dtype=self.config.fwd_op_dtype,
+            out_dtype=self.config.fwd_out_dtype,
+            backward_options=backward_options,
+        )
+
+
 @dataclass(kw_only=True, slots=True)
-class ShardingConfig:
+class ShardingConfig(Configurable.Config):
     """Declarative sharding for a Module's states and activations.
 
     All placements use ``SpmdLayout`` keyed by mesh axis names.  At
@@ -114,8 +155,10 @@ class ShardingConfig:
     state_shardings: dict[str, SpmdLayout] = field(default_factory=dict)
     in_src_shardings: dict[str, SpmdLayout] | None = None
     in_dst_shardings: dict[str, SpmdLayout] | None = None
+    in_redist: dict[str, RedistributionSpec.Config] | None = None
     out_src_shardings: SpmdLayout | tuple[SpmdLayout, ...] | None = None
     out_dst_shardings: SpmdLayout | None = None
+    out_redist: RedistributionSpec.Config | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
