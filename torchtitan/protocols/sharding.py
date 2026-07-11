@@ -52,12 +52,10 @@ class LocalMapConfig:
     Wraps forward with ``local_map()``: DTensor -> local before forward,
     local -> DTensor after forward.
 
-    Input placements come from ``ShardingConfig.in_dst_shardings``
-    (already aligned by ``_redistribute_inputs``); output placements from
-    ``ShardingConfig.out_src_shardings``. ``LocalMapConfig`` only carries
-    ``in_grad_placements`` since there's no equivalent slot on
-    ``ShardingConfig`` today. Set it to ``None`` to omit the local_map
-    argument when input gradients are irrelevant.
+    Output placements come from ``ShardingConfig.out_src_shardings``.
+    ``LocalMapConfig`` only carries ``in_grad_placements`` since input
+    placements are inferred at the local_map boundary. Set it to ``None`` to
+    omit the local_map argument when input gradients are irrelevant.
 
     Attributes:
         in_grad_placements: Per-input-gradient SpmdLayouts (positional,
@@ -131,10 +129,6 @@ class ShardingConfig(Configurable.Config):
             dataloader or FSDP-only path). Also declares the src side of
             the input redistribute pair.
             e.g. ``{"x": {TP: Shard(1)}}``.
-        in_dst_shardings: Desired input placements after redistribution,
-            keyed by ``forward()`` arg name.
-            e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
-            ``None`` means no input redistribution.
         out_src_shardings: Source placement of the forward's output as a
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
@@ -143,21 +137,16 @@ class ShardingConfig(Configurable.Config):
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
             e.g. ``{TP: Partial()}`` for the MoE wrapper.
-        out_dst_shardings: Desired output placement after redistribution.
-            e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
-            ``None`` means no output redistribution.
         local_map: If set, wraps forward with ``local_map()``. Input and
-            output placements come from ``in_dst_shardings`` and
+            output placements are inferred from runtime inputs and
             ``out_src_shardings``; ``LocalMapConfig`` only carries
             ``in_grad_placements``.
     """
 
     state_shardings: dict[str, SpmdLayout] = field(default_factory=dict)
     in_src_shardings: dict[str, SpmdLayout] | None = None
-    in_dst_shardings: dict[str, SpmdLayout] | None = None
     in_redist: dict[str, RedistributionSpec.Config] | None = None
     out_src_shardings: SpmdLayout | tuple[SpmdLayout, ...] | None = None
-    out_dst_shardings: SpmdLayout | None = None
     out_redist: RedistributionSpec.Config | None = None
     local_map: LocalMapConfig | None = None
 
