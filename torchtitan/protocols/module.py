@@ -535,6 +535,7 @@ class Module(nn.Module, Configurable):
         if (
             sharding_config.in_dst_shardings is None
             and sharding_config.in_src_shardings is None
+            and sharding_config.in_redist is None
         ):
             return args, kwargs
 
@@ -546,16 +547,18 @@ class Module(nn.Module, Configurable):
 
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
+        in_redist = sharding_config.in_redist or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
             src_spmd_layout = in_src_shardings.get(name)
             dst_spmd_layout = in_dst_shardings.get(name)
+            redist = in_redist.get(name)
 
             if parallel_dims.spmd_backend == "spmd_types":
                 if src_spmd_layout is None:
-                    if dst_spmd_layout is not None:
+                    if dst_spmd_layout is not None or redist is not None:
                         raise ValueError(
                             f"{type(self).__name__}.{name}: SPMD input "
                             "redistribution requires explicit in_src_shardings."
@@ -571,6 +574,10 @@ class Module(nn.Module, Configurable):
                         src_spmd_layout.axis_types,
                         src_spmd_layout.partition_spec,
                     )
+
+                if redist is not None:
+                    new_kwargs[name] = redist.build()(value)
+                    continue
 
                 if dst_spmd_layout is None:
                     new_kwargs[name] = value
@@ -642,12 +649,13 @@ class Module(nn.Module, Configurable):
 
         out_src = sharding_config.out_src_shardings
         out_dst = sharding_config.out_dst_shardings
+        out_redist = sharding_config.out_redist
         if parallel_dims.spmd_backend == "spmd_types":
             if not isinstance(outputs, torch.Tensor):
                 return outputs
 
             if out_src is None:
-                if out_dst is not None:
+                if out_dst is not None or out_redist is not None:
                     raise ValueError(
                         f"{type(self).__name__}: SPMD output redistribution "
                         "requires explicit out_src_shardings."
@@ -667,6 +675,9 @@ class Module(nn.Module, Configurable):
                     out_src.axis_types,
                     out_src.partition_spec,
                 )
+
+            if out_redist is not None:
+                return out_redist.build()(outputs)
 
             if out_dst is None:
                 return outputs
