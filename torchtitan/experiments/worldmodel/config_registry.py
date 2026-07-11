@@ -63,11 +63,10 @@ def worldmodel() -> WorldModelTrainer.Config:
     optimizer = default_adamw(lr=2e-4, weight_decay=1e-2)
     optimizer.implementation = "fused_opt_states_bf16"
     local_world_size, world_size, num_nodes = _world_sizes()
-    checkpoint_base_folder = _reporterv2_checkpoint_base_folder()
+    checkpoint_folder = _reporterv2_checkpoint_folder()
 
     return WorldModelTrainer.Config(
         hf_assets_path=".",
-        dump_folder=checkpoint_base_folder or "./outputs",
         loss=WorldModelLoss.Config(plan_loss_weight=0.1),
         tokenizer=WorldModelTokenizer.Config(
             compressor_model=COMPRESSOR_MODEL,
@@ -111,7 +110,7 @@ def worldmodel() -> WorldModelTrainer.Config:
         ),
         checkpoint=WorldModelTorchPackageCheckpointManager.Config(
             enable=True,
-            folder=os.getenv("REPORTERV2_TRAINING_ID") or "checkpoint",
+            folder=checkpoint_folder,
             interval=validation_freq * 5,
             async_mode="async",
             keep_latest_k=0,
@@ -155,9 +154,10 @@ def _world_sizes() -> tuple[int, int, int]:
     return local_world_size, world_size, num_nodes
 
 
-def _reporterv2_checkpoint_base_folder() -> str:
+def _reporterv2_checkpoint_folder() -> str:
     host = os.getenv("REPORTERV2_HOST")
-    return f"{host.rstrip('/')}/checkpoint" if host else ""
+    folder = os.getenv("REPORTERV2_TRAINING_ID") or "checkpoint"
+    return f"{host.rstrip('/')}/checkpoint/{folder}" if host else folder
 
 
 def main() -> None:

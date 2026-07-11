@@ -73,7 +73,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
         """
 
-        dump_folder: str = "./outputs"
+        dump_folder: str = "/tmp/torchtitan_train"
         """Folder to dump job outputs"""
 
         codedir: str = ""

@@ -38,7 +38,6 @@ CONFIG=${CONFIG:-"llama3_debugmodel"}
 COMM_MODE=${COMM_MODE:-""}
 NNODES=${NNODES:-${SLURM_JOB_NUM_NODES:-1}}
 NODE_RANK=${NODE_RANK:-${SLURM_NODEID:-0}}
-TORCHTITAN_DUMP_FOLDER=${TORCHTITAN_DUMP_FOLDER:-"/tmp/torchtitan_train/"}
 
 # xx injects these
 TORCHTITAN_ARGS=()
@@ -88,7 +87,7 @@ export REPORTERV2_TRAINING_ID
 if [ -n "$COMM_MODE" ]; then
     # Communication mode specified: validate configuration or run in debug mode
     echo "Running with comm_mode=${COMM_MODE}"
-    NGPU="${NGPU}" LOCAL_RANK=0 python3 -m torchtitan.train --module ${MODULE} --config ${CONFIG} --dump-folder "${TORCHTITAN_DUMP_FOLDER}" "$@" --comm.mode=${COMM_MODE} --training.steps 1
+    NGPU="${NGPU}" LOCAL_RANK=0 python3 -m torchtitan.train --module ${MODULE} --config ${CONFIG} "$@" --comm.mode=${COMM_MODE} --training.steps 1
 else
     if [[ -n "${MASTER_ADDR:-}" ]]; then
         RDZV_ENDPOINT="${MASTER_ADDR}:${MASTER_PORT}"
@@ -103,5 +102,5 @@ else
     --rdzv_id=${RDZV_ID:-${SLURM_JOB_ID:-$(generate_uuid)}} --rdzv_backend c10d \
     --rdzv_endpoint="${RDZV_ENDPOINT}" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-    -m torchtitan.train --module ${MODULE} --config ${CONFIG} --dump-folder "${TORCHTITAN_DUMP_FOLDER}" "$@"
+    -m torchtitan.train --module ${MODULE} --config ${CONFIG} "$@"
 fi

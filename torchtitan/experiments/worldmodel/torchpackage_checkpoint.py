@@ -36,7 +36,8 @@ os.environ.setdefault("NCCL_P2P_DISABLE", "1")
 PACKAGE_NAME = "model.torchpackage"
 MODEL_CONFIG_FILE = "_torchpackage_model_config.pt"
 STRUCTURED_LOG_DIR = os.getenv(
-    "TORCHTITAN_STRUCTURED_LOG_DIR", "./outputs/worldmodel_torchpackage_checkpoint"
+    "TORCHTITAN_STRUCTURED_LOG_DIR",
+    "/tmp/torchtitan_train/worldmodel_torchpackage_checkpoint",
 )
 WORLD_MODEL_TORCH_PACKAGE_RECIPE = (
     "torchtitan.experiments.worldmodel.torchpackage_checkpoint:"

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast, Literal
 from urllib.parse import urlparse
 
+from fsspec.core import split_protocol
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
@@ -458,7 +459,11 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return
 
-        self.folder = fs.join_path(base_folder, config.folder)
+        self.folder = (
+            config.folder
+            if split_protocol(config.folder)[0] is not None
+            else fs.join_path(base_folder, config.folder)
+        )
         self.checkpoint_id_format = config.checkpoint_id_format
         self.interval = config.interval
 

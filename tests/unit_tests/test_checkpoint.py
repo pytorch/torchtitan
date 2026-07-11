@@ -386,10 +386,11 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             config=cfg,
             sd_adapter=None,
-            base_folder="",
+            base_folder="./outputs",
         )
 
         try:
+            self.assertEqual(manager.folder, root)
             checkpoint_id = manager._create_checkpoint_id(1)
             expected = torch.tensor([3.0])
             manager.dcp_save(
