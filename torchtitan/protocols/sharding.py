@@ -14,16 +14,25 @@ meshes.
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
+import torch
+
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
+from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 
-from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
+from torchtitan.distributed.spmd_types import (
+    current_spmd_mesh,
+    spmd_layout_to_dtensor_placements,
+    spmd_mesh_size,
+)
 
 
 __all__ = [
     "LocalMapConfig",
+    "RedistributionSpec",
     "ShardingConfig",
     "SpmdLayout",
     "resolve_placements",
@@ -43,12 +52,10 @@ class LocalMapConfig:
     Wraps forward with ``local_map()``: DTensor -> local before forward,
     local -> DTensor after forward.
 
-    Input placements come from ``ShardingConfig.in_dst_shardings``
-    (already aligned by ``_redistribute_inputs``); output placements from
-    ``ShardingConfig.out_src_shardings``. ``LocalMapConfig`` only carries
-    ``in_grad_placements`` since there's no equivalent slot on
-    ``ShardingConfig`` today. Set it to ``None`` to omit the local_map
-    argument when input gradients are irrelevant.
+    Output placements come from ``ShardingConfig.out_src_shardings``.
+    ``LocalMapConfig`` only carries ``in_grad_placements`` since input
+    placements are inferred at the local_map boundary. Set it to ``None`` to
+    omit the local_map argument when input gradients are irrelevant.
 
     Attributes:
         in_grad_placements: Per-input-gradient SpmdLayouts (positional,
@@ -62,8 +69,40 @@ class LocalMapConfig:
         return {"repr": repr(self)}
 
 
+class RedistributionSpec(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        axis: MeshAxisName
+        src: spmd.PerMeshAxisSpmdType
+        dst: spmd.PerMeshAxisSpmdType
+        fwd_op_dtype: torch.dtype | None = None
+        fwd_out_dtype: torch.dtype | None = None
+        bwd_op_dtype: torch.dtype | None = None
+        bwd_out_dtype: torch.dtype | None = None
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        axis = self.config.axis.value
+        if self.config.src == self.config.dst or spmd_mesh_size(axis) == 1:
+            return x
+        backward_options = {"op_dtype": self.config.bwd_op_dtype or x.dtype}
+        if self.config.bwd_out_dtype is not None:
+            backward_options["out_dtype"] = self.config.bwd_out_dtype
+        return spmd.redistribute(
+            x,
+            current_spmd_mesh().get_group(axis),  # pyrefly: ignore[missing-attribute]
+            src=self.config.src,
+            dst=self.config.dst,
+            op_dtype=self.config.fwd_op_dtype,
+            out_dtype=self.config.fwd_out_dtype,
+            backward_options=backward_options,
+        )
+
+
 @dataclass(kw_only=True, slots=True)
-class ShardingConfig:
+class ShardingConfig(Configurable.Config):
     """Declarative sharding for a Module's states and activations.
 
     All placements use ``SpmdLayout`` keyed by mesh axis names.  At
@@ -90,10 +129,6 @@ class ShardingConfig:
             dataloader or FSDP-only path). Also declares the src side of
             the input redistribute pair.
             e.g. ``{"x": {TP: Shard(1)}}``.
-        in_dst_shardings: Desired input placements after redistribution,
-            keyed by ``forward()`` arg name.
-            e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
-            ``None`` means no input redistribution.
         out_src_shardings: Source placement of the forward's output as a
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
@@ -102,20 +137,17 @@ class ShardingConfig:
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
             e.g. ``{TP: Partial()}`` for the MoE wrapper.
-        out_dst_shardings: Desired output placement after redistribution.
-            e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
-            ``None`` means no output redistribution.
         local_map: If set, wraps forward with ``local_map()``. Input and
-            output placements come from ``in_dst_shardings`` and
+            output placements are inferred from runtime inputs and
             ``out_src_shardings``; ``LocalMapConfig`` only carries
             ``in_grad_placements``.
     """
 
     state_shardings: dict[str, SpmdLayout] = field(default_factory=dict)
     in_src_shardings: dict[str, SpmdLayout] | None = None
-    in_dst_shardings: dict[str, SpmdLayout] | None = None
+    in_redist: dict[str, RedistributionSpec.Config] | None = None
     out_src_shardings: SpmdLayout | tuple[SpmdLayout, ...] | None = None
-    out_dst_shardings: SpmdLayout | None = None
+    out_redist: RedistributionSpec.Config | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
