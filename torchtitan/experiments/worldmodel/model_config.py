@@ -77,6 +77,7 @@ def _model_config(
     attention_impl: str = "FLEX",
     attention_mask: str = "LAST_FRAME_CAUSAL",
     norm: str = "RMSNorm",
+    experimental_pose_only_xy: bool = False,
 ) -> WorldModel.Config:
     stats = COMPRESSOR_STATS[COMPRESSOR_MODEL]
     return WorldModel.Config(
@@ -88,6 +89,7 @@ def _model_config(
         time_factor=1.0,
         compressor_mean=stats["mean"],
         compressor_std=stats["std"],
+        experimental_pose_only_xy=experimental_pose_only_xy,
         transformer=TransformerConfig(
             n_layer=layers,
             n_embd=hidden,
