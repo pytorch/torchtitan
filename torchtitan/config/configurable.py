@@ -128,6 +128,16 @@ class Configurable:
                                 yield item_fqn, item, val, i
                         elif hasattr(item, "traverse"):
                             yield from _traverse_child(item, item_fqn, val, i)
+                elif isinstance(val, dict):
+                    for key, item in val.items():
+                        item_fqn = f"{fqn}.{key}"
+                        if isinstance(item, config_cls):
+                            if recurse and hasattr(item, "traverse"):
+                                yield from _traverse_child(item, item_fqn, val, key)
+                            else:
+                                yield item_fqn, item, val, key
+                        elif hasattr(item, "traverse"):
+                            yield from _traverse_child(item, item_fqn, val, key)
                 elif hasattr(val, "traverse"):
                     yield from _traverse_child(val, fqn, self, f.name)
 
