@@ -6539,6 +6539,14 @@ class TestSelectiveActivationRematPass(TestCase):
         result = selective_activation_remat_pass(gm)
 
         nodes = list(result.graph.nodes)
+        positions = {node: index for index, node in enumerate(nodes)}
+        for node in nodes:
+            for inp in node.all_input_nodes:
+                self.assertLess(
+                    positions[inp],
+                    positions[node],
+                    f"{inp.name} must precede its user {node.name}",
+                )
 
         # Backward reload chain has been moved in front of the dup's target
         # (bwd_use) in topological order (reload_op before bwd_wait).
@@ -6636,6 +6644,14 @@ class TestSelectiveActivationRematPass(TestCase):
         result = selective_activation_remat_pass(gm)
 
         nodes = list(result.graph.nodes)
+        positions = {node: index for index, node in enumerate(nodes)}
+        for node in nodes:
+            for inp in node.all_input_nodes:
+                self.assertLess(
+                    positions[inp],
+                    positions[node],
+                    f"{inp.name} must precede its user {node.name}",
+                )
         early_idx = nodes.index(early_bwd)
         reload_idx = nodes.index(reload_op)
         wait_idx = nodes.index(bwd_wait)
@@ -6647,7 +6663,9 @@ class TestSelectiveActivationRematPass(TestCase):
         # collapsed it next to bwd_use, reload_op/bwd_wait would land after
         # middle_bwd — which would also be a topology violation since
         # middle_bwd consumes bwd_wait.
-        self.assertLess(early_idx, reload_idx)
+        # Reload is prefetched at the beginning of the backward region;
+        # wait_tensor remains before its existing consumer.
+        self.assertLess(reload_idx, early_idx)
         self.assertLess(reload_idx, wait_idx)
         self.assertLess(wait_idx, middle_idx)
         self.assertLess(middle_idx, bwd_use_idx)
@@ -6659,6 +6677,10 @@ class TestSelectiveActivationRematPass(TestCase):
         dup_idx = nodes.index(dup)
         self.assertLess(wait_idx, dup_idx)
         self.assertLess(dup_idx, bwd_use_idx)
+
+        # There is real graph distance between launching H2D and waiting for
+        # it: early_bwd executes while the transfer can be in flight.
+        self.assertGreater(wait_idx - reload_idx, 1)
 
         # middle_bwd still consumes bwd_wait at its original location.
         for inp in middle_bwd.all_input_nodes:
