@@ -8,6 +8,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 
@@ -19,6 +20,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Conv1d, FeedForward, Linear
 from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
 from torchtitan.models.common.decoder import Decoder
@@ -64,7 +66,7 @@ def _torch_native_gated_delta(
     k = _l2norm(k.float(), dim=-1)
     v, g, beta = v.float(), g.float(), beta.float()
 
-    output = torch.zeros(B, L, H, D_v, dtype=torch.float32, device=q.device)
+    output = torch.zeros_like(v, dtype=torch.float32)
     state = torch.zeros(B, H, D_k, D_v, dtype=torch.float32, device=q.device)
 
     for t in range(L):
@@ -196,32 +198,44 @@ class GatedDeltaKernel(Module):
         if self.backend == "torch_native":
             return _torch_native_gated_delta(q, k, v, g, beta)
 
-        if self.backend == "fla_chunked":
-            result = _fla_chunk_gated_delta_rule(
-                q,
-                k,
-                v,
-                g,
-                beta,
-                use_qk_l2norm_in_kernel=True,
-            )
-        elif self.backend == "fla_fused_recurrent":
-            result = _fla_fused_recurrent_gated_delta_rule(
-                q,
-                k,
-                v,
-                g,
-                beta=beta,
-                use_qk_l2norm_in_kernel=True,
-            )
-        else:
-            raise ValueError(
-                f"Unknown fla_backend '{self.backend}'. "
-                "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_native'."
-            )
+        with spmd.no_typecheck():
+            # FLA kernels call into third-party custom autograd functions; we can't typecheck.
+            # ShardingConfig handles output re-annotation.
+            if self.backend == "fla_chunked":
+                result = _fla_chunk_gated_delta_rule(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    use_qk_l2norm_in_kernel=True,
+                )
+            elif self.backend == "fla_fused_recurrent":
+                result = _fla_fused_recurrent_gated_delta_rule(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta=beta,
+                    use_qk_l2norm_in_kernel=True,
+                )
+            else:
+                raise ValueError(
+                    f"Unknown fla_backend '{self.backend}'. "
+                    "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_native'."
+                )
 
         # FLA kernels return (output, final_state); we only need output
         return result[0]
+
+
+@spmd.local_map(
+    in_types=(spmd.PartitionSpec("dp", None, "tp"), None),
+    out_types=spmd.PartitionSpec("dp", None, "tp", None),
+)
+def _local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
+    # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
+    return t.view(t.shape[0], t.shape[1], -1, head_dim)
 
 
 class GatedDeltaNet(Module):
@@ -281,6 +295,20 @@ class GatedDeltaNet(Module):
 
     def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
         x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
+
+        def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
+            # groups == local out-channels for depthwise channel-sharded conv.
+            # pyrefly: ignore [no-matching-overload]
+            return F.conv1d(
+                x_local,
+                w_local,
+                None,
+                conv.stride,
+                conv.padding,
+                conv.dilation,
+                w_local.size(0),
+            )
+
         if isinstance(x, DTensor):
             # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
             # groups lands in a released torch. local_map runs the conv on
@@ -290,19 +318,6 @@ class GatedDeltaNet(Module):
             w = conv.weight
             w_plc = w.placements  # pyrefly: ignore [missing-attribute]
 
-            def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
-                # groups == local out-channels (depthwise, channel-sharded)
-                # pyrefly: ignore [no-matching-overload]
-                return F.conv1d(
-                    x_local,
-                    w_local,
-                    None,
-                    conv.stride,
-                    conv.padding,
-                    conv.dilation,
-                    w_local.size(0),
-                )
-
             conv_dt = local_map(
                 _conv,
                 out_placements=(x_plc,),
@@ -311,6 +326,15 @@ class GatedDeltaNet(Module):
                 device_mesh=x.device_mesh,
             )
             x = conv_dt(x, w)  # pyrefly: ignore
+        elif get_spmd_backend() == "spmd_types":
+            conv_spmd = spmd.local_map(
+                in_types=(
+                    {"dp": spmd.S(0), "tp": spmd.S(1)},
+                    {"dp": spmd.R, "tp": spmd.S(0)},
+                ),
+                out_types={"dp": spmd.S(0), "tp": spmd.S(1)},
+            )(_conv)
+            x = conv_spmd(x, conv.weight)
         else:
             x = conv(x)
         return F.silu(x).transpose(1, 2)
@@ -329,9 +353,9 @@ class GatedDeltaNet(Module):
         xa = self.in_proj_a(x)
         xb = self.in_proj_b(x)
 
-        xq = xq.view(bs, seqlen, -1, self.key_head_dim)
-        xk = xk.view(bs, seqlen, -1, self.key_head_dim)
-        xv = xv.view(bs, seqlen, -1, self.value_head_dim)
+        xq = _local_head_split(xq, self.key_head_dim)
+        xk = _local_head_split(xk, self.key_head_dim)
+        xv = _local_head_split(xv, self.value_head_dim)
 
         # Gating signals, shape (bs, seqlen, n_value_heads):
         #   g:    decay rate per head, always negative
@@ -341,7 +365,7 @@ class GatedDeltaNet(Module):
 
         output = self.kernel(xq, xk, xv, g, beta)
 
-        xz = xz.view(bs, seqlen, -1, self.value_head_dim)
+        xz = _local_head_split(xz, self.value_head_dim)
         output = self.norm(output, xz)
 
         output = output.reshape(bs, seqlen, -1)
@@ -408,10 +432,10 @@ class Qwen35Attention(BaseAttention):
         bs, seqlen, _ = x.shape
 
         # wq is 2x wider: produces query + gate
-        xq_gate = self.wq(x).view(bs, seqlen, -1, self.head_dim * 2)
+        xq_gate = _local_head_split(self.wq(x), self.head_dim * 2)
         xq, gate = xq_gate.chunk(2, dim=-1)
-        xk = self.wk(x).view(bs, seqlen, -1, self.head_dim)
-        xv = self.wv(x).view(bs, seqlen, -1, self.head_dim)
+        xk = _local_head_split(self.wk(x), self.head_dim)
+        xv = _local_head_split(self.wv(x), self.head_dim)
 
         # QK norm (before RoPE)
         xq = self.q_norm(xq)
@@ -681,6 +705,7 @@ class Qwen35Model(Decoder):
             ] = merged_embeds[item_idx, :n_tokens, :]
         return inputs_embeds
 
+    @spmd.local_map(out_types={"dp": spmd.S(0), "tp": spmd.R})
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,

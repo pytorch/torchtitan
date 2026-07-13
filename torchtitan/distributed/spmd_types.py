@@ -142,6 +142,9 @@ def annotate_input_spmd_types(
 
     Hardcodes the standard decoder convention: inputs and positions are
     ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
+    Qwen3.5 multimodal payload tensors are irregular across DP shards and
+    invariant across TP ranks; multimodal compute should handle them in local
+    SPMD regions. Qwen3.5 does not support CP.
     Analogous to ``full_dtensor.parallelize_inputs()`` but for the
     ``spmd_types`` path.
     """
@@ -157,15 +160,26 @@ def annotate_input_spmd_types(
         MeshAxisName.CP: spmd.S(1),
         MeshAxisName.TP: spmd.I,
     }
+    multimodal_type = {
+        MeshAxisName.DP: spmd.V,
+        MeshAxisName.TP: spmd.I,
+    }
 
     mesh = parallel_dims.spmd_dense_mesh()
     with set_current_spmd_mesh(mesh):
         spmd.assert_type(inputs, token_type)
         spmd.assert_type(labels, label_type)
-        if "positions" in extra_kwargs and isinstance(
-            extra_kwargs["positions"], torch.Tensor
+        for name in ("positions", "mrope_positions"):
+            if name in extra_kwargs and isinstance(extra_kwargs[name], torch.Tensor):
+                spmd.assert_type(extra_kwargs[name], token_type)
+        for name in (
+            "pixel_values",
+            "pixel_values_videos",
+            "grid_thw",
+            "grid_thw_videos",
         ):
-            spmd.assert_type(extra_kwargs["positions"], token_type)
+            if name in extra_kwargs and isinstance(extra_kwargs[name], torch.Tensor):
+                spmd.assert_type(extra_kwargs[name], multimodal_type)
     return inputs, labels, extra_kwargs
 
 
