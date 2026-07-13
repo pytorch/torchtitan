@@ -263,7 +263,7 @@ class VisionRotaryEmbedding(Module):
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
         seq = _maybe_wrap_positions(seq, self.inv_freq)
-        return torch.outer(seq, self.inv_freq)   # pyrefly: ignore
+        return torch.outer(seq, self.inv_freq)  # pyrefly: ignore
 
 
 class PatchMerger(Module):
@@ -503,7 +503,7 @@ class Qwen35VisionEncoder(Module):
                 out_placements=(self._cached_freq_table.placements,),
             )(
                 self._cached_freq_table,
-                grid_thw,
+                grid_thw,  # pyrefly: ignore [bad-argument-count]
                 max_num_patch,
                 self.spatial_merge_size,
                 head_dim,
