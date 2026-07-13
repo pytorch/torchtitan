@@ -77,7 +77,8 @@ class MRoPE(CosSinRoPE):
             if isinstance(position_ids, DTensor)
             else position_ids
         )
-        pos = pos.to(device=rope_cache.device)
+        if pos.device != rope_cache.device:
+            pos = pos.to(device=rope_cache.device)
 
         _maybe_check_max_pos(pos, max_valid_pos=rope_cache.shape[0] - 1)
         head_dim = rope_cache.shape[-1] // 2
