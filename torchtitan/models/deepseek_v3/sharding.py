@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -22,7 +21,7 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
-from torchtitan.protocols.sharding import RedistributionSpec, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
@@ -93,12 +92,8 @@ def _set_deepseek_v3_layer_sharding(
         in_src_shardings={
             "x": attn_x_layout,
         },
-        in_redist={
-            "x": RedistributionSpec.Config(
-                axis=MeshAxisName.TP,
-                src=spmd.S(1) if enable_sp else spmd.I,
-                dst=spmd.R,
-            )
+        in_dst_shardings={
+            "x": dense_activation_placement(tp=spmd.R),
         },
     )
     attention.rope.sharding_config = ShardingConfig(

@@ -418,7 +418,9 @@ def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
             gate.reshape(-1, gate.shape[-1]),
             up.reshape(-1, up.shape[-1]),
         ).reshape(gate.shape)
-    )(gate, up)
+    )(
+        gate, up
+    )
 
 
 class FusedSwiGLU(FeedForward):
@@ -496,7 +498,7 @@ def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
     fused.sharding_config = ShardingConfig(
         state_shardings={"w13": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings=base.in_src_shardings if base is not None else None,
-        in_redist=base.in_redist if base is not None else None,
+        in_dst_shardings=base.in_dst_shardings if base is not None else None,
     )
     return fused
 
