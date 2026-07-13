@@ -12,7 +12,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import Shard
+from torch.distributed.tensor import Replicate
 from torch.distributed.tensor.debug import CommDebugMode
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -28,7 +28,6 @@ from torchtitan.distributed.parallel_dims import (
 )
 from torchtitan.distributed.spmd_types import (
     spmd_distribute_tensor,
-    spmd_layout_to_dtensor_placements,
     spmd_redistribute_per_axis,
     spmd_validate_redistributions,
 )
@@ -37,7 +36,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
 )
 from torchtitan.models.llama3 import model_registry
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
 class TestParallelDimsValidation(unittest.TestCase):
@@ -236,19 +235,6 @@ class TestSpmdLayout(DTensorTestBase):
     def world_size(self):
         return 4
 
-    def test_converts_partition_spec_to_dtensor_shard(self):
-        """PartitionSpec refines V into concrete DTensor Shard placement."""
-        layout = SpmdLayout(
-            {MeshAxisName.TP: spmd.V},
-            partition_spec=spmd.PartitionSpec(MeshAxisName.TP),
-        )
-
-        self.assertEqual(layout.per_axis_spmd_types(), {MeshAxisName.TP: spmd.S(0)})
-        self.assertEqual(
-            spmd_layout_to_dtensor_placements(layout),
-            {MeshAxisName.TP: Shard(0)},
-        )
-
     def test_seq_parallel_activation_per_axis_spmd_types(self):
         """PartitionSpec can map multiple mesh axes to one tensor dim."""
         layout = SpmdLayout(
@@ -279,6 +265,21 @@ class TestSpmdLayout(DTensorTestBase):
             unfold_dp_axes([MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP]),
             ["dp_replicate", "dp_shard", "cp", "tp"],
         )
+
+    @with_comms
+    def test_resolve_placements_ignores_extra_untranslatable_axes(self):
+        """Extra layout axes are ignored before converting to DTensor placements."""
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("tp",)
+        )
+        layout = SpmdLayout(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.TP: spmd.I,
+            }
+        )
+
+        self.assertEqual(resolve_placements(layout, mesh), (Replicate(),))
 
     def test_rejects_partition_spec_reorder_redistribute(self):
         """((DP, CP), None) -> ((CP, DP), None) not supported by a single redistribute call."""

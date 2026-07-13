@@ -66,12 +66,12 @@ def _replicate_norm() -> ShardingConfig:
 
 
 def vision_activation_placement(
-    *, tp: spmd.PerMeshAxisSpmdType = spmd.I
+    *, dp: spmd.PerMeshAxisSpmdType, tp: spmd.PerMeshAxisSpmdType
 ) -> SpmdLayout:
     """Placement for vision-only local activations."""
     return SpmdLayout(
         {
-            DP: spmd.R,
+            DP: dp,
             TP: tp,
         }
     )
@@ -243,8 +243,8 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={"pos_embed": dense_param_placement(tp=spmd.I)},
         # I->R convert to scatter into text embeddings.
-        out_src_shardings=vision_activation_placement(tp=spmd.I),
-        out_dst_shardings=vision_activation_placement(tp=spmd.R),
+        out_src_shardings=vision_activation_placement(dp=spmd.V, tp=spmd.I),
+        out_dst_shardings=vision_activation_placement(dp=spmd.V, tp=spmd.R),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
         state_shardings={"inv_freq": dense_param_placement(tp=spmd.I)},
@@ -270,8 +270,12 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     block.norm2.sharding_config = _replicate_norm()
 
     block.attn.sharding_config = ShardingConfig(
-        in_src_shardings={"rope_cache": vision_activation_placement()},
-        in_dst_shardings={"rope_cache": vision_activation_placement(tp=spmd.R)},
+        in_src_shardings={
+            "rope_cache": vision_activation_placement(dp=spmd.R, tp=spmd.I)
+        },
+        in_dst_shardings={
+            "rope_cache": vision_activation_placement(dp=spmd.R, tp=spmd.R)
+        },
     )
     block.attn.wq.sharding_config = _vision_colwise_config()
     block.attn.wk.sharding_config = _vision_colwise_config()
