@@ -121,9 +121,12 @@ jobs:
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
+        # TODO(#3898): re-enable once the flex generator recompile-limit hang is
+        # fixed (vLLM flex_attention_compiled recompiles per query length and
+        # deadlocks on A10G). Temporarily disabled to isolate the CI hang.
+        # RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+        #   HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+        #   torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
 
         # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
         # random-init test and the batch-invariant debug tests (both need 8 GPUs).
