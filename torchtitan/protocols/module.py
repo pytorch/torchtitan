@@ -91,6 +91,8 @@ class Module(nn.Module, Configurable):
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
+    _in_redist_fns: dict[str, RedistributionSpec] | None = None
+    _out_redist_fn: RedistributionSpec | None = None
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
 
@@ -323,6 +325,7 @@ class Module(nn.Module, Configurable):
 
         self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
+        self._build_redistribution_specs()
         fn = self._maybe_wrap_with_local_region(self.forward, parallel_dims)
 
         def forward_with_redistribution(*args, **kwargs):
@@ -331,6 +334,19 @@ class Module(nn.Module, Configurable):
             return self._redistribute_outputs(parallel_dims, outputs)
 
         self.forward = forward_with_redistribution
+
+    def _build_redistribution_specs(self) -> None:
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        self._in_redist_fns = {
+            name: config.build()
+            for name, config in (sharding_config.in_redist or {}).items()
+        }
+        self._out_redist_fn = (
+            sharding_config.out_redist.build()
+            if sharding_config.out_redist is not None
+            else None
+        )
 
     def _spmd_distribute_state(
         self,
@@ -567,12 +583,14 @@ class Module(nn.Module, Configurable):
 
         in_src_shardings = sharding_config.in_src_shardings or {}
         in_redist = sharding_config.in_redist or {}
+        in_redist_fns = self._in_redist_fns or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
             src_spmd_layout = in_src_shardings.get(name)
             redist = in_redist.get(name)
+            redist_fn = in_redist_fns.get(name)
 
             if parallel_dims.spmd_backend == "spmd_types":
                 if src_spmd_layout is None:
@@ -594,7 +612,13 @@ class Module(nn.Module, Configurable):
                     )
 
                 if redist is not None:
-                    new_kwargs[name] = redist.build()(value)
+                    if redist_fn is None:
+                        raise RuntimeError(
+                            f"{type(self).__name__}.{name}: input redistribution "
+                            "specs have not been built. Call parallelize() before "
+                            "running redistribution."
+                        )
+                    new_kwargs[name] = redist_fn(value)
                     continue
 
                 new_kwargs[name] = value
@@ -665,6 +689,7 @@ class Module(nn.Module, Configurable):
 
         out_src = sharding_config.out_src_shardings
         out_redist = sharding_config.out_redist
+        out_redist_fn = self._out_redist_fn
         if out_redist is None:
             return outputs
 
@@ -693,7 +718,13 @@ class Module(nn.Module, Configurable):
                 )
 
             if out_redist is not None:
-                return out_redist.build()(outputs)
+                if out_redist_fn is None:
+                    raise RuntimeError(
+                        f"{type(self).__name__}: output redistribution specs have "
+                        "not been built. Call parallelize() before running "
+                        "redistribution."
+                    )
+                return out_redist_fn(outputs)
 
         if isinstance(out_src, tuple):
             raise ValueError(

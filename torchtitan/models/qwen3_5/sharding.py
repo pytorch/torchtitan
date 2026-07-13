@@ -213,6 +213,10 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={"pos_embed": dense_param_placement(tp=spmd.R)},
     )
+    ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
+        state_shardings={"inv_freq": dense_param_placement(tp=spmd.I)},
+        out_src_shardings=dense_param_placement(tp=spmd.I),
+    )
 
     # patch_embed receives plain pixel_values — wrap as DTensor(Replicate)
     ve_cfg.patch_embed_proj.sharding_config = ShardingConfig(
