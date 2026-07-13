@@ -50,69 +50,54 @@ def _torch_native_gated_delta(
 ) -> torch.Tensor:
     """Standalone math reference for the gated delta rule recurrence.
 
-    Sequential O(seqlen) loop — use FLA kernels for GPU efficiency.
+    Sequential O(seqlen) loop -- use FLA kernels for GPU efficiency.
 
     Args:
         q, k: (bs, seqlen, n_heads, key_head_dim)
         v: (bs, seqlen, n_heads, value_head_dim)
-        g: (bs, seqlen, n_heads) — log-space decay, always negative
-        beta: (bs, seqlen, n_heads) — update gate ∈ (0, 1)
-        cu_seqlens: optional varlen boundaries over a flattened [1, total] input;
-            when set, the recurrent state resets at each boundary (packed samples).
+        g: (bs, seqlen, n_heads) -- log-space decay, always negative
+        beta: (bs, seqlen, n_heads) -- update gate in (0, 1)
+        cu_seqlens: optional packed-sample boundaries over the flattened
+            [1, bs*seqlen] timeline; the state resets at each one.
 
     Returns:
         output: (bs, seqlen, n_heads, value_head_dim)
     """
-    # Packed: run the recurrence per segment with a fresh state, then restore shape.
-    if cu_seqlens is not None:
-        B, L = q.shape[0], q.shape[1]
-
-        def _flatten(t: torch.Tensor) -> torch.Tensor:
-            return t.reshape(1, B * L, *t.shape[2:])
-
-        qf, kf, vf, gf, bf = (
-            _flatten(q),
-            _flatten(k),
-            _flatten(v),
-            _flatten(g),
-            _flatten(beta),
-        )
-        bounds = cu_seqlens.tolist()
-        segs = [
-            _torch_native_gated_delta(
-                qf[:, s:e], kf[:, s:e], vf[:, s:e], gf[:, s:e], bf[:, s:e]
-            )
-            for s, e in zip(bounds[:-1], bounds[1:])
-        ]
-        out = torch.cat(segs, dim=1)
-        return out.reshape(B, L, *out.shape[2:])
-
     B, L, H, D_k = q.shape
     D_v = v.shape[-1]
     dtype = q.dtype
 
-    # Upcast to float32 — recurrence accumulates over seqlen steps
+    # Upcast to float32 -- the recurrence accumulates over seqlen steps.
     q = _l2norm(q.float(), dim=-1) * (D_k**-0.5)
     k = _l2norm(k.float(), dim=-1)
     v, g, beta = v.float(), g.float(), beta.float()
 
-    output = torch.zeros(B, L, H, D_v, dtype=torch.float32, device=q.device)
-    state = torch.zeros(B, H, D_k, D_v, dtype=torch.float32, device=q.device)
+    # Flatten [B, L] into one [1, B*L] timeline and reset the state at each sample
+    # start, so packed samples stay independent. cu_seqlens gives the boundaries;
+    # without it each row start is one (reproducing the plain batched result).
+    q, k, v, g, beta = (t.reshape(1, B * L, *t.shape[2:]) for t in (q, k, v, g, beta))
+    starts = (
+        set(cu_seqlens[:-1].tolist())
+        if cu_seqlens is not None
+        else {b * L for b in range(B)}
+    )
 
-    for t in range(L):
-        q_t = q[:, t]
-        k_t = k[:, t]
-        v_t = v[:, t]
+    output = torch.zeros(1, B * L, H, D_v, dtype=torch.float32, device=q.device)
+    state = torch.zeros(1, H, D_k, D_v, dtype=torch.float32, device=q.device)
+
+    for t in range(B * L):
+        if t in starts:  # packed-sample boundary -> fresh recurrent state
+            state = torch.zeros_like(state)
         g_t = g[:, t].exp().unsqueeze(-1).unsqueeze(-1)
         b_t = beta[:, t].unsqueeze(-1)
 
         state = state * g_t
-        kv_mem = torch.einsum("bhkv,bhk->bhv", state, k_t)
-        delta = (v_t - kv_mem) * b_t
-        state = state + torch.einsum("bhk,bhv->bhkv", k_t, delta)
-        output[:, t] = torch.einsum("bhkv,bhk->bhv", state, q_t)
+        kv_mem = torch.einsum("bhkv,bhk->bhv", state, k[:, t])
+        delta = (v[:, t] - kv_mem) * b_t
+        state = state + torch.einsum("bhk,bhv->bhkv", k[:, t], delta)
+        output[:, t] = torch.einsum("bhkv,bhk->bhv", state, q[:, t])
 
-    return output.to(dtype)
+    return output.reshape(B, L, H, D_v).to(dtype)
 
 
 class SharedExperts(FeedForward):
