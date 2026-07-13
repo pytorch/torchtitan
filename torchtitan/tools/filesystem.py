@@ -7,10 +7,9 @@
 """Filesystem helpers that transparently support local paths and remote fsspec
 URIs (e.g. ``gs://``, ``s3://``) for checkpoint IO.
 
-A path is treated as remote iff it contains ``"://"`` -- the same heuristic
-PyTorch DCP uses in ``FileSystem.validate_checkpoint_id``. Local paths keep
-using ``os``/``shutil`` unchanged; only remote paths go through fsspec, so the
-battle-tested local code path is behaviorally identical.
+Local paths keep using ``os``/``shutil`` unchanged; only remote paths go
+through fsspec, so the battle-tested local code path is behaviorally
+identical.
 """
 
 from __future__ import annotations
@@ -20,7 +19,11 @@ import shutil
 
 
 def is_remote(path: str | os.PathLike) -> bool:
-    """Whether ``path`` is a remote fsspec URI rather than a local path."""
+    """Whether ``path`` is a remote fsspec URI rather than a local path.
+
+    Uses the same ``"://"`` heuristic as PyTorch DCP's
+    ``FileSystem.validate_checkpoint_id``.
+    """
     return "://" in str(path)
 
 
@@ -60,15 +63,12 @@ def isfile(path: str | os.PathLike) -> bool:
 def listdir(path: str | os.PathLike) -> list[str]:
     """List directory entries as basenames, matching ``os.listdir``.
 
-    fsspec's ``ls`` returns full paths, so remote entries are reduced to their
-    basename to keep downstream ``step-(\\d+)`` matching and ``os.path.join``
-    logic unchanged.
-
-    Object-store backends (GCS, S3) may include a directory-marker entry for
-    ``path`` itself (e.g. a zero-byte ``bucket/ckpt/`` object). ``os.listdir``
-    never returns the directory itself, so that self-entry is dropped. Entries
-    are compared by full normalized path, not basename, so a legitimate child
-    that happens to share the parent's basename is kept.
+    fsspec's ``ls`` returns full paths, so entries are reduced to their
+    basename. Object-store backends (GCS, S3) may also include a
+    directory-marker entry for ``path`` itself (e.g. a zero-byte
+    ``bucket/ckpt/`` object), which ``os.listdir`` never returns for a local
+    dir; it is dropped by comparing full paths before taking the basename, so
+    a real child that happens to share the parent's basename is kept.
     """
     if is_remote(path):
         fs, p = _resolve(path)
