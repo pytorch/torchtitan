@@ -13,6 +13,7 @@ import torch
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -98,6 +99,8 @@ class PolicyTrainer(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
+        # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
+        logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
         if not config.dump_folder:
             config.dump_folder = output_dir
         sl.init_structured_logger(
@@ -438,7 +441,7 @@ class PolicyTrainer(Actor, Configurable):
         if len(current_lrs) != 1:
             raise ValueError(
                 "RL metrics only support a single optimizer LR for "
-                f"train/lr; got {current_lrs}"
+                f"trainer/lr; got {current_lrs}"
             )
         current_lr = float(current_lrs[0])
 
@@ -466,9 +469,9 @@ class PolicyTrainer(Actor, Configurable):
         return OptimStepOutput(
             policy_version=self.policy_version,
             metrics={
-                "train/grad_norm/mean": float(grad_norm.item()),
-                "train/lr": current_lr,
-                "train/policy_version": float(self.policy_version),
+                "trainer/grad_norm/mean": float(grad_norm.item()),
+                "trainer/lr": current_lr,
+                "trainer/policy_version": float(self.policy_version),
             },
         )
 
@@ -496,32 +499,26 @@ class PolicyTrainer(Actor, Configurable):
         """
         state_dict = self.model.state_dict()
         if self._transfer_dtype is not None:
-            # torchstore only applies `transfer_dtype` on the RDMA path, so under
-            # direct_rdma=False cast to the generator dtype here (else the generator reads
-            # fp32 into its bf16 state dict). Exclude buffers from the cast: FSDP mixed
-            # precision casts params to the compute dtype but leaves buffers at their
-            # registered dtype (e.g. the fp32 expert_bias_E load-balance bias in MoE),
-            # which the bf16 generator also keeps fp32 -- casting them would fail
-            # torchstore's get-side dtype check. named_buffers() FQNs carry module-wrapper
-            # segments (activation checkpoint's `._checkpoint_wrapped_module`, compile's
-            # `._orig_mod`) that state_dict() strips, so normalize both before matching,
-            # else a wrapped buffer is misclassified as a param and wrongly cast.
-            # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype
-            #   on the CPU-staged path.
-            def _clean(n: str) -> str:
-                return n.replace("._checkpoint_wrapped_module", "").replace(
-                    "._orig_mod", ""
-                )
-
-            buffer_names = {_clean(name) for name, _ in self.model.named_buffers()}
+            # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
+            # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
+            # Exclude buffers from the cast: FSDP mixed precision casts params to the compute dtype but
+            # leaves buffers at their registered dtype (same as pretraining), e.g. the fp32
+            # expert_bias_E load-balance bias in MoE. The generator keeps those buffers at the same
+            # registered dtype, so casting them here would mismatch its state dict and fail torchstore's
+            # dtype check on weight sync.
+            # Strip the AC wrapper's `_checkpoint_wrapped_module` segment so buffer FQNs match state_dict() keys.
+            # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
+            #   CPU-staged path.
+            buffer_names = {
+                canonical_fqn(name) for name, _ in self.model.named_buffers()
+            }
             state_dict = {
                 name: (
-                    tensor
-                    if _clean(name) in buffer_names
-                    else tensor.to(self._transfer_dtype)
+                    tensor if name in buffer_names else tensor.to(self._transfer_dtype)
                 )
                 for name, tensor in state_dict.items()
             }
+
         await ts.put_state_dict(
             state_dict,
             "model_state_dict",

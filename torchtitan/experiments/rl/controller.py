@@ -444,7 +444,9 @@ class Controller(Configurable):
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            result = await self.generator_router.route(
+            # Dispatches to the chosen generator's rank-0 intake via call_one, so
+            # it returns the Completion directly (no ValueMesh unwrap).
+            return await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,
@@ -459,7 +461,6 @@ class Controller(Configurable):
                     session_id=routing_session_id,
                 ),
             )
-            return self._get_rank_0_value(result)
 
         return generate
 
@@ -596,6 +597,12 @@ class Controller(Configurable):
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
+
+        # Start each generator's engine loop on all ranks once, before any
+        # rank-0-only generate / pull (rank 0 drives the followers through this
+        # loop, so every rank must be running it first).
+        with sl.log_trace_span("generator_start_engine_loop"):
+            await self.generator_router.fanout("start_engine_loop")
 
         # Initial weight sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):

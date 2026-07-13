@@ -25,13 +25,15 @@ python3 -m torchtitan.experiments.rl.train \
 import asyncio
 import logging
 import os
-from collections.abc import Callable
 from dataclasses import dataclass
 
 # must run before torch import. Set it as early as possible to avoid other
 # imports transitively importing torch.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+# TODO: Remove `_src` after monarch cuts a new release. This is already a public
+# API in monarch nightly. https://github.com/meta-pytorch/monarch/pull/4327
+from monarch._src.actor.host_mesh import default_bootstrap_cmd
 from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
@@ -50,7 +52,7 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
     makes prefill attention a cudagraph break (run eager at replay). The import happens before the
     generator actor's ``__init__`` and in the vLLM EngineCore worker subprocesses -- which do NOT
     inherit a runtime-set ``os.environ`` -- so setting it at runtime is too late. It must go in the
-    proc's LAUNCH env (the spawn bootstrap, or the MAST role.env). Without it the decorator no-ops
+    proc's LAUNCH env (the spawn ``bootstrap_command``, or the MAST role.env). Without it the decorator no-ops
     and prefill attention is captured as ``output.fill_(0)`` (zeroed) -> the model never reads the
     prompt -> coherent-but-unrelated output. FULL_DECODE_ONLY never captures prefill so it needs
     nothing. Shared so the OSS spawn path and the fbcode MAST launcher use one source of truth.
@@ -65,15 +67,21 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
     return {}
 
 
+def _preimport_torch() -> None:
+    """``bootstrap`` setup callable: pre-import torch on the spawned proc.
+    """
+    # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
+    import torch  # noqa: F401
+
+
 class PerHostProvisioner:
     """Allocates non-overlapping GPU ranges within a single host.
 
     On the same host, the trainer and generator run on separate GPU
     meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
-    call to `allocate(n)` reserves the next *n* GPUs and returns a
-    bootstrap callable that sets `CUDA_VISIBLE_DEVICES` before CUDA
-    initializes in the spawned process, ensuring each mesh only sees its
-    own devices.
+    call to `allocate(n)` reserves the next *n* GPUs and returns the launch
+    env (`CUDA_VISIBLE_DEVICES` plus any `extra_env`) for those GPUs. The
+    returned env vars are applied to the spawned process via ``bootstrap_command``.
     """
 
     def __init__(self, total_gpus: int = 8):
@@ -86,7 +94,7 @@ class PerHostProvisioner:
 
     def allocate(
         self, num_gpus: int, *, extra_env: dict[str, str] | None = None
-    ) -> Callable[[], None]:
+    ) -> dict[str, str]:
         if num_gpus > self.available:
             raise RuntimeError(
                 f"Requested {num_gpus} GPUs but only {self.available} "
@@ -95,18 +103,10 @@ class PerHostProvisioner:
         gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
         self.next_gpu += num_gpus
 
-        def _bootstrap():
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
-            # Per-proc LAUNCH env. Set here (in the bootstrap) -- not at runtime in the actor's
-            # __init__ -- because rl/models/attention.py's @eager_break_during_capture reads
-            # VLLM_USE_BREAKABLE_CUDAGRAPH at MODULE IMPORT, which happens before __init__ and
-            # in the vLLM EngineCore worker subprocs (which do not inherit a runtime-set env).
-            if extra_env:
-                os.environ.update(extra_env)
-            # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
-            import torch  # noqa: F401
-
-        return _bootstrap
+        env = {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpu_ids)}
+        if extra_env:
+            env.update(extra_env)
+        return env
 
 
 @dataclass
@@ -151,9 +151,11 @@ def _spawn_proc_mesh(
     )
     role_gpus_per_node = role_world_size // nodes
     provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
+    env = provisioner.allocate(role_gpus_per_node, extra_env=extra_env)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
-        bootstrap=provisioner.allocate(role_gpus_per_node, extra_env=extra_env),
+        bootstrap=_preimport_torch,
+        bootstrap_command=default_bootstrap_cmd().with_env(env),
     )
 
 
@@ -216,13 +218,19 @@ def spawn_proc_mesh(
         provisioner = PerHostProvisioner(total_gpus=total_gpus)
         trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
-            bootstrap=provisioner.allocate(trainer_world_size),
+            bootstrap=_preimport_torch,
+            bootstrap_command=default_bootstrap_cmd().with_env(
+                provisioner.allocate(trainer_world_size)
+            ),
         )
         generator_meshes = [
             host_mesh.spawn_procs(
                 per_host={"gpus": per_generator_world_size},
-                bootstrap=provisioner.allocate(
-                    per_generator_world_size, extra_env=generator_env
+                bootstrap=_preimport_torch,
+                bootstrap_command=default_bootstrap_cmd().with_env(
+                    provisioner.allocate(
+                        per_generator_world_size, extra_env=generator_env
+                    )
                 ),
             )
             for _ in range(num_generators)
@@ -232,6 +240,15 @@ def spawn_proc_mesh(
 
 
 async def main():
+    # Monarch is making breaking changes to its message dispatching mechanism.
+    # The recommended way to maintain the current behavior, which is what we want,
+    # is to use @concurrent_endpoint. But that decorator is not available in
+    # monarch's stable release yet. So we pin this env var for now, until the
+    # new release is cut. More details can be found in:
+    # https://github.com/meta-pytorch/monarch/pull/4243
+    # https://github.com/meta-pytorch/monarch/pull/4211
+    os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
+
     config = ConfigManager().parse_args()
     assert isinstance(config, Controller.Config)
     sl.init_structured_logger(
