@@ -763,6 +763,8 @@ class VLLMGenerator(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
+        # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
+        logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
         sl.init_structured_logger(
             source="rl_generator",
             output_dir=output_dir,

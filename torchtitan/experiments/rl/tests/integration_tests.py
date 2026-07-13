@@ -36,7 +36,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-loop.num-training-steps 5",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    # trainer FSDP=2 (dp_shard=2, tp=1) + 3 generators TP=2 = 8 GPUs.
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--num_generators 3",
                     "--async-loop.group-size 2",
@@ -50,8 +52,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 no compile",
-            "rl_grpo_tp2_no_compile",
+            "RL GRPO trainer FSDP=2 + gen TP=2 no compile",
+            "rl_grpo_fsdp2_gen_tp2_no_compile",
             ngpu=8,
         ),
         OverrideDefinitions(
@@ -60,8 +62,11 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-loop.num-training-steps 5",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    # trainer FSDP=2 (dp_shard=2, tp=1) + 3 generators TP=2 = 8 GPUs.
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 2",
+                    "--num_generators 3",
                     "--async-loop.group-size 2",
                     "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
@@ -71,9 +76,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 compile",
-            "rl_grpo_tp2_compile",
-            ngpu=4,
+            "RL GRPO trainer FSDP=2 + gen TP=2 compile",
+            "rl_grpo_fsdp2_gen_tp2_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
@@ -159,27 +164,31 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_checkpoint_resume",
             ngpu=8,
         ),
-    ]
-
-
-def build_rl_h100_test_list() -> list[OverrideDefinitions]:
-    return [
         OverrideDefinitions(
             [
                 [
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
-                    "--async-loop.num-training-steps 5",
+                    "--async-loop.num-training-steps 3",
+                    # The config defaults to trainer TP=2 + 3 generators TP=2. Override
+                    # to trainer TP=4 + 1 generator TP=4 so batch-invariant mode fits
+                    # A10G: TP=2 shards less per GPU and OOMs with BI on.
+                    "--trainer.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.tensor_parallel_degree 4",
+                    "--num_generators 1",
+                    # On-policy (lockstep) + real weights that update each step:
+                    # trainer/generator weights match, so bit_wise/logprob_diff/max == 0.
+                    "--async-loop.max-offpolicy-steps 0",
                     "--async-loop.group-size 2",
                     "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
-                    "--generator.sampling.max_tokens 256",
+                    "--generator.sampling.max_tokens 128",
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 batch-invariant + deterministic",
-            "rl_grpo_tp2_batch_invariant",
-            ngpu=4,
+            "RL GRPO 0.6B TP=4 batch-invariant + deterministic",
+            "rl_grpo_0_6b_tp4_batch_invariant",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
@@ -202,12 +211,6 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
     ]
-
-
-_TEST_SUITES = {
-    "default": build_rl_test_list,
-    "h100": build_rl_h100_test_list,
-}
 
 
 def run_single_test(
@@ -282,12 +285,6 @@ def main():
         help="Specific test to run (default: all)",
     )
     parser.add_argument(
-        "--test_suite",
-        default="default",
-        choices=list(_TEST_SUITES.keys()),
-        help="Which test suite to run (default: default)",
-    )
-    parser.add_argument(
         "--ngpu",
         default=4,
         type=int,
@@ -303,7 +300,7 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    test_list = _TEST_SUITES[args.test_suite]()
+    test_list = build_rl_test_list()
     run_tests(args, test_list)
 
 
