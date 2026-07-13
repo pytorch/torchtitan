@@ -168,9 +168,9 @@ def annotate_input_spmd_types(
 
     Hardcodes the standard decoder convention: inputs and positions are
     ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
-    Qwen3.5 multimodal payload tensors are irregular across DP/CP shards and
+    Qwen3.5 multimodal payload tensors are irregular across DP shards and
     invariant across TP ranks; multimodal compute should handle them in local
-    SPMD regions.
+    SPMD regions. Qwen3.5 does not support CP.
     Analogous to ``full_dtensor.parallelize_inputs()`` but for the
     ``spmd_types`` path.
     """
@@ -188,7 +188,6 @@ def annotate_input_spmd_types(
     }
     multimodal_type = {
         MeshAxisName.DP: spmd.V,
-        MeshAxisName.CP: spmd.V,
         MeshAxisName.TP: spmd.I,
     }
 

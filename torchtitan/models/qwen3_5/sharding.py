@@ -242,6 +242,9 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     """
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={"pos_embed": dense_param_placement(tp=spmd.I)},
+        # I->R convert to scatter into text embeddings.
+        out_src_shardings=vision_activation_placement(tp=spmd.I),
+        out_dst_shardings=vision_activation_placement(tp=spmd.R),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
         state_shardings={"inv_freq": dense_param_placement(tp=spmd.I)},

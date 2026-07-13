@@ -69,14 +69,6 @@ def qwen35_debugmodel() -> Trainer.Config:
     )
 
 
-def qwen35_debugmodel_gdn_torch_native() -> Trainer.Config:
-    config = qwen35_debugmodel()
-    for layer in config.model_spec.model.layers:
-        if layer.delta_net is not None:
-            layer.delta_net.kernel.backend = "torch_native"
-    return config
-
-
 def qwen35_debugmodel_moe() -> Trainer.Config:
     model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
     return Trainer.Config(

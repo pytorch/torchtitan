@@ -20,7 +20,6 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Conv1d, FeedForward, Linear
 from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
@@ -199,8 +198,8 @@ class GatedDeltaKernel(Module):
         if self.backend == "torch_native":
             return _torch_native_gated_delta(q, k, v, g, beta)
 
-        with spmd.no_typecheck():
-            if self.backend == "fla_chunked":
+        if self.backend == "fla_chunked":
+            with spmd.no_typecheck():
                 result = _fla_chunk_gated_delta_rule(
                     q,
                     k,
@@ -209,7 +208,8 @@ class GatedDeltaKernel(Module):
                     beta,
                     use_qk_l2norm_in_kernel=True,
                 )
-            elif self.backend == "fla_fused_recurrent":
+        elif self.backend == "fla_fused_recurrent":
+            with spmd.no_typecheck():
                 result = _fla_fused_recurrent_gated_delta_rule(
                     q,
                     k,
@@ -218,14 +218,23 @@ class GatedDeltaKernel(Module):
                     beta=beta,
                     use_qk_l2norm_in_kernel=True,
                 )
-            else:
-                raise ValueError(
-                    f"Unknown fla_backend '{self.backend}'. "
-                    "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_native'."
-                )
+        else:
+            raise ValueError(
+                f"Unknown fla_backend '{self.backend}'. "
+                "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_native'."
+            )
 
         # FLA kernels return (output, final_state); we only need output
         return result[0]
+
+
+@spmd.local_map(
+    in_types=(spmd.PartitionSpec("dp", None, "tp"), None),
+    out_types=spmd.PartitionSpec("dp", None, "tp", None),
+)
+def _local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
+    # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
+    return t.view(t.shape[0], t.shape[1], -1, head_dim)
 
 
 class GatedDeltaNet(Module):
@@ -319,10 +328,10 @@ class GatedDeltaNet(Module):
         elif get_spmd_backend() == "spmd_types":
             conv_spmd = spmd.local_map(
                 in_types=(
-                    {"dp": spmd.S(0), "cp": spmd.S(2), "tp": spmd.S(1)},
-                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.S(0)},
+                    {"dp": spmd.S(0), "tp": spmd.S(1)},
+                    {"dp": spmd.R, "tp": spmd.S(0)},
                 ),
-                out_types={"dp": spmd.S(0), "cp": spmd.S(2), "tp": spmd.S(1)},
+                out_types={"dp": spmd.S(0), "tp": spmd.S(1)},
             )(_conv)
             x = conv_spmd(x, conv.weight)
         else:
@@ -343,20 +352,9 @@ class GatedDeltaNet(Module):
         xa = self.in_proj_a(x)
         xb = self.in_proj_b(x)
 
-        def local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
-            # Drop into local region, we can't propagate S(2) -> head unflatten.
-            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
-            with spmd.local():
-                t = t.view(bs, seqlen, -1, head_dim)
-                if get_spmd_backend() == "spmd_types":
-                    spmd.assert_type(
-                        t, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
-                    )
-            return t
-
-        xq = local_head_split(xq, self.key_head_dim)
-        xk = local_head_split(xk, self.key_head_dim)
-        xv = local_head_split(xv, self.value_head_dim)
+        xq = _local_head_split(xq, self.key_head_dim)
+        xk = _local_head_split(xk, self.key_head_dim)
+        xv = _local_head_split(xv, self.value_head_dim)
 
         # Gating signals, shape (bs, seqlen, n_value_heads):
         #   g:    decay rate per head, always negative
@@ -366,7 +364,7 @@ class GatedDeltaNet(Module):
 
         output = self.kernel(xq, xk, xv, g, beta)
 
-        xz = local_head_split(xz, self.value_head_dim)
+        xz = _local_head_split(xz, self.value_head_dim)
         output = self.norm(output, xz)
 
         output = output.reshape(bs, seqlen, -1)
@@ -432,22 +430,11 @@ class Qwen35Attention(BaseAttention):
     ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
 
-        def local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
-            # Drop into local region, we can't propagate S(2) -> head unflatten.
-            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
-            with spmd.local():
-                t = t.view(bs, seqlen, -1, head_dim)
-                if get_spmd_backend() == "spmd_types":
-                    spmd.assert_type(
-                        t, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
-                    )
-            return t
-
         # wq is 2x wider: produces query + gate
-        xq_gate = local_head_split(self.wq(x), self.head_dim * 2)
+        xq_gate = _local_head_split(self.wq(x), self.head_dim * 2)
         xq, gate = xq_gate.chunk(2, dim=-1)
-        xk = local_head_split(self.wk(x), self.head_dim)
-        xv = local_head_split(self.wv(x), self.head_dim)
+        xk = _local_head_split(self.wk(x), self.head_dim)
+        xv = _local_head_split(self.wv(x), self.head_dim)
 
         # QK norm (before RoPE)
         xq = self.q_norm(xq)
@@ -711,23 +698,13 @@ class Qwen35Model(Decoder):
         Returns:
             Updated embeddings
         """
-        # Vision compute is TP-invariant; I->R convert to mix with text embeddings.
-        if spmd.is_type_checking():
-            merged_embeds = spmd.convert(
-                merged_embeds,
-                current_spmd_mesh().get_group("tp"),  # pyrefly: ignore [missing-attribute]
-                src=spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": merged_embeds.dtype},
-            )
-
         for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
             inputs_embeds[
                 sample_idx, vision_start : vision_start + n_tokens, :
             ] = merged_embeds[item_idx, :n_tokens, :]
         return inputs_embeds
 
-    @spmd.local_map(out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R})
+    @spmd.local_map(out_types={"dp": spmd.S(0), "tp": spmd.R})
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,

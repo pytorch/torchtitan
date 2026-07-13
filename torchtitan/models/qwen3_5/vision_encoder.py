@@ -514,7 +514,7 @@ class Qwen35VisionEncoder(Module):
                 out_placements=(self._cached_freq_table.placements,),
             )(
                 self._cached_freq_table,
-                grid_thw,
+                grid_thw,  # pyrefly: ignore [bad-argument-count]
                 max_num_patch,
                 self.spatial_merge_size,
                 head_dim,
