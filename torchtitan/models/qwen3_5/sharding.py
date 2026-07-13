@@ -121,17 +121,10 @@ def set_qwen35_sharding_config(
         local_map=LocalMapConfig(in_grad_placements=None),
     )
     _set_vision_encoder_sharding(config.vision_encoder)
-    # The embedding path stays replicated through multimodal vision scatter.
-    # The first attention block restores SP; later decoder block inputs are SP.
-    first_layer_input_layout = dense_activation_placement(tp=spmd.R)
-    layer_input_layout = dense_sequence_parallel_placement()
     for layer_idx, layer_cfg in enumerate(config.layers):
         _set_qwen35_layer_sharding(
             layer_cfg,
-            attention_input_layout=(
-                first_layer_input_layout if layer_idx == 0 else layer_input_layout
-            ),
-            attention_input_redist_src=spmd.R if layer_idx == 0 else spmd.S(1),
+            is_first_layer=layer_idx == 0,
             enable_ep=enable_ep,
         )
 
@@ -139,10 +132,16 @@ def set_qwen35_sharding_config(
 def _set_qwen35_layer_sharding(
     layer_cfg: "Qwen35TransformerBlock.Config",
     *,
-    attention_input_layout: SpmdLayout,
-    attention_input_redist_src: spmd.PerMeshAxisSpmdType,
+    is_first_layer: bool,
     enable_ep: bool,
 ) -> None:
+    # The embedding path stays replicated through multimodal vision scatter.
+    # The first attention block restores SP; later decoder block inputs are SP.
+    attention_input_layout = (
+        dense_activation_placement(tp=spmd.R)
+        if is_first_layer
+        else dense_sequence_parallel_placement()
+    )
     layer_cfg.attention_norm.sharding_config = _decoder_norm_sharding(
         attention_input_layout
     )
@@ -152,14 +151,14 @@ def _set_qwen35_layer_sharding(
         _set_full_attention_sharding(
             layer_cfg.attention,
             attention_input_layout=attention_input_layout,
-            attention_input_redist_src=attention_input_redist_src,
+            is_first_layer=is_first_layer,
         )
     else:
         assert layer_cfg.delta_net is not None
         _set_deltanet_sharding(
             layer_cfg.delta_net,
             attention_input_layout=attention_input_layout,
-            attention_input_redist_src=attention_input_redist_src,
+            is_first_layer=is_first_layer,
         )
 
     if layer_cfg.feed_forward is not None:
@@ -255,7 +254,7 @@ def _set_full_attention_sharding(
     attention_cfg: "Qwen35Attention.Config",
     *,
     attention_input_layout: SpmdLayout,
-    attention_input_redist_src: spmd.PerMeshAxisSpmdType,
+    is_first_layer: bool,
 ) -> None:
     """TP sharding for Qwen35Attention (output gating + partial RoPE)."""
     attention_cfg.sharding_config = ShardingConfig(
@@ -263,7 +262,7 @@ def _set_full_attention_sharding(
         in_redist={
             "x": RedistributionSpec.Config(
                 axis=MeshAxisName.TP,
-                src=attention_input_redist_src,
+                src=spmd.R if is_first_layer else spmd.S(1),
                 dst=spmd.R,
             )
         },
@@ -288,7 +287,7 @@ def _set_deltanet_sharding(
     deltanet_cfg: "GatedDeltaNet.Config",
     *,
     attention_input_layout: SpmdLayout,
-    attention_input_redist_src: spmd.PerMeshAxisSpmdType,
+    is_first_layer: bool,
 ) -> None:
     """Sharding for GatedDeltaNet: head-sharded TP on projections.
 
@@ -352,7 +351,7 @@ def _set_deltanet_sharding(
         in_redist={
             "x": RedistributionSpec.Config(
                 axis=MeshAxisName.TP,
-                src=attention_input_redist_src,
+                src=spmd.R if is_first_layer else spmd.S(1),
                 dst=spmd.R,
             )
         },
