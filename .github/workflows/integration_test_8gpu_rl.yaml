@@ -118,7 +118,11 @@ jobs:
         # (both TP=2) run as separate torchrun invocations so each backend gets a
         # fresh process group and vLLM engine; nproc matches each config's
         # tensor_parallel_degree (the test builds ParallelDims from it).
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+        # RL_TEST_FAULTHANDLER_TIMEOUT: if a rank deadlocks, dump all thread
+        # tracebacks and exit before the job's ~60 min limit force-cancels it
+        # (which would discard the logs). Temporary, to locate the A10G hang.
+        RL_TEST_FAULTHANDLER_TIMEOUT=900 \
+          RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
         # TODO(#3898): re-enable once the flex generator recompile-limit hang is
