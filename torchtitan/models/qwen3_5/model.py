@@ -40,34 +40,6 @@ def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
 
 
-def _gdn_cu_seqlens(positions: torch.Tensor) -> torch.Tensor | None:
-    """FLA ``cu_seqlens`` for packed GatedDeltaNet, or None for a single sequence.
-
-    The RL batcher packs several training samples into one row and restarts
-    ``positions`` at 0 at each sample. GatedDeltaNet must reset its recurrent state
-    and causal conv at those boundaries (full attention gets a block-diagonal mask
-    instead). We reuse :func:`create_varlen_metadata_for_document` -- the same
-    ``positions == 0`` document convention used to build the full-attention masks --
-    so both attention types agree on the boundaries.
-
-    Unlike full attention, GatedDeltaNet always needs these boundaries regardless of
-    the full-attention backend, so the caller derives them from ``positions`` rather
-    than reading them off ``attention_masks`` (which is a flex ``BlockMask`` -- or
-    ``None`` for a pipeline stage with no full-attention layers -- and carries no
-    ``cu_seqlens``). Returns None for a single unpacked sequence so the generator /
-    eval path stays on the non-varlen kernel (bitwise unchanged).
-    """
-    # MRoPE passes 3D positions [B, L, 3]; the sample boundary is the reset of the
-    # temporal component. Text (RL) positions are 2D [B, L].
-    if positions.dim() == 3:
-        positions = positions[..., 0]
-    cu_seqlens = create_varlen_metadata_for_document(positions).cu_seq_q
-    # A single unpacked sequence yields [0, total]; skip the varlen path.
-    if cu_seqlens.numel() <= 2:
-        return None
-    return cu_seqlens
-
-
 def _torch_native_gated_delta(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -360,32 +332,44 @@ class GatedDeltaNet(Module):
         self, x: torch.Tensor, conv: nn.Module, cu_seqlens: torch.Tensor | None = None
     ) -> torch.Tensor:
         # Packed samples: the causal conv window must not cross sample boundaries
-        # (else the first conv_kernel_size-1 tokens of each sample see the previous
-        # one). fla's causal_conv1d resets at cu_seqlens. Flatten [B, L, C] channels-
-        # last -> [1, B*L, C]; depthwise weight [C, 1, k] -> [C, k]. cu_seqlens is only
-        # built under packing (FSDP, non-TP activations), so x is a plain tensor here.
+        # (else the first conv_kernel_size-1 tokens of each sample would see the
+        # previous one). F.conv1d cannot express a per-segment reset, so the packed
+        # path uses fla.causal_conv1d, which resets at cu_seqlens. The conv is
+        # depthwise (per-channel), so under TP (channel-sharded) we run it on local
+        # shards via local_map -- same pattern as the F.conv1d path below. GDN conv
+        # is bias-free.
         if cu_seqlens is not None:
-            assert not isinstance(
-                x, DTensor
-            ), "packed GDN conv (cu_seqlens) assumes non-TP (FSDP) activations"
-            bs, seqlen, channels = x.shape
-            weight = conv.weight
-            bias = conv.bias
-            if isinstance(weight, DTensor):
-                weight = weight.full_tensor()
-            if isinstance(bias, DTensor):
-                bias = bias.full_tensor()
-            # fla's causal_conv1d is untyped (pyrefly reads it as a Tensor).
-            y = _fla_causal_conv1d(
-                x.reshape(1, bs * seqlen, channels),
-                weight=weight.squeeze(1),  # pyrefly: ignore [not-callable]
-                bias=bias,
-                activation="silu",
-                cu_seqlens=cu_seqlens,
-            )
-            if isinstance(y, tuple):
-                y = y[0]
-            return y.reshape(bs, seqlen, channels)
+            bs, seqlen, _ = x.shape
+
+            def _fla_conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
+                # x_local: [bs, seqlen, C_local]; depthwise weight [C_local, 1, k].
+                # fla wants one [1, total, C] sequence; cu_seqlens spans the
+                # flattened [bs*seqlen] layout (offsets already include batch rows).
+                # fla's causal_conv1d is untyped (pyrefly reads it as a Tensor).
+                y = _fla_causal_conv1d(
+                    x_local.reshape(1, bs * seqlen, -1),
+                    weight=w_local.squeeze(1),
+                    bias=None,
+                    activation="silu",
+                    cu_seqlens=cu_seqlens,
+                )
+                if isinstance(y, tuple):
+                    y = y[0]
+                return y.reshape(bs, seqlen, -1)
+
+            if isinstance(x, DTensor):
+                # Channel-sharded depthwise conv: run per shard, restore DTensor-ness.
+                x_plc = x.placements
+                w_plc = conv.weight.placements  # pyrefly: ignore [missing-attribute]
+                conv_dt = local_map(
+                    _fla_conv,
+                    out_placements=(x_plc,),
+                    in_placements=(x_plc, w_plc),
+                    in_grad_placements=(x_plc, w_plc),
+                    device_mesh=x.device_mesh,
+                )
+                return conv_dt(x, conv.weight)  # pyrefly: ignore
+            return _fla_conv(x, conv.weight)  # pyrefly: ignore [bad-argument-type]
 
         x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x, DTensor):
@@ -426,10 +410,6 @@ class GatedDeltaNet(Module):
         self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None
     ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
-
-        # cu_seqlens holds the packed sample boundaries (computed once at the model
-        # level); it resets the causal conv AND the recurrent state at each boundary.
-        # None (single unpacked sequence / generator decode) -> unchanged path.
 
         # Shapes:
         #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
@@ -602,8 +582,6 @@ class Qwen35TransformerBlock(Module):
         if self.full_attn:
             h = self.attn(h, attention_masks, positions)
         else:
-            # GatedDeltaNet resets its conv/recurrent state at the packed sample
-            # boundaries in cu_seqlens (full attention uses attention_masks instead).
             h = self.attn(h, cu_seqlens)
         x = x + h
 
@@ -885,13 +863,17 @@ class Qwen35Model(Decoder):
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
-        # GatedDeltaNet packing boundaries, computed once and shared across layers
-        # (see _gdn_cu_seqlens). Derived from the same document positions as the
-        # full-attention masks, but independent of the attention backend so it is
-        # correct for a pipeline stage that holds only GatedDeltaNet layers.
-        cu_seqlens = _gdn_cu_seqlens(
-            positions if positions is not None else rope_positions
-        )
+        # cu_seqlens holds the packed sample boundaries (positions == 0), computed
+        # once and shared across GatedDeltaNet layers so their recurrent state and
+        # causal conv reset per sample. Reuses the same document-varlen metadata as
+        # the full-attention masks. None for a single unpacked sequence (unchanged
+        # path). NOTE: not context-parallel aware (CP would split the sequence and
+        # break these boundaries); CP is unsupported for GatedDeltaNet.
+        cu_seqlens = None
+        if positions is not None:
+            cu_seqlens = create_varlen_metadata_for_document(positions).cu_seq_q
+            if cu_seqlens.numel() <= 2:  # single unpacked sample -> non-varlen path
+                cu_seqlens = None
         for layer in self.layers.values():
             x = layer(x, attention_masks, rope_positions, cu_seqlens)
 
