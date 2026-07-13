@@ -16,7 +16,6 @@ from typing import Any, TYPE_CHECKING
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.distributed.utils import get_spmd_backend
 
@@ -40,7 +39,6 @@ __all__ = [
     "set_current_spmd_mesh",
     "set_spmd_meshes",
     "maybe_set_sparse_mesh",
-    "spmd_layout_to_dtensor_placements",
 ]
 
 
@@ -132,30 +130,6 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
 
     with set_current_spmd_mesh(mesh):
         yield
-
-
-def spmd_layout_to_dtensor_placements(
-    layout: "SpmdLayout",
-) -> dict["MeshAxisName", Placement]:
-    """Convert an SPMD layout to DTensor placements keyed by mesh axis name."""
-    from torchtitan.distributed.parallel_dims import MeshAxisName
-
-    result: dict[MeshAxisName, Placement] = {}
-    for axis_name, axis_type in layout.per_axis_spmd_types().items():
-        if axis_type == spmd.R or axis_type == spmd.I:
-            dtensor_placement: Placement = Replicate()
-        elif axis_type == spmd.P:
-            dtensor_placement = Partial()
-        else:
-            assert isinstance(axis_type, spmd.Shard)
-            dtensor_placement = Shard(axis_type.dim)
-
-        if axis_name == MeshAxisName.DP:
-            result[MeshAxisName.DP_REPLICATE] = dtensor_placement
-            result[MeshAxisName.DP_SHARD] = dtensor_placement
-        else:
-            result[axis_name] = dtensor_placement
-    return result
 
 
 def annotate_input_spmd_types(
