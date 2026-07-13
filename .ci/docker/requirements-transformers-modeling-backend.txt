@@ -1,1 +1,1 @@
-transformers==4.57.1
+transformers==5.5.0
