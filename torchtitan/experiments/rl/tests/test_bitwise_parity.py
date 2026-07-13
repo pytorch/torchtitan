@@ -33,6 +33,8 @@ Run each backend in a separate torchrun invocation:
 import gc
 import logging
 import os
+import shutil
+import tempfile
 import unittest
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -589,6 +591,10 @@ class BitwiseParityTestBase(unittest.TestCase):
     attn_backend: str = "varlen"
     min_world_size: int = 1
     hf_assets_env_var: str = "HF_ASSETS_PATH"
+    # Root dir for run artifacts (NCCL flight-recorder comm_traces). CI sets it
+    # to $RUNNER_TEMP/artifacts-to-be-uploaded so traces are uploaded; when unset
+    # (local runs) a temp dir is used instead.
+    dump_folder_env_var: str = "RL_TEST_DUMP_FOLDER"
     # When True, vLLM skips its own checkpoint load and the trainer model's
     # weights (including attention sinks) are copied into the engine in-process.
     sync_weights_from_trainer: bool = False
@@ -630,7 +636,15 @@ class BitwiseParityTestBase(unittest.TestCase):
         set_batch_invariance(config.trainer.debug.batch_invariant)
 
         if not dist.is_initialized():
-            dist_utils.init_distributed(CommConfig())
+            # Writable base_folder for comm_traces
+            dump_root = os.environ.get(cls.dump_folder_env_var)
+            if dump_root:
+                base_folder = os.path.join(dump_root, cls.__name__)
+                os.makedirs(base_folder, exist_ok=True)
+            else:
+                base_folder = tempfile.mkdtemp(prefix="rl_bitwise_")
+                cls.addClassCleanup(shutil.rmtree, base_folder, ignore_errors=True)
+            dist_utils.init_distributed(CommConfig(), base_folder=base_folder)
 
         if cls.sync_weights_from_trainer:
             generator_checkpoint = CheckpointManager.Config(enable=False)
