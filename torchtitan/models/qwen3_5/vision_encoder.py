@@ -559,7 +559,7 @@ class Qwen35VisionEncoder(Module):
         x = x + learned_pos
 
         mask_mod = get_vision_block_mask_mod(num_patch)
-        with spmd.no_typecheck():
+        with spmd.no_typecheck():  # hide BlockMask from typechecking; usage in Flex is also blackboxed
             attention_mask = _compiled_create_block_mask(
                 mask_mod,
                 num_vision,

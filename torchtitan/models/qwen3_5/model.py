@@ -198,8 +198,10 @@ class GatedDeltaKernel(Module):
         if self.backend == "torch_native":
             return _torch_native_gated_delta(q, k, v, g, beta)
 
-        if self.backend == "fla_chunked":
-            with spmd.no_typecheck():
+        with spmd.no_typecheck():
+            # FLA kernels call into third-party custom autograd functions; we can't typecheck.
+            # ShardingConfig handles output re-annotation.
+            if self.backend == "fla_chunked":
                 result = _fla_chunk_gated_delta_rule(
                     q,
                     k,
@@ -208,8 +210,7 @@ class GatedDeltaKernel(Module):
                     beta,
                     use_qk_l2norm_in_kernel=True,
                 )
-        elif self.backend == "fla_fused_recurrent":
-            with spmd.no_typecheck():
+            elif self.backend == "fla_fused_recurrent":
                 result = _fla_fused_recurrent_gated_delta_rule(
                     q,
                     k,
@@ -218,11 +219,11 @@ class GatedDeltaKernel(Module):
                     beta=beta,
                     use_qk_l2norm_in_kernel=True,
                 )
-        else:
-            raise ValueError(
-                f"Unknown fla_backend '{self.backend}'. "
-                "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_native'."
-            )
+            else:
+                raise ValueError(
+                    f"Unknown fla_backend '{self.backend}'. "
+                    "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_native'."
+                )
 
         # FLA kernels return (output, final_state); we only need output
         return result[0]
