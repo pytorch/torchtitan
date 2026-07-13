@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks
+from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
 
 from torchtitan.distributed.minimal_async_ep.api import (
     maybe_update_minimal_async_ep_config,
@@ -289,7 +289,7 @@ class Decoder(BaseModel):
         positions: torch.Tensor,
         attn_config: BaseAttention.Config,
         mask_mods: Sequence[_mask_mod_signature],
-    ) -> AttentionMasksType:
+    ) -> BlockMask:
         """Build a flex-attention BlockMask from mask_mods (ANDed together),
         respecting the config's block_size and batch-invariant mode."""
         assert isinstance(attn_config.inner_attention, FlexAttention.Config)
@@ -315,7 +315,7 @@ class Decoder(BaseModel):
         self,
         positions: torch.Tensor,
         attn_config: BaseAttention.Config,
-    ) -> AttentionMasksType:
+    ) -> BlockMask:
         """Build the standard causal + packed-document flex-attention mask."""
         return self._create_flex_attention_mask(
             positions,
