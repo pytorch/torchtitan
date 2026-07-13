@@ -217,6 +217,9 @@ class GatedDeltaKernel(Module):
         v: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
+        *,
+        # Keyword-only so the TP sharding's local_map treats it as replicated
+        # pass-through metadata (like attention_masks), not a sharded input.
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Expand Q/K heads to match V when n_value_heads > n_key_heads
@@ -432,7 +435,7 @@ class GatedDeltaNet(Module):
         g = -torch.exp(self.A_log.float()) * F.softplus(xa.float() + self.dt_bias)
         beta = torch.sigmoid(xb)
 
-        output = self.kernel(xq, xk, xv, g, beta, cu_seqlens)
+        output = self.kernel(xq, xk, xv, g, beta, cu_seqlens=cu_seqlens)
 
         xz = xz.view(bs, seqlen, -1, self.value_head_dim)
         output = self.norm(output, xz)
