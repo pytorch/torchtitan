@@ -31,24 +31,8 @@ from . import model_registry
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
-    # Enable compile / graph capture path
-    config.compile.enable = True
-    config.compile.enable_xpugraph = True
-
     return config
 
-def graph_trainer_llama3_8b_xpugraph():
-    config = graph_trainer_llama3_8b()
-
-    # Enable compile / graph capture path
-    config.compile.enable = True
-    config.compile.enable_xpugraph = True
-
-    # Keep these disabled for XPUGraph-only
-    config.compile.enable_fsdp_ag_rs_overlap = False
-
-
-    return config
 
 def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
     """Debug model with the attention and FFN TP collectives folded into the GEMMs.
