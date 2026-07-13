@@ -418,7 +418,9 @@ def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
             gate.reshape(-1, gate.shape[-1]),
             up.reshape(-1, up.shape[-1]),
         ).reshape(gate.shape)
-    )(gate, up)
+    )(
+        gate, up
+    )
 
 
 class FusedSwiGLU(FeedForward):
