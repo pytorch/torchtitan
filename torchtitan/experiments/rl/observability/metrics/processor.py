@@ -67,6 +67,10 @@ class MetricsProcessor(Configurable):
                 "trainer/entropy/mean",
                 "trainer/grad_norm/mean",
                 "trainer/lr",
+                # trainer-vs-generator logprob diff; 0 under batch-invariant mode.
+                # Printed so batch-invariance is visible in logs even with no
+                # TensorBoard/W&B backend (e.g. the CI batch-invariant E2E test).
+                "bit_wise/logprob_diff/max",
             ]
         )
         """Regex search patterns selecting console keys for train log lines.

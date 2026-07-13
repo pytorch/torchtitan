@@ -95,14 +95,11 @@ def _compute_learned_pos_embeds(
 
     for (h, w), indices in hw_to_indices.items():
         if isinstance(pos_grid, DTensor):
-            pos_hw = local_map(
-                F.interpolate,
-                out_placements=(pos_grid.placements,),
-            )(
+            pos_hw = local_map(F.interpolate, out_placements=(pos_grid.placements,),)(
                 pos_grid,
-                size=[h, w],
-                mode="bilinear",
-                align_corners=True,
+                size=[h, w],  # pyrefly: ignore [unexpected-keyword]
+                mode="bilinear",  # pyrefly: ignore [unexpected-keyword]
+                align_corners=True,  # pyrefly: ignore [unexpected-keyword]
             )
         else:
             pos_hw = F.interpolate(
@@ -277,7 +274,7 @@ class VisionRotaryEmbedding(Module):
         seq = _maybe_wrap_positions(seq, self.inv_freq)
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
             seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
-        return torch.outer(seq, self.inv_freq)
+        return torch.outer(seq, self.inv_freq)  # pyrefly: ignore
 
 
 class PatchMerger(Module):
