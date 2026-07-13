@@ -104,11 +104,6 @@ class Attention(BaseAttention):
 
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
-        if config.rope.scaling == "yarn" and config.rope.rope_factor > 1.0:
-            mscale = 0.1 * math.log(config.rope.rope_factor) + 1.0
-            # Merge YaRN attention mscale into softmax_scale, with
-            # m**2 being equivalent to scaling q / k each by mscale.
-            self.softmax_scale *= mscale * mscale
 
         self.qkv_linear = config.qkv_linear.build()
         self.wo = config.wo.build()
