@@ -30,10 +30,12 @@ Run each backend in a separate torchrun invocation:
         torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
+import faulthandler
 import gc
 import logging
 import os
 import shutil
+import signal
 import tempfile
 import unittest
 
@@ -606,6 +608,16 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        watchdog_sec = os.environ.get("RL_TEST_WATCHDOG_SEC")
+        if watchdog_sec:
+            faulthandler.enable()
+            for sig in (signal.SIGTERM, signal.SIGABRT):
+                try:
+                    faulthandler.register(sig, chain=True)
+                except (AttributeError, ValueError, OSError):
+                    pass
+            faulthandler.dump_traceback_later(int(watchdog_sec), exit=True)
+
         world_size = (
             dist.get_world_size()
             if dist.is_initialized()
@@ -679,13 +691,19 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        if dist.is_initialized():
+            dist.barrier()
         if hasattr(cls, "engine"):
-            cls.engine.engine_core.shutdown()
+            renderer = getattr(cls.engine, "renderer", None)
+            if renderer is not None:
+                renderer.shutdown()
             del cls.engine
         if hasattr(cls, "model"):
             del cls.model
         gc.collect()
         torch.cuda.empty_cache()
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
     def _assert_logprobs_equal(self, name, a, b, label_a="A", label_b="B"):
         """Assert two logprob sequences are bitwise identical."""
