@@ -8,10 +8,11 @@
 
 When several samples are packed into one row (``positions`` restart at 0 per
 sample), GatedDeltaNet is given ``cu_seqlens`` marking the boundaries so its
-recurrent state and causal conv reset per sample. This test checks that a packed
-row processed with ``cu_seqlens`` matches processing each sample on its own.
+recurrent state and causal conv reset per sample. These tests check that the
+boundaries are derived correctly and that a packed row processed with
+``cu_seqlens`` matches processing each sample on its own.
 
-Needs a GPU: the FLA gated-delta kernels are Triton/CUDA only.
+The end-to-end test needs a GPU: the FLA gated-delta kernels are Triton/CUDA only.
 """
 
 import pytest
@@ -23,6 +24,15 @@ from torchtitan.models.qwen3_5 import _qwen35_deltanet_config
 
 def _max_abs_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     return (x - y).abs().max().item()
+
+
+def test_packed_documents_cu_seqlens():
+    # Two documents packed in one row (positions restart at 0 at the boundary);
+    # these boundaries are what GatedDeltaNet resets its state/conv on.
+    positions = torch.cat([torch.arange(30), torch.arange(40)]).unsqueeze(0)
+    meta = create_varlen_metadata_for_document(positions)
+    assert meta.cu_seq_q.tolist() == [0, 30, 70]
+    assert meta.max_q == 40
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FLA GDN kernels need CUDA")
