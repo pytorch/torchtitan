@@ -157,7 +157,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     d["model_spec"] = {
                         "name": self.model_spec.name,
                         "flavor": self.model_spec.flavor,
-                        "model": self.model_spec.model.to_dict()
+                        "model": self.model_spec.model.to_dict(),
                     }
                 else:
                     val = getattr(self, f.name)
