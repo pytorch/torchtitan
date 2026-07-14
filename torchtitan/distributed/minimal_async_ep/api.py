@@ -420,8 +420,7 @@ def _compute_direct_metadata(
     output_ends = segment_lens.cumsum(0)
     output_starts = output_ends - segment_lens
     source_input_starts_EP_E = (  # noqa: N806
-        num_global_tokens_per_expert_EP_E.cumsum(1)
-        - num_global_tokens_per_expert_EP_E
+        num_global_tokens_per_expert_EP_E.cumsum(1) - num_global_tokens_per_expert_EP_E
     )
     (
         combine_dst_ranks,
@@ -522,9 +521,11 @@ def _dispatch_metadata(
     # Mirrors AllToAllTokenDispatcher's count exchange: each rank starts with
     # counts for its local tokens over all global experts, then learns how many
     # tokens every peer will send to each of this rank's local experts.
-    num_global_tokens_per_expert_EP_E = _copy_all_counts_to_peers_and_wait_cuda(  # noqa: N806
-        num_local_tokens_per_expert_E,
-        ep_size,
+    num_global_tokens_per_expert_EP_E = (
+        _copy_all_counts_to_peers_and_wait_cuda(  # noqa: N806
+            num_local_tokens_per_expert_E,
+            ep_size,
+        )
     )
 
     # Instead of materializing an all-to-all rank-major receive tensor and then
