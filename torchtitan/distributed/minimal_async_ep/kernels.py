@@ -510,6 +510,9 @@ def invert_flat_indices_kernel(
     *,
     num_rows: int,
 ) -> torch.Tensor:
+    # Equivalent to creating arange(num_rows) and scattering it into slot_to_row
+    # at flat_indices. flat_indices is a permutation, so every output position is
+    # written exactly once and no atomics are needed.
     slot_to_row = flat_indices.new_empty(num_rows)
 
     block_size = _COUNT_COPY_BLOCK_SIZE

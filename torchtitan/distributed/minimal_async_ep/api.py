@@ -369,7 +369,7 @@ def _copy_all_counts_to_peers_and_wait_cuda(
 
 def _compute_direct_metadata(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
-    all_tokens_per_expert_RE: torch.Tensor,  # noqa: N803
+    num_global_tokens_per_expert_EP_E: torch.Tensor,  # noqa: N803
     num_routed_rows: int,
     receive_capacity: int,
     ep_size: int,
@@ -387,7 +387,7 @@ def _compute_direct_metadata(
     num_experts = num_local_tokens_per_expert_E.numel()
     num_local_experts = num_experts // ep_size
 
-    counts_sde = all_tokens_per_expert_RE.view(
+    counts_sde = num_global_tokens_per_expert_EP_E.view(
         ep_size,
         ep_size,
         num_local_experts,
@@ -419,8 +419,9 @@ def _compute_direct_metadata(
     segment_lens = counts_sde[:, rank, :].t().reshape(-1)
     output_ends = segment_lens.cumsum(0)
     output_starts = output_ends - segment_lens
-    source_input_starts_RE = (  # noqa: N806
-        all_tokens_per_expert_RE.cumsum(1) - all_tokens_per_expert_RE
+    source_input_starts_EP_E = (  # noqa: N806
+        num_global_tokens_per_expert_EP_E.cumsum(1)
+        - num_global_tokens_per_expert_EP_E
     )
     (
         combine_dst_ranks,
@@ -429,7 +430,7 @@ def _compute_direct_metadata(
     ) = fill_combine_metadata_kernel(
         segment_lens,
         output_starts,
-        source_input_starts_RE,
+        source_input_starts_EP_E,
         ep_rank=rank,
         ep_size=ep_size,
         num_local_experts=num_local_experts,
@@ -521,7 +522,7 @@ def _dispatch_metadata(
     # Mirrors AllToAllTokenDispatcher's count exchange: each rank starts with
     # counts for its local tokens over all global experts, then learns how many
     # tokens every peer will send to each of this rank's local experts.
-    all_tokens_per_expert_RE = _copy_all_counts_to_peers_and_wait_cuda(  # noqa: N806
+    num_global_tokens_per_expert_EP_E = _copy_all_counts_to_peers_and_wait_cuda(  # noqa: N806
         num_local_tokens_per_expert_E,
         ep_size,
     )
@@ -530,7 +531,7 @@ def _dispatch_metadata(
     # calling _permute(), compute the final E-major receive rows directly.
     return _compute_direct_metadata(
         num_local_tokens_per_expert_E,
-        all_tokens_per_expert_RE,
+        num_global_tokens_per_expert_EP_E,
         num_routed_rows,
         receive_capacity,
         ep_size,
@@ -543,7 +544,7 @@ def _dispatch_metadata(
     device_types="cuda",
 )
 def dispatch_op(
-    dispatch_input: torch.Tensor,
+    x_TD: torch.Tensor,  # noqa: N803
     topk_expert_ids_TK: torch.Tensor,  # noqa: N803
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     receive_capacity: int,
@@ -562,7 +563,7 @@ def dispatch_op(
     """Build MinimalAsyncEP metadata and dispatch rows to expert-owner ranks.
 
     Args:
-        dispatch_input: ``(T, D)`` local token rows.
+        x_TD: ``(T, D)`` local token rows.
         topk_expert_ids_TK: ``(T, K)`` global expert ids.
         num_local_tokens_per_expert_E: ``(E,)`` counts for this rank's token
             shard over all global experts.
@@ -570,7 +571,7 @@ def dispatch_op(
         ep_size: ``EP``.
 
     Returns:
-        ``hidden_states`` plus all tensor metadata needed by combine and
+        ``hidden_states_RD`` plus all tensor metadata needed by combine and
         backward.
     """
     T_row_to_expert_N = topk_expert_ids_TK.reshape(-1)  # noqa: N806
@@ -580,6 +581,10 @@ def dispatch_op(
         stable=True,
     )
     top_k = topk_expert_ids_TK.shape[1]
+
+    # E_row_to_T_row_N indexes the flattened (T, K) routed-slot view, where
+    # flat_index = token_index * K + topk_slot. Divide by K to recover the
+    # source token row used to gather rows from x_TD.
     E_row_to_token_N = E_row_to_T_row_N // top_k  # noqa: N806
     (
         dispatch_dst_ranks,
@@ -605,8 +610,8 @@ def dispatch_op(
 
     # This direct copy corresponds to AllToAllTokenDispatcher's token all-to-all;
     # dispatch_dst_rows already point at the post-_permute E-major layout.
-    hidden_states = _copy_rows_to_peers_and_wait_cuda(
-        dispatch_input,
+    hidden_states_RD = _copy_rows_to_peers_and_wait_cuda(  # noqa: N806
+        x_TD,
         dispatch_dst_ranks,
         dispatch_dst_rows,
         num_routed_rows,
@@ -615,7 +620,7 @@ def dispatch_op(
         src_rows=E_row_to_token_N,
     )
     return (
-        hidden_states,
+        hidden_states_RD,
         dispatch_dst_ranks,
         dispatch_dst_rows,
         combine_dst_ranks,
@@ -629,7 +634,7 @@ def dispatch_op(
 
 @dispatch_op.register_fake
 def dispatch_op_fake(
-    dispatch_input: torch.Tensor,
+    x_TD: torch.Tensor,  # noqa: N803
     topk_expert_ids_TK: torch.Tensor,  # noqa: N803
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     receive_capacity: int,
@@ -648,7 +653,7 @@ def dispatch_op_fake(
     num_routed_rows = topk_expert_ids_TK.numel()
     num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
     return (
-        dispatch_input.new_empty(receive_capacity, dispatch_input.shape[1]),
+        x_TD.new_empty(receive_capacity, x_TD.shape[1]),
         topk_expert_ids_TK.new_empty(num_routed_rows, dtype=torch.int64),
         topk_expert_ids_TK.new_empty(num_routed_rows, dtype=torch.int64),
         topk_expert_ids_TK.new_empty(receive_capacity, dtype=torch.int64),
@@ -882,9 +887,9 @@ def combine_backward_op_fake(
 
 
 def dispatch_setup_context(ctx, inputs, output):
-    dispatch_input, topk_expert_ids_TK, *_ = inputs  # noqa: N806
+    x_TD, topk_expert_ids_TK, *_ = inputs  # noqa: N806
     (
-        _hidden_states,
+        _hidden_states_RD,
         _dispatch_dst_ranks,
         _dispatch_dst_rows,
         combine_dst_ranks,
@@ -895,7 +900,7 @@ def dispatch_setup_context(ctx, inputs, output):
         _num_tokens_per_local_expert_e,
     ) = output
     ctx.num_routed_rows = topk_expert_ids_TK.numel()
-    ctx.num_tokens = dispatch_input.shape[0]
+    ctx.num_tokens = x_TD.shape[0]
     ctx.top_k = topk_expert_ids_TK.shape[1]
     ctx.save_for_backward(
         combine_dst_ranks,
