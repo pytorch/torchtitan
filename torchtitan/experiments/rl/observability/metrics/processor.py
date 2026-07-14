@@ -79,8 +79,11 @@ class MetricsProcessor(Configurable):
 
         console_log_keys_validation: list[str] | None = field(
             default_factory=lambda: [
-                "validation/reward/_mean",
-                "validation/reward/_max",
+                # compute_rollout_metrics emits the reward under "<prefix>_reward" (an
+                # UNDERSCORE), matching the train side's "rollout_reward/_mean" -- so the
+                # validation reward key is "validation_reward/...", not "validation/reward/...".
+                "validation_reward/_mean",
+                "validation_reward/_max",
                 "validation/response_length/mean",
                 "timing/validate",
             ]
