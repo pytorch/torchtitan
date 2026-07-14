@@ -977,6 +977,12 @@ class CheckpointManager(Configurable):
         Returns:
             int: The maximum step number found among valid checkpoints,
                 or -1 if no valid checkpoints are detected.
+
+        Note:
+            This function is not remote friendly: it issues one listdir plus
+            up to two isfile probes per step folder, each a network round trip
+            on remote (fsspec) storage instead of a single batched listing.
+            Acceptable for now since it only runs once at load time.
         """
 
         folder = folder or self.folder
@@ -992,10 +998,10 @@ class CheckpointManager(Configurable):
                 continue
 
             # A checkpoint is valid only if it contains core metadata
-            checkpoint_path = os.path.join(folder, filename)
-            is_dcp = filesystem.isfile(os.path.join(checkpoint_path, ".metadata"))
+            checkpoint_path = filesystem.join(folder, filename)
+            is_dcp = filesystem.isfile(filesystem.join(checkpoint_path, ".metadata"))
             is_hf = filesystem.isfile(
-                os.path.join(checkpoint_path, "model.safetensors.index.json")
+                filesystem.join(checkpoint_path, "model.safetensors.index.json")
             )
 
             if is_dcp or is_hf:
@@ -1007,7 +1013,7 @@ class CheckpointManager(Configurable):
         """Generate the standardized filesystem path for a checkpoint
         (e.g., 'checkpoints/step-100')."""
         folder = folder or self.folder
-        return os.path.join(folder, f"step-{step}")
+        return filesystem.join(folder, f"step-{step}")
 
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
@@ -1144,7 +1150,7 @@ class CheckpointManager(Configurable):
             for filename in filesystem.listdir(self.folder):
                 match = re.search(r"step-(\d+)", filename)
                 if match:
-                    path = os.path.join(self.folder, filename)
+                    path = filesystem.join(self.folder, filename)
                     discovered_checkpoints.append((int(match.group(1)), path))
 
             discovered_checkpoints.sort()

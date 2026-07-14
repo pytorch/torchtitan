@@ -36,6 +36,18 @@ class TestJoin(unittest.TestCase):
             "gs://bucket/run/ckpt",
         )
 
+    def test_remote_base_uses_posix_separator(self):
+        self.assertEqual(
+            filesystem.join("gs://bucket/run/ckpt", "step-10"),
+            "gs://bucket/run/ckpt/step-10",
+        )
+
+    def test_remote_base_with_trailing_slash(self):
+        self.assertEqual(
+            filesystem.join("gs://bucket/run/ckpt/", "step-10"),
+            "gs://bucket/run/ckpt/step-10",
+        )
+
 
 class TestLocalOps(unittest.TestCase):
     def test_local_filesystem_operations(self):

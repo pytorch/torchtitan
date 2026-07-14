@@ -15,6 +15,7 @@ identical.
 from __future__ import annotations
 
 import os
+import posixpath
 import shutil
 
 
@@ -64,17 +65,19 @@ def listdir(path: str | os.PathLike) -> list[str]:
     """List directory entries as basenames, matching ``os.listdir``.
 
     fsspec's ``ls`` returns full paths, so entries are reduced to their
-    basename. Object-store backends (GCS, S3) may also include a
-    directory-marker entry for ``path`` itself (e.g. a zero-byte
-    ``bucket/ckpt/`` object), which ``os.listdir`` never returns for a local
-    dir; it is dropped by comparing full paths before taking the basename, so
-    a real child that happens to share the parent's basename is kept.
+    basename (``posixpath.basename``, since fsspec paths are always
+    ``/``-separated regardless of platform). Object-store backends (GCS, S3)
+    may also include a directory-marker entry for ``path`` itself (e.g. a
+    zero-byte ``bucket/ckpt/`` object), which ``os.listdir`` never returns for
+    a local dir; it is dropped by comparing full paths before taking the
+    basename, so a real child that happens to share the parent's basename is
+    kept.
     """
     if is_remote(path):
         fs, p = _resolve(path)
         self_entry = p.rstrip("/")
         return [
-            os.path.basename(entry.rstrip("/"))
+            posixpath.basename(entry.rstrip("/"))
             for entry in fs.ls(p, detail=False)
             if entry.rstrip("/") != self_entry
         ]
@@ -95,12 +98,17 @@ def rmtree(path: str | os.PathLike) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def join(base: str, folder: str) -> str:
-    """Join ``base`` and ``folder``, treating a remote ``folder`` as absolute.
+def join(base: str | os.PathLike, name: str) -> str:
+    """Join ``base`` and ``name``, mirroring ``os.path.join`` for local paths.
 
-    A remote ``folder`` (e.g. ``gs://bucket/run/ckpt``) is returned unchanged so
-    it is not prefixed with a local ``base`` such as ``dump_folder``.
+    A remote ``name`` (e.g. ``gs://bucket/run/ckpt``) is returned unchanged --
+    the same way ``os.path.join`` restarts at an absolute component -- so it is
+    not prefixed with a local ``base`` such as ``dump_folder``. A remote
+    ``base`` is joined with ``posixpath`` since fsspec URIs are always
+    ``/``-separated regardless of platform.
     """
-    if is_remote(folder):
-        return folder
-    return os.path.join(base, folder)
+    if is_remote(name):
+        return name
+    if is_remote(base):
+        return posixpath.join(str(base), name)
+    return os.path.join(base, name)
