@@ -89,14 +89,19 @@ class LocalTokenDispatcher(Configurable):
             token_indices_experts_sorted_N: ``(N,)`` token-to-original mapping
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
         """
-        # Reorder the token indices to match the order of the experts where N = T*K
-        token_indices_experts_sorted_N = torch.argsort(
+        # Reorder routed slots to match the order of the experts where N = T*K.
+        expert_sorted_flat_indices_N = torch.argsort(
             topk_expert_ids_TK.view(-1), stable=True
         )
         topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
-            token_indices_experts_sorted_N
+            expert_sorted_flat_indices_N
         ]
-        token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
+        # expert_sorted_flat_indices_N indexes the flattened (T, K) routed-slot
+        # view, where flat_index = token_index * K + topk_slot. Divide by K to
+        # recover the source token index used to gather rows from x_TD.
+        token_indices_experts_sorted_N = expert_sorted_flat_indices_N // self.top_k
+        # A token can be routed to multiple experts, so gathering by routed slot
+        # expands the token dimension from T to N = T * K.
         routed_input_ND = x_TD[token_indices_experts_sorted_N]
 
         return (
