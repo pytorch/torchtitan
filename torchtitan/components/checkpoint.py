@@ -239,11 +239,8 @@ class CheckpointManager(Configurable):
         This option specifies the path to the initial checkpoint to load, which is
         particularly useful for resuming training from a previous run with a
         different output path or when loading a checkpoint from a pre-trained model.
-        It is an error to provide this option when the checkpoint folder for the
-        current run already contains a valid checkpoint, located at
-        {--dump_folder}/{--checkpoint.folder}. In that case the run is no longer a
-        fresh run and should resume from the intermediate checkpoint without
-        initial_load_path.
+        If the checkpoint folder for the current run is not empty,
+        located at {--dump_folder}/{--checkpoint.folder}, this option will be ignored.
         This feature allows users to load an initial checkpoint from a different folder
         and continue training, saving new checkpoints to the specified folder without
         affecting the existing ones.
@@ -837,7 +834,7 @@ class CheckpointManager(Configurable):
                 f"checkpoint.folder {self.folder} does not exist"
             )
 
-        if not has_checkpoint_folder or load_step == -1:
+        if load_step == -1:
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
@@ -879,29 +876,15 @@ class CheckpointManager(Configurable):
                 )
 
             else:
-                logger.info(
-                    "No checkpoint was loaded because checkpoint.folder %s has no "
-                    "valid checkpoints and no initial checkpoint source was provided.",
-                    self.folder,
-                )
+                logger.info("No checkpoint was provided, this is a fresh start.")
                 return False
 
         else:
-            if self.initial_load_path:
-                raise ValueError(
-                    "checkpoint.initial_load_path is provided but the "
-                    "checkpoint.folder contains valid checkpoints. Remove "
-                    "checkpoint.initial_load_path to resume from checkpoint.folder "
-                    f"{self.folder}, or set checkpoint.folder to a directory with "
-                    "no valid checkpoints for a fresh initial load."
-                )
-            if self.initial_load_in_hf:
-                logger.warning(
-                    "checkpoint.initial_load_in_hf is True but the checkpoint.folder "
-                    "contains valid checkpoints. Checkpointer will not load from HF "
-                    "safetensors"
-                )
-
+            # This is the fault-tolerance branch: checkpoint.folder already
+            # contains valid checkpoints from a previous run, so we resume from
+            # it and all initial_* options are ignored by design. This allows a
+            # job to keep the same arguments across automatic restarts after
+            # failures.
             step = load_step
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
