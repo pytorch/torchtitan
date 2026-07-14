@@ -274,7 +274,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) and get_spmd_backend() != "spmd_types":
+        ) or get_spmd_backend() != "spmd_types":
             return all_to_all_single(
                 num_local_tokens_per_expert_E.view(ep_size, -1),
                 None,
@@ -341,7 +341,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) and get_spmd_backend() != "spmd_types":
+        ) or get_spmd_backend() != "spmd_types":
             return all_to_all_single(
                 routed_input_ND,
                 output_splits,
@@ -369,7 +369,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) and get_spmd_backend() != "spmd_types":
+        ) or get_spmd_backend() != "spmd_types":
             return all_to_all_single(
                 routed_output_RD,
                 input_splits,

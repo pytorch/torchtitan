@@ -533,11 +533,7 @@ class Controller(Configurable):
             for generator_mesh in generator_meshes:
                 await setup_torch_elastic_env_async(generator_mesh)
 
-            # Spawn the trainer first; generators wait until it is ready (see below).
-            # A generator's first MoE dispatch (vLLM warm-up in __init__) can race the
-            # trainer's model build + weight load and fault a partial-NVLink-domain
-            # HybridEP generator (cudaErrorIllegalAddress, hybrid_ep_backend.cuh:5693),
-            # so sequencing keeps that first dispatch on a quiescent system.
+            # Spawn actors on their respective meshes
             self.trainer = trainer_mesh.spawn(
                 "trainer",
                 PolicyTrainer,
@@ -549,31 +545,7 @@ class Controller(Configurable):
                 output_dir=config.dump_folder,
             )
 
-        # Initialize TorchStore for weight sync between trainer and generator.
-        # StorageVolumes are spawned on the trainer mesh so they are colocated
-        # with the weight source for faster data access in the non-RDMA path.
-        # LocalRankStrategy: routes each process to a storage volume based on
-        #   LOCAL_RANK, so colocated processes share the same volume.
-        # https://github.com/meta-pytorch/torchstore
-        with sl.log_trace_span("torchstore_init"):
-            await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
-
-        # Barrier on trainer readiness BEFORE spawning generators (see spawn comment):
-        # returns only after the trainer's __init__ (model build + checkpoint load), so
-        # generators init on a quiescent system. Also reads the restored policy_version
-        # (0 if fresh) for resume.
-        # TODO(resume): only model/optimizer/policy_version are restored; the rollout
-        #   buffer (in-flight rollouts) and dataset stream position are NOT -- a resumed
-        #   run refills the buffer and re-reads data from the start.
-        # TODO: investigate why we need to spawn generator later
-        self.start_step = self._get_rank_0_value(
-            await self.trainer.get_policy_version.call()
-        )
-        if self.start_step > 0:
-            logger.info(f"Resuming RL training from step {self.start_step}")
-
-        # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
-        with sl.log_trace_span("mesh_spawn_generators"):
+            # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
             generators = []
             for idx, generator_mesh in enumerate(generator_meshes):
                 actor_name = (
@@ -591,6 +563,26 @@ class Controller(Configurable):
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
+
+        # Initialize TorchStore for weight sync between trainer and generator.
+        # StorageVolumes are spawned on the trainer mesh so they are colocated
+        # with the weight source for faster data access in the non-RDMA path.
+        # LocalRankStrategy: routes each process to a storage volume based on
+        #   LOCAL_RANK, so colocated processes share the same volume.
+        # https://github.com/meta-pytorch/torchstore
+        with sl.log_trace_span("torchstore_init"):
+            await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
+
+        # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
+        # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
+        # TODO(resume): only model/optimizer/policy_version are restored. The active-slot rollout
+        #   buffer (in-flight rollouts) and the dataset stream position are NOT restored -- a resumed
+        #   run refills the buffer and re-reads data from the start. Need to recycle prompts.
+        self.start_step = self._get_rank_0_value(
+            await self.trainer.get_policy_version.call()
+        )
+        if self.start_step > 0:
+            logger.info(f"Resuming RL training from step {self.start_step}")
 
         # Start each generator's engine loop on all ranks once, before any
         # rank-0-only generate / pull (rank 0 drives the followers through this
