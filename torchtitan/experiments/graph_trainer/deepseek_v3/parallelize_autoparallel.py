@@ -37,6 +37,7 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
+
 def _load_autoparallel_dsv3_dependency():
     """Load the temporary AutoParallel DSv3 integration dependency."""
     try:

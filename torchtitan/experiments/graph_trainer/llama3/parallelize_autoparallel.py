@@ -34,6 +34,7 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
+
 def parallelize_autoparallel_llama(
     model,
     *,
