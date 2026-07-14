@@ -311,6 +311,7 @@ def make_token_dispatcher_config(
     hidden_dim: int | None = None,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
+    minimal_async_ep_load_balanced_capacity: bool = False,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -354,6 +355,7 @@ def make_token_dispatcher_config(
         return MinimalAsyncEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            load_balanced_capacity=minimal_async_ep_load_balanced_capacity,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
@@ -378,6 +380,7 @@ def make_experts_config(
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
+    minimal_async_ep_load_balanced_capacity: bool = False,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -393,5 +396,8 @@ def make_experts_config(
             hidden_dim=dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             cudagraphable=cudagraphable,
+            minimal_async_ep_load_balanced_capacity=(
+                minimal_async_ep_load_balanced_capacity
+            ),
         ),
     )

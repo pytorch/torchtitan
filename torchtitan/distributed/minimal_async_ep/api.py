@@ -47,6 +47,67 @@ _HIDDEN_READY_CHANNEL = 0
 _COUNTS_READY_CHANNEL = 0
 
 
+def receive_capacity_for_routing(
+    *,
+    tokens_per_rank: int,
+    ep_size: int,
+    num_local_experts: int,
+    top_k: int,
+    load_balanced_capacity: bool,
+) -> int:
+    """Return MinimalAsyncEP receive-buffer rows for the configured routing bound.
+
+    ``load_balanced_capacity`` assumes the debug forced-load-balance router,
+    which assigns routed top-k slots round-robin over global experts.
+    """
+    if tokens_per_rank < 0:
+        raise ValueError(
+            f"tokens_per_rank must be non-negative, got {tokens_per_rank}."
+        )
+    if ep_size <= 0:
+        raise ValueError(f"ep_size must be positive, got {ep_size}.")
+    if num_local_experts <= 0:
+        raise ValueError(
+            f"num_local_experts must be positive, got {num_local_experts}."
+        )
+    if top_k <= 0:
+        raise ValueError(f"top_k must be positive, got {top_k}.")
+
+    if load_balanced_capacity:
+        # Capacity derivation for the forced-load-balance router.
+        #
+        # The router hands out each source rank's routed slots round-robin
+        # over the global experts:
+        #
+        #     N = tokens_per_rank * top_k       routed slots per source rank
+        #     E = ep_size * num_local_experts   global experts
+        #     expert(slot) = arange(N) % E      round-robin assignment
+        #
+        # Round-robin gives every expert floor(N / E) or ceil(N / E) rows.
+        # For simple rank-independent sizing, use a per-expert upper bound:
+        #
+        #     N // E + 1
+        #
+        # The "+ 1" keeps the computation branch-free after integer division.
+        # This is intentionally a small over-allocation instead of the exact
+        # per-rank maximum: at worst one extra row per local expert per source
+        # rank, while keeping the bound safe and dropless.
+        #
+        # This rank owns num_local_experts experts and receives from all
+        # ep_size source ranks, so:
+        #
+        #     capacity = ep_size * num_local_experts * (N // E + 1)
+        num_experts = ep_size * num_local_experts
+        num_routed_rows = tokens_per_rank * top_k
+        max_rows_per_expert = num_routed_rows // num_experts + 1
+        max_rows_per_source_rank = num_local_experts * max_rows_per_expert
+    else:
+        # Worst case: every one of a source rank's tokens can route to the
+        # maximal min(top_k, num_local_experts) of this rank's experts.
+        max_rows_per_source_rank = tokens_per_rank * min(top_k, num_local_experts)
+    return ep_size * max_rows_per_source_rank
+
+
 @dataclass
 class _MinimalAsyncEPBufferState:
     """Process-local symmetric-memory state initialized as one unit."""
@@ -143,6 +204,10 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
             config.training.mixed_precision_param
         ]
+        token_dispatcher_cfg.load_balanced_capacity = (
+            token_dispatcher_cfg.load_balanced_capacity
+            or config.debug.moe_force_load_balance
+        )
 
 
 @dataclass
@@ -181,24 +246,33 @@ def init_buffer(
     top_k: int,
     dtype: torch.dtype,
     device: torch.device,
+    load_balanced_capacity: bool = False,
 ) -> None:
     """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
     global _buffer_state
 
     device = torch.device(device)
-    max_routed_tokens = group.size() * tokens_per_rank * min(top_k, num_local_experts)
+    max_routed_tokens = receive_capacity_for_routing(
+        tokens_per_rank=tokens_per_rank,
+        ep_size=group.size(),
+        num_local_experts=num_local_experts,
+        top_k=top_k,
+        load_balanced_capacity=load_balanced_capacity,
+    )
     num_experts = group.size() * num_local_experts
     assert _buffer_state is None
 
     logger.info(
         "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
-        "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d",
+        "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d, "
+        "load_balanced_capacity=%s",
         hidden_dim,
         tokens_per_rank,
         top_k,
         num_local_experts,
         group.size(),
         max_routed_tokens,
+        load_balanced_capacity,
     )
     backend = symm_mem.get_backend(device)
     if backend != "CUDA":

@@ -9,6 +9,7 @@ import unittest
 import torch
 import triton.language as tl
 
+from torchtitan.distributed.minimal_async_ep import receive_capacity_for_routing
 from torchtitan.distributed.minimal_async_ep.kernels import (
     _copy_rows_to_peer_ptrs_kernel,
     copy_full_counts_to_peers_kernel,
@@ -29,6 +30,46 @@ def assert_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
         raise AssertionError(f"dtype mismatch: {actual.dtype} != {expected.dtype}")
     if not torch.equal(actual, expected):
         raise AssertionError(f"tensor mismatch:\nactual={actual}\nexpected={expected}")
+
+
+class TestMinimalAsyncEPCapacity(unittest.TestCase):
+    def test_receive_capacity_matches_worst_case_and_forced_balance(self):
+        self.assertEqual(
+            receive_capacity_for_routing(
+                tokens_per_rank=8192,
+                ep_size=64,
+                num_local_experts=4,
+                top_k=8,
+                load_balanced_capacity=False,
+            ),
+            2_097_152,
+        )
+        self.assertEqual(
+            receive_capacity_for_routing(
+                tokens_per_rank=8192,
+                ep_size=64,
+                num_local_experts=4,
+                top_k=8,
+                load_balanced_capacity=True,
+            ),
+            65_792,
+        )
+
+    def test_receive_capacity_for_forced_balance_uses_simple_upper_bound(self):
+        # Forced balance routes top-k slots round-robin over global experts.
+        # For 9 routed rows over 4 experts, this simple bound budgets 3 rows
+        # per expert, so a 2-expert rank receives capacity for 6 rows per
+        # source rank from 2 source ranks.
+        self.assertEqual(
+            receive_capacity_for_routing(
+                tokens_per_rank=3,
+                ep_size=2,
+                num_local_experts=2,
+                top_k=3,
+                load_balanced_capacity=True,
+            ),
+            12,
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")

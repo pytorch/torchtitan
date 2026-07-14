@@ -18,6 +18,7 @@ from torchtitan.distributed.minimal_async_ep import (
     dispatch_op as minimal_async_ep_dispatch_op,
     init_buffer as minimal_async_ep_init_buffer,
     MinimalAsyncEPDispatchMetadata,
+    receive_capacity_for_routing as minimal_async_ep_receive_capacity_for_routing,
 )
 from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_sparse_mesh
 from torchtitan.distributed.utils import get_spmd_backend
@@ -1047,6 +1048,9 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
+        # Valid only with debug.moe_force_load_balance / round-robin routing.
+        # Natural routing needs the default worst-case dropless capacity.
+        load_balanced_capacity: bool = False
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -1055,6 +1059,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self.hidden_dim = config.hidden_dim
         self.tokens_per_rank = config.tokens_per_rank
         self.dtype = config.dtype
+        self.load_balanced_capacity = config.load_balanced_capacity
         if config.device is None:
             buffer_device = torch.device(device_type, device_module.current_device())
         else:
@@ -1066,7 +1071,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     # initializes it, same-configuration dispatchers reuse it, and differing
     # metadata is invalid because the buffer layout would not match.
     _global_buffer_key: ClassVar[
-        tuple[object, int, int, int, int, torch.dtype, torch.device] | None
+        tuple[object, int, int, int, int, torch.dtype, torch.device, bool] | None
     ] = None
 
     def wire_meshes(
@@ -1124,6 +1129,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             self.top_k,
             self.dtype,
             self.buffer_device,
+            self.load_balanced_capacity,
         )
         if MinimalAsyncEPTokenDispatcher._global_buffer_key is not None:
             if MinimalAsyncEPTokenDispatcher._global_buffer_key != buffer_key:
@@ -1141,6 +1147,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             top_k=self.top_k,
             dtype=self.dtype,
             device=self.buffer_device,
+            load_balanced_capacity=self.load_balanced_capacity,
         )
         MinimalAsyncEPTokenDispatcher._global_buffer_key = buffer_key
 
@@ -1174,9 +1181,13 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         ep_size = ep_group.size()
         num_tokens = x_TD.shape[0]
         num_local_experts = num_local_tokens_per_expert_E.numel() // ep_size
-        # TODO(xmfan): make this capacity configurable by user
-        num_receive_rows_per_source_rank = num_tokens * min(top_k, num_local_experts)
-        receive_capacity = ep_size * num_receive_rows_per_source_rank
+        receive_capacity = minimal_async_ep_receive_capacity_for_routing(
+            tokens_per_rank=num_tokens,
+            ep_size=ep_size,
+            num_local_experts=num_local_experts,
+            top_k=top_k,
+            load_balanced_capacity=self.load_balanced_capacity,
+        )
 
         (
             hidden_states_RD,
