@@ -143,9 +143,9 @@ def _prepare_generation_request_metrics(
                 inputs.last_token_ts - inputs.first_token_ts
             ) * 1000
             metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
-            metric_values[
-                f"{prefix}/inter_token_latency_ms"
-            ] = first_to_last_token_ms / (inputs.num_generation_tokens - 1)
+            metric_values[f"{prefix}/inter_token_latency_ms"] = (
+                first_to_last_token_ms / (inputs.num_generation_tokens - 1)
+            )
 
     # Emit each value with both Mean and Max aggregators.
     return [
@@ -722,6 +722,13 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
+        attention_config: AttentionConfig | None = None
+        """vLLM attention config passed to the engine. When None (default), the
+        backend is derived from the model's inner_attention config
+        (FlexAttention -> FLEX_ATTENTION, VarlenAttention -> CUSTOM).
+        Platforms that don't support those backends (e.g. XPU) should set this
+        to AttentionConfig(backend=<supported_backend>)."""
+
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -818,6 +825,7 @@ class VLLMGenerator(Actor, Configurable):
 
         # Build vLLM engine
         enable_ep = config.parallelism.expert_parallel_degree > 1
+
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from torchtitan's ModelSpec via
@@ -844,7 +852,7 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            attention_config=AttentionConfig(
+            attention_config=config.attention_config or AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
                     if isinstance(inner_attn, FlexAttention.Config)
@@ -1128,11 +1136,13 @@ class VLLMGenerator(Actor, Configurable):
         # the predicate. In-flight requests keep the predicate true, so they need no notify.
         async with self._engine_loop_condition:
             await self._engine_loop_condition.wait_for(
-                lambda: self._close_request is not None
-                or self._model_state_dict_pull_request is not None
-                or self._queued_generation_requests
-                # In-flight requests (on any DP rank) keep rank 0 issuing STEP.
-                or self._request_dispatcher.rank0_has_pending_futures()
+                lambda: (
+                    self._close_request is not None
+                    or self._model_state_dict_pull_request is not None
+                    or self._queued_generation_requests
+                    # In-flight requests (on any DP rank) keep rank 0 issuing STEP.
+                    or self._request_dispatcher.rank0_has_pending_futures()
+                )
             )
 
             if self._close_request is not None:
@@ -1206,9 +1216,9 @@ class VLLMGenerator(Actor, Configurable):
         self._rank0_check_engine_loop_running("pull_model_state_dict")
 
         # A placeholder future for the engine loop to resolve once the pull has been applied.
-        pull_model_state_dict_future: asyncio.Future[
-            int
-        ] = asyncio.get_running_loop().create_future()
+        pull_model_state_dict_future: asyncio.Future[int] = (
+            asyncio.get_running_loop().create_future()
+        )
 
         # `_engine_loop_condition` wakes the engine loop, if asleep, when a pull is queued.
         async with self._engine_loop_condition:

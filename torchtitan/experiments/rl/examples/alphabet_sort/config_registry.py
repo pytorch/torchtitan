@@ -13,8 +13,11 @@ Each function returns a complete ``Controller.Config``, discoverable by
 
 import dataclasses
 
+import torch
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
@@ -24,6 +27,8 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
+from vllm.config import AttentionConfig
+
 from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
     VLLMCudagraphConfig,
@@ -180,6 +185,92 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+        ),
+    )
+
+
+def rl_grpo_lora_qwen3_0_6b() -> Controller.Config:
+    """GRPO + LoRA config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train).
+
+    Uses FSDP (dp_shard=2) instead of TP for training, LoRA adapters (rank=8).
+
+    On XPU, set ZE_AFFINITY_MASK for device isolation and
+    TORCHINDUCTOR_MAX_AUTOTUNE=0 to avoid backward kernel resource exhaustion.
+    """
+    group_size = 8
+    model_spec = _qwen3_rl_model_registry(
+        "0.6B",
+        attn_backend="flex",
+        converters=[
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
+        ],
+    )
+    # Disable max_autotune for XPU: backward autotuning tries kernel configs
+    # that exceed XPU register limits (OUT_OF_RESOURCES). Harmless on CUDA
+    # (just uses the default heuristic config instead of autotuning).
+    # Must redefine _compiled_flex_attn since torch.compile captures options at
+    # definition time.
+    from torch.nn.attention.flex_attention import flex_attention
+    from torchtitan.models.common.attention import FlexAttention
+
+    FlexAttention.inductor_configs = {
+        **FlexAttention.inductor_configs,
+        "max_autotune": False,
+        "coordinate_descent_tuning": False,
+    }
+    FlexAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexAttention.inductor_configs
+    )
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.85,
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            attention_config=AttentionConfig(),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=1,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(

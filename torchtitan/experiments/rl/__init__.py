@@ -36,22 +36,33 @@ import os
 import sys
 import warnings
 
-# Avoid memory fragmentation and peak reserved memory increasing over time
-# To overwrite, set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
-if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
-    if "torch" in sys.modules:
-        warnings.warn(
-            "The 'torch' module has already been imported. "
-            "Setting PYTORCH_CUDA_ALLOC_CONF may not have an effect."
-            "For best results, set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before importing 'torch'."
-        )
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# Avoid memory fragmentation and peak reserved memory increasing over time.
+# expandable_segments corrupts XPU's oneCCL USM pointers (PyTorch bug: XPU
+# allocator reads PYTORCH_CUDA_ALLOC_CONF). Detect XPU via ZE_AFFINITY_MASK.
+if "ZE_AFFINITY_MASK" not in os.environ:
+    if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        if "torch" in sys.modules:
+            warnings.warn(
+                "The 'torch' module has already been imported. "
+                "Setting PYTORCH_CUDA_ALLOC_CONF may not have an effect."
+                "For best results, set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before importing 'torch'."
+            )
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
-from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
+
+def __getattr__(name: str):
+    if name == "register_to_vllm":
+        from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
+
+        return register_to_vllm
+    if name == "VLLMModelWrapper":
+        from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
+
+        return VLLMModelWrapper
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
     "VLLMModelWrapper",
-    "register_to_vllm",  # Export register function for manual use
+    "register_to_vllm",
 ]
