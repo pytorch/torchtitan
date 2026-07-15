@@ -29,17 +29,13 @@ from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
 )
+from torchtitan.models.common.linear import ScaledBiasRowwiseLinear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
-from .model import (
-    Attention,
-    GptOssModel,
-    GptOssTransformerBlock,
-    ScaledBiasRowwiseLinear,
-)
+from .model import Attention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedExperts, GptOssMoE
 from .parallelize import parallelize_gptoss
 from .state_dict_adapter import GptOssStateDictAdapter

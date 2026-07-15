@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     HybridEPTokenDispatcher,
