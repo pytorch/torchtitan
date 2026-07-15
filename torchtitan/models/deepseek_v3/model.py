@@ -17,7 +17,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttention,
 )
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import MTPDecoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -184,13 +184,13 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         return x
 
 
-class DeepSeekV3Model(Decoder):
+class DeepSeekV3Model(MTPDecoder):
     """
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(MTPDecoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
 
@@ -200,7 +200,7 @@ class DeepSeekV3Model(Decoder):
             config,
             **kwargs,
         ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            MTPDecoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
             if (
                 self.mtp is not None

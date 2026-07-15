@@ -21,22 +21,15 @@ from torchtitan.distributed.full_dtensor import (
     validate_config,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.deepseek_v3 import DeepSeekV3Model
+from torchtitan.models.common.decoder import Decoder
 
 
-def _get_inner_attentions_for_context_parallel(model: DeepSeekV3Model):
-    inner_attentions = [
-        block.attention.inner_attention for block in model.layers.values()
-    ]
-    if model.mtp_block is not None:
-        inner_attentions.extend(
-            layer.inner.attention.inner_attention for layer in model.mtp_block.layers
-        )
-    return inner_attentions
+def _get_inner_attentions_for_context_parallel(model: Decoder):
+    return [block.attention.inner_attention for block in model.layers.values()]
 
 
 def parallelize_deepseekv3(
-    model: DeepSeekV3Model,
+    model: Decoder,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,

@@ -82,7 +82,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         layer_num: str,
     ) -> tuple[str, str]:
         new_key = self.from_hf_map[abstract_key]
-        mtp_cfg = self.model_config.mtp
+        mtp_cfg = getattr(self.model_config, "mtp", None)
         if mtp_cfg is not None and mtp_cfg.num_mtp_layers > 0:
             num_main_layers = len(self.model_config.layers)
             layer_idx = int(layer_num)
