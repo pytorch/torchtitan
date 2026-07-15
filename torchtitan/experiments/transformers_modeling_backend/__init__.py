@@ -48,8 +48,10 @@ class TitanModelConfig:
     ffn_dim_multiplier: float | None = None
     max_seq_len: int = 2048
     depth_init: bool = True
-    use_flex_attn: bool = False
     attn_mask_type: str = "causal"
+    """Attention mask under the flex attention impl: "causal" (plain causal) or
+    "block_causal" (causal AND same-document, for packed sequences). Requires
+    attn_implementation="flex_torchtitan"; ignored by the SDPA impl (is_causal)."""
 
 
 @dataclass
@@ -115,12 +117,22 @@ flavors = {
     ),
     "debugmodel_flex": HFTransformerModel.Config(
         model_config=TitanModelConfig(
-            use_flex_attn=True,
             dim=256,
             n_layers=2,
             n_heads=16,
             n_kv_heads=16,
         ),
+        attn_implementation="flex_torchtitan",
+    ),
+    "sft_debugmodel": HFTransformerModel.Config(
+        model_config=TitanModelConfig(
+            dim=256,
+            n_layers=2,
+            n_heads=16,
+            n_kv_heads=16,
+            attn_mask_type="block_causal",
+        ),
+        attn_implementation="flex_torchtitan",
     ),
     "debugmodel_moe": HFTransformerModel.Config(
         model_config=TitanMoeModelConfig(
@@ -137,7 +149,6 @@ flavors = {
     ),
     "debugmodel_moe_flex": HFTransformerModel.Config(
         model_config=TitanMoeModelConfig(
-            use_flex_attn=True,
             dim=2048,
             n_layers=4,
             n_heads=16,
@@ -148,6 +159,7 @@ flavors = {
             moe_intermediate_size=128,
             num_nextn_predict_layers=0,
         ),
+        attn_implementation="flex_torchtitan",
     ),
     "full": HFTransformerModel.Config(
         model_config=TitanModelConfig(),
@@ -164,6 +176,12 @@ flavors = {
             moe_intermediate_size=768,
             norm_topk_prob=True,
         ),
+    ),
+    "sft_full": HFTransformerModel.Config(
+        model_config=TitanModelConfig(
+            attn_mask_type="block_causal",
+        ),
+        attn_implementation="flex_torchtitan",
     ),
 }
 

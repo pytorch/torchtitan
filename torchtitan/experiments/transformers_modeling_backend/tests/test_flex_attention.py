@@ -35,7 +35,7 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
         from torchtitan.models.common.attention import (
             create_attention_mask,
             get_causal_mask_mod,
-            get_efficient_causal_mask_mod_for_packed_document,
+            get_document_mask_mod,
         )
 
         device = "cuda"
@@ -49,7 +49,7 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
         # The same document-causal BlockMask the model builds in get_attention_masks.
         mask_mod = and_masks(
             get_causal_mask_mod(),
-            get_efficient_causal_mask_mod_for_packed_document(positions),
+            get_document_mask_mod(positions),
         )
         block_mask = create_attention_mask(
             mask_mod, 1, None, seq, seq, device=device, BLOCK_SIZE=128
@@ -81,39 +81,53 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
         self.assertFalse(torch.allclose(out1[:, :len_a], out2[:, :len_a]))
 
 
-class TestFlexCpGuard(unittest.TestCase):
-    """flex attention + context parallelism must fail loud (not silently wrong).
+class TestAttnMaskTypeValidation(unittest.TestCase):
+    """block_causal masking requires the flex impl; SDPA must fail loud.
 
-    The guard sits at the top of parallelize_hf_transformers, before any model
-    work, so lightweight stubs are enough — no GPU/distributed needed.
+    Building the config is lightweight (no model build, no GPU/distributed), so
+    this validates the guard in HFTransformerModel.Config.__init__ directly.
     """
 
-    def test_flex_cp_is_guarded(self):
-        import types
-
-        from torchtitan.experiments.transformers_modeling_backend.parallelize import (
-            parallelize_hf_transformers,
+    def test_block_causal_requires_flex(self):
+        from torchtitan.experiments.transformers_modeling_backend import (
+            TitanModelConfig,
+        )
+        from torchtitan.experiments.transformers_modeling_backend.model import (
+            HFTransformerModel,
         )
 
-        model = types.SimpleNamespace(
-            model=types.SimpleNamespace(
-                config=types.SimpleNamespace(use_flex_attn=True)
+        # Default attn_implementation is sdpa_torchtitan, which cannot express
+        # cross-document masking -- block_causal must raise.
+        with self.assertRaisesRegex(ValueError, "block_causal"):
+            HFTransformerModel.Config(
+                model_config=TitanModelConfig(
+                    dim=256,
+                    n_layers=2,
+                    n_heads=16,
+                    n_kv_heads=16,
+                    attn_mask_type="block_causal",
+                ),
             )
+
+    def test_block_causal_with_flex_ok(self):
+        from torchtitan.experiments.transformers_modeling_backend import (
+            TitanModelConfig,
         )
-        parallel_dims = types.SimpleNamespace(
-            cp_enabled=True, tp=1, cp=2, seq_len_divisor=1
+        from torchtitan.experiments.transformers_modeling_backend.model import (
+            HFTransformerModel,
         )
-        training = types.SimpleNamespace(seq_len=8)
-        with self.assertRaisesRegex(NotImplementedError, "context parallelism"):
-            parallelize_hf_transformers(
-                model,
-                parallel_dims=parallel_dims,
-                training=training,
-                parallelism=None,
-                compile_config=None,
-                ac_config=None,
-                dump_folder="",
-            )
+
+        # flex_torchtitan supports the document BlockMask -- no error.
+        HFTransformerModel.Config(
+            model_config=TitanModelConfig(
+                dim=256,
+                n_layers=2,
+                n_heads=16,
+                n_kv_heads=16,
+                attn_mask_type="block_causal",
+            ),
+            attn_implementation="flex_torchtitan",
+        )
 
 
 if __name__ == "__main__":

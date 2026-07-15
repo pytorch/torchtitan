@@ -177,7 +177,11 @@ def parallelize_hf_transformers(
     # (seq_len / flex BLOCK_SIZE) to be divisible by the CP degree; too-short
     # sequences raise "num_tasks N must be divisible by group_size" from the
     # balancer -- this is a CP+ptrr constraint, independent of PP.
-    use_flex = getattr(model.model.config, "use_flex_attn", False)
+    from torchtitan.experiments.transformers_modeling_backend.model import (
+        _uses_flex_attention,
+    )
+
+    use_flex = _uses_flex_attention(model.model.config)
 
     # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
     # Some models (Gemma4) share the embedding and lm_head weight
@@ -258,7 +262,8 @@ def parallelize_hf_transformers(
         if parallel_dims.tp_enabled:
             raise NotImplementedError(
                 "SDPA attention with tensor parallelism + context parallelism is "
-                "not supported. Use flex attention (use_flex_attn=True) for TP+CP, "
+                "not supported. Use flex attention "
+                "(attn_implementation='flex_torchtitan') for TP+CP, "
                 "or run context parallelism without tensor parallelism."
             )
         _wire_sdpa_attention_cp(model, parallel_dims.get_mesh("cp"))

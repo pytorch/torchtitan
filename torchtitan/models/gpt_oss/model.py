@@ -12,17 +12,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torch.nn.attention.flex_attention import and_masks, BlockMask
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     BaseQKVLinear,
-    create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttention,
     get_causal_mask_mod,
-    get_document_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     VarlenAttention,
 )
@@ -104,6 +103,11 @@ class Attention(BaseAttention):
 
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
+        if config.rope.scaling == "yarn" and config.rope.rope_factor > 1.0:
+            mscale = 0.1 * math.log(config.rope.rope_factor) + 1.0
+            # Merge YaRN attention mscale into softmax_scale, with
+            # m**2 being equivalent to scaling q / k each by mscale.
+            self.softmax_scale *= mscale * mscale
 
         self.qkv_linear = config.qkv_linear.build()
         self.wo = config.wo.build()
@@ -268,22 +272,15 @@ class GptOssModel(Decoder):
         if isinstance(inner_attn, VarlenAttention.Config):
             return create_varlen_metadata_for_document(positions)
         elif isinstance(inner_attn, FlexAttention.Config):
-            seq_len = positions.shape[1]
-            B = positions.shape[0]
-            basic_mask_mods = [
+            base_mask_mods = [
                 get_causal_mask_mod(),
-                get_document_mask_mod(positions),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
             ]
-
             # Full-attention (causal + document) mask, used by layers without a
             # sliding window.
             masks: dict[str, BlockMask] = {
-                "basic_mask": create_attention_mask(
-                    and_masks(*basic_mask_mods),
-                    B,
-                    None,
-                    seq_len,
-                    seq_len,
+                "basic_mask": self._create_flex_attention_mask(
+                    positions, attn_cfg, base_mask_mods
                 )
             }
 
@@ -297,12 +294,10 @@ class GptOssModel(Decoder):
                     window = layer.attention.sliding_window_size
                     break
             if window is not None:
-                masks["sliding_window_mask"] = create_attention_mask(
-                    and_masks(*basic_mask_mods, get_sliding_window_mask_mod(window)),
-                    B,
-                    None,
-                    seq_len,
-                    seq_len,
+                masks["sliding_window_mask"] = self._create_flex_attention_mask(
+                    positions,
+                    attn_cfg,
+                    [*base_mask_mods, get_sliding_window_mask_mod(window)],
                 )
 
             return masks

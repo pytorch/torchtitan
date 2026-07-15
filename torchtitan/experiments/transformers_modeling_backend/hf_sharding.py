@@ -124,7 +124,11 @@ def set_hf_sharding_configs(
         rope._sharding_config = _rope_config(rope, enable_sp=enable_sp)
 
     # Per-layer modules
-    use_flex = getattr(model.model.config, "use_flex_attn", False)
+    from torchtitan.experiments.transformers_modeling_backend.model import (
+        _uses_flex_attention,
+    )
+
+    use_flex = _uses_flex_attention(model.model.config)
     for transformer_block in model.layers:
         _set_layer_sharding_configs(
             transformer_block, enable_sp=enable_sp, use_flex=use_flex

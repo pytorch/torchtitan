@@ -209,6 +209,10 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
+    # Batch invariance requires strict on-policy: the generator must run the
+    # latest weights before generating so trainer/generator logprobs stay
+    # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
+    config.async_loop.max_offpolicy_steps = 0
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -357,6 +361,9 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=5,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
@@ -663,6 +670,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
@@ -819,7 +829,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
 
 
 def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
-    """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
+    """On-policy GRPO config for Qwen3-0.6B (8 GPUs: trainer TP=2 + 3 generators TP=2).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
 
@@ -834,8 +844,12 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
     return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_generators=3,
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
@@ -853,10 +867,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            # fp32 master weights; FSDP mixed precision casts to bf16 for the
-            # forward (mixed_precision_param="bfloat16" is the TrainingConfig
-            # default), aligning the trainer forward with the bf16 generator.
-            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
