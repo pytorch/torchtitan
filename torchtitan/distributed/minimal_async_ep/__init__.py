@@ -10,6 +10,7 @@ from torchtitan.distributed.minimal_async_ep.api import (
     init_buffer,
     maybe_update_minimal_async_ep_config,
     MinimalAsyncEPDispatchMetadata,
+    receive_capacity_for_routing,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "dispatch_op",
     "init_buffer",
     "maybe_update_minimal_async_ep_config",
+    "receive_capacity_for_routing",
 ]
