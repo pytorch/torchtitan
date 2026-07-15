@@ -12,7 +12,7 @@ import torch
 from torchtitan.components.lora import _get_lora_cls, LoRAConverter
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.models.common.attention import FlexAttention
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.module import Module

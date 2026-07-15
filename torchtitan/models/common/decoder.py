@@ -28,8 +28,9 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
