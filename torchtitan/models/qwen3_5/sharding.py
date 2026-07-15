@@ -35,7 +35,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
-    RedistributionSpec,
+    PerAxisRedistribution,
     ShardingConfig,
     SpmdLayout,
 )
@@ -113,7 +113,7 @@ def set_qwen35_sharding_config(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_redist=RedistributionSpec.Config(
+        out_redist=PerAxisRedistribution.Config(
             axis=MeshAxisName.TP,
             src=spmd.P,
             dst=spmd.R,
@@ -260,7 +260,7 @@ def _set_full_attention_sharding(
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x": attention_input_layout},
         in_redist={
-            "x": RedistributionSpec.Config(
+            "x": PerAxisRedistribution.Config(
                 axis=MeshAxisName.TP,
                 src=spmd.R if is_first_layer else spmd.S(1),
                 dst=spmd.R,
@@ -349,7 +349,7 @@ def _set_deltanet_sharding(
         },
         in_src_shardings={"x": attention_input_layout},
         in_redist={
-            "x": RedistributionSpec.Config(
+            "x": PerAxisRedistribution.Config(
                 axis=MeshAxisName.TP,
                 src=spmd.R if is_first_layer else spmd.S(1),
                 dst=spmd.R,

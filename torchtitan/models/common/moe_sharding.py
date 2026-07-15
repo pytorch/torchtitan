@@ -17,7 +17,7 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
-    RedistributionSpec,
+    PerAxisRedistribution,
     ShardingConfig,
     SpmdLayout,
 )
@@ -134,7 +134,7 @@ def _router_gate_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
             in_redist=None
             if enable_sp
             else {
-                "input": RedistributionSpec.Config(
+                "input": PerAxisRedistribution.Config(
                     axis=TP,
                     src=spmd.I,
                     dst=spmd.S(1),
@@ -191,14 +191,14 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         in_redist=None
         if enable_ep
         else {
-            "x_BLD": RedistributionSpec.Config(
+            "x_BLD": PerAxisRedistribution.Config(
                 axis=TP,
                 src=spmd.S(1) if enable_sp else spmd.I,
                 dst=spmd.R,
             )
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_redist=RedistributionSpec.Config(
+        out_redist=PerAxisRedistribution.Config(
             axis=TP,
             src=spmd.P,
             dst=spmd.S(1) if enable_sp else spmd.I,
@@ -276,7 +276,7 @@ def set_moe_sharding_config(
             in_redist=None
             if not enable_ep
             else {
-                "x": RedistributionSpec.Config(
+                "x": PerAxisRedistribution.Config(
                     axis=TP,
                     src=spmd.S(1) if enable_sp else spmd.I,
                     dst=spmd.R,
@@ -324,7 +324,7 @@ def set_moe_sharding_config(
             ),
         },
         in_redist={
-            "x_BLD": RedistributionSpec.Config(
+            "x_BLD": PerAxisRedistribution.Config(
                 axis=TP,
                 src=spmd.I,
                 dst=spmd.S(1),

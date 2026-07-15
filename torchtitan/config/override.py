@@ -80,17 +80,14 @@ class Override:
     description: str
     origin_module: str
     exact: bool = False
-    predicate: Callable[[Configurable.Config], bool] | None = None
 
-    def matches(self, fqn: str, cfg: Configurable.Config) -> bool:
+    def matches(self, fqn: str) -> bool:
         """Whether this override claims the node at ``fqn``.
 
         ``fqns`` is ``None`` (every instance of ``target_cls``) or a list of FQN
         globs (``fnmatch``; ``*`` also crosses ``.``); a node matches if any glob
         matches its FQN.
         """
-        if self.predicate is not None and not self.predicate(cfg):
-            return False
         if self.fqns is None:
             return True
         return any(fnmatch(fqn, pattern) for pattern in self.fqns)
@@ -104,7 +101,6 @@ def override(
     *,
     target: type[Configurable.Config],
     fqns: list[str] | None = None,
-    predicate: Callable[[Configurable.Config], bool] | None = None,
     description: str = "",
     exact: bool = False,
 ) -> Callable:
@@ -117,8 +113,8 @@ def override(
         fqns: Per-instance selector. ``None`` (default) claims every instance; a
             list of FQN globs (``fnmatch`` style, where ``*`` also crosses
             ``.``) claims instances whose FQN matches any glob. The FQN is the
-            bare module FQN, e.g. ``"layers.0.feed_forward"``.
-        predicate: Per-config selector for filtering matches by config content.
+            bare module FQN, e.g. ``"layers.0.feed_forward"``. (A general
+            predicate selector may be added later if needed.)
         description: Human-readable description, surfaced in the override log.
         exact: If ``True``, claim only configs whose concrete type is exactly
             ``target``. The default ``False`` preserves subclass matching, useful
@@ -160,7 +156,6 @@ def override(
             description=description,
             origin_module=fn.__module__,
             exact=exact,
-            predicate=predicate,
         )
         return fn
 
@@ -272,7 +267,7 @@ def _collect_claims(
         for fqn, cfg, parent, attr in config_root.traverse(ov.target_cls):
             if ov.exact and type(cfg) is not ov.target_cls:
                 continue
-            if ov.matches(fqn, cfg):
+            if ov.matches(fqn):
                 claims.append(_Claim(ov=ov, fqn=fqn, cfg=cfg, parent=parent, attr=attr))
     return claims
 
@@ -341,8 +336,6 @@ def apply_overrides(
     for c in claims:
         new_cfg = c.ov.factory(c.cfg)
         if isinstance(c.parent, list) and isinstance(c.attr, int):
-            c.parent[c.attr] = new_cfg
-        elif isinstance(c.parent, dict):
             c.parent[c.attr] = new_cfg
         elif isinstance(c.attr, str):
             setattr(c.parent, c.attr, new_cfg)

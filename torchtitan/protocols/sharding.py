@@ -20,7 +20,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
-from torchtitan.config import Configurable
+from torchtitan.config import Configurable, Function
 from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 
 from torchtitan.distributed.spmd_types import (
@@ -32,7 +32,7 @@ from torchtitan.distributed.spmd_types import (
 
 __all__ = [
     "LocalMapConfig",
-    "RedistributionSpec",
+    "PerAxisRedistribution",
     "ShardingConfig",
     "SpmdLayout",
     "resolve_placements",
@@ -69,7 +69,14 @@ class LocalMapConfig:
         return {"repr": repr(self)}
 
 
-class RedistributionSpec(Configurable):
+class PerAxisRedistribution(Function):
+    """Apply one ``spmd.redistribute`` over a single mesh axis.
+
+    The config names the mesh axis to redistribute and the per-axis source and
+    destination SPMD types. Optional dtype fields are forwarded to
+    ``spmd.redistribute`` for forward and backward collectives.
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         axis: MeshAxisName
@@ -112,12 +119,9 @@ class ShardingConfig(Configurable.Config):
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
 
-    Redistribution is expressed as a (source, destination) pair: src declares
-    what the tensor's placement is entering the boundary, dst declares the
-    desired placement after redistribution. For DTensor, the src is usually
-    implicit in the tensor's ``placements``; declaring it explicitly keeps
-    the contract uniform with future erased-type systems that require both
-    sides of every redistribute.
+    Redistribution is expressed as a ``PerAxisRedistribution``: ``src``
+    declares what the tensor's per-axis SPMD type is entering the boundary,
+    and ``dst`` declares the desired type after redistribution.
 
     Attributes:
         state_shardings: Parameter/buffer placements for ``distribute_tensor``.
@@ -129,6 +133,10 @@ class ShardingConfig(Configurable.Config):
             dataloader or FSDP-only path). Also declares the src side of
             the input redistribute pair.
             e.g. ``{"x": {TP: Shard(1)}}``.
+        in_redist: Per-input redistribution specs, keyed by ``forward()``
+            arg name. Each spec changes one mesh axis from ``src`` to ``dst``;
+            the same input name must be present in ``in_src_shardings`` so the
+            source layout and mesh are explicit.
         out_src_shardings: Source placement of the forward's output as a
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
@@ -137,6 +145,9 @@ class ShardingConfig(Configurable.Config):
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
             e.g. ``{TP: Partial()}`` for the MoE wrapper.
+        out_redist: Output redistribution spec. Changes one mesh axis from
+            ``src`` to ``dst`` after forward; requires single-tensor
+            ``out_src_shardings`` so the source layout and mesh are explicit.
         local_map: If set, wraps forward with ``local_map()``. Input and
             output placements are inferred from runtime inputs and
             ``out_src_shardings``; ``LocalMapConfig`` only carries
@@ -145,9 +156,9 @@ class ShardingConfig(Configurable.Config):
 
     state_shardings: dict[str, SpmdLayout] = field(default_factory=dict)
     in_src_shardings: dict[str, SpmdLayout] | None = None
-    in_redist: dict[str, RedistributionSpec.Config] | None = None
+    in_redist: dict[str, PerAxisRedistribution.Config] | None = None
     out_src_shardings: SpmdLayout | tuple[SpmdLayout, ...] | None = None
-    out_redist: RedistributionSpec.Config | None = None
+    out_redist: PerAxisRedistribution.Config | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:

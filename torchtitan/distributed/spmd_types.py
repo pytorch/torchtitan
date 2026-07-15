@@ -16,7 +16,7 @@ from typing import Any, TYPE_CHECKING
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Partial, Placement, Replicate, Shard
+from torch.distributed.tensor import Placement
 
 from torchtitan.distributed.utils import get_spmd_backend
 
@@ -35,6 +35,7 @@ __all__ = [
     "spmd_sparse_mesh",
     "spmd_mesh_size",
     "spmd_distribute_tensor",
+    "spmd_validate_redistributions",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
     "maybe_set_sparse_mesh",
@@ -140,13 +141,7 @@ def spmd_layout_to_dtensor_placements(
 
     result: dict[MeshAxisName, Placement] = {}
     for axis_name, axis_type in layout.per_axis_spmd_types().items():
-        if axis_type == spmd.R or axis_type == spmd.I:
-            dtensor_placement: Placement = Replicate()
-        elif axis_type == spmd.P:
-            dtensor_placement = Partial()
-        else:
-            assert isinstance(axis_type, spmd.Shard)
-            dtensor_placement = Shard(axis_type.dim)
+        dtensor_placement = spmd.spmd_type_to_dtensor_placement(axis_type)
 
         if axis_name == MeshAxisName.DP:
             result[MeshAxisName.DP_REPLICATE] = dtensor_placement
@@ -191,6 +186,125 @@ def annotate_input_spmd_types(
         ):
             spmd.assert_type(extra_kwargs["positions"], token_type)
     return inputs, labels, extra_kwargs
+
+
+def spmd_validate_redistributions(sharding_config: Any) -> None:
+    """Validate that PerAxisRedistributions fit the runtime helper.
+
+    ``spmd.redistribute`` can only change one axis when that axis is the
+    innermost shard for its tensor dimension. For example, unsharding CP from
+    ``PartitionSpec((DP, CP), None)`` is valid, but unsharding DP is not because
+    CP would remain as an inner shard of the same tensor dimension.
+    """
+
+    def _normalize_partition_spec(
+        axis_types: dict["MeshAxisName", spmd.PerMeshAxisSpmdType],
+        *,
+        ndim: int,
+    ) -> tuple[tuple["MeshAxisName", ...], ...]:
+        """Normalize per-axis-types w/ S(dim) -> PartitionSpec-style tuple."""
+        entries: list[tuple["MeshAxisName", ...]] = [()] * ndim
+        for axis_name, axis_type in axis_types.items():
+            if not isinstance(axis_type, spmd.Shard):
+                continue
+            dim = axis_type.dim if axis_type.dim >= 0 else ndim + axis_type.dim
+            if dim < 0 or dim >= ndim:
+                raise ValueError(
+                    f"Cannot compare SPMD layout with shard dim {axis_type.dim} "
+                    f"against PartitionSpec of rank {ndim}."
+                )
+            entries[dim] = (axis_name,)
+        return tuple(entries)
+
+    def _validate_redistribution(
+        src: "SpmdLayout",
+        redist: Any,
+        *,
+        name: str,
+    ) -> None:
+        """Validate a per-axis SPMD redistribution is expressible."""
+        src_types = src.per_axis_spmd_types()
+        src_axis_type = src_types.get(redist.axis)
+        if src_axis_type is None:
+            raise ValueError(
+                f"{name}: PerAxisRedistribution axis {redist.axis.value!r} "
+                "is not declared in source sharding."
+            )
+        if src_axis_type != redist.src:
+            raise ValueError(
+                f"{name}: PerAxisRedistribution src does not match source "
+                f"sharding for axis {redist.axis.value!r}: "
+                f"{redist.src!r} vs {src_axis_type!r}."
+            )
+
+        # If neither side is sharded, no shard-order constraint is involved.
+        src_is_shard = isinstance(redist.src, spmd.Shard)
+        dst_is_shard = isinstance(redist.dst, spmd.Shard)
+        if not src_is_shard and not dst_is_shard:
+            return
+
+        shard_dim = redist.src.dim if src_is_shard else redist.dst.dim
+        if shard_dim < 0:
+            shard_dim = shard_dim + (
+                len(src.partition_spec) if src.partition_spec else 0
+            )
+        ndim = (
+            len(src.partition_spec)
+            if src.partition_spec is not None
+            else shard_dim + 1
+        )
+        if shard_dim < 0 or shard_dim >= ndim:
+            raise ValueError(
+                f"{name}: PerAxisRedistribution shard dim {shard_dim} is outside "
+                f"source layout rank {ndim}."
+            )
+
+        if src.partition_spec is None:
+            spec = _normalize_partition_spec(src.axis_types, ndim=ndim)
+            dim_axes = spec[shard_dim]
+        else:
+            spec_entry = src.partition_spec[shard_dim]
+            if spec_entry is None:
+                dim_axes = ()
+            elif isinstance(spec_entry, tuple):
+                dim_axes = spec_entry
+            else:
+                dim_axes = (spec_entry,)
+
+        # A one-axis redistribute may only add/remove the changed axis as the
+        # innermost shard for its tensor dim. For example, removing CP from
+        # (DP, CP) is valid, but removing DP would change shard order.
+        if src_is_shard and redist.axis in dim_axes and dim_axes[-1] != redist.axis:
+            raise ValueError(
+                f"{name}: unsharding axis {redist.axis.value!r} from tensor "
+                f"dim {shard_dim} is only valid for the innermost mesh axis; "
+                f"source shard order is {tuple(axis.value for axis in dim_axes)}."
+            )
+        if dst_is_shard and redist.axis in dim_axes and dim_axes[-1] != redist.axis:
+            raise ValueError(
+                f"{name}: resharding axis {redist.axis.value!r} on tensor "
+                f"dim {shard_dim} is only valid for the innermost mesh axis; "
+                f"source shard order is {tuple(axis.value for axis in dim_axes)}."
+            )
+
+    in_src = sharding_config.in_src_shardings or {}
+    in_redist = sharding_config.in_redist or {}
+    for name in in_src.keys() & in_redist.keys():
+        _validate_redistribution(
+            in_src[name],
+            in_redist[name],
+            name=f"input {name!r}",
+        )
+
+    out_src = sharding_config.out_src_shardings
+    out_redist = sharding_config.out_redist
+    if out_src is not None and out_redist is not None:
+        if isinstance(out_src, tuple):
+            raise ValueError(
+                "output: PerAxisRedistribution only supports a single source "
+                "layout."
+            )
+        _validate_redistribution(out_src, out_redist, name="output")
 
 
 def spmd_distribute_tensor(

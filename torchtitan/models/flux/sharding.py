@@ -16,7 +16,7 @@ from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
-    RedistributionSpec,
+    PerAxisRedistribution,
     ShardingConfig,
     SpmdLayout,
 )
@@ -53,12 +53,12 @@ def set_flux_inner_attention_local_map(inner_attention_cfg) -> None:
             "v_BLNH": kv_src_layout,
         },
         in_redist={
-            "k_BLNH": RedistributionSpec.Config(
+            "k_BLNH": PerAxisRedistribution.Config(
                 axis=CP,
                 src=spmd.S(1),
                 dst=spmd.R,
             ),
-            "v_BLNH": RedistributionSpec.Config(
+            "v_BLNH": PerAxisRedistribution.Config(
                 axis=CP,
                 src=spmd.S(1),
                 dst=spmd.R,

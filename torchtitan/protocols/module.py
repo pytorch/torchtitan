@@ -18,12 +18,7 @@ import torch.nn as nn
 from spmd_types.runtime import get_local_type, get_partition_spec, has_local_type
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
-from torch.distributed.tensor.placement_types import (
-    Partial,
-    Placement,
-    Replicate,
-    Shard,
-)
+from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
@@ -31,38 +26,28 @@ from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import (
     set_current_spmd_mesh,
     spmd_distribute_tensor,
+    spmd_validate_redistributions,
 )
 from torchtitan.distributed.utils import (
     check_dtensor_placements_match,
     get_spmd_backend,
 )
 from torchtitan.protocols.sharding import (
-    RedistributionSpec,
+    PerAxisRedistribution,
     resolve_placements,
     ShardingConfig,
 )
 
 
-def _placement_from_spmd_type(
-    axis_type: spmd.PerMeshAxisSpmdType,
-) -> Placement:
-    if axis_type == spmd.R or axis_type == spmd.I:
-        return Replicate()
-    if axis_type == spmd.P:
-        return Partial()
-    assert isinstance(axis_type, spmd.Shard)
-    return Shard(axis_type.dim)
-
-
 def _resolve_placements_after_redist(
     layout: SpmdLayout,
-    redist: RedistributionSpec.Config,
+    redist: PerAxisRedistribution.Config,
     mesh,
 ) -> tuple[Placement, ...]:
     src_axis_type = layout.per_axis_spmd_types().get(redist.axis)
     if src_axis_type is not None and src_axis_type != redist.src:
         raise ValueError(
-            "RedistributionSpec src does not match source sharding for "
+            "PerAxisRedistribution src does not match source sharding for "
             f"axis {redist.axis.value!r}: {redist.src!r} vs {src_axis_type!r}."
         )
 
@@ -74,7 +59,7 @@ def _resolve_placements_after_redist(
 
     axis_idx = mesh_axis_names.index(axis)
     if mesh.size(axis_idx) > 1:
-        placements[axis_idx] = _placement_from_spmd_type(redist.dst)
+        placements[axis_idx] = spmd.spmd_type_to_dtensor_placement(redist.dst)
     return tuple(placements)
 
 
@@ -91,8 +76,8 @@ class Module(nn.Module, Configurable):
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
-    _in_redist_fns: dict[str, RedistributionSpec] | None = None
-    _out_redist_fn: RedistributionSpec | None = None
+    _in_redists: dict[str, PerAxisRedistribution] | None = None
+    _out_redist: PerAxisRedistribution | None = None
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
 
@@ -323,6 +308,8 @@ class Module(nn.Module, Configurable):
         if self._sharding_config is None:
             return
 
+        if parallel_dims.spmd_backend == "spmd_types":
+            spmd_validate_redistributions(self._sharding_config)
         self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
         self._build_redistribution_specs()
@@ -338,11 +325,11 @@ class Module(nn.Module, Configurable):
     def _build_redistribution_specs(self) -> None:
         sharding_config = self._sharding_config
         assert sharding_config is not None
-        self._in_redist_fns = {
+        self._in_redists = {
             name: config.build()
             for name, config in (sharding_config.in_redist or {}).items()
         }
-        self._out_redist_fn = (
+        self._out_redist = (
             sharding_config.out_redist.build()
             if sharding_config.out_redist is not None
             else None
@@ -571,7 +558,7 @@ class Module(nn.Module, Configurable):
 
         if (
             sharding_config.in_src_shardings is None
-            and sharding_config.in_redist is None
+            and not self._in_redists
         ):
             return args, kwargs
 
@@ -582,19 +569,19 @@ class Module(nn.Module, Configurable):
         new_kwargs.update(kwargs)
 
         in_src_shardings = sharding_config.in_src_shardings or {}
-        in_redist = sharding_config.in_redist or {}
-        in_redist_fns = self._in_redist_fns or {}
+        in_redists = self._in_redists
+        assert in_redists is not None
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
             src_spmd_layout = in_src_shardings.get(name)
-            redist = in_redist.get(name)
-            redist_fn = in_redist_fns.get(name)
+            redist = in_redists.get(name)
+            redist_config = redist.config if redist is not None else None
 
             if parallel_dims.spmd_backend == "spmd_types":
                 if src_spmd_layout is None:
-                    if redist is not None:
+                    if redist_config is not None:
                         raise ValueError(
                             f"{type(self).__name__}.{name}: SPMD input "
                             "redistribution requires explicit in_src_shardings."
@@ -612,20 +599,14 @@ class Module(nn.Module, Configurable):
                     )
 
                 if redist is not None:
-                    if redist_fn is None:
-                        raise RuntimeError(
-                            f"{type(self).__name__}.{name}: input redistribution "
-                            "specs have not been built. Call parallelize() before "
-                            "running redistribution."
-                        )
-                    new_kwargs[name] = redist_fn(value)
+                    new_kwargs[name] = redist(value)
                     continue
 
                 new_kwargs[name] = value
                 continue
 
             if src_spmd_layout is None:
-                if redist is not None:
+                if redist_config is not None:
                     raise ValueError(
                         f"{type(self).__name__}.{name}: input redistribution "
                         "requires explicit in_src_shardings."
@@ -662,9 +643,9 @@ class Module(nn.Module, Configurable):
                         f"expects {expected}."
                     )
 
-            if redist is not None and isinstance(value, DTensor):
+            if redist_config is not None and isinstance(value, DTensor):
                 desired = _resolve_placements_after_redist(
-                    src_spmd_layout, redist, mesh
+                    src_spmd_layout, redist_config, mesh
                 )
                 if not check_dtensor_placements_match(
                     value.placements, desired, value.ndim
@@ -688,10 +669,10 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
 
         out_src = sharding_config.out_src_shardings
-        out_redist = sharding_config.out_redist
-        out_redist_fn = self._out_redist_fn
-        if out_redist is None:
+        redist = self._out_redist
+        if redist is None:
             return outputs
+        redist_config = redist.config
 
         if parallel_dims.spmd_backend == "spmd_types":
             if not isinstance(outputs, torch.Tensor):
@@ -717,14 +698,7 @@ class Module(nn.Module, Configurable):
                     out_src.partition_spec,
                 )
 
-            if out_redist is not None:
-                if out_redist_fn is None:
-                    raise RuntimeError(
-                        f"{type(self).__name__}: output redistribution specs have "
-                        "not been built. Call parallelize() before running "
-                        "redistribution."
-                    )
-                return out_redist_fn(outputs)
+            return redist(outputs)
 
         if isinstance(out_src, tuple):
             raise ValueError(
@@ -752,7 +726,7 @@ class Module(nn.Module, Configurable):
                     f"{expected}."
                 )
 
-        desired = _resolve_placements_after_redist(out_src, out_redist, mesh)
+        desired = _resolve_placements_after_redist(out_src, redist_config, mesh)
         if isinstance(outputs, DTensor) and not check_dtensor_placements_match(
             outputs.placements, desired, outputs.ndim
         ):

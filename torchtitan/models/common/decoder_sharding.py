@@ -11,7 +11,7 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
-    RedistributionSpec,
+    PerAxisRedistribution,
     ShardingConfig,
     SpmdLayout,
 )
@@ -89,7 +89,7 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
             "bias": dense_param_placement(tp=spmd.R),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_redist=RedistributionSpec.Config(
+        out_redist=PerAxisRedistribution.Config(
             axis=TP,
             src=spmd.P,
             dst=spmd.S(1) if output_sp else spmd.I,
@@ -134,7 +134,7 @@ def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
         },
         in_src_shardings={"input": activation},
         out_src_shardings=activation,
-        out_redist=RedistributionSpec.Config(
+        out_redist=PerAxisRedistribution.Config(
             axis=TP,
             src=spmd.S(1) if enable_sp else spmd.I,
             dst=spmd.R,
@@ -184,7 +184,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
             "x_BLD": attn_x_layout,
         },
         in_redist={
-            "x_BLD": RedistributionSpec.Config(
+            "x_BLD": PerAxisRedistribution.Config(
                 axis=TP,
                 src=spmd.S(1) if enable_sp else spmd.I,
                 dst=spmd.R,
@@ -229,12 +229,12 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
             "v_BLNH": kv_src_placements,
         },
         in_redist={
-            "k_BLNH": RedistributionSpec.Config(
+            "k_BLNH": PerAxisRedistribution.Config(
                 axis=CP,
                 src=spmd.S(1),
                 dst=spmd.R,
             ),
-            "v_BLNH": RedistributionSpec.Config(
+            "v_BLNH": PerAxisRedistribution.Config(
                 axis=CP,
                 src=spmd.S(1),
                 dst=spmd.R,
@@ -262,7 +262,7 @@ def set_dense_ffn_sharding(
     feed_forward_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x": attn_x_layout},
         in_redist={
-            "x": RedistributionSpec.Config(
+            "x": PerAxisRedistribution.Config(
                 axis=TP,
                 src=spmd.S(1) if enable_sp else spmd.I,
                 dst=spmd.R,
@@ -292,7 +292,7 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": embed_input},
         out_src_shardings=embed_out_src,
-        out_redist=RedistributionSpec.Config(
+        out_redist=PerAxisRedistribution.Config(
             axis=TP,
             src=spmd.P,
             dst=spmd.S(1) if enable_sp else spmd.I,

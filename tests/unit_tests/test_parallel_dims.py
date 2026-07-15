@@ -13,6 +13,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard
+from torch.distributed.tensor.debug import CommDebugMode
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -28,8 +29,12 @@ from torchtitan.distributed.parallel_dims import (
 from torchtitan.distributed.spmd_types import (
     spmd_distribute_tensor,
     spmd_layout_to_dtensor_placements,
+    spmd_validate_redistributions,
+    set_current_spmd_mesh,
 )
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.llama3 import model_registry
+from torchtitan.protocols.sharding import PerAxisRedistribution, ShardingConfig
 
 
 class TestParallelDimsValidation(unittest.TestCase):
@@ -272,6 +277,45 @@ class TestSpmdLayout(DTensorTestBase):
             ["dp_replicate", "dp_shard", "cp", "tp"],
         )
 
+    def test_rejects_non_innermost_axis_redistribution(self):
+        """For ``(DP, CP)``, CP can be unsharded directly but DP cannot."""
+        src = SpmdLayout(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.V,
+            },
+            partition_spec=spmd.PartitionSpec(
+                (MeshAxisName.DP, MeshAxisName.CP), None
+            ),
+        )
+
+        spmd_validate_redistributions(
+            ShardingConfig(
+                out_src_shardings=src,
+                out_redist=PerAxisRedistribution.Config(
+                    axis=MeshAxisName.CP,
+                    src=spmd.S(0),
+                    dst=spmd.R,
+                ),
+            )
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            spmd_validate_redistributions(
+                ShardingConfig(
+                    out_src_shardings=src,
+                    out_redist=PerAxisRedistribution.Config(
+                        axis=MeshAxisName.DP,
+                        src=spmd.S(0),
+                        dst=spmd.R,
+                    ),
+                )
+            )
+        self.assertExpectedInline(
+            str(cm.exception),
+            """output: unsharding axis 'dp' from tensor dim 0 is only valid for the innermost mesh axis; source shard order is ('dp', 'cp').""",
+        )
+
     @with_comms
     def test_partition_spec_order_controls_state_shard(self):
         """Test spmd_distribute_tensor follows PartitionSpec order.
@@ -319,6 +363,34 @@ class TestSpmdLayout(DTensorTestBase):
                 local_rows = global_weight.shape[0] // self.world_size
                 expected = global_weight.narrow(0, shard_idx * local_rows, local_rows)
                 torch.testing.assert_close(local_weight, expected)
+
+    @with_comms
+    def test_per_axis_redistribution_allgather(self):
+        """PerAxisRedistribution performs a seq-dim all-gather."""
+        mesh = init_device_mesh(
+            self.device_type,
+            (4,),
+            mesh_dim_names=("tp",),
+        )
+        x = torch.ones(2, 2, device=self.device_type)
+        redist = PerAxisRedistribution.Config(
+            axis=MeshAxisName.TP,
+            src=spmd.S(1),
+            dst=spmd.R,
+        ).build()
+
+        set_spmd_backend("spmd_types")
+        try:
+            with set_current_spmd_mesh(mesh):
+                spmd.assert_type(x, {MeshAxisName.TP: spmd.S(1)})
+                comm_mode = CommDebugMode()
+                with comm_mode:
+                    result = redist(x)
+        finally:
+            set_spmd_backend("default")
+
+        self.assertEqual(comm_mode.get_total_counts(), 1)
+        self.assertTrue(torch.equal(result, torch.ones(2, 8, device=self.device_type)))
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):

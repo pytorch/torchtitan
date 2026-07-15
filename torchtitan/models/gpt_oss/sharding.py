@@ -22,7 +22,7 @@ from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.gpt_oss.model import Attention
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
-    RedistributionSpec,
+    PerAxisRedistribution,
     ShardingConfig,
 )
 
@@ -49,7 +49,7 @@ def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
         },
         in_src_shardings={"input": input_layout},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_redist=RedistributionSpec.Config(
+        out_redist=PerAxisRedistribution.Config(
             axis=MeshAxisName.TP,
             src=spmd.P,
             dst=spmd.S(1) if output_sp else spmd.I,
@@ -109,7 +109,7 @@ def _set_gpt_oss_layer_sharding(
             "x": attn_x_layout,
         },
         in_redist={
-            "x": RedistributionSpec.Config(
+            "x": PerAxisRedistribution.Config(
                 axis=MeshAxisName.TP,
                 src=spmd.S(1) if enable_sp else spmd.I,
                 dst=spmd.R,

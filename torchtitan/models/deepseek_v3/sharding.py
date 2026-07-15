@@ -22,7 +22,7 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
-from torchtitan.protocols.sharding import RedistributionSpec, ShardingConfig
+from torchtitan.protocols.sharding import PerAxisRedistribution, ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
@@ -94,7 +94,7 @@ def _set_deepseek_v3_layer_sharding(
             "x": attn_x_layout,
         },
         in_redist={
-            "x": RedistributionSpec.Config(
+            "x": PerAxisRedistribution.Config(
                 axis=MeshAxisName.TP,
                 src=spmd.S(1) if enable_sp else spmd.I,
                 dst=spmd.R,
