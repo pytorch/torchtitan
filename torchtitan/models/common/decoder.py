@@ -344,7 +344,7 @@ class MTPDecoder(Decoder):
         # Optional so one model class can serve both regular decoder and
         # decoder-with-MTP configs.
         mtp: "MTPBlock.Config | None" = None
-        extra_input_tokens: int = 0
+        extra_mtp_tokens: int = 0
 
         def update_from_config(
             self,
@@ -353,7 +353,7 @@ class MTPDecoder(Decoder):
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
-            self.extra_input_tokens = (
+            self.extra_mtp_tokens = (
                 self.mtp.num_mtp_layers if self.mtp is not None else 0
             )
             MTPDecoder.materialize_mtp_config(self)
