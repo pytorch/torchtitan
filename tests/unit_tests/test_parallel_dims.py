@@ -29,15 +29,12 @@ from torchtitan.distributed.parallel_dims import (
 from torchtitan.distributed.spmd_types import (
     spmd_distribute_tensor,
     spmd_layout_to_dtensor_placements,
-    spmd_redistribute_per_axis,
     spmd_validate_redistributions,
+    set_current_spmd_mesh,
 )
-from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
-    dense_sequence_parallel_placement,
-)
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.llama3 import model_registry
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import PerAxisRedistribution, ShardingConfig
 
 
 class TestParallelDimsValidation(unittest.TestCase):
@@ -280,57 +277,44 @@ class TestSpmdLayout(DTensorTestBase):
             ["dp_replicate", "dp_shard", "cp", "tp"],
         )
 
-    def test_rejects_partition_spec_reorder_redistribute(self):
-        """((DP, CP), None) -> ((CP, DP), None) not supported by a single redistribute call."""
-        with self.assertRaises(ValueError) as cm:
-            spmd_validate_redistributions(
-                ShardingConfig(
-                    out_src_shardings=SpmdLayout(
-                        {
-                            MeshAxisName.DP: spmd.V,
-                            MeshAxisName.CP: spmd.V,
-                        },
-                        partition_spec=spmd.PartitionSpec(
-                            (MeshAxisName.DP, MeshAxisName.CP), None
-                        ),
-                    ),
-                    out_dst_shardings=SpmdLayout(
-                        {
-                            MeshAxisName.DP: spmd.V,
-                            MeshAxisName.CP: spmd.V,
-                        },
-                        partition_spec=spmd.PartitionSpec(
-                            (MeshAxisName.CP, MeshAxisName.DP), None
-                        ),
-                    ),
-                )
-            )
+    def test_rejects_non_innermost_axis_redistribution(self):
+        """For ``(DP, CP)``, CP can be unsharded directly but DP cannot."""
+        src = SpmdLayout(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.V,
+            },
+            partition_spec=spmd.PartitionSpec(
+                (MeshAxisName.DP, MeshAxisName.CP), None
+            ),
+        )
 
-    def test_rejects_multi_axis_redistribute(self):
-        """Redistributing multiple mesh axes is unsupported."""
+        spmd_validate_redistributions(
+            ShardingConfig(
+                out_src_shardings=src,
+                out_redist=PerAxisRedistribution.Config(
+                    axis=MeshAxisName.CP,
+                    src=spmd.S(0),
+                    dst=spmd.R,
+                ),
+            )
+        )
+
         with self.assertRaises(ValueError) as cm:
             spmd_validate_redistributions(
                 ShardingConfig(
-                    in_src_shardings={
-                        "x": SpmdLayout(
-                            {
-                                MeshAxisName.DP: spmd.S(0),
-                                MeshAxisName.CP: spmd.S(1),
-                                MeshAxisName.TP: spmd.R,
-                            }
-                        )
-                    },
-                    in_dst_shardings={
-                        "x": SpmdLayout(
-                            {
-                                MeshAxisName.DP: spmd.R,
-                                MeshAxisName.CP: spmd.R,
-                                MeshAxisName.TP: spmd.R,
-                            }
-                        )
-                    },
+                    out_src_shardings=src,
+                    out_redist=PerAxisRedistribution.Config(
+                        axis=MeshAxisName.DP,
+                        src=spmd.S(0),
+                        dst=spmd.R,
+                    ),
                 )
             )
+        self.assertExpectedInline(
+            str(cm.exception),
+            """output: unsharding axis 'dp' from tensor dim 0 is only valid for the innermost mesh axis; source shard order is ('dp', 'cp').""",
+        )
 
     @with_comms
     def test_partition_spec_order_controls_state_shard(self):
@@ -381,29 +365,29 @@ class TestSpmdLayout(DTensorTestBase):
                 torch.testing.assert_close(local_weight, expected)
 
     @with_comms
-    def test_spmd_redistribute_per_axis_allgather(self):
-        """
-        Test spmd_redistribute_per_axis performs seq-dim allgather.
-        src: dense SP placement (V + PartitionSpec)
-        dst: dense activation w/ I@TP
-        """
+    def test_per_axis_redistribution_allgather(self):
+        """PerAxisRedistribution performs a seq-dim all-gather."""
         mesh = init_device_mesh(
             self.device_type,
-            (1, 1, 4),
-            mesh_dim_names=("dp", "cp", "tp"),
+            (4,),
+            mesh_dim_names=("tp",),
         )
         x = torch.ones(2, 2, device=self.device_type)
-        src = dense_sequence_parallel_placement()
-        dst = dense_activation_placement(tp=spmd.I)
+        redist = PerAxisRedistribution.Config(
+            axis=MeshAxisName.TP,
+            src=spmd.S(1),
+            dst=spmd.R,
+        ).build()
 
-        comm_mode = CommDebugMode()
-        with comm_mode:
-            result = spmd_redistribute_per_axis(
-                x,
-                mesh,
-                src.per_axis_spmd_types(),
-                dst.per_axis_spmd_types(),
-            )
+        set_spmd_backend("spmd_types")
+        try:
+            with set_current_spmd_mesh(mesh):
+                spmd.assert_type(x, {MeshAxisName.TP: spmd.S(1)})
+                comm_mode = CommDebugMode()
+                with comm_mode:
+                    result = redist(x)
+        finally:
+            set_spmd_backend("default")
 
         self.assertEqual(comm_mode.get_total_counts(), 1)
         self.assertTrue(torch.equal(result, torch.ones(2, 8, device=self.device_type)))
