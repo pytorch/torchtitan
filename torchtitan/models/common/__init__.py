@@ -27,6 +27,7 @@ from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import Linear, ScaledBiasRowwiseLinear
 from .moe import MoE
 from .nn_modules import (
+    BatchedLinear,
     Conv1d,
     Conv2d,
     GELU,
@@ -39,6 +40,7 @@ from .nn_modules import (
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "BatchedLinear",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
