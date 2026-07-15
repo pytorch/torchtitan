@@ -304,9 +304,7 @@ class TestCheckpointManager(unittest.TestCase):
         )
         self.assertFalse(manager.load(step=-1))
         mock_logger.info.assert_any_call(
-            "No checkpoint was loaded because checkpoint.folder %s has no "
-            "valid checkpoints and no initial checkpoint source was provided.",
-            os.path.join(self.trainer_config.dump_folder, "nonexistent"),
+            "No checkpoint was provided, this is a fresh start."
         )
         manager.close()
 
@@ -389,9 +387,12 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torchtitan.components.checkpoint.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    def test_initial_load_path_errors_when_folder_has_valid_checkpoints(
+    def test_initial_load_path_ignored_when_folder_has_valid_checkpoints(
         self, mock_load, mock_rank, mock_logger
     ):
+        # Resuming from checkpoint.folder is the fault-tolerance path: all
+        # initial_* options are silently ignored so a job can keep the same
+        # arguments across automatic restarts.
         initial_load_path = os.path.join(self.base_temp_dir, "initial", "step-100")
         os.makedirs(initial_load_path, exist_ok=True)
         ckpt_folder = os.path.join(self.test_folder, "checkpoints")
@@ -414,16 +415,13 @@ class TestCheckpointManager(unittest.TestCase):
             base_folder=self.trainer_config.dump_folder,
         )
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "checkpoint.initial_load_path is provided but the "
-            "checkpoint.folder contains valid checkpoints",
-        ):
-            manager.load(step=-1)
+        res = manager.load(step=-1)
 
-        mock_load.assert_not_called()
+        self.assertTrue(res)
+        mock_load.assert_called_once()
+        _, kwargs = mock_load.call_args
+        self.assertEqual(kwargs.get("checkpoint_id"), step_dir)
         mock_logger.warning.assert_not_called()
-        self.assertTrue(os.path.isdir(step_dir))
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
