@@ -570,6 +570,22 @@ class HFTransformerModel(BaseModel):
             model_name_prefix = model_class_name.replace("ForCausalLM", "")
             model_module = importlib.import_module(model_cls.__module__)
 
+            # Some models name their text-stack classes with a "Text" infix
+            # (e.g. Gemma4 -> Gemma4TextAttention / Gemma4TextDecoderLayer,
+            # while the causal-LM class stays Gemma4ForCausalLM). Prefer the
+            # plain prefix, but fall back to "<prefix>Text" when the plain
+            # prefix does not resolve the attention/decoder classes -- otherwise
+            # the init patch is silently skipped and HF's default init (with the
+            # backend's initializer_range=1.0) blows up the loss.
+            for candidate in (model_name_prefix, f"{model_name_prefix}Text"):
+                if (
+                    getattr(model_module, f"{candidate}Attention", None) is not None
+                    and getattr(model_module, f"{candidate}DecoderLayer", None)
+                    is not None
+                ):
+                    model_name_prefix = candidate
+                    break
+
             attention_cls = getattr(model_module, f"{model_name_prefix}Attention", None)
             mlp_cls = getattr(model_module, f"{model_name_prefix}MLP", None)
             decoder_layer_cls = getattr(

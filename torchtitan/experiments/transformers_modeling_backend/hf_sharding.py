@@ -342,6 +342,19 @@ def _set_layer_sharding_configs(
         down_name = "down_proj" if hasattr(mlp, "down_proj") else "fc2"
         getattr(mlp, down_name)._sharding_config = rowwise_config(output_sp=enable_sp)
 
+    # --- Direct-on-layer state ---
+    # Some models keep parameters/buffers directly on the decoder layer rather
+    # than in a submodule (e.g. Gemma4's ``layer_scalar``, a per-layer scalar
+    # buffer initialized to 1). Replicate any such state so the layer itself has
+    # a config -- otherwise the completeness backstop fails loud, and under TP
+    # the plain tensor would mix with DTensor activations. Under FSDP/EP (no TP)
+    # the replicate placement resolves to no mesh and the state stays local.
+    if (
+        next(layer.named_parameters(recurse=False), None) is not None
+        or next(layer.named_buffers(recurse=False), None) is not None
+    ):
+        layer._sharding_config = _replicate_config(layer)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
