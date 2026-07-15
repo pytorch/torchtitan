@@ -29,11 +29,6 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
     VarlenAttention,
 )
-from torchtitan.models.common.mtp import (
-    merge_mtp_context_parallel_input,
-    MTPContextParallelInput,
-    split_mtp_context_parallel_input,
-)
 from torchtitan.tools.logging import logger
 
 
@@ -123,7 +118,6 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     device: torch.device,
     load_balancer_type: str | None = "headtail",
-    num_mtp_modules: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Shard inputs, labels, positions, and attention masks for Context Parallel.
@@ -132,22 +126,15 @@ def prepare_context_parallel_input(
     function.  Position resolution (per-document vs sequential) is handled
     upstream in ``post_dataloading_process``.
 
-    When ``num_mtp_modules > 0``, the input/label tensors have extra MTP tokens
-    at the end. The sharding splits main and MTP portions, shards them together,
-    then recombines.
-
     Args:
-        inputs: Input tensor of shape [batch_size, seq_len] or
-            [batch_size, seq_len + num_mtp_modules] when MTP is enabled
-        labels: Label tensor of shape [batch_size, seq_len] or
-            [batch_size, seq_len + num_mtp_modules] when MTP is enabled
+        inputs: Input tensor of shape [batch_size, seq_len]
+        labels: Label tensor of shape [batch_size, seq_len]
         extra_kwargs: Dictionary containing 'positions' (required) and
             optionally 'attention_masks' to be sharded.
         cp_mesh: Device mesh for context parallel dimension
         device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
-        num_mtp_modules: Number of MTP modules. 0 means no MTP.
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -157,59 +144,15 @@ def prepare_context_parallel_input(
               sharded 'attention_masks'
     """
     attention_masks = extra_kwargs.get("attention_masks", None)
-    if num_mtp_modules <= 0:
-        positions = extra_kwargs["positions"]
-        (inputs, labels, positions), attention_masks = cp_shard(
-            cp_mesh,
-            (inputs, labels, positions),
-            attention_masks,
-            load_balancer_type,
-        )
-        extra_kwargs["positions"] = positions
-        extra_kwargs["attention_masks"] = attention_masks
-        return inputs, labels, extra_kwargs
-    else:
-        # CP shards every provided tensor along sequence dim. Split the extended
-        # [S + K] MTP tensors into aligned S-token main and shifted views first,
-        # so each rank receives matching local windows for model input and loss.
-        mtp_input = split_mtp_context_parallel_input(
-            inputs,
-            labels,
-            num_mtp_modules=num_mtp_modules,
-        )
-        positions = extra_kwargs["positions"]
-
-        (
-            main_inputs,
-            main_labels,
-            mtp_inputs,
-            mtp_labels,
-            positions,
-        ), attention_masks = cp_shard(
-            cp_mesh,
-            (
-                mtp_input.main_inputs,
-                mtp_input.main_labels,
-                mtp_input.mtp_inputs,
-                mtp_input.mtp_labels,
-                positions,
-            ),
-            attention_masks,
-            load_balancer_type,
-        )
-        # Restore the local [local_S + K] layout expected by Decoder/MTP loss by
-        # appending the local tail from the shifted view after CP sharding.
-        inputs, labels = merge_mtp_context_parallel_input(
-            MTPContextParallelInput(
-                main_inputs=main_inputs,
-                main_labels=main_labels,
-                mtp_inputs=mtp_inputs,
-                mtp_labels=mtp_labels,
-            ),
-            num_mtp_modules=num_mtp_modules,
-        )
-        extra_kwargs["positions"] = positions
-        extra_kwargs["attention_masks"] = attention_masks
+    positions = extra_kwargs["positions"]
+    (inputs, labels, positions), attention_masks = cp_shard(
+        cp_mesh,
+        (inputs, labels, positions),
+        attention_masks,
+        load_balancer_type,
+    )
+    extra_kwargs["positions"] = positions
+    extra_kwargs["attention_masks"] = attention_masks
 
     return inputs, labels, extra_kwargs
 

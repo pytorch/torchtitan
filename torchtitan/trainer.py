@@ -48,7 +48,6 @@ from torchtitan.distributed.context_parallel import prepare_context_parallel_inp
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.mtp import MTPBlock, trim_mtp_positions
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -106,10 +105,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
-        # Multi-Token Prediction training config. Trainer wires this shared
-        # config into both the model and MTPLoss before either component builds.
-        mtp: MTPBlock.Config | None = None
-
         def __post_init__(self):
             if self.debug.batch_invariant:
                 raise ValueError(
@@ -210,6 +205,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     validator: BaseValidator
     metrics_processor: MetricsProcessor
     checkpointer: CheckpointManager
+    extra_input_tokens: int
 
     # runtime utilities
     device: torch.device
@@ -283,19 +279,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # build model (using meta init)
         model_config = model_spec.model
-        if config.mtp is not None:
-            model_config.mtp = config.mtp
         # set the model args from training job configs
         model_config.update_from_config(
             config=config,
         )
         self.model_config = model_config
-        mtp_config = getattr(model_config, "mtp", None)
-        if mtp_config is not None and hasattr(config.loss, "mtp_config"):
-            config.loss.mtp_config = mtp_config
-        self.num_mtp_layers = (
-            getattr(mtp_config, "num_mtp_layers", 0) if mtp_config is not None else 0
-        )
+        self.extra_input_tokens = getattr(model_config, "extra_input_tokens", 0)
 
         # Apply overrides to the full config tree, before any component is
         # built. The model config is reached via ModelSpec.traverse. Model
@@ -508,9 +497,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
-        # MTP needs extra future tokens for shifted inputs and labels, while
-        # config.training.seq_len remains the main transformer sequence length.
-        dataloader_seq_len = config.training.seq_len + self.num_mtp_layers
+        dataloader_seq_len = config.training.seq_len + self.extra_input_tokens
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
@@ -616,11 +603,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
-            ntokens_batch = (
-                labels[:, : -self.num_mtp_layers].numel()
-                if self.num_mtp_layers > 0
-                else labels.numel()
+            loss_labels = (
+                labels[:, : -self.extra_input_tokens]
+                if self.extra_input_tokens > 0
+                else labels
             )
+            ntokens_batch = loss_labels.numel()
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -665,14 +653,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             k: v for k, v in input_dict.items() if k != "input"
         }
 
+        if self.extra_input_tokens > 0:
+            positions = extra_kwargs.get("positions", None)
+            if positions is not None:
+                extra_kwargs["positions"] = positions[:, : -self.extra_input_tokens]
         positions = extra_kwargs.get("positions", None)
-        num_mtp_modules = self.num_mtp_layers
-        positions = trim_mtp_positions(
-            positions,
-            num_mtp_modules=num_mtp_modules,
-        )
-        if positions is not None:
-            extra_kwargs["positions"] = positions
 
         # positions and attention_masks are optional (Decoder.forward defaults
         # both to None). Build attention masks only for the masked backends
@@ -700,7 +685,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
-                num_mtp_modules=num_mtp_modules,
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual
@@ -800,8 +784,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             with sl.log_trace_span("fetching_batch"):
                 input_dict, labels = next(data_iterator)
                 loss_labels = (
-                    labels[:, : -self.num_mtp_layers]
-                    if self.num_mtp_layers > 0
+                    labels[:, : -self.extra_input_tokens]
+                    if self.extra_input_tokens > 0
                     else labels
                 )
                 local_valid_tokens += (loss_labels != IGNORE_INDEX).sum()

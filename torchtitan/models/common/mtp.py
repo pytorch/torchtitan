@@ -26,16 +26,6 @@ class MTPSequenceSlices:
         return len(self.offsets)
 
 
-@dataclass(frozen=True)
-class MTPContextParallelInput:
-    """Main and shifted MTP tensors to shard together for context parallel."""
-
-    main_inputs: torch.Tensor
-    main_labels: torch.Tensor
-    mtp_inputs: torch.Tensor
-    mtp_labels: torch.Tensor
-
-
 class MTPTransformerBlock(Module):
     """Generic MTP block for decoder-only transformer models.
 
@@ -137,7 +127,6 @@ class MTPBlock(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_mtp_layers: int = 0
-        loss_scaling_factor: float = 0.3
         inner_block_config: TransformerBlock.Config | None = None
         detach_heads: bool = False
 
@@ -231,64 +220,6 @@ def split_mtp_sequence(
             for offset in range(1, num_mtp_modules + 1)
         ),
     )
-
-
-def trim_mtp_positions(
-    positions: torch.Tensor | None,
-    *,
-    num_mtp_modules: int,
-) -> torch.Tensor | None:
-    """Return positions for the main sequence when MTP extra tokens are present."""
-    if positions is None or num_mtp_modules <= 0:
-        return positions
-    return positions[:, :-num_mtp_modules]
-
-
-def split_mtp_context_parallel_input(
-    inputs: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    num_mtp_modules: int,
-) -> MTPContextParallelInput:
-    """Split extended MTP input/label tensors before CP sharding.
-
-    The dataloader provides ``[B, S + K]`` tensors. For CP, we shard the main
-    view and the shifted view together, then append the local shifted tail back
-    so each rank still holds ``local_S + K`` tokens for model/loss slicing.
-    """
-    if num_mtp_modules <= 0:
-        raise ValueError("num_mtp_modules must be positive for MTP CP splitting.")
-    return MTPContextParallelInput(
-        main_inputs=inputs[:, :-num_mtp_modules],
-        main_labels=labels[:, :-num_mtp_modules],
-        mtp_inputs=inputs[:, num_mtp_modules:],
-        mtp_labels=labels[:, num_mtp_modules:],
-    )
-
-
-def merge_mtp_context_parallel_input(
-    mtp_input: MTPContextParallelInput,
-    *,
-    num_mtp_modules: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Append the local shifted tail back after CP sharding."""
-    if num_mtp_modules <= 0:
-        raise ValueError("num_mtp_modules must be positive for MTP CP merging.")
-    inputs = torch.cat(
-        [
-            mtp_input.main_inputs,
-            mtp_input.mtp_inputs[:, -num_mtp_modules:],
-        ],
-        dim=-1,
-    )
-    labels = torch.cat(
-        [
-            mtp_input.main_labels,
-            mtp_input.mtp_labels[:, -num_mtp_modules:],
-        ],
-        dim=-1,
-    )
-    return inputs, labels
 
 
 def mtp_labels_for_depth(

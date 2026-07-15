@@ -21,7 +21,7 @@ from .attention import (
     VarlenAttention,
     VarlenMetadata,
 )
-from .decoder import Decoder, TransformerBlock
+from .decoder import Decoder, MTPDecoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
@@ -65,6 +65,7 @@ __all__ = [
     "Linear",
     "MoE",
     "MTPBlock",
+    "MTPDecoder",
     "MTPTransformerBlock",
     "QKVLinear",
     "RMSNorm",

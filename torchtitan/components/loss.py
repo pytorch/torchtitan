@@ -384,24 +384,14 @@ class MTPLoss(BaseLoss):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLoss.Config):
-        mtp_config: Any | None = None
+        loss_scaling_factor: float = 0.3
         global_vocab_size: int | None = None
         """Full vocabulary size, needed for spmd_types loss-parallel CE."""
 
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
-        mtp_config = config.mtp_config
-        self.num_mtp_layers = (
-            getattr(mtp_config, "num_mtp_layers", 1)
-            if mtp_config is not None
-            else 1
-        )
-        self.loss_scaling_factor = (
-            getattr(mtp_config, "loss_scaling_factor", 0.3)
-            if mtp_config is not None
-            else 0.3
-        )
+        self.loss_scaling_factor = config.loss_scaling_factor
         self.global_vocab_size = config.global_vocab_size
 
     def __call__(
@@ -410,18 +400,19 @@ class MTPLoss(BaseLoss):
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if isinstance(pred, list):
-            if len(pred) != self.num_mtp_layers + 1:
+        if isinstance(pred, (list, tuple)):
+            num_mtp_layers = len(pred) - 1
+            if num_mtp_layers <= 0:
                 raise ValueError(
-                    f"Expected {self.num_mtp_layers + 1} predictions for "
-                    f"{self.num_mtp_layers} MTP layers, got {len(pred)}."
+                    "MTPLoss expects main prediction plus at least one MTP "
+                    f"prediction, got {len(pred)} predictions."
                 )
 
             seq_len = pred[0].shape[1]
-            if labels.shape[1] < seq_len + self.num_mtp_layers:
+            if labels.shape[1] < seq_len + num_mtp_layers:
                 raise ValueError(
                     f"MTP labels must have at least "
-                    f"{seq_len + self.num_mtp_layers} tokens, "
+                    f"{seq_len + num_mtp_layers} tokens, "
                     f"got {labels.shape[1]}."
                 )
 
@@ -438,7 +429,7 @@ class MTPLoss(BaseLoss):
                     mtp_pred,
                     labels[:, label_offset : label_offset + seq_len],
                     global_vocab_size=self.global_vocab_size,
-                ) / self.num_mtp_layers
+                ) / num_mtp_layers
             loss = main_loss + mtp_loss * self.loss_scaling_factor
         else:
             loss = self.fn(

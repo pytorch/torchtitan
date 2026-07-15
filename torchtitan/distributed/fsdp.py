@@ -178,10 +178,11 @@ def apply_fsdp_to_decoder(
             )
 
     transformer_blocks = list(model.layers.values())
-    if model.mtp_block is not None:
+    mtp_block = getattr(model, "mtp_block", None)
+    if mtp_block is not None:
         # Shard the outer MTPTransformerBlock so its fusion/norm params and
         # inner transformer block are covered by one FSDP unit.
-        transformer_blocks.extend(model.mtp_block.layers)
+        transformer_blocks.extend(mtp_block.layers)
 
     for transformer_block in transformer_blocks:
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different

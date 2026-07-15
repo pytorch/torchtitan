@@ -17,7 +17,6 @@ from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.mtp import MTPBlock
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -27,14 +26,6 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
     override = "torchtitan.overrides.fused_swiglu"
     assert override not in config.override.imports
     config.override.imports.append(override)
-
-
-def _configure_debug_mtp(config: Trainer.Config) -> None:
-    config.mtp = MTPBlock.Config(num_mtp_layers=1, loss_scaling_factor=0.3)
-    assert config.model_spec is not None
-    config.loss = MTPLoss.Config(
-        global_vocab_size=decoder_vocab_size(config.model_spec),
-    )
 
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
@@ -74,7 +65,11 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    _configure_debug_mtp(config)
+    config.model_spec = model_registry("debugmodel_mtp")
+    config.loss = MTPLoss.Config(
+        global_vocab_size=decoder_vocab_size(config.model_spec),
+        loss_scaling_factor=0.3,
+    )
     return config
 
 
