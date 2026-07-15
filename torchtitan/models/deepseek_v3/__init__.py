@@ -179,6 +179,7 @@ def _build_dsv3_layers(
     router_num_limited_groups: int | None = None,
     router_route_scale: float = 1.0,
     router_route_norm: bool = False,
+    aux_loss_coeff: float | None = None,
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
@@ -246,6 +247,7 @@ def _build_dsv3_layers(
                     w1_param_init=_LINEAR_INIT,
                     w2w3_param_init=_depth_init(layer_id),
                 ),
+                aux_loss_coeff=aux_loss_coeff,
             )
 
         layers.append(
@@ -295,6 +297,7 @@ def _debugmodel(
         num_shared_experts=num_shared_experts,
         router_top_k=3,
         router_score_func="softmax",
+        aux_loss_coeff=1e-4,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -358,6 +361,7 @@ def _16b(
         num_shared_experts=num_shared_experts,
         router_top_k=6,
         router_score_func="softmax",
+        aux_loss_coeff=1e-4,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -425,6 +429,7 @@ def _236b(
         router_num_expert_groups=8,
         router_num_limited_groups=3,
         router_route_scale=16.0,
+        aux_loss_coeff=1e-4,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -489,6 +494,7 @@ def _671b(
         num_shared_experts=num_shared_experts,
         router_top_k=8,
         router_score_func="sigmoid",
+        aux_loss_coeff=1e-4,
         router_num_expert_groups=8,
         router_num_limited_groups=4,
         router_route_scale=2.5,

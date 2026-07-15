@@ -299,6 +299,9 @@ class MetricsProcessor(Configurable):
         enable_wandb: bool = False
         """Whether to log metrics to Weights & Biases"""
 
+        console_log_extra_metrics: bool = False
+        """Whether to include extra_metrics (e.g. aux losses) in the console log line."""
+
     config: Config
     logger: BaseLogger
     parallel_dims: ParallelDims
@@ -448,6 +451,24 @@ class MetricsProcessor(Configurable):
             logger.debug("No loggers enabled, returning an empty LoggerContainer")
         return logger_container
 
+    def _format_extra_metrics(self, extra_metrics: dict[str, Any] | None) -> str:
+        if not self.config.console_log_extra_metrics or not extra_metrics:
+            return ""
+        _extra_cycle = [
+            "yellow",
+            "cyan",
+            "magenta",
+            "green",
+            "blue",
+            "orange",
+            "turquoise",
+        ]
+        parts = []
+        for i, (k, v) in enumerate(extra_metrics.items()):
+            tone = getattr(self.color, _extra_cycle[i % len(_extra_cycle)])
+            parts.append(f"{tone}{k}: {v:8.5f}")
+        return "  " + "  ".join(parts)
+
     def log(
         self,
         step: int,
@@ -520,6 +541,7 @@ class MetricsProcessor(Configurable):
 
         color = self.color
         mfu_str = f"{mfu:.2f}%" if mfu is not None else "N/A"
+        extra_str = self._format_extra_metrics(extra_metrics)
         logger.info(
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:8.5f}  "
@@ -528,7 +550,9 @@ class MetricsProcessor(Configurable):
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu_str}{color.reset}"
+            f"{color.magenta}mfu: {mfu_str}"
+            f"{extra_str}"
+            f"{color.reset}"
         )
 
         self.ntokens_since_last_log = 0
@@ -563,12 +587,15 @@ class MetricsProcessor(Configurable):
         self.logger.log(metrics, step)
 
         color = self.color
+        extra_str = self._format_extra_metrics(extra_metrics)
         logger.info(
             f"{color.yellow}validate step: {step:2}  "
             f"{color.green}loss: {loss:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
-            f"{color.blue}tps: {round(tps):,}{color.reset}"
+            f"{color.blue}tps: {round(tps):,}"
+            f"{extra_str}"
+            f"{color.reset}"
         )
 
         self.ntokens_since_last_log = 0
