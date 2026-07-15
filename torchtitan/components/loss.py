@@ -195,6 +195,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
+        if isinstance(grad_output, DTensor):
+            grad_output = grad_output.to_local()
         log_probs, labels_1d = ctx.saved_tensors
         safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
         out_of_range = (safe_labels < ctx.vocab_start) | (
@@ -375,6 +377,69 @@ class MSELoss(BaseLoss):
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = mse_loss
         self._maybe_compile(compile_config)
+
+
+class MTPLoss(BaseLoss):
+    """DeepSeek-V3 multi-token prediction loss."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseLoss.Config):
+        loss_scaling_factor: float = 0.3
+        global_vocab_size: int | None = None
+        """Full vocabulary size, needed for spmd_types loss-parallel CE."""
+
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        self.fn: LossFunction = cross_entropy_loss
+        self._maybe_compile(compile_config)
+        self.loss_scaling_factor = config.loss_scaling_factor
+        self.global_vocab_size = config.global_vocab_size
+
+    def __call__(
+        self,
+        pred: torch.Tensor | list[torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: float | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if isinstance(pred, (list, tuple)):
+            num_mtp_layers = len(pred) - 1
+            if num_mtp_layers <= 0:
+                raise ValueError(
+                    "MTPLoss expects main prediction plus at least one MTP "
+                    f"prediction, got {len(pred)} predictions."
+                )
+
+            seq_len = pred[0].shape[1]
+            if labels.shape[1] < seq_len + num_mtp_layers:
+                raise ValueError(
+                    f"MTP labels must have at least "
+                    f"{seq_len + num_mtp_layers} tokens, "
+                    f"got {labels.shape[1]}."
+                )
+
+            main_loss = self.fn(
+                pred[0],
+                labels[:, :seq_len],
+                global_vocab_size=self.global_vocab_size,
+            )
+            mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
+            for label_offset, mtp_pred in enumerate(pred[1:], 1):
+                # MTP depth d predicts the token d positions after the main
+                # decoder position, so labels are sliced with the same offset.
+                mtp_loss = mtp_loss + self.fn(
+                    mtp_pred,
+                    labels[:, label_offset : label_offset + seq_len],
+                    global_vocab_size=self.global_vocab_size,
+                ) / num_mtp_layers
+            loss = main_loss + mtp_loss * self.loss_scaling_factor
+        else:
+            loss = self.fn(
+                pred,
+                labels,
+                global_vocab_size=self.global_vocab_size,
+            )
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss, {}
 
 
 def compute_logprobs(

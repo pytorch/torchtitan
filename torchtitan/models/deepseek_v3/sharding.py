@@ -14,6 +14,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    pre_lm_head_norm_config,
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -59,6 +60,13 @@ def set_deepseek_v3_sharding_config(
     for layer_cfg in config.layers:
         _set_deepseek_v3_layer_sharding(
             layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
+        )
+    mtp_cfg = getattr(config, "mtp", None)
+    if mtp_cfg is not None and mtp_cfg.num_mtp_layers > 0:
+        _set_deepseek_v3_mtp_sharding(
+            mtp_cfg,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
         )
 
 
@@ -141,3 +149,40 @@ def _set_deepseek_v3_layer_sharding(
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
+
+
+def _set_deepseek_v3_mtp_sharding(
+    mtp_cfg,
+    *,
+    enable_sp: bool,
+    enable_ep: bool,
+) -> None:
+    activation = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    norm = norm_config(enable_sp=enable_sp)
+
+    # Decoder.Config.update_from_config materializes this as an
+    # MTPTransformerBlock.Config before sharding runs. This function only fills
+    # placements, mirroring how the main DeepSeek-V3 layer config is handled.
+    mtp_layer_cfg = mtp_cfg.inner_block_config
+
+    _set_deepseek_v3_layer_sharding(
+        mtp_layer_cfg.inner_block_config,
+        enable_sp=enable_sp,
+        enable_ep=enable_ep,
+    )
+    mtp_layer_cfg.enorm.sharding_config = norm
+    mtp_layer_cfg.hnorm.sharding_config = norm
+    mtp_layer_cfg.mtp_norm.sharding_config = pre_lm_head_norm_config(
+        enable_sp=enable_sp
+    )
+    mtp_layer_cfg.eh_proj.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R),
+        },
+        in_src_shardings={"input": activation},
+        out_src_shardings=activation,
+    )

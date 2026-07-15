@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss, MTPLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
@@ -61,6 +61,16 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry("debugmodel_mtp")
+    config.loss = MTPLoss.Config(
+        global_vocab_size=decoder_vocab_size(config.model_spec),
+        loss_scaling_factor=0.3,
+    )
+    return config
 
 
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:

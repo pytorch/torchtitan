@@ -21,10 +21,11 @@ from .attention import (
     VarlenAttention,
     VarlenMetadata,
 )
-from .decoder import Decoder, TransformerBlock
+from .decoder import Decoder, MTPDecoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
+from .mtp import MTPBlock, MTPTransformerBlock
 from .nn_modules import (
     Conv1d,
     Conv2d,
@@ -63,6 +64,9 @@ __all__ = [
     "LayerNorm",
     "Linear",
     "MoE",
+    "MTPBlock",
+    "MTPDecoder",
+    "MTPTransformerBlock",
     "QKVLinear",
     "RMSNorm",
     "RoPE",

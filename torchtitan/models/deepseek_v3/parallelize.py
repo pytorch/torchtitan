@@ -21,11 +21,15 @@ from torchtitan.distributed.full_dtensor import (
     validate_config,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.deepseek_v3 import DeepSeekV3Model
+from torchtitan.models.common.decoder import Decoder
+
+
+def _get_inner_attentions_for_context_parallel(model: Decoder):
+    return [block.attention.inner_attention for block in model.layers.values()]
 
 
 def parallelize_deepseekv3(
-    model: DeepSeekV3Model,
+    model: Decoder,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
@@ -42,8 +46,7 @@ def parallelize_deepseekv3(
         # runs inside the local_map boundary on local tensors.
         if parallel_dims.cp_enabled:
             apply_cp_to_forward(
-                # pyrefly: ignore [missing-attribute]
-                [block.attention.inner_attention for block in model.layers.values()],
+                _get_inner_attentions_for_context_parallel(model),
                 parallel_dims.get_mesh("cp"),
             )
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:

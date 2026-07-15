@@ -105,7 +105,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
-
         def __post_init__(self):
             if self.debug.batch_invariant:
                 raise ValueError(
@@ -206,6 +205,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     validator: BaseValidator
     metrics_processor: MetricsProcessor
     checkpointer: CheckpointManager
+    extra_mtp_tokens: int
 
     # runtime utilities
     device: torch.device
@@ -284,6 +284,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config=config,
         )
         self.model_config = model_config
+        self.extra_mtp_tokens = getattr(model_config, "extra_mtp_tokens", 0)
 
         # Apply overrides to the full config tree, before any component is
         # built. The model config is reached via ModelSpec.traverse. Model
@@ -496,11 +497,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
+        dataloader_seq_len = config.training.seq_len + self.extra_mtp_tokens
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
+            seq_len=dataloader_seq_len,
             local_batch_size=config.training.local_batch_size,
             snapshot_every_n_steps=(
                 config.checkpoint.interval * self.gradient_accumulation_steps
@@ -601,7 +603,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
-            ntokens_batch = labels.numel()
+            loss_labels = (
+                labels[:, : -self.extra_mtp_tokens]
+                if self.extra_mtp_tokens > 0
+                else labels
+            )
+            ntokens_batch = loss_labels.numel()
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -646,6 +653,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             k: v for k, v in input_dict.items() if k != "input"
         }
 
+        if self.extra_mtp_tokens > 0:
+            positions = extra_kwargs.get("positions", None)
+            if positions is not None:
+                extra_kwargs["positions"] = positions[:, : -self.extra_mtp_tokens]
         positions = extra_kwargs.get("positions", None)
 
         # positions and attention_masks are optional (Decoder.forward defaults
@@ -772,7 +783,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         for _microbatch in range(self.gradient_accumulation_steps):
             with sl.log_trace_span("fetching_batch"):
                 input_dict, labels = next(data_iterator)
-                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                loss_labels = (
+                    labels[:, : -self.extra_mtp_tokens]
+                    if self.extra_mtp_tokens > 0
+                    else labels
+                )
+                local_valid_tokens += (loss_labels != IGNORE_INDEX).sum()
                 microbatches.append((input_dict, labels))
         sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
 
