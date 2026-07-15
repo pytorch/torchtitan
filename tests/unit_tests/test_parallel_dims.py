@@ -13,11 +13,11 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard
-from torch.distributed.tensor.debug import CommDebugMode
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torch.utils._debug_mode import DebugMode
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import (
@@ -29,15 +29,12 @@ from torchtitan.distributed.parallel_dims import (
 from torchtitan.distributed.spmd_types import (
     spmd_distribute_tensor,
     spmd_layout_to_dtensor_placements,
-    spmd_redistribute_per_axis,
     spmd_validate_redistributions,
+    set_current_spmd_mesh,
 )
-from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
-    dense_sequence_parallel_placement,
-)
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.llama3 import model_registry
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import PerAxisRedistribution, ShardingConfig
 
 
 class TestParallelDimsValidation(unittest.TestCase):
@@ -280,57 +277,44 @@ class TestSpmdLayout(DTensorTestBase):
             ["dp_replicate", "dp_shard", "cp", "tp"],
         )
 
-    def test_rejects_partition_spec_reorder_redistribute(self):
-        """((DP, CP), None) -> ((CP, DP), None) not supported by a single redistribute call."""
-        with self.assertRaises(ValueError) as cm:
-            spmd_validate_redistributions(
-                ShardingConfig(
-                    out_src_shardings=SpmdLayout(
-                        {
-                            MeshAxisName.DP: spmd.V,
-                            MeshAxisName.CP: spmd.V,
-                        },
-                        partition_spec=spmd.PartitionSpec(
-                            (MeshAxisName.DP, MeshAxisName.CP), None
-                        ),
-                    ),
-                    out_dst_shardings=SpmdLayout(
-                        {
-                            MeshAxisName.DP: spmd.V,
-                            MeshAxisName.CP: spmd.V,
-                        },
-                        partition_spec=spmd.PartitionSpec(
-                            (MeshAxisName.CP, MeshAxisName.DP), None
-                        ),
-                    ),
-                )
-            )
+    def test_rejects_non_innermost_axis_redistribution(self):
+        """For ``(DP, CP)``, CP can be unsharded directly but DP cannot."""
+        src = SpmdLayout(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.V,
+            },
+            partition_spec=spmd.PartitionSpec(
+                (MeshAxisName.DP, MeshAxisName.CP), None
+            ),
+        )
 
-    def test_rejects_multi_axis_redistribute(self):
-        """Redistributing multiple mesh axes is unsupported."""
+        spmd_validate_redistributions(
+            ShardingConfig(
+                out_src_shardings=src,
+                out_redist=PerAxisRedistribution.Config(
+                    axis=MeshAxisName.CP,
+                    src=spmd.S(0),
+                    dst=spmd.R,
+                ),
+            )
+        )
+
         with self.assertRaises(ValueError) as cm:
             spmd_validate_redistributions(
                 ShardingConfig(
-                    in_src_shardings={
-                        "x": SpmdLayout(
-                            {
-                                MeshAxisName.DP: spmd.S(0),
-                                MeshAxisName.CP: spmd.S(1),
-                                MeshAxisName.TP: spmd.R,
-                            }
-                        )
-                    },
-                    in_dst_shardings={
-                        "x": SpmdLayout(
-                            {
-                                MeshAxisName.DP: spmd.R,
-                                MeshAxisName.CP: spmd.R,
-                                MeshAxisName.TP: spmd.R,
-                            }
-                        )
-                    },
+                    out_src_shardings=src,
+                    out_redist=PerAxisRedistribution.Config(
+                        axis=MeshAxisName.DP,
+                        src=spmd.S(0),
+                        dst=spmd.R,
+                    ),
                 )
             )
+        self.assertExpectedInline(
+            str(cm.exception),
+            """output: unsharding axis 'dp' from tensor dim 0 is only valid for the innermost mesh axis; source shard order is ('dp', 'cp').""",
+        )
 
     @with_comms
     def test_partition_spec_order_controls_state_shard(self):
@@ -380,33 +364,106 @@ class TestSpmdLayout(DTensorTestBase):
                 expected = global_weight.narrow(0, shard_idx * local_rows, local_rows)
                 torch.testing.assert_close(local_weight, expected)
 
-    @with_comms
-    def test_spmd_redistribute_per_axis_allgather(self):
-        """
-        Test spmd_redistribute_per_axis performs seq-dim allgather.
-        src: dense SP placement (V + PartitionSpec)
-        dst: dense activation w/ I@TP
-        """
-        mesh = init_device_mesh(
-            self.device_type,
-            (1, 1, 4),
-            mesh_dim_names=("dp", "cp", "tp"),
-        )
-        x = torch.ones(2, 2, device=self.device_type)
-        src = dense_sequence_parallel_placement()
-        dst = dense_activation_placement(tp=spmd.I)
+    def test_per_axis_redistribution_reduce_scatter_config(self):
+        """PerAxisRedistribution forwards collective and dtype config."""
+        if dist.is_initialized():
+            self.skipTest("requires no pre-existing process group")
 
-        comm_mode = CommDebugMode()
-        with comm_mode:
-            result = spmd_redistribute_per_axis(
-                x,
-                mesh,
-                src.per_axis_spmd_types(),
-                dst.per_axis_spmd_types(),
+        dist.init_process_group("fake", rank=0, world_size=2)
+        try:
+            mesh = init_device_mesh(
+                "cpu",
+                (2,),
+                mesh_dim_names=("tp",),
             )
+            x = torch.ones(4, 4, dtype=torch.float16, requires_grad=True)
+            redist = PerAxisRedistribution.Config(
+                axis=MeshAxisName.TP,
+                src=spmd.P,
+                dst=spmd.S(1),
+                fwd_op_dtype=torch.float32,
+                fwd_out_dtype=torch.bfloat16,
+                bwd_op_dtype=torch.float32,
+                bwd_out_dtype=torch.float16,
+            ).build()
 
-        self.assertEqual(comm_mode.get_total_counts(), 1)
-        self.assertTrue(torch.equal(result, torch.ones(2, 8, device=self.device_type)))
+            set_spmd_backend("spmd_types")
+            try:
+                with set_current_spmd_mesh(mesh):
+                    spmd.assert_type(x, {MeshAxisName.TP: spmd.P})
+                    with DebugMode(record_torchfunction=False) as debug_mode:
+                        result = redist(x)
+                        result.float().sum().backward()
+            finally:
+                set_spmd_backend("default")
+        finally:
+            dist.destroy_process_group()
+
+        self.assertExpectedInline(
+            debug_mode.debug_string(),
+            """\
+    aten::_to_copy(t: f16[4, 4], dtype=torch.float32)  ->  t: f32[4, 4]
+    aten::permute(t: f32[4, 4], [1, 0])  ->  t: f32[4, 4]
+    aten::clone(t: f32[4, 4], memory_format=torch.contiguous_format)  ->  t: f32[4, 4]
+    aten::new_empty(t: f32[4, 4], [2, 4], pin_memory=False)  ->  t: f32[2, 4]
+    c10d::_reduce_scatter_base_(t: f32[2, 4], t: f32[4, 4], ScriptObject <__torch__.torch.classes.c10d.ProcessGroup>, ScriptObject <__torch__.torch.classes.c10d.ReduceOp>, False)  ->  ('t: f32[2, 4]', 'ScriptObject <__torch__.torch.classes.c10d.Work>')
+    aten::permute(t: f32[2, 4], [1, 0])  ->  t: f32[4, 2]
+    aten::_to_copy(t: f32[4, 2], dtype=torch.bfloat16)  ->  t: bf16[4, 2]
+    aten::_to_copy(t: bf16[4, 2], dtype=torch.float32)  ->  t: f32[4, 2]
+    aten::sum(t: f32[4, 2])  ->  t: f32[]
+    aten::ones_like(t: f32[], pin_memory=False, memory_format=torch.preserve_format)  ->  t: f32[]
+    aten::expand(t: f32[], [4, 2])  ->  t: f32[4, 2]
+    aten::_to_copy(t: f32[4, 2], dtype=torch.bfloat16, layout=torch.strided, device=cpu)  ->  t: bf16[4, 2]
+    aten::_to_copy(t: bf16[4, 2], dtype=torch.float32)  ->  t: f32[4, 2]
+    aten::empty.memory_format([8, 2], dtype=torch.float32, device=cpu, pin_memory=False)  ->  t: f32[8, 2]
+    c10d::_allgather_base_(t: f32[8, 2], t: f32[4, 2], ScriptObject <__torch__.torch.classes.c10d.ProcessGroup>, False)  ->  ('t: f32[8, 2]', 'ScriptObject <__torch__.torch.classes.c10d.Work>')
+    aten::split.Tensor(t: f32[8, 2], 4)  ->  ['t: f32[4, 2]', 't: f32[4, 2]']
+    aten::cat(['t: f32[4, 2]', 't: f32[4, 2]'], 1)  ->  t: f32[4, 4]
+    aten::_to_copy(t: f32[4, 4], dtype=torch.float16)  ->  t: f16[4, 4]
+    aten::detach(t: f16[4, 4])  ->  t: f16[4, 4]""",
+        )
+        self.assertEqual(result.shape, torch.Size([4, 2]))
+        self.assertEqual(result.dtype, torch.bfloat16)
+        self.assertIsNotNone(x.grad)
+        self.assertEqual(x.grad.dtype, torch.float16)
+
+    def test_per_axis_redistribution_passes_dtype_options(self):
+        x = torch.ones(2, 2)
+        mesh = unittest.mock.Mock()
+        mesh.mesh_dim_names = ("tp",)
+        mesh.size.return_value = 2
+        mesh.get_group.return_value = "tp_group"
+        redist = PerAxisRedistribution.Config(
+            axis=MeshAxisName.TP,
+            src=spmd.P,
+            dst=spmd.S(1),
+            fwd_op_dtype=torch.float32,
+            fwd_out_dtype=torch.bfloat16,
+            bwd_op_dtype=torch.float16,
+            bwd_out_dtype=torch.float32,
+        ).build()
+
+        with (
+            patch("torchtitan.protocols.sharding.current_spmd_mesh", return_value=mesh),
+            patch("torchtitan.protocols.sharding.spmd_mesh_size", return_value=2),
+            patch("torchtitan.protocols.sharding.spmd.redistribute") as mock,
+        ):
+            mock.return_value = x
+            result = redist(x)
+
+        self.assertIs(result, x)
+        mock.assert_called_once_with(
+            x,
+            "tp_group",
+            src=spmd.P,
+            dst=spmd.S(1),
+            op_dtype=torch.float32,
+            out_dtype=torch.bfloat16,
+            backward_options={
+                "op_dtype": torch.float16,
+                "out_dtype": torch.float32,
+            },
+        )
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):
