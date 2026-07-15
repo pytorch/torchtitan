@@ -14,6 +14,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    pre_lm_head_norm_config,
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -60,9 +61,10 @@ def set_deepseek_v3_sharding_config(
         _set_deepseek_v3_layer_sharding(
             layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
         )
-    if config.mtp is not None and config.mtp.num_mtp_layers > 0:
+    mtp_cfg = getattr(config, "mtp", None)
+    if mtp_cfg is not None and mtp_cfg.num_mtp_layers > 0:
         _set_deepseek_v3_mtp_sharding(
-            config.mtp,
+            mtp_cfg,
             enable_sp=enable_sp,
             enable_ep=enable_ep,
         )
@@ -174,7 +176,9 @@ def _set_deepseek_v3_mtp_sharding(
     )
     mtp_layer_cfg.enorm.sharding_config = norm
     mtp_layer_cfg.hnorm.sharding_config = norm
-    mtp_layer_cfg.mtp_norm.sharding_config = norm
+    mtp_layer_cfg.mtp_norm.sharding_config = pre_lm_head_norm_config(
+        enable_sp=enable_sp
+    )
     mtp_layer_cfg.eh_proj.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
