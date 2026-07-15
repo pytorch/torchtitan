@@ -13,11 +13,13 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
 
 from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
+from tests.utils import has_fa3, has_torchcomms, num_available_gpus
 
 
 _TEST_SUITES_FUNCTION = {
@@ -178,7 +180,7 @@ def run_single_test(
 def _filter_tests(
     args, test_list: list[OverrideDefinitions]
 ) -> tuple[list[OverrideDefinitions], list[OverrideDefinitions]]:
-    """Filter tests by --test_name / --exclude / disabled / arch / ngpu.
+    """Filter tests by --test_name / --exclude / disabled / arch / deps / ngpu.
 
     Returns (runnable, skipped_due_to_ngpu).
     """
@@ -188,6 +190,8 @@ def _filter_tests(
 
     runnable: list[OverrideDefinitions] = []
     skipped_ngpu: list[OverrideDefinitions] = []
+    # Cap --ngpu by visible devices so under-provisioned hosts skip cleanly.
+    effective_ngpu = min(args.ngpu, num_available_gpus())
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -198,7 +202,24 @@ def _filter_tests(
             and test_flavor.skip_rocm_test
         ):
             continue
-        if args.ngpu < test_flavor.ngpu:
+        # VarlenAttention activates FA3 on SM90+; skip if flash-attn-3 is missing.
+        if (
+            test_flavor.requires_fa3
+            and has_cuda_capability(9, 0)
+            and not has_fa3()
+        ):
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires FA3 on SM90+,"
+                f" because flash-attn-3 is not available"
+            )
+            continue
+        if test_flavor.requires_torchcomms and not has_torchcomms():
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires torchcomms,"
+                f" because torchcomms is not available"
+            )
+            continue
+        if effective_ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
         runnable.append(test_flavor)
@@ -214,10 +235,12 @@ def run_tests(
 ):
     """Run all integration tests to test the core features of TorchTitan."""
     runnable, skipped_ngpu = _filter_tests(args, test_list)
+    effective_ngpu = min(args.ngpu, num_available_gpus())
     for test_flavor in skipped_ngpu:
         logger.info(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-            f" because --ngpu arg is {args.ngpu}"
+            f" because effective ngpu is {effective_ngpu}"
+            f" (--ngpu={args.ngpu}, visible={num_available_gpus()})"
         )
 
     failed_tests: list[tuple[str, str]] = []

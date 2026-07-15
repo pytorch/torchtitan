@@ -621,9 +621,13 @@ class BitwiseParityTestBase(unittest.TestCase):
         if hf_path:
             config.hf_assets_path = hf_path
 
+        from tests.utils import has_fa3
+
         from torchtitan.tools.utils import has_cuda_capability
 
         if has_cuda_capability(9, 0):
+            if not has_fa3():
+                raise unittest.SkipTest("requires flash-attn-3 on SM90+")
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,

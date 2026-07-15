@@ -5,10 +5,32 @@
 # LICENSE file in the root directory of this source tree.
 
 import hashlib
+import importlib.util
 import json
 
 import torch
 from torch.distributed.tensor import DTensor
+
+
+def num_available_gpus() -> int:
+    """Number of visible CUDA devices, or 0 if CUDA is unavailable."""
+    if not torch.cuda.is_available():
+        return 0
+    return torch.cuda.device_count()
+
+
+def has_fa3() -> bool:
+    """True if the flash-attn-3 package is available (torch.ops.flash_attn_3)."""
+    try:
+        import flash_attn_interface  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch.ops, "flash_attn_3")
+
+
+def has_torchcomms() -> bool:
+    """True if the optional torchcomms package is importable."""
+    return importlib.util.find_spec("torchcomms") is not None
 
 
 def _hash_model_impl(

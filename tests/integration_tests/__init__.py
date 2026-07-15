@@ -24,6 +24,10 @@ class OverrideDefinitions:
     ngpu: int = 4
     disabled: bool = False
     skip_rocm_test: bool = False
+    # Varlen/FA3 path activates FA3 on SM90+; skip there if flash-attn-3 is missing.
+    requires_fa3: bool = False
+    # --comm.mode torchcomms; skip if torchcomms is not installed.
+    requires_torchcomms: bool = False
     timeout: int | None = None
 
     def __repr__(self):

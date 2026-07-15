@@ -11,6 +11,7 @@ from torchtitan.tools.logging import logger
 
 from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import _run_cmd
+from tests.utils import num_available_gpus
 
 
 def build_flux_test_list() -> list[OverrideDefinitions]:
@@ -121,11 +122,13 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
 
-        # Check if we have enough GPUs
-        if args.ngpu < test_flavor.ngpu:
+        # Cap --ngpu by visible devices so under-provisioned hosts skip cleanly.
+        effective_ngpu = min(args.ngpu, num_available_gpus())
+        if effective_ngpu < test_flavor.ngpu:
             logger.info(
                 f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                f" because --ngpu arg is {args.ngpu}"
+                f" because effective ngpu is {effective_ngpu}"
+                f" (--ngpu={args.ngpu}, visible={num_available_gpus()})"
             )
         else:
             run_single_test(test_flavor, args.output_dir)
