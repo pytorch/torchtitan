@@ -64,3 +64,51 @@ def test_quantized_grouped_experts():
     assert issubclass(float8_cls, GptOssGroupedExperts)
     assert hasattr(mxfp8_cls.Config, "swiglu_limit")
     assert hasattr(float8_cls.Config, "swiglu_limit")
+
+
+def test_fp8_blockwise_applied_by_model_registry():
+    """Blockwise FP8 converters swap both linears and grouped experts."""
+    pytest.importorskip("torchao.prototype.blockwise_fp8_training.linear")
+    from torchtitan.components.quantization import Float8BlockwiseLinear
+    from torchtitan.tools.utils import has_cuda_capability
+
+    if Float8BlockwiseLinear is None:
+        pytest.skip("torchao blockwise FP8 training linear is unavailable")
+    if not has_cuda_capability(9, 0):
+        pytest.skip("blockwise FP8 training requires SM90 or later")
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args(
+        [
+            "--module",
+            "deepseek_v3",
+            "--config",
+            "deepseek_v3_debugmodel_fp8_blockwise",
+        ]
+    )
+    model_config = config.model_spec.model
+    assert has_quantization(model_config)
+
+    converted = [
+        (fqn, lc)
+        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
+        if isinstance(lc, Float8BlockwiseLinear.Config)
+    ]
+    assert len(converted) > 0
+    for _fqn, lc in converted:
+        assert lc.in_features % 128 == 0
+        assert lc.out_features % 128 == 0
+        assert not lc.bias
+    for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
+        if fqn == "lm_head" or "router.gate" in fqn:
+            assert not isinstance(lc, Float8BlockwiseLinear.Config)
+
+    experts_configs = [
+        config
+        for _fqn, config, _parent, _attr in model_config.traverse(GroupedExperts.Config)
+    ]
+    assert len(experts_configs) > 0
+    assert all(
+        getattr(config, "recipe_name", None) == "fp8_blockwise"
+        for config in experts_configs
+    )

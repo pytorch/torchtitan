@@ -63,6 +63,7 @@ def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
     from torchtitan.components.quantization.float8 import (
         _float8_experts_cache,
+        Float8BlockwiseLinear,
         Float8Linear,
     )
     from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
@@ -70,6 +71,8 @@ def has_quantization(model_config) -> bool:
     quant_linear_types: list[type] = []
     if Float8Linear is not None:
         quant_linear_types.append(Float8Linear.Config)
+    if Float8BlockwiseLinear is not None:
+        quant_linear_types.append(Float8BlockwiseLinear.Config)
     if MXFP8Linear is not None:
         quant_linear_types.append(MXFP8Linear.Config)
 
