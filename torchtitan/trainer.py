@@ -9,7 +9,7 @@ import json
 import math
 import os
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
@@ -105,6 +105,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
+
+        post_model_init_fn: Annotated[
+            Callable[[torch.nn.Module], torch.nn.Module] | None, tyro.conf.Suppress
+        ] = None
+        """Optional callback applied to the model after initialization and
+        parallelization. Set programmatically in config_registry (e.g. for QAD)."""
 
         def __post_init__(self):
             if self.debug.batch_invariant:
@@ -435,6 +441,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model.train()
 
                 self.model_parts = [model]
+
+        # Apply post-model-init callback (e.g. QAD)
+        if config.post_model_init_fn is not None:
+            for i, part in enumerate(self.model_parts):
+                self.model_parts[i] = config.post_model_init_fn(part)
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.

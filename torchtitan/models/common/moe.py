@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -53,6 +54,11 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.token_dispatcher = config.token_dispatcher.build()
+        # Optional fake-quantization hook applied to expert weights and
+        # activations inside _experts_forward. Set programmatically for QAD
+        # (see torchtitan/components/quantization/nvfp4_fake_quant.py).
+        # None = no-op (bf16).
+        self.fake_quant_fn: Callable[[torch.Tensor], torch.Tensor] | None = None
 
     def _experts_forward(
         self,
@@ -80,6 +86,11 @@ class GroupedExperts(Module):
             w2_EDF = self.w2_EDF
             w3_EFD = self.w3_EFD
 
+        if self.fake_quant_fn is not None:
+            w1_EFD = self.fake_quant_fn(w1_EFD)
+            w2_EDF = self.fake_quant_fn(w2_EDF)
+            w3_EFD = self.fake_quant_fn(w3_EFD)
+
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if (
             get_spmd_backend() == "spmd_types"
@@ -93,20 +104,29 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
+        x_RD_bf16 = x_RD.bfloat16()
+        if self.fake_quant_fn is not None:
+            x_RD_bf16 = self.fake_quant_fn(x_RD_bf16)
+
         h_RF = F.silu(
             torch._grouped_mm(
-                x_RD.bfloat16(),
+                x_RD_bf16,
                 w1_EFD.bfloat16().transpose(-2, -1),
                 offs=offsets_E,
             )
         )
         h_RF = h_RF * torch._grouped_mm(
-            x_RD.bfloat16(),
+            x_RD_bf16,
             w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
+
+        h_RF_input = h_RF
+        if self.fake_quant_fn is not None:
+            h_RF_input = self.fake_quant_fn(h_RF_input)
+
         return torch._grouped_mm(
-            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+            h_RF_input, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
 
     def forward(
