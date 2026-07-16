@@ -39,14 +39,13 @@ class HcSplitSinkhorn(Module):
             hc_mult, hc_mult
         ).unsqueeze(0).unsqueeze(0)
 
-        comb = comb.softmax(-1) + self.eps
-        col_sum = comb.sum(-2, keepdim=True)
-        comb = comb / (col_sum + self.eps)
+        row_max = comb.max(dim=-1, keepdim=True).values
+        comb = torch.exp(comb - row_max)
+        comb = comb / comb.sum(dim=-1, keepdim=True) + self.eps
+        comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
         for _ in range(self.sinkhorn_iters - 1):
-            row_sum = comb.sum(-1, keepdim=True)
-            comb = comb / (row_sum + self.eps)
-            col_sum = comb.sum(-2, keepdim=True)
-            comb = comb / (col_sum + self.eps)
+            comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
+            comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
         return pre, post, comb
 
 
@@ -71,10 +70,12 @@ class HcPre(Module):
 
     def forward(self, x, hc_fn, hc_scale, hc_base):
         shape, dtype = x.size(), x.dtype
-        x = x.flatten(2)
+        x = x.flatten(2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, hc_fn) * rsqrt
-        pre, post, comb = self.sinkhorn(mixes, hc_scale, hc_base)
+        mixes = F.linear(x, hc_fn.float()) * rsqrt
+        pre, post, comb = self.sinkhorn(
+            mixes.float(), hc_scale.float(), hc_base.float()
+        )
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
         return y.to(dtype), post, comb
 
@@ -109,9 +110,9 @@ class HcHead(Module):
 
     def forward(self, x, hc_fn, hc_scale, hc_base):
         shape, dtype = x.size(), x.dtype
-        x = x.flatten(2)
+        x = x.flatten(2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, hc_fn) * rsqrt
+        mixes = F.linear(x, hc_fn.float()) * rsqrt
         pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.eps
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
         return y.to(dtype)

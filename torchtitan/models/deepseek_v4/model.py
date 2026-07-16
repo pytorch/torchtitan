@@ -199,9 +199,13 @@ class DeepSeekV4Model(Decoder):
         self.n_main_layers = cfg.n_layers
 
         hc_dim = cfg.hc_mult * cfg.dim
-        self.hc_head_fn = nn.Parameter(torch.empty(cfg.hc_mult, hc_dim))
-        self.hc_head_base = nn.Parameter(torch.empty(cfg.hc_mult))
-        self.hc_head_scale = nn.Parameter(torch.empty(1))
+        self.hc_head_fn = nn.Parameter(
+            torch.empty(cfg.hc_mult, hc_dim, dtype=torch.float32)
+        )
+        self.hc_head_base = nn.Parameter(
+            torch.empty(cfg.hc_mult, dtype=torch.float32)
+        )
+        self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
         self.hc_head = HcHead.Config(
             hc_mult=cfg.hc_mult,
@@ -246,7 +250,7 @@ class DeepSeekV4Model(Decoder):
         h = self.norm(h) if self.norm is not None else h
         if self._skip_lm_head:
             return h
-        output = self.lm_head(h) if self.lm_head is not None else h
+        output = self.lm_head(h.float()) if self.lm_head is not None else h
         return output
 
 

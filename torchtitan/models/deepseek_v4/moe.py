@@ -5,16 +5,12 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
 
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
-
-
-def _softplus_stable(x):
-    return torch.log1p(torch.exp(-x.abs())) + torch.relu(x)
 
 
 def _build_hash_routing_table(vocab_size, num_experts, top_k, device=None, chunk_size=8192):
@@ -63,41 +59,29 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
                     device=buffer_device,
                 )
 
-    def _hash_lookup(self, input_ids, scores):
-        if isinstance(input_ids, DTensor):
-            input_ids = input_ids.to_local()
-
-        tid2eid = self.tid2eid
-        if isinstance(tid2eid, DTensor):
-            tid2eid = tid2eid.to_local()
-
-        selected_experts_indices = tid2eid.to(input_ids.device)[input_ids]
-        if isinstance(scores, DTensor):
-            selected_experts_indices = DTensor.from_local(
-                selected_experts_indices,
-                scores.device_mesh,
-                scores.placements,
-                run_check=False,
-            )
-        else:
-            selected_experts_indices = selected_experts_indices.to(scores.device)
-        return selected_experts_indices
-
     def forward(self, x_BLD, expert_bias_E=None, *, input_ids=None):
-        scores = self.gate(x_BLD)
+        scores = F.linear(
+            x_BLD.float(),
+            self.gate.weight.float(),
+            None if self.gate.bias is None else self.gate.bias.float(),
+        )
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=-1)
+            scores = F.softmax(scores, dim=-1)
         elif self.score_func == "sqrtsoftplus":
-            scores = _softplus_stable(scores.to(torch.float32)).sqrt()
+            scores = F.softplus(scores).sqrt()
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type_like(scores, x_BLD)
 
         if self.hash:
             if input_ids is None:
                 raise ValueError("input_ids is required for DeepSeek V4 hash routing.")
-            selected_experts_indices = self._hash_lookup(input_ids, scores)
+            selected_experts_indices = self.tid2eid.to(input_ids.device)[input_ids]
+            if get_spmd_backend() == "spmd_types":
+                spmd.assert_type_like(selected_experts_indices, x_BLD)
         else:
             scores_for_choice = (
                 scores if expert_bias_E is None else scores + expert_bias_E
@@ -111,10 +95,12 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
                 scores
             )
 
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type_like(top_scores, x_BLD)
+            spmd.assert_type_like(selected_experts_indices, x_BLD)
         if self.route_norm:
-            denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
-            top_scores = top_scores / denominator
-        top_scores = top_scores * self.route_scale
+            top_scores /= top_scores.sum(dim=-1, keepdim=True) + 1e-20
+        top_scores *= self.route_scale
 
         return top_scores, selected_experts_indices, scores
 
