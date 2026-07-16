@@ -4,7 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import numpy as np
+
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data.dataset import (
+    DataRuntime,
+    SingleDatasetConfig,
+    TokenSample,
+)
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.packing import PackedTokenDatasetConfig
+from torchtitan.components.data.sources import JsonlSourceConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -61,6 +71,34 @@ def llama3_debugmodel() -> Trainer.Config:
             steps=10,
         ),
     )
+
+
+def c4_text_to_token_sample(row: dict, runtime: DataRuntime) -> TokenSample:
+    """Tokenize one C4 row with a pretraining loss mask."""
+    assert runtime.tokenizer is not None
+    token_ids = np.asarray(
+        runtime.tokenizer.encode(row["text"], add_bos=True, add_eos=True),
+        dtype=np.int64,
+    )
+    return TokenSample(
+        token_ids=token_ids,
+        loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
+    )
+
+
+def llama3_debugmodel_grain() -> Trainer.Config:
+    """Llama 3 debug model using the Grain-backed local C4 pipeline."""
+    config = llama3_debugmodel()
+    config.dataloader = GrainDataLoader.Config(
+        dataset_config=PackedTokenDatasetConfig(
+            dataset=SingleDatasetConfig(
+                source=JsonlSourceConfig(patterns=("tests/assets/c4_test/data.json",)),
+                sample_processor=c4_text_to_token_sample,
+            ),
+        ),
+        seed=42,
+    )
+    return config
 
 
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
