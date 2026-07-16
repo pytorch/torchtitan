@@ -169,6 +169,7 @@ def compute_policy_age_metrics(
     trainer_policy_version: int,
     min_policy_versions: list[int],
     max_offpolicy_steps: int,
+    window_lookahead_steps: int = 0,
 ) -> list[m.Metric]:
     """Age of each packed training sample at the moment the trainer consumes the batch.
 
@@ -178,7 +179,10 @@ def compute_policy_age_metrics(
     Args:
         trainer_policy_version: Policy version that will consume this batch.
         min_policy_versions: Oldest sampled policy version for each packed training sample.
-        max_offpolicy_steps: Maximum allowed consume-time trainer-version lag.
+        max_offpolicy_steps: Configured max consume-time trainer-version lag (the strict-FIFO bound).
+        window_lookahead_steps: Extra lag that windowed FIFO may admit while a straggler waits
+            (`ceil(window_size / num_prompts_per_train_step)`); `0` under strict FIFO. The hard bound
+            checked here is `max_offpolicy_steps + window_lookahead_steps`.
 
     Example:
         # trainer at v=10; training samples' oldest versions [8, 9] -> ages [2, 1]
@@ -190,11 +194,13 @@ def compute_policy_age_metrics(
         for min_policy_version in min_policy_versions
     ]
     max_policy_age = max(policy_ages, default=0)
-    if max_policy_age > max_offpolicy_steps:
+    max_policy_age_tolerance = max_offpolicy_steps + window_lookahead_steps
+    if max_policy_age > max_policy_age_tolerance:
         raise RuntimeError(
             "rollout backpressure admitted stale training data: "
             f"max_policy_age={max_policy_age}, "
             f"max_offpolicy_steps={max_offpolicy_steps}, "
+            f"window_lookahead_steps={window_lookahead_steps}, "
             f"trainer_policy_version={trainer_policy_version}"
         )
     return [

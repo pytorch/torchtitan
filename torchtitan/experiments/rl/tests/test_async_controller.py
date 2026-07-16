@@ -10,7 +10,6 @@ the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID
 import asyncio
 
 import pytest
-
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
@@ -207,4 +206,102 @@ def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
             trainer_policy_version=4,
             min_policy_versions=[0],
             max_offpolicy_steps=3,
+        )
+
+
+def _fifo_buffer(
+    *, capacity: int, window_fraction: float = 0.0
+) -> RolloutGroupWorkBuffer:
+    return RolloutGroupWorkBuffer.Config(window_fraction=window_fraction).build(
+        max_active_rollout_groups=capacity
+    )
+
+
+async def _admit(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
+    if not await buffer.wait_for_slot():
+        raise RuntimeError("buffer closed unexpectedly")
+    await buffer.add_work(RolloutGroupWork(group_id=group_id, sample=object()))
+
+
+async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
+    await buffer.finalize_work(RolloutGroup(group_id=group_id, rollouts=[]))
+
+
+def test_window_size_derived_from_fraction() -> None:
+    # W = max(1, ceil(window_fraction * capacity)); 0.0 -> strict FIFO (W=1).
+    assert _fifo_buffer(capacity=10).window_size == 1
+    assert _fifo_buffer(capacity=10, window_fraction=0.3).window_size == 3
+    assert (
+        _fifo_buffer(capacity=10, window_fraction=0.01).window_size == 1
+    )  # floored at 1
+    assert _fifo_buffer(capacity=10, window_fraction=1.0).window_size == 10
+
+
+def test_window_fraction_out_of_range_raises() -> None:
+    with pytest.raises(ValueError, match="window_fraction"):
+        _fifo_buffer(capacity=10, window_fraction=1.5)
+
+
+def test_strict_fifo_blocks_on_unfinalized_head() -> None:
+    async def run() -> None:
+        buffer = _fifo_buffer(capacity=4)  # window_fraction=0.0 -> W=1
+        for group_id in range(2):
+            await _admit(buffer, group_id)
+        await buffer.claim_next()  # g0 -> INFLIGHT (head stuck)
+        await _finalize(buffer, 1)  # only g1 finalized
+
+        taker = asyncio.create_task(buffer.take_finalized())
+        await asyncio.sleep(0)
+        assert not taker.done()  # strict FIFO: g1 finalized but head g0 is not -> stall
+
+        await _finalize(buffer, 0)
+        assert (await taker).group_id == 0  # head returned first
+
+    asyncio.run(run())
+
+
+def test_windowed_fifo_greedy_within_window_and_anchored_at_head() -> None:
+    async def run() -> None:
+        # capacity 10, window_fraction 0.3 -> W=3, window = [head, head+2].
+        buffer = _fifo_buffer(capacity=10, window_fraction=0.3)
+        assert buffer.window_size == 3
+        for group_id in range(4):
+            await _admit(buffer, group_id)
+        await buffer.claim_next()  # g0 -> INFLIGHT (head stuck)
+        for group_id in (1, 2, 3):
+            await _finalize(buffer, group_id)
+
+        # Greedy within the window [g0, g2]: g1 and g2 are fetched ahead of the stuck head.
+        assert (await buffer.take_finalized()).group_id == 1
+        assert (await buffer.take_finalized()).group_id == 2
+
+        # Holes count: consuming g1/g2 does NOT move the head, so g3 stays outside [g0, g2].
+        taker = asyncio.create_task(buffer.take_finalized())
+        await asyncio.sleep(0)
+        assert not taker.done()  # g3 finalized but beyond the window -> blocked
+
+        # Consuming the head slides the window; g3 becomes eligible.
+        await _finalize(buffer, 0)
+        assert (await taker).group_id == 0
+        assert (await buffer.take_finalized()).group_id == 3
+
+    asyncio.run(run())
+
+
+def test_policy_age_tolerance_accounts_for_window_lookahead() -> None:
+    # Hard bound = max_offpolicy_steps + window_lookahead_steps = 3 + 2 = 5.
+    # Age exactly at the bound is allowed; one past it raises.
+    metrics = compute_policy_age_metrics(
+        trainer_policy_version=5,
+        min_policy_versions=[0],
+        max_offpolicy_steps=3,
+        window_lookahead_steps=2,
+    )
+    assert any(metric.key == "train_batch/policy_age_max" for metric in metrics)
+    with pytest.raises(RuntimeError, match="admitted stale training data"):
+        compute_policy_age_metrics(
+            trainer_policy_version=6,
+            min_policy_versions=[0],
+            max_offpolicy_steps=3,
+            window_lookahead_steps=2,
         )

@@ -75,8 +75,8 @@ _rollout_loop[N]
     unblocked by: n/a
 
 _batcher_loop
-  consumes: the oldest FINALIZED group (group_buffer.take_finalized)
-    waits for:    the oldest group becoming FINALIZED
+  consumes: a FINALIZED group within the window (group_buffer.take_finalized, windowed FIFO)
+    waits for:    a group in the window becoming FINALIZED
     unblocked by: _rollout_loop[N] group_buffer.finalize_work()
   produces: TrainingBatch (training_batch_queue.put)
     waits for:    a free training_batch_queue slot (maxsize=1)
@@ -103,7 +103,6 @@ import torchstore as ts
 import tyro
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
-
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
@@ -927,8 +926,8 @@ class Controller(Configurable):
         On a clean close/shutdown the group_buffer drains and returns None; we forward a `None` sentinel
         so the trainer stops.
 
-        consumes: the oldest FINALIZED group (group_buffer.take_finalized)
-            waits for:    the oldest group becoming FINALIZED
+        consumes: a FINALIZED group within the window (group_buffer.take_finalized, windowed FIFO)
+            waits for:    a group in the window becoming FINALIZED
             unblocked by: _rollout_loop[N] group_buffer.finalize_work()
         produces: TrainingBatch (training_batch_queue.put)
             waits for:    a free training_batch_queue slot (maxsize=1)
@@ -990,12 +989,14 @@ class Controller(Configurable):
                 await self.generator_router.fanout("sync_log_step", step)
             step_timer = MetricsTimer()
 
-            with sl.log_trace_span("train_step"), step_timer.record(
-                "timing/step/total"
+            with (
+                sl.log_trace_span("train_step"),
+                step_timer.record("timing/step/total"),
             ):
                 # Waits for a TrainingBatch to be ready (or None on shutdown).
-                with sl.log_trace_span("wait_for_training_batch"), step_timer.record(
-                    "timing/step/wait_for_training_batch"
+                with (
+                    sl.log_trace_span("wait_for_training_batch"),
+                    step_timer.record("timing/step/wait_for_training_batch"),
                 ):
                     packed = await training_batch_queue.get()
 
@@ -1005,17 +1006,24 @@ class Controller(Configurable):
 
                 # Policy age is computed HERE, at consumption time, against the live trainer version, so it is
                 # faithful to what this step trains on -- not the version when the batch was packed.
+                # Windowed FIFO lets up to ceil(window_size / num_prompts_per_train_step) extra train
+                # steps run ahead of a straggler, so the hard tolerance is raised accordingly.
                 policy_age_panel = compute_policy_age_metrics(
                     trainer_policy_version=self._trainer_policy_version,
                     min_policy_versions=packed.min_policy_versions,
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
+                    window_lookahead_steps=math.ceil(
+                        self._group_buffer.window_size
+                        / self.config.async_loop.num_prompts_per_train_step
+                    ),
                 )
 
                 # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
                 #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optim.
-                with sl.log_trace_span("forward_backward"), step_timer.record(
-                    "timing/step/forward_backward"
+                with (
+                    sl.log_trace_span("forward_backward"),
+                    step_timer.record("timing/step/forward_backward"),
                 ):
                     # fwd_bwd on all microbatches
                     microbatch_metrics = [
@@ -1034,15 +1042,17 @@ class Controller(Configurable):
                         break
 
                 # Await trainer weight push to finish before optim step mutates the weights.
-                with sl.log_trace_span(
-                    "blocking_trainer_push_model_state_dict"
-                ), step_timer.record(
-                    "timing/step/blocking_trainer_push_model_state_dict"
+                with (
+                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_trainer_push_model_state_dict"
+                    ),
                 ):
                     push_metrics = await self._weight_sync.wait_prev_push()
 
-                with sl.log_trace_span("optim_step"), step_timer.record(
-                    "timing/step/optim"
+                with (
+                    sl.log_trace_span("optim_step"),
+                    step_timer.record("timing/step/optim"),
                 ):
                     optim_result = self._get_rank_0_value(
                         await self.trainer.optim_step.call()
@@ -1050,10 +1060,11 @@ class Controller(Configurable):
                 self._trainer_policy_version = optim_result.policy_version
 
                 # Await generator weight pull to finish before the trainer's next push.
-                with sl.log_trace_span(
-                    "blocking_generator_pull_model_state_dict"
-                ), step_timer.record(
-                    "timing/step/blocking_generator_pull_model_state_dict"
+                with (
+                    sl.log_trace_span("blocking_generator_pull_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_generator_pull_model_state_dict"
+                    ),
                 ):
                     pull_metrics = await self._weight_sync.wait_prev_pull()
 

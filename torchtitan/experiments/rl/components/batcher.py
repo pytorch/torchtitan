@@ -13,7 +13,6 @@ import math
 from dataclasses import dataclass, field, replace
 
 import torch
-
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import (
