@@ -21,7 +21,10 @@ from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import (
+    ParallelDims,
+    SpmdLayout,
+)
 from torchtitan.distributed.spmd_types import (
     resolve_dtensor_dst_placements,
     set_current_spmd_mesh,
@@ -143,7 +146,7 @@ class Module(nn.Module, Configurable):
         saved = {
             fqn: SpmdLayout(
                 # pyrefly: ignore [bad-argument-type]
-                axis_types=get_local_type(buf),
+                local_type=get_local_type(buf),
                 partition_spec=get_partition_spec(buf),
             )
             for fqn, buf in self.named_buffers()
@@ -157,7 +160,7 @@ class Module(nn.Module, Configurable):
                     layout = saved[fqn]
                     spmd.assert_type(
                         buf,
-                        layout.axis_types,
+                        layout.local_type,
                         partition_spec=layout.partition_spec,
                     )
 
@@ -335,7 +338,8 @@ class Module(nn.Module, Configurable):
         # Call get_optional_mesh with include_singleton_axes=True, so we're able to call assert_type()
         # using all axes, and defer size-1 axis filtering to spmd_types internals.
         mesh = parallel_dims.get_optional_mesh(
-            [axis.value for axis in layout.axes()], include_singleton_axes=True
+            [axis.value for axis in layout.local_type],
+            include_singleton_axes=True,
         )
         assert mesh is not None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
@@ -354,7 +358,7 @@ class Module(nn.Module, Configurable):
         with set_current_spmd_mesh(mesh):
             spmd.assert_type(
                 registered,
-                layout.axis_types,
+                layout.local_type,
                 layout.partition_spec,
             )
 
@@ -385,7 +389,7 @@ class Module(nn.Module, Configurable):
                     is_param=True,
                 )
                 continue
-            axes = spmd_layout.axes()
+            axes = tuple(spmd_layout.local_type)
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -428,7 +432,7 @@ class Module(nn.Module, Configurable):
                     is_param=False,
                 )
                 continue
-            axes = spmd_layout.axes()
+            axes = tuple(spmd_layout.local_type)
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -516,7 +520,7 @@ class Module(nn.Module, Configurable):
     ) -> Callable:
         """Apply spmd_types local_map for a local-tensor compute region."""
         return spmd.local_map(
-            out_types=(out_src.axis_types, out_src.partition_spec),
+            out_types=(out_src.local_type, out_src.partition_spec),
         )(fn)
 
     def _redistribute_inputs(
@@ -573,7 +577,7 @@ class Module(nn.Module, Configurable):
                 if spmd.is_type_checking():
                     spmd.assert_type(
                         value,
-                        src_spmd_layout.axis_types,
+                        src_spmd_layout.local_type,
                         src_spmd_layout.partition_spec,
                     )
 
@@ -668,7 +672,7 @@ class Module(nn.Module, Configurable):
             if spmd.is_type_checking():
                 spmd.assert_type(
                     outputs,
-                    out_src.axis_types,
+                    out_src.local_type,
                     out_src.partition_spec,
                 )
 
