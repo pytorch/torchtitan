@@ -136,10 +136,10 @@ class Batcher(Configurable):
             )
 
         self._groups_for_next_batch.append(training_sample_group)
-        num_trainable_prompts = sum(
+        num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
-        if num_trainable_prompts < self._num_prompts_per_train_step:
+        if num_trainable_groups < self._num_prompts_per_train_step:
             return None  # accumulate until one full batch is ready
         return self._pack_one_training_batch()
 
@@ -149,8 +149,8 @@ class Batcher(Configurable):
             training_samples,
             metrics,
             num_rollout_groups,
-            num_metric_only_prompts,
-        ) = self._take_prompt_groups()
+            num_metric_only_groups,
+        ) = self._take_groups()
         # Next-fit all taken training_samples into rows.
         rows = self._assign_training_samples_to_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
@@ -165,7 +165,7 @@ class Batcher(Configurable):
                     packed_rows,
                     training_samples,
                     num_rollout_groups,
-                    num_metric_only_prompts,
+                    num_metric_only_groups,
                 ),
             ],
             # Trainer computes policy_age from these at consume time (faithful to what it trains on).
@@ -176,33 +176,33 @@ class Batcher(Configurable):
             ],
         )
 
-    def _take_prompt_groups(
+    def _take_groups(
         self,
     ) -> tuple[list[TrainingSample], list[m.Metric], int, int]:
         """Pop accumulated groups oldest-first until `num_prompts_per_train_step` are taken."""
         taken_training_samples: list[TrainingSample] = []
         taken_metrics: list[m.Metric] = []
-        num_trainable_prompts = 0
+        num_trainable_groups = 0
         cut = 0
         for group in self._groups_for_next_batch:
-            if num_trainable_prompts >= self._num_prompts_per_train_step:
+            if num_trainable_groups >= self._num_prompts_per_train_step:
                 break
             cut += 1
 
             taken_metrics.extend(group.metrics)
             if group.training_samples:
-                num_trainable_prompts += 1
+                num_trainable_groups += 1
                 taken_training_samples.extend(group.training_samples)
 
         # surplus carried over
         self._groups_for_next_batch = self._groups_for_next_batch[cut:]
-        num_metric_only_prompts: int = cut - num_trainable_prompts
+        num_metric_only_groups: int = cut - num_trainable_groups
 
         return (
             taken_training_samples,
             taken_metrics,
-            num_trainable_prompts,
-            num_metric_only_prompts,
+            num_trainable_groups,
+            num_metric_only_groups,
         )
 
     def _assign_training_samples_to_rows(
@@ -372,7 +372,7 @@ class Batcher(Configurable):
         packed_rows: list[dict],
         training_samples: list[TrainingSample],
         num_rollout_groups: int,
-        num_metric_only_prompts: int,
+        num_metric_only_groups: int,
     ) -> list[m.Metric]:
         """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
         total_slots = len(packed_rows) * self.seq_len
@@ -392,8 +392,8 @@ class Batcher(Configurable):
                 "train_batch/num_rollout_groups", m.NoReduce(float(num_rollout_groups))
             ),
             m.Metric(
-                "train_batch/num_metric_only_prompts",
-                m.NoReduce(float(num_metric_only_prompts)),
+                "train_batch/num_metric_only_groups",
+                m.NoReduce(float(num_metric_only_groups)),
             ),
             m.Metric(
                 "train_batch/num_training_samples",
