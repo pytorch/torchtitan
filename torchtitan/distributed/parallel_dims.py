@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal
+from typing import Literal
 
 import spmd_types as spmd
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -19,7 +19,13 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
 
-__all__ = ["MeshAxisName", "ParallelDims", "SpmdLayout", "unfold_dp_axes"]
+__all__ = [
+    "MeshAxisName",
+    "ParallelDims",
+    "SpmdLayout",
+    "spmd_layout_per_axis_types",
+    "unfold_dp_axes",
+]
 
 
 class StrEnum(str, Enum):
@@ -52,67 +58,39 @@ class MeshAxisName(StrEnum):
     EFSDP = "efsdp"
 
 
-@dataclass(frozen=True, slots=True)
-class SpmdLayout:
-    """Temporary SPMD layout annotations keyed by logical mesh axis name.
+SpmdLayout = spmd.SpmdType
 
-    TODO(pianpwk): Replace this with ``spmd_types.SpmdLayout`` once that API is
-    available in TorchTitan's minimum ``spmd_types`` version.
+
+def spmd_layout_per_axis_types(
+    layout: SpmdLayout,
+) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
     """
+    Return per-axis types with PartitionSpec sharding represented as S(i).
+    e.g. {DP: R, CP: V} + PartitionSpec(None, CP) -> {DP: R, CP: S(1)}
 
-    axis_types: dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
-    partition_spec: spmd.PartitionSpec | tuple[Any, ...] | None = None
+    This is not meant as a minimal description of the SPMD layout; shard order
+    cannot be expressed. Specifically, shard order information will be lost in
+    this representation. This is purely a helper for calling spmd.redistribute,
+    which takes per-axis types (e.g. redistribute(S(1) -> R)).
 
-    def __post_init__(self) -> None:
-        sharded_dims: dict[int, MeshAxisName] = {}
-        for axis_name, axis_type in self.axis_types.items():
-            if not isinstance(axis_type, spmd.Shard):
+    This manually handles ``MeshAxisName``, because spmd_types normalization
+    functions often attempt to resolve to concrete runtime mesh axes, even
+    without a set current mesh.
+    """
+    result = dict(layout.local_type)
+    if layout.partition_spec is not None:
+        for dim, entry in enumerate(layout.partition_spec):
+            if entry is None:
                 continue
-            if self.partition_spec is not None:
-                raise ValueError(
-                    "SpmdLayout with PartitionSpec should use spmd.V instead "
-                    "of spmd.S(dim) in per-axis-types, and express tensor dim "
-                    "sharding in the provided PartitionSpec."
-                )
-            if axis_type.dim in sharded_dims:
-                raise ValueError(
-                    "SpmdLayout has multiple mesh axes sharding tensor dim "
-                    f"{axis_type.dim}; provide partition_spec to make shard "
-                    "ordering explicit."
-                )
-            sharded_dims[axis_type.dim] = axis_name
-
-    def axes(self) -> tuple[MeshAxisName, ...]:
-        return tuple(self.axis_types)
-
-    def per_axis_spmd_types(self) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
-        """
-        Return per-axis types with PartitionSpec sharding represented as S(i).
-        e.g. {DP: R, CP: V} + PartitionSpec(None, CP) -> {DP: R, CP: S(1)}
-
-        This is not meant as a minimal description of the SPMD layout; shard order
-        cannot be expressed. Specifically, shard order information will be lost in
-        this representation. This is purely a helper for calling spmd.redistribute,
-        which takes per-axis types (e.g. redistribute(S(1) -> R)).
-
-        This manually handles ``MeshAxisName``, because spmd_types normalization
-        functions often attempt to resolve to concrete runtime mesh axes, even
-        without a set current mesh.
-        """
-        result = dict(self.axis_types)
-        if self.partition_spec is not None:
-            for dim, entry in enumerate(self.partition_spec):
-                if entry is None:
-                    continue
-                axes = entry if isinstance(entry, tuple) else (entry,)
-                for axis_name in axes:
-                    if not isinstance(axis_name, MeshAxisName):
-                        raise TypeError(
-                            f"Expected MeshAxisName in partition_spec, "
-                            f"got {axis_name!r}."
-                        )
-                    result[axis_name] = spmd.S(dim)
-        return result
+            axes = entry if isinstance(entry, tuple) else (entry,)
+            for axis_name in axes:
+                if not isinstance(axis_name, MeshAxisName):
+                    raise TypeError(
+                        f"Expected MeshAxisName in partition_spec, "
+                        f"got {axis_name!r}."
+                    )
+                result[axis_name] = spmd.S(dim)
+    return result
 
 
 def unfold_dp_axes(axes: Iterable[MeshAxisName | str]) -> list[str]:
@@ -599,9 +577,9 @@ class ParallelDims:
         non_none = [p for p in placements if p is not None]
         if not non_none:
             return None
-        axes = non_none[0].axes()
+        axes = tuple(non_none[0].local_type)
         for p in non_none[1:]:
-            p_axes = p.axes()
+            p_axes = tuple(p.local_type)
             assert p_axes == axes, (
                 f"Inconsistent mesh axes within a boundary: "
                 f"{sorted(k.value for k in axes)} vs "

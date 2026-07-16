@@ -92,7 +92,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
     ) -> torch.Tensor:
         """
         SPMD type: logits S(-1)@TP, labels I@TP -> loss I@TP.
-        Non-TP axes are passed through from logits to the output.
+        For sum reduction, non-TP axes become partial scalar sums. Otherwise,
+        non-TP axes are passed through from logits to the output.
         """
         spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
         spmd.assert_type(labels, {tp_group: spmd.I})
@@ -103,9 +104,14 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             global_vocab_size,
             reduction,
         )
-        output_type = dict(spmd.get_local_type(logits))
-        output_type[tp_group] = spmd.I
-        spmd.assert_type(result, output_type)
+        out_type = spmd.get_local_type(logits)
+        if reduction == "sum":
+            out_type = {
+                axis: spmd.P if axis != tp_group else spmd.I
+                for axis in out_type.keys()
+            }
+        out_type[tp_group] = spmd.I
+        spmd.assert_type(result, out_type)
         return result
 
     @staticmethod
@@ -324,13 +330,7 @@ class BaseLoss(ABC, Configurable):
         """Return the scaled loss and any metrics computed by the loss."""
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
-            # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
-            with spmd.no_typecheck():
-                loss = loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":
-                    spmd.assert_type(
-                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
-                    )
+            loss = loss / global_valid_tokens
         return loss, {}
 
 
@@ -355,13 +355,7 @@ class CrossEntropyLoss(BaseLoss):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
-            # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
-            with spmd.no_typecheck():
-                loss = loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":
-                    spmd.assert_type(
-                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
-                    )
+            loss = loss / global_valid_tokens
         return loss, {}
 
 
@@ -413,15 +407,13 @@ def compute_logprobs(
     elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
         # spmd_types returns a plain local vocab shard. Labels are global token
         # ids, so cross_entropy needs full-vocab logits.
-        mesh = current_spmd_mesh()
-        assert mesh is not None
         # dst=I, not R: the vocab all-gather's grad is the replicated upstream
         # grad sliced back to this rank's vocab shard (I's backward), not an
         # all-reduce (R's backward). The latter over-counts by tp_degree and
         # diverges from the DTensor path above, whose redistribute grad slices.
         logits = spmd.redistribute(
             logits,
-            mesh.get_group("tp"),
+            "tp",
             src=spmd.S(-1),
             dst=spmd.I,
         )
