@@ -15,7 +15,12 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import (
+    LocalMapConfig,
+    PerAxisRedistribution,
+    ShardingConfig,
+    SpmdLayout,
+)
 
 
 DP = MeshAxisName.DP
@@ -81,9 +86,7 @@ def _shared_expert_colwise_config() -> ShardingConfig:
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
-        out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
     )
 
 
@@ -104,7 +107,6 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
         },
         in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=dense_activation_placement(tp=spmd.P),
     )
 
 
@@ -129,18 +131,23 @@ def _router_gate_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         return ShardingConfig(
             state_shardings=state,
             in_src_shardings={"input": input_layout},
-            in_dst_shardings={"input": output_layout},
+            in_redist=None
+            if enable_sp
+            else {
+                "input": PerAxisRedistribution.Config(
+                    axis=TP,
+                    src=spmd.I,
+                    dst=spmd.S(1),
+                )
+            },
             out_src_shardings=output_layout,
-            out_dst_shardings=output_layout,
         )
     else:
         input_layout = dense_activation_placement(tp=spmd.R)
         return ShardingConfig(
             state_shardings=state,
             in_src_shardings={"input": input_layout},
-            in_dst_shardings={"input": input_layout},
             out_src_shardings=input_layout,
-            out_dst_shardings=input_layout,
         )
 
 
@@ -175,19 +182,27 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
-    moe_desired_input_layouts = (
-        sp_layout if enable_ep else dense_activation_placement(tp=spmd.R)
-    )
-
     return ShardingConfig(
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
             "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
         in_src_shardings={"x_BLD": sp_layout},
-        in_dst_shardings={"x_BLD": moe_desired_input_layouts},
+        in_redist=None
+        if enable_ep
+        else {
+            "x_BLD": PerAxisRedistribution.Config(
+                axis=TP,
+                src=spmd.S(1) if enable_sp else spmd.I,
+                dst=spmd.R,
+            )
+        },
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=sp_layout,
+        out_redist=PerAxisRedistribution.Config(
+            axis=TP,
+            src=spmd.P,
+            dst=spmd.S(1) if enable_sp else spmd.I,
+        ),
     )
 
 
@@ -258,7 +273,15 @@ def set_moe_sharding_config(
         )
         shared.sharding_config = ShardingConfig(
             in_src_shardings={"x": shared_input},
-            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+            in_redist=None
+            if not enable_ep
+            else {
+                "x": PerAxisRedistribution.Config(
+                    axis=TP,
+                    src=spmd.S(1) if enable_sp else spmd.I,
+                    dst=spmd.R,
+                )
+            },
         )
 
         shared.w1.sharding_config = _shared_expert_colwise_config()
@@ -300,16 +323,16 @@ def set_moe_sharding_config(
                 enable_ep=enable_ep
             ),
         },
-        in_dst_shardings={
-            "x_BLD": experts_in_layout,
-            "topk_scores_BLK": experts_in_layout,
-            "topk_expert_ids_BLK": experts_in_layout,
-            "num_local_tokens_per_expert_E": _tokens_per_expert_placement(
-                enable_ep=enable_ep
-            ),
-        },
+        in_redist={
+            "x_BLD": PerAxisRedistribution.Config(
+                axis=TP,
+                src=spmd.I,
+                dst=spmd.S(1),
+            )
+        }
+        if enable_ep and not enable_sp
+        else None,
         out_src_shardings=experts_out_layout,
-        out_dst_shardings=experts_out_layout,
         local_map=LocalMapConfig(
             in_grad_placements=(
                 experts_in_grad_layout,
