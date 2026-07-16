@@ -116,7 +116,7 @@ from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # 
 from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (  # noqa: F401
     TestAnnotateRMSNormForRegionalInductorPass,
 )
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
 
