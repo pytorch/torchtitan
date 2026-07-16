@@ -79,16 +79,6 @@ generator under LocalTensor simulation briefly routes through
 `_run_flat_slice_with_generator`, which then invokes the same ATen operation for
 each simulated rank from a common captured generator state.
 
-Non-CUDA tensors and layouts that cannot be represented as one contiguous flat
-slice bypass this path and retain the existing DTensor RNG behavior.
-
-## Supported Shape And Mesh Scope
-
-The exact-replay path supports CUDA local tensors that correspond to one
-contiguous interval in the flattened logical tensor. For the target
-tensor-parallel initialization path, this means a 1D CUDA mesh with `Shard(0)`
-over tensors whose remaining dimensions are fully local on each rank.
-
-Replicated tensors and empty local tensors use the same path when they satisfy
-that flat-slice contract. Other placements retain the previous DTensor RNG path
-and are outside the single-device numerics guarantee.
+Exact replay currently targets 1D CUDA meshes whose local tensors form
+contiguous flat intervals, such as `Shard(0)`; other devices and layouts retain
+existing DTensor RNG behavior.
