@@ -1,4 +1,7 @@
-# Custom Datasets in torchtitan
+# Hugging Face dataset loaders
+
+> [!NOTE]
+> New pretraining pipelines should use the example-first [Grain dataset guide](../torchtitan/components/data/README.md). This page documents the existing Hugging Face text, chat, interleaved, and multimodal loaders, which remain supported.
 
 `torchtitan` is designed to work seamlessly with most HuggingFace datasets. It supports three training flavours — **pre-training** (plain text), **instruction-tuning / SFT** (chat), and **multimodal** (vision) — each with its own dataloader. Both text flavours support single-source and multi-source interleaved configurations.
 
