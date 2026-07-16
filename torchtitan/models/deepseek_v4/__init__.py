@@ -456,10 +456,12 @@ def _build_v4_layers(
                 attention=attn_cfg,
                 attention_norm=RMSNorm.Config(
                     normalized_shape=dim,
+                    eps=norm_eps,
                     param_init=_NORM_INIT,
                 ),
                 ffn_norm=RMSNorm.Config(
                     normalized_shape=dim,
+                    eps=norm_eps,
                     param_init=_NORM_INIT,
                 ),
                 feed_forward=ffn_cfg,
@@ -488,7 +490,7 @@ def _debugmodel(
     q_lora_rank = 128
     o_lora_rank = 128
     n_groups = 2
-    compress_ratios = (4, 1, 1, 4)
+    compress_ratios = (0, 0, 4, 128)
     window_size = 16
     norm_eps = 1e-6
     index_n_heads = 8
@@ -571,7 +573,9 @@ def _debugmodel(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -681,7 +685,9 @@ def _deepseek_v4_flash(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -791,7 +797,9 @@ def _deepseek_v4_pro(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,

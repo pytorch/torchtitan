@@ -3,7 +3,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
 from dataclasses import dataclass
 from functools import partial
 
@@ -24,14 +23,6 @@ def _assert_spmd_replicated_activation(tensor):
             tensor,
             {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},
         )
-
-
-def _make_hadamard_mat(n: int, device: torch.device | str | None = None) -> torch.Tensor:
-    n_pow2 = 2 ** math.ceil(math.log2(n))
-    H = torch.tensor([[1.0, 1.0], [1.0, -1.0]], device=device)
-    for _ in range(int(math.log2(n_pow2)) - 1):
-        H = torch.kron(H, torch.tensor([[1.0, 1.0], [1.0, -1.0]], device=device))
-    return H
 
 
 class Compressor(Module):
@@ -83,9 +74,9 @@ class Compressor(Module):
         rd = self.rope_head_dim
         ratio = self.compress_ratio
         dtype = x.dtype
-        x = x
-        kv = self.wkv(x)
-        score = self.wgate(x)
+        x = x.float()
+        kv = F.linear(x, self.wkv.weight.float(), self.wkv.bias)
+        score = F.linear(x, self.wgate.weight.float(), self.wgate.bias)
         if seqlen % ratio != 0:
             raise ValueError(
                 f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
@@ -144,34 +135,17 @@ class Indexer(Module):
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
         self.compressor = cfg.compressor.build()
-        self.register_buffer("hadamard_mat", torch.empty(0), persistent=False)
-
-    def _init_self_buffers(self, *, buffer_device=None):
-        if buffer_device is None:
-            buffer_device = self.hadamard_mat.device
-        with torch.device(buffer_device):
-            self.hadamard_mat = _make_hadamard_mat(
-                self.head_dim, device=buffer_device
-            )
 
     @staticmethod
-    def _rotate_activation(x, hadamard_mat):
-        x_shape = x.shape
-        dim = x.shape[-1]
-        x = x.reshape(-1, dim)
-        log_dim = math.ceil(math.log2(dim))
-        dim_padded = 2**log_dim
-        if dim != dim_padded:
-            x = F.pad(x, (0, dim_padded - dim))
-        out = F.linear(x, hadamard_mat) * (dim**-0.5)
-        return out[..., :dim].reshape(*x_shape)
+    def _rotate_activation(x):
+        from fast_hadamard_transform import hadamard_transform
+
+        return hadamard_transform(x, scale=x.size(-1) ** -0.5)
 
     def forward(
         self,
         x,
         qr,
-        compress_causal_mask,
-        compress_causal_limit,
         *,
         positions=None,
         offset: int,
@@ -186,20 +160,27 @@ class Indexer(Module):
         q_rope = self.single_rope(q_rope, positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         _assert_spmd_replicated_activation(q)
-        hadamard_mat = self.hadamard_mat.to(device=q.device, dtype=q.dtype)
-        q = self._rotate_activation(q, hadamard_mat)
+        q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)
-        k = self._rotate_activation(k, hadamard_mat)
+        k = self._rotate_activation(k)
         weights = self.weights_proj(x) * (self.softmax_scale * self.num_index_heads**-0.5)
         index_score = torch.einsum("bshd,btd->bsht", q, k)
         index_score = index_score.relu_() * weights.unsqueeze(-1)
         index_score = index_score.sum(dim=2)
 
+        ratio = self.compress_ratio
+        compress_causal_limit = (
+            torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
+        )
+        compress_causal_mask = (
+            torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1)
+            >= compress_causal_limit
+        )
         index_score = index_score + torch.where(
             compress_causal_mask, torch.finfo(q.dtype).min, 0
         )
         index_score, topk_idxs = index_score.topk(
-            min(self.index_topk, seqlen // self.compress_ratio), dim=-1
+            min(self.index_topk, seqlen // ratio), dim=-1
         )
         mask = topk_idxs >= compress_causal_limit
         compress_topk_idxs = torch.where(mask, -1, topk_idxs + offset)

@@ -225,16 +225,12 @@ class DSAFlexAttention(FlexAttention):
         query_states,
         kv_states,
         attn_sink,
-        kv_compress,
         topk_idxs,
     ):
-        if kv_compress is None:
-            raise ValueError("DSAFlexAttention requires kv_compress")
         if topk_idxs is None:
             raise ValueError("DSAFlexAttention requires topk_idxs")
 
         bsz, seqlen, _, head_dim = query_states.size()
-        kv_states = torch.cat([kv_states, kv_compress], dim=1)
         kv_len = kv_states.size(1)
 
         sink_kv = kv_states.new_zeros((bsz, 1, head_dim))
@@ -384,17 +380,8 @@ class Attention(BaseAttention):
         )
 
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
-            base = torch.arange(seqlen, device=x.device).unsqueeze(1)
-            compress_causal_limit = (base + 1) // self.compress_ratio
-            compress_causal_mask = (
-                torch.arange(
-                    seqlen // self.compress_ratio, device=x.device
-                ).unsqueeze(0)
-                >= compress_causal_limit
-            )
             compress_topk_idxs, index_score = self.indexer(
                 x.detach(), qr.detach(),
-                compress_causal_mask, compress_causal_limit,
                 positions=positions,
                 offset=kv.size(1),
             )
@@ -413,18 +400,16 @@ class Attention(BaseAttention):
             kv_compress = self.compressor_128(x, positions=positions)
 
         attn_sink_param = self.attn_sink.weight.squeeze(-1)
-        if kv_compress is None:
-            kv_compress = kv.new_empty((bsz, 0, self.head_dim))
-            _assert_spmd_attention_type(kv_compress, tp=spmd.R)
-        if compress_topk_idxs is None:
-            compress_topk_idxs = torch.empty(
-                (bsz, seqlen, 0), dtype=torch.int64, device=x.device
-            )
-            _assert_spmd_attention_type(compress_topk_idxs, tp=spmd.R)
-        topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
+        if compress_topk_idxs is not None:
+            topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
         _assert_spmd_attention_type(topk_idxs, tp=spmd.R)
+
+        if kv_compress is not None:
+            kv = torch.cat([kv, kv_compress], dim=1)
+            _assert_spmd_attention_type(kv, tp=spmd.R)
+
         attn_out = self.inner_attention(
-            q, kv, attn_sink_param, kv_compress, topk_idxs,
+            q, kv, attn_sink_param, topk_idxs,
         )
         if isinstance(attn_out, tuple):
             o, attn_lse = attn_out

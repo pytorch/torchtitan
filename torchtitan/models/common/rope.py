@@ -174,7 +174,7 @@ class ComplexRoPE(RoPE):
                 wavelen > low_freq_wavelen
             )
             freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
-        elif cfg.scaling == "yarn" and end > cfg.original_seq_len:
+        elif cfg.scaling == "yarn" and cfg.original_seq_len > 0:
             # YaRN (DeepSeek V3 style)
             beta_fast = cfg.beta_fast
             beta_slow = cfg.beta_slow

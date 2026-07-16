@@ -66,14 +66,12 @@ def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
         "query_states": query_states,
         "kv_states": replicated_activation,
         "attn_sink": _attn_sink_placement,
-        "kv_compress": replicated_activation,
         "topk_idxs": replicated_activation,
     }
     grad_placements = [
         query_states,
         dense_activation_placement(tp=spmd.P),
         _attn_sink_placement,
-        dense_activation_placement(tp=spmd.P),
         replicated_activation,
     ]
 
@@ -192,18 +190,13 @@ def set_compressor_sharding(compressor_cfg):
 def set_indexer_sharding(indexer_cfg):
     replicated_activation = dense_activation_placement(tp=spmd.R)
     indexer_cfg.sharding_config = ShardingConfig(
-        state_shardings={"hadamard_mat": _dense_param_rep},
         in_src_shardings={
             "x": replicated_activation,
             "qr": replicated_activation,
-            "compress_causal_mask": _replicated_layout,
-            "compress_causal_limit": _replicated_layout,
         },
         in_dst_shardings={
             "x": replicated_activation,
             "qr": replicated_activation,
-            "compress_causal_mask": _replicated_layout,
-            "compress_causal_limit": _replicated_layout,
         },
     )
     indexer_cfg.rope.sharding_config = ShardingConfig(
