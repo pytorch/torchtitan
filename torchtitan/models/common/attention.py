@@ -17,10 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
 import spmd_types as spmd
-
 import torch
 import torch.nn.functional as F
-from spmd_types.runtime import get_local_type, get_partition_spec
+from spmd_types.runtime import get_partition_spec
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -42,7 +41,6 @@ from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_att
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
-
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
@@ -287,12 +285,12 @@ class FlexAttention(Module):
                 kernel_options=kernel_options,
             )
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            q_local = get_local_type(q)
+            q_local = spmd.get_local_type(q)
             q_ps = get_partition_spec(q)
             spmd.assert_type(out, q_local, q_ps)
             if return_aux.lse:
                 # lse is (B, N, L) = q minus the trailing (unsharded) head dim.
-                lse_ps = None if q_ps is None else spmd.PartitionSpec(*tuple(q_ps)[:-1])
+                lse_ps = None if q_ps is None else spmd.PartitionSpec(*q_ps[:-1])
                 spmd.assert_type(aux.lse, q_local, lse_ps)
         return out, aux
 
