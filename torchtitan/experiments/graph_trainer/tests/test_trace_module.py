@@ -1588,7 +1588,8 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_document_mask_mod,
         )
-        from torchtitan.models.common.nn_modules import Linear, RMSNorm
+        from torchtitan.models.common.linear import Linear
+        from torchtitan.models.common.nn_modules import RMSNorm
         from torchtitan.models.common.rope import ComplexRoPE
         from torchtitan.models.deepseek_v3.model import Attention as DSAttention
 

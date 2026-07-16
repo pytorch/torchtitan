@@ -41,7 +41,9 @@ from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_att
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
