@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
@@ -19,7 +20,11 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.gpt_oss.model import Attention
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import (
+    LocalMapConfig,
+    PerAxisRedistribution,
+    ShardingConfig,
+)
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
@@ -37,20 +42,18 @@ _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 
 def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
     input_layout = dense_activation_placement(tp=spmd.S(2))
-    out_dst = (
-        dense_sequence_parallel_placement()
-        if output_sp
-        else dense_activation_placement(tp=spmd.I)
-    )
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.R),
         },
         in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": input_layout},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=out_dst,
+        out_redist=PerAxisRedistribution.Config(
+            axis=MeshAxisName.TP,
+            src=spmd.P,
+            dst=spmd.S(1) if output_sp else spmd.I,
+        ),
         local_map=LocalMapConfig(in_grad_placements=(input_layout,)),
     )
 
@@ -105,8 +108,12 @@ def _set_gpt_oss_layer_sharding(
         in_src_shardings={
             "x": attn_x_layout,
         },
-        in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R),
+        in_redist={
+            "x": PerAxisRedistribution.Config(
+                axis=MeshAxisName.TP,
+                src=spmd.S(1) if enable_sp else spmd.I,
+                dst=spmd.R,
+            )
         },
     )
     attention.rope.sharding_config = ShardingConfig(

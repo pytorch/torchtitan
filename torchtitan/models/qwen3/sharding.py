@@ -83,9 +83,7 @@ def _set_qwen3_layer_sharding(
         attention.qk_norm.sharding_config = ShardingConfig(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)},
             in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
-            in_dst_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
             out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
-            out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
         )
 
     # Dense FFN (non-MoE layers only)
