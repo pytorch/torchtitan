@@ -42,10 +42,10 @@ PyTorch owns the runtime behavior:
   DTensor random init keep existing local-op behavior and are outside the
   single-device numerics guarantee.
 - `aten/src/ATen/native/native_functions.yaml` defines internal generic
-  `_philox_normal_dense_slice_` and `_philox_uniform_dense_slice_` ops. Their
-  schemas contain no DTensor concepts: they accept the logical dense element
-  count, the flat start of the output slice, and an optional generator. Torchgen
-  creates their functional and out variants as required for functionalization.
+  `_philox_normal_flat_slice_` and `_philox_uniform_flat_slice_` ops. Their
+  schemas contain no DTensor concepts: they accept `total_numel`, `start_index`,
+  and an optional generator. Torchgen creates their functional and out variants
+  as required for functionalization.
 - `aten/src/ATen/native/cuda/PhiloxDistribution.cu` implements those ops by
   reusing the dense CUDA distribution launch policy, advancing the generator by
   the full dense increment, and replaying the dense kernel's Philox mapping.
@@ -136,7 +136,7 @@ collects the full model init order and consumes RNG for skipped parameters.
 - `python test/distributed/tensor/test_random_ops.py -k
   init_with_user_generator`: two tests passed, including LocalTensor mode.
 - `python test/distributed/tensor/test_random_ops.py -k test_init_ops`: two
-  tests passed, covering the existing fallback for noncontiguous dense slices.
+  tests passed, covering the existing fallback for noncontiguous flat slices.
 - The expanded TorchTitan test: three tests passed.
 - Targeted TorchTitan pre-commit hooks passed with `pyrefly-check` skipped.
   Pyrefly still fails on existing repository-wide missing dependencies and
