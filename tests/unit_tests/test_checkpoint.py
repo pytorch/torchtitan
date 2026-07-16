@@ -5,19 +5,28 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import queue as queue_lib
 import shutil
 import tempfile
 import time
 import unittest
+import uuid
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest import mock
 
+import fsspec
 import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
-from torchtitan.components.checkpoint import CheckpointManager, MODEL, ModelWrapper
+from torchtitan.components.checkpoint import (
+    CheckpointManager,
+    MODEL,
+    ModelWrapper,
+    purge_thread,
+    Terminate,
+)
 
 
 class FakeOptimizersContainer:
@@ -790,13 +799,17 @@ class TestConfigPostInit(unittest.TestCase):
             CheckpointManager.Config(exclude_from_loading=[MODEL])
 
     def test_path_normalization(self):
-        """Test that paths are stripped and must be absolute."""
-        # Test leading/trailing whitespace stripping
+        """initial_load_path is stripped and must be absolute or a remote URI."""
+        # Leading/trailing whitespace is stripped.
         cfg = CheckpointManager.Config(initial_load_path="  /absolute/path/step-100  ")
         self.assertEqual(cfg.initial_load_path, "/absolute/path/step-100")
 
-        # Test relative path rejection
-        with self.assertRaisesRegex(ValueError, "must be absolute"):
+        # A remote URI is accepted (and stripped).
+        cfg = CheckpointManager.Config(initial_load_path="  gs://bucket/run/step-100  ")
+        self.assertEqual(cfg.initial_load_path, "gs://bucket/run/step-100")
+
+        # A bare relative path is rejected.
+        with self.assertRaisesRegex(ValueError, "absolute path or a remote"):
             CheckpointManager.Config(initial_load_path="relative/path/step-100")
 
     def test_dependency_assertions(self):
@@ -819,6 +832,26 @@ class TestConfigPostInit(unittest.TestCase):
         # HF last save requires model_only
         with self.assertRaisesRegex(ValueError, "requires last_save_model_only=True"):
             CheckpointManager.Config(last_save_in_hf=True, last_save_model_only=False)
+
+    def test_remote_hf_rejected(self):
+        """HF safetensors format is not supported with remote (fsspec) paths."""
+        with self.assertRaisesRegex(
+            ValueError, "last_save_in_hf is not supported with a remote"
+        ):
+            CheckpointManager.Config(
+                folder="gs://bucket/run",
+                last_save_in_hf=True,
+                last_save_model_only=True,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "initial_load_in_hf is not supported with a remote"
+        ):
+            CheckpointManager.Config(
+                initial_load_in_hf=True,
+                initial_load_model_only=True,
+                initial_load_path="gs://bucket/run/step-1",
+            )
 
     def test_mode_normalization(self):
         """Test that async_mode is case-normalized."""
@@ -843,6 +876,66 @@ class TestConfigPostInit(unittest.TestCase):
         mock_logger.warning.assert_any_call(
             "initial_load_model_only=True has no effect without an initial_load_path."
         )
+
+
+class TestFindLoadStepRemote(unittest.TestCase):
+    """_find_load_step must discover checkpoints on a remote (fsspec) folder,
+    exercising listdir-basename reduction and per-dir metadata probing over the
+    in-memory backend (no gcsfs/network)."""
+
+    def setUp(self):
+        self.name = f"test-{uuid.uuid4().hex}"
+        self.root = f"memory://{self.name}"
+        self._fs = fsspec.filesystem("memory")
+
+    def tearDown(self):
+        if self._fs.exists(f"/{self.name}"):
+            self._fs.rm(f"/{self.name}", recursive=True)
+
+    def _write(self, url):
+        with fsspec.open(url, "wb") as f:
+            f.write(b"x")
+
+    def test_returns_max_valid_step(self):
+        self._write(f"{self.root}/step-10/.metadata")
+        self._write(f"{self.root}/step-20/.metadata")
+        # step-30 has no core metadata -> not a valid checkpoint.
+        self._write(f"{self.root}/step-30/some_shard")
+        # A non-checkpoint directory must be ignored.
+        self._write(f"{self.root}/logs/events")
+
+        manager = CheckpointManager.__new__(CheckpointManager)
+        self.assertEqual(manager._find_load_step(folder=self.root), 20)
+
+    def test_missing_folder_returns_negative_one(self):
+        manager = CheckpointManager.__new__(CheckpointManager)
+        self.assertEqual(manager._find_load_step(folder=self.root), -1)
+
+
+class TestPurgeThread(unittest.TestCase):
+    """A single failed deletion must not kill the daemon purge thread; otherwise
+    keep_latest_k would silently stop purging for the rest of the run."""
+
+    def test_survives_failed_delete(self):
+        q = queue_lib.Queue()
+        q.put("fails")
+        q.put("succeeds")
+        q.put(Terminate())
+
+        calls = []
+
+        def rmtree(path):
+            calls.append(path)
+            if path == "fails":
+                raise RuntimeError("transient backend error")
+
+        with mock.patch(
+            "torchtitan.components.checkpoint.filesystem.rmtree", side_effect=rmtree
+        ):
+            # Returns once Terminate is dequeued; must not raise.
+            purge_thread(q)
+
+        self.assertEqual(calls, ["fails", "succeeds"])
 
 
 class TestModelWrapper(unittest.TestCase):

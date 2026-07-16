@@ -17,7 +17,7 @@ import unittest
 
 import torch
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 
 _DIM = 16
 _N_HEADS = 4

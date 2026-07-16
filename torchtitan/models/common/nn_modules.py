@@ -131,23 +131,6 @@ class LayerNorm(nn.LayerNorm, Module):
         )
 
 
-class Linear(nn.Linear, Module):
-    """Configurable nn.Linear."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        in_features: int
-        out_features: int
-        bias: bool = False
-
-    def __init__(self, config: Config):
-        super().__init__(
-            config.in_features,
-            config.out_features,
-            bias=config.bias,
-        )
-
-
 class RMSNorm(nn.RMSNorm, Module):
     """Configurable nn.RMSNorm."""
 
@@ -183,7 +166,6 @@ __all__ = [
     "GroupNorm",
     "Identity",
     "LayerNorm",
-    "Linear",
     "RMSNorm",
     "SiLU",
 ]
