@@ -92,7 +92,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
             batcher=Batcher.Config(
                 batch=BatchConfig(microbatch_size=2, seq_len=2048),
             ),
-            max_offpolicy_steps=0,
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
