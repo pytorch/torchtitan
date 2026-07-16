@@ -39,8 +39,8 @@ DTensor paths consume the same global RNG stream under strict SPMD.
 - [x] Add targeted TorchTitan tests that compare dense init against direct
   DTensor init for representative stateful initializers.
 - [x] Run CPU/static checks that do not require the rebuilt PyTorch checkout.
-- [ ] After the PyTorch checkout is aligned with the rebuilt `14753d46` build,
-  run DTensor/GPU parity tests.
+- [x] After the PyTorch checkout is aligned with a rebuilt PyTorch commit, run
+  DTensor/GPU parity tests.
 
 ## Deferred Work
 
@@ -54,13 +54,14 @@ collects the full model init order and consumes RNG for skipped parameters.
 - `git diff --check`: passed.
 - `python -m py_compile tests/unit_tests/test_dtensor_stateful_rng_init.py`:
   passed.
-- `python tests/unit_tests/test_dtensor_stateful_rng_init.py`: blocked at
-  `import torch` by the PyTorch source/build mismatch described below.
+- Initial `python tests/unit_tests/test_dtensor_stateful_rng_init.py`: blocked
+  at `import torch` by the PyTorch source/build mismatch described below.
+- After rebuilding PyTorch from the trimmed DTensor RNG commit,
+  `python tests/unit_tests/test_dtensor_stateful_rng_init.py`: passed.
 
-## Current Blocker
+## Resolved Blocker
 
-The TorchTitan parity test currently cannot import torch because the editable
-PyTorch install still points at `/data/users/weif/code-review/pytorch`, but that
-source checkout no longer matches the compiled extension built from `14753d46`.
-Re-align that checkout with `14753d46` or rebuild PyTorch at the checkout's
-current HEAD before running the DTensor/GPU parity test.
+The TorchTitan parity test initially could not import torch because the editable
+PyTorch install pointed at `/data/users/weif/code-review/pytorch`, but that
+source checkout no longer matched the compiled extension built from `14753d46`.
+Rebuilding PyTorch from the trimmed DTensor RNG commit resolved the mismatch.
