@@ -4,722 +4,695 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import warnings
+"""
+XPUGraph pass for the graph trainer.
+
+This module provides an XPUGraph pass that can be applied to graph modules
+during compilation.
+"""
+
+from __future__ import annotations
+
+import operator
 from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
-import torch.fx as fx
 from torch._library.opaque_object import is_opaque_value
-from torch.fx.passes.split_module import split_module
+from torch.utils._ordered_set import OrderedSet
 
+from torchtitan.config.function import Function
 from torchtitan.tools.logging import logger
 
 
-def _get_xpu_graph_cls():
-    return getattr(torch.xpu, "XPUGraph", None)
-
-
-def _xpu_graph(graph, *, pool=None, stream=None):
-    if pool is not None and stream is not None:
-        return torch.xpu.graph(graph, pool=pool, stream=stream)
-    if pool is not None:
-        return torch.xpu.graph(graph, pool=pool)
-    if stream is not None:
-        return torch.xpu.graph(graph, stream=stream)
-    return torch.xpu.graph(graph)
-
-
-def _xpu_graph_pool_handle():
-    if hasattr(torch.xpu, "graph_pool_handle"):
-        return torch.xpu.graph_pool_handle()
-    return None
-
-
 class _XPUGraphManager:
+    """A manager to hold a shared graph pool, stream, and wrapper registry."""
+
     def __init__(self) -> None:
-        self.pool = None
-        self.stream = None
-        self.dummy_graph = None
-        self.wrappers: list[XPUGraphWrapper] = []
+        self._initialized = False
+        self._xpugraph_wrappers: list["XPUGraphWrapper"] = []
+        self._teardown_called = False
+        self.graph_pool: Any | None = None
+        self.stream: Any | None = None
 
-    def initialize(self) -> None:
-        if self.stream is None:
-            self.stream = torch.xpu.Stream()
+    def maybe_initialize(self) -> None:
+        if self._initialized:
+            return
 
-        if self.pool is None:
-            pool = _xpu_graph_pool_handle()
-            if pool is not None:
-                self.pool = pool
+        if self._teardown_called:
+            raise RuntimeError("Cannot initialize XPUGraph after teardown")
 
-    def register(self, wrapper: "XPUGraphWrapper") -> None:
-        self.wrappers.append(wrapper)
+        if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+            raise RuntimeError("XPUGraph requires an available XPU device")
+
+        required_apis = (
+            "XPUGraph",
+            "graph",
+            "graph_pool_handle",
+            "Stream",
+            "current_stream",
+            "stream",
+            "synchronize",
+        )
+        missing = [name for name in required_apis if not hasattr(torch.xpu, name)]
+        if missing:
+            raise RuntimeError(
+                "This PyTorch build does not provide the required XPUGraph APIs: "
+                + ", ".join(f"torch.xpu.{name}" for name in missing)
+            )
+
+        # Create a global XPUGraph memory pool to allow memory reuse across
+        # XPUGraphs.
+        self.graph_pool = torch.xpu.graph_pool_handle()
+
+        # Create a global XPU stream for graph capture. We need to use a single
+        # stream for all allocations to the memory pool; otherwise, allocations
+        # made on separate streams cannot be reused through the shared pool.
+        self.stream = torch.xpu.Stream()
+        self._initialized = True
+
+    def register_wrapper(self, wrapper: "XPUGraphWrapper") -> None:
+        if self._teardown_called:
+            raise RuntimeError("Cannot register a new XPUGraph after teardown")
+        self._xpugraph_wrappers.append(wrapper)
 
     def teardown(self) -> None:
-        for wrapper in self.wrappers:
-            wrapper.reset()
+        """Destroy all XPUGraphs and release the XPUGraph memory pool.
 
-        self.wrappers.clear()
-        self.pool = None
+        Note [explicit XPUGraph teardown]
+        XPUGraph can retain references to communication and runtime resources,
+        which may prevent clean process-group teardown. Explicitly release the
+        XPUGraph objects held by ``_XPUGraphManager`` and ``XPUGraphWrapper``.
+        If XPUGraph is not used, this is a no-op.
+        """
+        if not self._initialized:
+            return
+
+        if self._teardown_called:
+            logger.warning("xpugraph manager teardown called twice")
+            return
+
+        # Ensure no replay or capture is still using the graph objects.
+        torch.xpu.synchronize()
+
+        for wrapper in self._xpugraph_wrappers:
+            wrapper.teardown()
+        self._xpugraph_wrappers.clear()
+
         self.stream = None
-        self.dummy_graph = None
+        self.graph_pool = None
+        self._teardown_called = True
 
 
 _xg_manager = _XPUGraphManager()
 
 
 def xpugraph_teardown() -> None:
-    """Synchronize XPU work and release manager-owned XPUGraph state.
+    """Destroy all XPUGraphs and release the XPUGraph memory pool.
 
-    GraphTrainer imports and calls this function during shutdown. It is safe
-    to call when XPU is unavailable or when no XPUGraphs were captured.
+    See Note [explicit XPUGraph teardown] for more details.
     """
-    if torch.xpu.is_available():
-        try:
-            torch.xpu.synchronize()
-        except Exception as exc:
-            logger.warning(
-                "Failed to synchronize XPU during XPUGraph teardown: %s",
-                exc,
+    _xg_manager.teardown()
+
+
+# XPU does not currently expose the CUDA graph kernel-annotation APIs used by
+# ``torch.cuda._graph_annotations``. Keep no-op equivalents so configuration
+# code can use the same interface for CUDA and XPU without importing CUDA-only
+# modules.
+def get_xpugraph_annotations() -> dict[int, list]:
+    """Return all kernel annotations accumulated across XPUGraph captures.
+
+    XPU graph kernel annotation capture is not currently exposed, so this
+    always returns an empty mapping.
+    """
+    return {}
+
+
+def enable_xpugraph_annotations() -> None:
+    """Enable kernel annotation capture on subsequent XPUGraph recordings.
+
+    XPU graph kernel annotation capture is not currently exposed, so this is a
+    no-op that logs a warning.
+    """
+    logger.warning(
+        "XPUGraph kernel annotations are not currently supported; "
+        "continuing without annotations."
+    )
+
+
+def xpugraph_annotate_trace_post_processor() -> Function.Config:
+    """Return a no-op XPUGraph profiler trace post-processor.
+
+    Attach this to ``Profiler.Config.trace_post_processor`` to preserve the
+    same configuration shape as the CUDAGraph path. XPU graph kernel annotation
+    metadata is not currently available, so the trace is left unchanged.
+    """
+    return Function.Config(fn=_xpugraph_annotate_trace_file)
+
+
+def _xpugraph_annotate_trace_file(trace_path: str) -> None:
+    """Post-process a profiler trace with XPUGraph kernel annotations.
+
+    XPU graph kernel annotation metadata is not currently available, so this is
+    a no-op.
+    """
+    del trace_path
+
+
+def insert_kernel_annotations_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Insert kernel annotations at module boundaries in the FX graph.
+
+    XPU graph kernel annotation capture is not currently exposed, so this pass
+    returns the graph unchanged.
+    """
+    del example_inputs
+    return gm
+
+
+class XPUGraphWrapper:
+    """Wrap a callable with XPUGraph.
+
+    It warms up the callable, records XPUGraph, and replays XPUGraph during
+    runtime. It also handles static input tensors, which are tensors whose
+    addresses do not change across runs.
+
+    Args:
+        runnable: The callable to wrap with XPUGraph. This can be a
+            ``torch.fx.GraphModule`` when used in an FX graph pass, or any
+            callable when used in PyTorch eager mode.
+        example_inputs: A list of example inputs to the callable.
+        static_input_indices: Indices identifying static input tensors. Static
+            inputs are tensors whose memory addresses remain constant across
+            invocations. Common examples include model weights, buffers, and
+            outputs from previously wrapped XPUGraph functions.
+        should_check_address: Whether to verify static input tensor addresses
+            at runtime. This should only be enabled for debugging purposes.
+        tensor_input_indices: Indices of tensor-valued inputs. This is useful
+            when the argument list also contains opaque values such as a
+            ``DeviceMesh``.
+    """
+
+    def __init__(
+        self,
+        runnable: Callable,
+        example_inputs: Sequence[Any],
+        static_input_indices: Sequence[int] | None = None,
+        should_check_address: bool = False,
+        tensor_input_indices: Sequence[int] | None = None,
+    ) -> None:
+        _xg_manager.maybe_initialize()
+        _xg_manager.register_wrapper(self)
+
+        self._runnable = runnable
+        self._static_input_indices = OrderedSet(static_input_indices or [])
+
+        if tensor_input_indices is not None:
+            self._input_indices_to_copy = [
+                i
+                for i in tensor_input_indices
+                if i not in self._static_input_indices
+            ]
+        else:
+            self._input_indices_to_copy = [
+                i
+                for i, inp in enumerate(example_inputs)
+                if isinstance(inp, torch.Tensor)
+                and i not in self._static_input_indices
+            ]
+
+        self._xpugraph: Any | None = None
+        self._has_warmup = False
+        self._args: tuple[Any, ...] | None = None
+        self._input_addresses: list[int | None] = []
+        self._output: Any = None
+
+        # Debug-only option that checks static input tensor addresses at
+        # runtime.
+        self._should_check_address = should_check_address
+        self._gm = runnable if isinstance(runnable, torch.fx.GraphModule) else None
+
+    def print_readable(self, *args, **kwargs):
+        """Delegate to the inner GraphModule's ``print_readable`` method."""
+        if self._gm is None:
+            raise AssertionError(
+                "print_readable requires a GraphModule runnable"
+            )
+        return self._gm.print_readable(*args, **kwargs)
+
+    def _copy_non_static_inputs(self, *args: Any) -> None:
+        if self._args is None:
+            raise AssertionError(
+                "XPUGraph input buffers have not been initialized"
             )
 
-    _xg_manager.teardown()
-    logger.info("XPUGraph teardown completed.")
+        for i in self._input_indices_to_copy:
+            dst = self._args[i]
+            src = args[i]
+
+            if not isinstance(dst, torch.Tensor) or not isinstance(
+                src, torch.Tensor
+            ):
+                raise TypeError(
+                    f"Expected tensor input at index {i}, got "
+                    f"{type(src).__name__} -> {type(dst).__name__}"
+                )
+
+            dst.copy_(src)
+
+    def _validate_inputs(self, inputs: Sequence[Any]) -> None:
+        """Validate that all inputs are of supported types.
+
+        Opaque inputs, such as ``DeviceMesh`` values from SimpleFSDP/DTensor,
+        are inherently static and already excluded from copying because only
+        tensors appear in ``_input_indices_to_copy``. No special handling is
+        needed beyond accepting them here.
+        """
+        for i, inp in enumerate(inputs):
+            if isinstance(
+                inp,
+                (
+                    torch.Tensor,
+                    int,
+                    float,
+                    torch._C.Generator,
+                ),
+            ):
+                continue
+
+            if is_opaque_value(inp):
+                continue
+
+            raise ValueError(
+                "args must be tensor, integer (for dynamic shapes), "
+                "float (for scalar constants), Generator, or opaque object, "
+                f"but found {type(inp)} with value {inp!r} at index {i}"
+            )
+
+    def _check_static_inputs_address(self) -> None:
+        if self._args is None:
+            raise AssertionError(
+                "XPUGraph input buffers have not been initialized"
+            )
+
+        for i in self._static_input_indices:
+            value = self._args[i]
+
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"Static input index {i} is not a tensor")
+
+            actual = value.data_ptr()
+            expected = self._input_addresses[i]
+
+            if expected != actual:
+                raise AssertionError(
+                    "Expected the same static tensor address but found "
+                    f"{expected} != {actual} at input index {i}"
+                )
+
+    def _warmup(self, *args: Any) -> Any:
+        """Warm up the callable on the shared XPU capture stream."""
+        capture_stream = _xg_manager.stream
+        if capture_stream is None:
+            raise AssertionError(
+                "XPUGraph capture stream is not initialized"
+            )
+
+        current_stream = torch.xpu.current_stream()
+        capture_stream.wait_stream(current_stream)
+
+        # Warm up lazy kernels and communication libraries on the same side
+        # stream that will later be used for XPUGraph capture.
+        with torch.xpu.stream(capture_stream):
+            out = self._runnable(*args)
+
+        current_stream.wait_stream(capture_stream)
+        return out
+
+    def __call__(self, *args: Any) -> Any:
+        if not self._has_warmup:
+            self._has_warmup = True
+            return self._warmup(*args)
+
+        if self._xpugraph is None:
+            self._validate_inputs(args)
+
+            self._args = tuple(args)
+            self._input_addresses = [
+                value.data_ptr()
+                if isinstance(value, torch.Tensor)
+                else None
+                for value in args
+            ]
+
+            graph_pool = _xg_manager.graph_pool
+            capture_stream = _xg_manager.stream
+
+            if graph_pool is None or capture_stream is None:
+                raise AssertionError(
+                    "XPUGraph manager is not initialized"
+                )
+
+            self._xpugraph = torch.xpu.XPUGraph()
+
+            with torch.xpu.graph(
+                self._xpugraph,
+                pool=graph_pool,
+                stream=capture_stream,
+            ):
+                # ``output`` is managed by PyTorch's XPUGraph memory pool.
+                self._output = self._runnable(*args)
+
+        if self._should_check_address:
+            self._check_static_inputs_address()
+
+        self._copy_non_static_inputs(*args)
+        self._xpugraph.replay()
+        return self._output
+
+    def teardown(self) -> None:
+        """Destroy XPUGraph and release references.
+
+        See Note [explicit XPUGraph teardown] for more details.
+        """
+        if self._xpugraph is not None:
+            reset = getattr(self._xpugraph, "reset", None)
+            if reset is not None:
+                reset()
+
+        self._xpugraph = None
+        self._args = None
+        self._input_addresses = []
+        self._output = None
 
 
-def _is_xpu_tensor(value: Any) -> bool:
-    return isinstance(value, torch.Tensor) and value.device.type == "xpu"
+def _has_dynamic_shape(val: Any) -> bool:
+    """True if ``val`` contains a tensor with a symbolic shape.
 
+    A symbolic dimension is represented by ``torch.SymInt`` rather than a
+    concrete integer.
+    """
+    if isinstance(val, torch.Tensor):
+        return any(
+            isinstance(size, torch.SymInt)
+            for size in val.shape
+        )
 
-def _is_tensor_input(value: Any) -> bool:
-    if not isinstance(value, torch.Tensor):
-        return False
-
-    try:
-        if is_opaque_value(value):
-            return False
-    except Exception:
-        pass
-
-    return value.device.type == "xpu"
-
-
-def _target_name(target: Any) -> str:
-    if isinstance(target, str):
-        return target
-    return getattr(target, "__name__", str(target))
-
-
-def _target_qualname(target: Any) -> str:
-    module = getattr(target, "__module__", "")
-    name = getattr(target, "__name__", str(target))
-    return f"{module}.{name}" if module else name
-
-
-def _node_target_text(node: fx.Node) -> str:
-    return _target_qualname(node.target)
-
-
-def _is_c10d_functional_node(node: fx.Node) -> bool:
-    if node.op != "call_function":
-        return False
-
-    target_text = _node_target_text(node)
-
-    return (
-        "_c10d_functional" in target_text
-        or "reduce_scatter_tensor" in target_text
-        or "all_gather_into_tensor" in target_text
-        or "all_reduce" in target_text
-        or "wait_tensor" in target_text
-    )
-
-
-def contains_c10d_functional(gm: fx.GraphModule) -> bool:
-    if "_c10d_functional" in gm.code:
-        return True
-
-    for node in gm.graph.nodes:
-        if _is_c10d_functional_node(node):
-            return True
+    if isinstance(val, (list, tuple)):
+        return any(_has_dynamic_shape(item) for item in val)
 
     return False
 
 
-_XPUGRAPH_UNSUPPORTED_OPS = {
-    torch.ops.aten.index_put_.default,
-    torch.ops.aten.embedding_dense_backward.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-}
+def _iter_tensors(val: Any) -> list[torch.Tensor]:
+    """Flatten ``val`` (tensor/list/tuple) to the tensors it contains."""
+    if isinstance(val, torch.Tensor):
+        return [val]
+
+    if isinstance(val, (list, tuple)):
+        return [
+            tensor
+            for item in val
+            for tensor in _iter_tensors(item)
+        ]
+
+    return []
 
 
-_FLEX_ATTENTION_OPS = {
-    "flex_attention",
-    "flex_attention_backward",
-}
+def _is_xpu_collective_target(target: Any) -> bool:
+    """Return True for c10d functional or direct c10d collective operators."""
+    target_name = str(target)
 
-
-def _is_flex_attention_node(node: fx.Node) -> bool:
-    target_text = _node_target_text(node)
-    return any(op_name in target_text for op_name in _FLEX_ATTENTION_OPS)
-
-
-def _is_backward_node(node: fx.Node) -> bool:
-    target_text = _node_target_text(node)
-    name = node.name
-
-    return (
-        "backward" in target_text
-        or "backward" in name
-        or "embedding_dense_backward" in target_text
-        or target_text.endswith("_backward.default")
+    return target_name.startswith(
+        (
+            "_c10d_functional.",
+            "c10d_functional.",
+            "c10d.",
+        )
     )
 
 
-def _is_backward_graph(gm: fx.GraphModule) -> bool:
-    if "backward" in gm.code or "embedding_dense_backward" in gm.code:
+def _is_known_xpugraph_unsafe_target(target: Any) -> bool:
+    """Return True for an operator that is unsafe for XPUGraph capture."""
+    if _is_xpu_collective_target(target):
+        # XCCL/c10d graph capture is not generally available. Keeping the
+        # collective outside a whole-graph capture requires regional capture;
+        # this file intentionally implements only all-or-nothing capture.
         return True
 
-    for node in gm.graph.nodes:
-        if _is_backward_node(node):
-            return True
+    if target == torch.ops.aten._local_scalar_dense.default:
+        # ``.item()``/``.tolist()`` require a device-to-host synchronization
+        # that an XPUGraph replay cannot repeat.
+        return True
+
+    if target == torch.ops.aten.index_put_.default:
+        # This path can trigger an XPU event wait during graph capture.
+        return True
 
     return False
 
 
-def _is_cpu_xpu_copy_node(node: fx.Node) -> bool:
+def is_xpugraphable(
+    node: torch.fx.Node,
+    dyn_map: dict[torch.fx.Node, bool] | None = None,
+) -> bool:
+    """Whether ``node`` can be captured by an XPU graph.
+
+    This is the per-node predicate used by the whole-graph build-time gate
+    (:func:`is_full_xpugraphable`). ``dyn_map``, when provided, is a precomputed
+    ``{node: has_dynamic_shape(output)}`` map, so each dynamic-shape check is an
+    O(1) lookup instead of being recomputed for every consumer.
+    """
     if node.op != "call_function":
+        return True
+
+    # ``getitem`` only indexes a multi-output operation's result, so it
+    # inherits its parent's XPUGraph ability rather than being judged on its
+    # own tensor metadata.
+    if node.target is operator.getitem:
+        parent = node.args[0]
+
+        return (
+            not isinstance(parent, torch.fx.Node)
+            or is_xpugraphable(parent, dyn_map)
+        )
+
+    if _is_known_xpugraph_unsafe_target(node.target):
         return False
 
-    target_text = _node_target_text(node)
+    # Cross-device copies from or to unpinned CPU memory are not replayable.
+    # The CPU side must be pinned for an asynchronous H2D/D2H copy.
+    if node.target in (
+        torch.ops.aten.copy_.default,
+        torch.ops.aten._to_copy.default,
+    ):
+        output_val = node.meta.get("val")
 
-    if "_to_copy" not in target_text and "to.device" not in target_text:
+        if isinstance(output_val, torch.Tensor):
+            for input_node in node.all_input_nodes:
+                input_val = input_node.meta.get("val")
+
+                if (
+                    isinstance(input_val, torch.Tensor)
+                    and input_val.device.type
+                    != output_val.device.type
+                ):
+                    cpu_val = (
+                        output_val
+                        if output_val.device.type == "cpu"
+                        else input_val
+                    )
+
+                    if (
+                        cpu_val.device.type == "cpu"
+                        and not cpu_val.is_pinned()
+                    ):
+                        return False
+
+    # Reject an operation with a dynamic input or output shape.
+    def _dyn(n: torch.fx.Node) -> bool:
+        if dyn_map is not None:
+            return dyn_map.get(n, False)
+
+        return _has_dynamic_shape(n.meta.get("val"))
+
+    if _dyn(node) or any(
+        _dyn(inp) for inp in node.all_input_nodes
+    ):
         return False
 
-    device = node.kwargs.get("device", None)
-    if device is None:
+    tensors = _iter_tensors(node.meta.get("val"))
+
+    for input_node in node.all_input_nodes:
+        tensors.extend(
+            _iter_tensors(input_node.meta.get("val"))
+        )
+
+    # An XPUGraph can contain XPU work and supported pinned CPU transfers.
+    # Reject work targeting another accelerator backend.
+    if any(
+        tensor.device.type not in ("xpu", "cpu")
+        for tensor in tensors
+    ):
         return False
 
-    device_text = str(device)
-    return "cpu" in device_text or "xpu" in device_text
-
-
-def is_xpugraph_compatible(gm: fx.GraphModule) -> bool:
-    if contains_c10d_functional(gm):
+    # Pure-CPU operations execute on the host during capture and would replay
+    # stale results because XPUGraph only records XPU device work.
+    if tensors and all(
+        tensor.device.type == "cpu"
+        for tensor in tensors
+    ):
         return False
-
-    for node in gm.graph.nodes:
-        if node.op != "call_function":
-            continue
-
-        if _is_c10d_functional_node(node):
-            return False
-
-        if _is_backward_node(node):
-            return False
-
-        if _is_flex_attention_node(node):
-            return False
-
-        if _is_cpu_xpu_copy_node(node):
-            return False
-
-        if node.target in _XPUGRAPH_UNSUPPORTED_OPS:
-            return False
-
-        target_text = _node_target_text(node)
-
-        if "embedding_dense_backward" in target_text:
-            return False
-
-        if "_scaled_dot_product_flash_attention" in target_text:
-            return False
-
-        if "index_put_" in target_text:
-            return False
 
     return True
 
 
-def has_xpu_kernel_candidate(gm: fx.GraphModule) -> bool:
-    compute_keywords = (
-        "aten.mm",
-        "aten.addmm",
-        "aten.bmm",
-        "aten.matmul",
-        "aten.linear",
+def is_full_xpugraphable(
+    gm: torch.fx.GraphModule,
+) -> bool:
+    """True if every node is XPUGraphable.
+
+    A True result means the graph can be captured as one full XPU graph.
+    """
+    dyn_map = {
+        node: _has_dynamic_shape(node.meta.get("val"))
+        for node in gm.graph.nodes
+    }
+
+    return all(
+        is_xpugraphable(node, dyn_map)
+        for node in gm.graph.nodes
     )
 
-    for node in gm.graph.nodes:
-        if node.op != "call_function":
-            continue
 
-        target_text = _node_target_text(node)
+def is_xpugraph_compatible(
+    gm: torch.fx.GraphModule,
+) -> bool:
+    """Whole-graph XPUGraph gate.
 
-        if any(keyword in target_text for keyword in compute_keywords):
-            return True
+    Returns True only when the graph has no XPUGraph-unsafe operation. A
+    preceding pass can also store its pre-collapse compatibility verdict in
+    ``gm.meta['xpugraph_compatible']`` when later graph transformations would
+    otherwise hide the original operations from this scan.
+    """
+    if gm.meta.get("xpugraph_compatible") is False:
+        logger.warning(
+            "Skipping xpugraph: "
+            "gm.meta['xpugraph_compatible'] is False."
+        )
+        return False
 
-    return False
+    return is_full_xpugraphable(gm)
 
 
 def get_static_input_indices(
-    gm: fx.GraphModule,
+    gm: torch.fx.GraphModule,
     is_forward: bool,
 ) -> list[int]:
-    try:
-        from torch._guards import TracingContext
+    """Get indices of graph inputs that are static input tensors.
 
-        tracing_context = TracingContext.try_get()
-        if tracing_context is None:
-            return []
+    Static input tensor addresses do not change across runs. Examples include
+    weights, buffers, and outputs of previously XPUGraph-wrapped functions.
+    """
+    from torch._inductor.utils import count_tangents
 
-        fw_metadata = getattr(tracing_context, "fw_metadata", None)
-        if fw_metadata is None:
-            return []
+    static_input_indices: list[int] = []
 
-        static_input_indices = getattr(
-            fw_metadata,
-            "static_input_indices",
-            None,
+    if (
+        is_forward
+        and (
+            tracing_context
+            := torch._guards.TracingContext.try_get()
         )
-        if static_input_indices is None:
-            return []
-
-        if is_forward:
-            return list(static_input_indices)
-
-        count_tangents = getattr(fw_metadata, "count_tangents", 0)
-        return [
-            idx
-            for idx in static_input_indices
-            if idx < count_tangents
-        ]
-
-    except Exception:
-        return []
-
-
-class XPUGraphWrapper:
-    def __init__(
-        self,
-        runnable: Callable[..., Any],
-        example_inputs: Sequence[Any] | None = None,
-        static_input_indices: Sequence[int] | None = None,
-        should_check_address: bool = True,
-        tensor_input_indices: Sequence[int] | None = None,
-    ) -> None:
-        self._runnable = runnable
-        self._example_inputs = (
-            tuple(example_inputs)
-            if example_inputs is not None
-            else None
-        )
-        self._static_input_indices = set(static_input_indices or [])
-        self._should_check_address = should_check_address
-
-        self._tensor_input_indices = (
-            list(tensor_input_indices)
-            if tensor_input_indices is not None
-            else None
+        and hasattr(tracing_context, "fw_metadata")
+    ):
+        # For forward, rely on graph capture, such as Dynamo or export, to
+        # provide the correct static input indices in the tracing context.
+        # Typical examples include weights and buffers.
+        static_input_indices = list(
+            tracing_context.fw_metadata.static_input_indices
         )
 
-        self._input_indices_to_copy: list[int] = []
-        self._static_inputs: list[Any] | None = None
-
-        self._xpugraph = None
-        self._output = None
-
-        self._warmed_up = False
-        self._captured = False
-        self._disabled = False
-
-        _xg_manager.register(self)
-
-    def reset(self) -> None:
-        graph = self._xpugraph
-
-        if graph is not None:
-            reset = getattr(graph, "reset", None)
-
-            if callable(reset):
-                try:
-                    reset()
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to reset XPUGraph during teardown: %s",
-                        exc,
-                    )
-
-        self._xpugraph = None
-        self._output = None
-        self._warmed_up = False
-        self._captured = False
-        self._static_inputs = None
-        self._input_indices_to_copy.clear()
-
-    def _disable(self, reason: str) -> None:
-        self._disabled = True
-        logger.warning(
-            "Disabling XPUGraph wrapper and falling back to eager: %s",
-            reason,
-        )
-
-    def _fallback_for_capture_error(
-        self,
-        exc: RuntimeError,
-    ) -> bool:
-        msg = str(exc)
-
-        fallback_messages = (
-            "wait method cannot be used for an event associated "
-            "with a command graph",
-            "XPU Graph is empty",
-            "graph is empty",
-        )
-
-        return any(message in msg for message in fallback_messages)
-
-    def _infer_tensor_input_indices(
-        self,
-        args: Sequence[Any],
-    ) -> list[int]:
-        if self._tensor_input_indices is not None:
-            return list(self._tensor_input_indices)
-
-        return [
-            idx
-            for idx, value in enumerate(args)
-            if _is_tensor_input(value)
-        ]
-
-    def _initialize_static_inputs(
-        self,
-        args: Sequence[Any],
-    ) -> None:
-        self._tensor_input_indices = self._infer_tensor_input_indices(args)
-
-        static_inputs = list(args)
-
-        self._input_indices_to_copy = [
-            idx
-            for idx in self._tensor_input_indices
-            if idx not in self._static_input_indices
-        ]
-
-        for idx in self._input_indices_to_copy:
-            static_inputs[idx] = args[idx].clone()
-
-        self._static_inputs = static_inputs
-
-    def _copy_non_static_inputs(
-        self,
-        args: Sequence[Any],
-    ) -> None:
-        assert self._static_inputs is not None
-
-        for idx in self._input_indices_to_copy:
-            self._static_inputs[idx].copy_(args[idx])
-
-    def _check_static_input_addresses(
-        self,
-        args: Sequence[Any],
-    ) -> bool:
-        if not self._should_check_address:
-            return True
-
-        if self._static_inputs is None:
-            return True
-
-        for idx in self._static_input_indices:
-            if idx >= len(args):
-                continue
-
-            arg = args[idx]
-            static_arg = self._static_inputs[idx]
-
-            if not isinstance(arg, torch.Tensor):
-                continue
-
-            if not isinstance(static_arg, torch.Tensor):
-                continue
-
-            if arg.data_ptr() != static_arg.data_ptr():
-                warnings.warn(
-                    "XPUGraph static input address changed. "
-                    "Falling back to eager for this wrapper.",
-                    stacklevel=2,
-                )
-                return False
-
-        return True
-
-    def _warmup(self, args: Sequence[Any]) -> Any:
-        assert self._static_inputs is not None
-        assert _xg_manager.stream is not None
-
-        current_stream = torch.xpu.current_stream()
-
-        _xg_manager.stream.wait_stream(current_stream)
-
-        with torch.xpu.stream(_xg_manager.stream):
-            self._output = self._runnable(*self._static_inputs)
-
-        current_stream.wait_stream(_xg_manager.stream)
-
-        self._warmed_up = True
-        return self._output
-
-    def _capture(self, args: Sequence[Any]) -> Any:
-        assert self._static_inputs is not None
-        assert _xg_manager.stream is not None
-
-        graph_cls = _get_xpu_graph_cls()
-
-        if graph_cls is None:
-            self._disable("torch.xpu.XPUGraph is not available.")
-            return self._runnable(*args)
-
-        self._copy_non_static_inputs(args)
-
-        self._xpugraph = graph_cls()
-
-        current_stream = torch.xpu.current_stream()
-
-        try:
-            _xg_manager.stream.wait_stream(current_stream)
-
-            with _xpu_graph(
-                self._xpugraph,
-                pool=_xg_manager.pool,
-                stream=_xg_manager.stream,
-            ):
-                self._output = self._runnable(*self._static_inputs)
-
-            current_stream.wait_stream(_xg_manager.stream)
-
-            self._captured = True
-            return self._output
-
-        except RuntimeError as exc:
-            if self._fallback_for_capture_error(exc):
-                self._disable(str(exc))
-                return self._runnable(*args)
-
-            raise
-
-    def _replay(self, args: Sequence[Any]) -> Any:
-        assert self._static_inputs is not None
-        assert self._xpugraph is not None
-        assert _xg_manager.stream is not None
-
-        if not self._check_static_input_addresses(args):
-            self._disable("static input address changed")
-            return self._runnable(*args)
-
-        self._copy_non_static_inputs(args)
-
-        current_stream = torch.xpu.current_stream()
-
-        _xg_manager.stream.wait_stream(current_stream)
-        self._xpugraph.replay()
-        current_stream.wait_stream(_xg_manager.stream)
-
-        return self._output
-
-    def __call__(self, *args: Any) -> Any:
-        if self._disabled:
-            return self._runnable(*args)
-
-        if not torch.xpu.is_available():
-            return self._runnable(*args)
-
-        if self._static_inputs is None:
-            init_args = (
-                self._example_inputs
-                if self._example_inputs is not None
-                else args
-            )
-            self._initialize_static_inputs(init_args)
-
-        _xg_manager.initialize()
-
-        if self._captured:
-            return self._replay(args)
-
-        if not self._warmed_up:
-            return self._warmup(args)
-
-        return self._capture(args)
-
-
-def regional_xpugraph_pass(
-    gm: fx.GraphModule,
-    is_forward: bool,
-) -> fx.GraphModule:
-    region_idx = 0
-
-    def split_callback(node: fx.Node) -> str:
-        nonlocal region_idx
-
-        if node.op in ("placeholder", "output"):
-            return "root"
-
-        if _is_c10d_functional_node(node):
-            name = f"eager_collective_{region_idx}"
-            region_idx += 1
-            return name
-
-        return f"xpu_region_{region_idx}"
-
-    split_gm = split_module(gm, gm, split_callback)
-
-    applied_regions = 0
-    candidate_regions = 0
-    skipped_no_kernel_regions = 0
-    skipped_backward_regions = 0
-    skipped_incompatible_regions = 0
-
-    for name, submodule in split_gm.named_modules():
-        if not isinstance(submodule, fx.GraphModule):
-            continue
-
-        if "xpu_region" not in name:
-            continue
-
-        candidate_regions += 1
-
-        if _is_backward_graph(submodule):
-            logger.info(
-                "Skipping regional xpugraph submodule %s "
-                "because it is backward.",
-                name,
-            )
-            skipped_backward_regions += 1
-            continue
-
-        if not has_xpu_kernel_candidate(submodule):
-            logger.info(
-                "Skipping regional xpugraph submodule %s because it "
-                "has no large XPU kernel candidate.",
-                name,
-            )
-            skipped_no_kernel_regions += 1
-            continue
-
-        if not is_xpugraph_compatible(submodule):
-            logger.info(
-                "Skipping regional xpugraph submodule %s because "
-                "it is not xpugraph compatible.",
-                name,
-            )
-            skipped_incompatible_regions += 1
-            continue
-
-        submodule.forward = XPUGraphWrapper(
-            submodule.forward,
-            example_inputs=None,
-            static_input_indices=[],
-            tensor_input_indices=None,
-        )
-
-        applied_regions += 1
-        logger.info(
-            "Applied xpugraph to regional submodule %s.",
-            name,
-        )
-
-    logger.info(
-        "Applied xpugraph pass to %s regional compute partition(s). "
-        "candidate_regions=%s, skipped_no_kernel_regions=%s, "
-        "skipped_backward_regions=%s, "
-        "skipped_incompatible_regions=%s",
-        applied_regions,
-        candidate_regions,
-        skipped_no_kernel_regions,
-        skipped_backward_regions,
-        skipped_incompatible_regions,
-    )
-
-    return split_gm
+    elif not is_forward:
+        # For backward, saved tensors are static inputs because they are outputs
+        # of the XPUGraph-wrapped forward run. In a PT2-generated backward
+        # GraphModule, saved tensors are the leading arguments. Count the saved
+        # tensors and use their leading indices as the static input indices.
+        fixed = count_tangents(gm)
+        static_input_indices = list(range(fixed))
+
+    return static_input_indices
 
 
 def xpugraph_pass(
-    gm: fx.GraphModule,
-    example_inputs: Sequence[Any] | None = None,
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
     *,
     is_forward: bool = True,
-) -> fx.GraphModule:
-    """Apply full-graph or regional XPUGraph capture.
+    static_input_indices: list[int] | None = None,
+    tensor_input_indices: list[int] | None = None,
+) -> torch.fx.GraphModule:
+    """Apply XPUGraph.
 
-    GraphTrainer supplies ``example_inputs`` to graph passes. Those inputs can
-    contain fake tensors, so this pass intentionally does not retain them for
-    XPUGraph capture. Static buffers are initialized during the first real
-    runtime invocation instead.
+    This pass wraps the forward function with XPUGraph during compilation and
+    does not record XPUGraph until runtime.
+
+    - On the first run, it warms up operators and runtime libraries.
+    - On the second run, it records XPUGraph and replays XPUGraph.
+    - On subsequent runs, it replays XPUGraph.
 
     Args:
-        gm: FX graph module to transform.
-        example_inputs: GraphTrainer pass inputs. These are intentionally
-            ignored by the XPUGraph runtime wrapper.
-        is_forward: Whether this graph represents a forward graph.
+        gm: The graph module to wrap.
+        example_inputs: Example inputs used to determine tensor inputs for
+            copying during replay.
+        is_forward: Whether this is a forward graph (True) or backward graph
+            (False). This is used to infer which inputs have stable tensor
+            addresses when ``static_input_indices`` is not provided. It
+            defaults to True because GraphTrainer traces one combined
+            forward/loss/backward graph and wraps it as the forward graph.
+        static_input_indices: Explicit input indices whose tensor addresses are
+            stable. When provided, ``is_forward`` is not used for inference.
+        tensor_input_indices: Indices of graph inputs that are tensors rather
+            than opaque values such as ``DeviceMesh``. These indices determine
+            which non-static inputs must be copied before replay. When omitted,
+            they are inferred from ``example_inputs``.
     """
-    del example_inputs
+    if not isinstance(gm, torch.fx.GraphModule):
+        raise TypeError(
+            "xpugraph_pass requires a GraphModule but got "
+            f"{type(gm).__name__}. Ensure xpugraph is not combined "
+            "with a pass that replaces the GraphModule "
+            "(for example, full_inductor_compilation)."
+        )
 
-    if not isinstance(gm, fx.GraphModule):
-        return gm
-
-    if not torch.xpu.is_available():
+    if not hasattr(torch, "xpu") or not torch.xpu.is_available():
         logger.warning(
-            "Skipping XPUGraph pass because XPU is not available."
-        )
-        return gm
-
-    if not is_forward:
-        logger.info(
-            "Skipping XPUGraph pass because this is not a forward graph."
-        )
-        return gm
-
-    if _is_backward_graph(gm):
-        logger.info(
-            "Skipping XPUGraph pass because graph appears to be backward."
-        )
-        return gm
-
-    if contains_c10d_functional(gm):
-        logger.info(
-            "Graph contains c10d functional collectives; "
-            "applying regional xpugraph."
-        )
-        return regional_xpugraph_pass(
-            gm,
-            is_forward=is_forward,
-        )
-
-    if not has_xpu_kernel_candidate(gm):
-        logger.info(
-            "Skipping XPUGraph pass because graph has no "
-            "large XPU kernel candidate."
+            "Skipping xpugraph: XPU is not available."
         )
         return gm
 
     if not is_xpugraph_compatible(gm):
-        logger.info(
-            "Skipping XPUGraph pass because graph is not "
-            "XPUGraph compatible."
+        logger.warning(
+            "Skipping xpugraph: graph is not compatible after all "
+            "preceding passes. Use "
+            "--compile.disable_passes xpugraph_pass to silence."
         )
         return gm
 
-    static_input_indices = get_static_input_indices(
-        gm,
-        is_forward=is_forward,
-    )
+    if static_input_indices is None:
+        static_input_indices = get_static_input_indices(
+            gm,
+            is_forward,
+        )
 
     gm.forward = XPUGraphWrapper(
         gm.forward,
-        example_inputs=None,
-        static_input_indices=static_input_indices,
-        tensor_input_indices=None,
+        example_inputs,
+        static_input_indices,
+        tensor_input_indices=tensor_input_indices,
     )
 
-    logger.info("Applied XPUGraph pass to full graph.")
+    logger.info("Applied xpugraph pass.")
     return gm
