@@ -49,10 +49,10 @@ class BatchConfig:
     TODO: Refactor the pre-training trainer to use an owned batch config
     instead of keeping batch shape fields directly on TrainingConfig.
     NOTE: in pretraining we would have global_batch_size. But now we have
-    num_groups_per_train_step. This will need to be addressed.
+    num_prompts_per_train_step. This will need to be addressed.
     """
 
-    local_batch_size: int = 8
+    microbatch_size: int = 8
     """Per-DP-rank microbatch size (rows per forward pass). If the number of tokens in the
     rollouts exceed the number of rows*seq_len, a new microbatch is started.
     If it is less, the remaining rows are padded to this size."""
@@ -62,14 +62,14 @@ class BatchConfig:
 
 
 class Batcher(Configurable):
-    """Accumulate `num_groups_per_train_step` groups and packs
-    `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[local_batch_size, seq_len]`.
+    """Accumulate `num_prompts_per_train_step` groups and packs
+    `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[microbatch_size, seq_len]`.
 
     Example:
-        # num_groups_per_train_step=2, dp_degree=2, local_batch_size=2
+        # num_prompts_per_train_step=2, dp_degree=2, microbatch_size=2
         # The trigger is 2 trainable GROUPS, regardless of how many samples/tokens each contains.
-        batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
-            num_groups_per_train_step=2, dp_degree=2, pad_id=0,
+        batcher = Batcher.Config(batch=BatchConfig(microbatch_size=2, seq_len=128)).build(
+            num_prompts_per_train_step=2, dp_degree=2, pad_id=0,
         )
         _ = batcher.add_training_samples(training_sample_group=group0)  # -> None (only 1 trainable group)
         batch = batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
@@ -88,15 +88,15 @@ class Batcher(Configurable):
         self,
         config: Config,
         *,
-        num_groups_per_train_step: int,
+        num_prompts_per_train_step: int,
         dp_degree: int,
         pad_id: int,
     ) -> None:
-        self.local_batch_size = config.batch.local_batch_size
+        self.microbatch_size = config.batch.microbatch_size
         self.seq_len = config.batch.seq_len
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
-        self._num_groups_per_train_step = num_groups_per_train_step
+        self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
 
@@ -109,7 +109,7 @@ class Batcher(Configurable):
             training_sample_group: One rollout group's trainable samples plus rollout metrics.
 
         Example:
-            batcher = Batcher.Config().build(num_groups_per_train_step=2, dp_degree=1, pad_id=0)
+            batcher = Batcher.Config().build(num_prompts_per_train_step=2, dp_degree=1, pad_id=0)
             batcher.add_training_samples(training_sample_group=group0)  # -> None
             batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
         """
@@ -137,21 +137,21 @@ class Batcher(Configurable):
             )
 
         self._groups_for_next_batch.append(training_sample_group)
-        num_trainable_groups = sum(
+        num_trainable_prompts = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
-        if num_trainable_groups < self._num_groups_per_train_step:
+        if num_trainable_prompts < self._num_prompts_per_train_step:
             return None  # accumulate until one full batch is ready
         return self._pack_one_training_batch()
 
     def _pack_one_training_batch(self) -> TrainingBatch:
-        """Pack the oldest accumulated groups (up to `num_groups_per_train_step` trainable groups) into one batch."""
+        """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""
         (
             training_samples,
             metrics,
             num_rollout_groups,
-            num_metric_only_groups,
-        ) = self._take_groups_for_train_step()
+            num_metric_only_prompts,
+        ) = self._take_prompt_groups()
         # Next-fit all taken training_samples into rows.
         rows = self._assign_training_samples_to_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
@@ -166,7 +166,7 @@ class Batcher(Configurable):
                     packed_rows,
                     training_samples,
                     num_rollout_groups,
-                    num_metric_only_groups,
+                    num_metric_only_prompts,
                 ),
             ],
             # Trainer computes policy_age from these at consume time (faithful to what it trains on).
@@ -177,33 +177,33 @@ class Batcher(Configurable):
             ],
         )
 
-    def _take_groups_for_train_step(
+    def _take_prompt_groups(
         self,
     ) -> tuple[list[TrainingSample], list[m.Metric], int, int]:
-        """Pop accumulated groups oldest-first until `num_groups_per_train_step` are taken."""
+        """Pop accumulated groups oldest-first until `num_prompts_per_train_step` are taken."""
         taken_training_samples: list[TrainingSample] = []
         taken_metrics: list[m.Metric] = []
-        num_trainable_groups = 0
+        num_trainable_prompts = 0
         cut = 0
         for group in self._groups_for_next_batch:
-            if num_trainable_groups >= self._num_groups_per_train_step:
+            if num_trainable_prompts >= self._num_prompts_per_train_step:
                 break
             cut += 1
 
             taken_metrics.extend(group.metrics)
             if group.training_samples:
-                num_trainable_groups += 1
+                num_trainable_prompts += 1
                 taken_training_samples.extend(group.training_samples)
 
         # surplus carried over
         self._groups_for_next_batch = self._groups_for_next_batch[cut:]
-        num_metric_only_groups: int = cut - num_trainable_groups
+        num_metric_only_prompts: int = cut - num_trainable_prompts
 
         return (
             taken_training_samples,
             taken_metrics,
-            num_trainable_groups,
-            num_metric_only_groups,
+            num_trainable_prompts,
+            num_metric_only_prompts,
         )
 
     def _assign_training_samples_to_rows(
@@ -263,10 +263,10 @@ class Batcher(Configurable):
         spreads them across microbatches/ranks instead of all landing on the last one.
 
         Example:
-            # local_batch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
+            # microbatch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
             # The 3 pad rows land on 3 different (microbatch, rank) pairs; none is all padding.
         """
-        rows_per_microbatch = self.local_batch_size * self._dp_degree
+        rows_per_microbatch = self.microbatch_size * self._dp_degree
         num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
 
         # Pad up to a full grid
@@ -373,7 +373,7 @@ class Batcher(Configurable):
         packed_rows: list[dict],
         training_samples: list[TrainingSample],
         num_rollout_groups: int,
-        num_metric_only_groups: int,
+        num_metric_only_prompts: int,
     ) -> list[m.Metric]:
         """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
         total_slots = len(packed_rows) * self.seq_len
@@ -386,15 +386,15 @@ class Batcher(Configurable):
             m.Metric(
                 "train_batch/num_microbatches",
                 m.NoReduce(
-                    float(len(packed_rows) // (self.local_batch_size * self._dp_degree))
+                    float(len(packed_rows) // (self.microbatch_size * self._dp_degree))
                 ),
             ),
             m.Metric(
                 "train_batch/num_rollout_groups", m.NoReduce(float(num_rollout_groups))
             ),
             m.Metric(
-                "train_batch/num_metric_only_groups",
-                m.NoReduce(float(num_metric_only_groups)),
+                "train_batch/num_metric_only_prompts",
+                m.NoReduce(float(num_metric_only_prompts)),
             ),
             m.Metric(
                 "train_batch/num_training_samples",

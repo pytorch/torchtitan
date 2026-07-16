@@ -140,7 +140,7 @@ class Rollout:
     """Prompt-group ID; siblings share it for advantage centering."""
 
     rollout_id: int
-    """Sibling index within the group (0..group_size-1)."""
+    """Sibling index within the group (0..num_samples_per_prompt-1)."""
 
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
     """Ordered rollout turns. Each turn stores its full prompt (redundant across turns); kept so a
@@ -165,7 +165,7 @@ class RolloutGroup:
     group_id: int
     """Prompt-group ID; siblings share it for advantage centering."""
 
-    rollouts: list[Rollout]  # [group_size]
+    rollouts: list[Rollout]  # [num_samples_per_prompt]
     """Sibling rollouts sampled from the group's shared prompt. Empty on a failed generation."""
 
     metrics: list[m.Metric] = field(default_factory=list)

@@ -25,7 +25,7 @@ _data_input_loop                                      _rollout_loop[N] (group wo
                         v                                                     | v
 RolloutGroupWorkBuffer
 +---------------------------------------------------------------------------------------------------------------------+
-| active slots = (max_offpolicy_steps + 1) * num_groups_per_train_step                                                |
+| active slots = (max_offpolicy_steps + 1) * num_prompts_per_train_step                                                |
 |                                                                                                                     |
 | caller            group_buffer call                                            state / active slot                  |
 | _data_input_loop  add_work(RolloutGroupWork)                                   WAITING; slot acquired               |
@@ -33,7 +33,7 @@ RolloutGroupWorkBuffer
 | _rollout_loop[N]  finalize_work(RolloutGroup)                                  INFLIGHT -> FINALIZED                |
 | _batcher_loop     RolloutGroup = take_finalized()                              FINALIZED -> taken (slot still held) |
 | _batcher_loop     release_active_groups(1, "untrainable_group")                slot released                        |
-| _trainer_loop     release_active_groups(num_groups_per_train_step, "trained")  slots released after weight pull     |
+| _trainer_loop     release_active_groups(num_prompts_per_train_step, "trained")  slots released after weight pull     |
 +---------------------------------------------------------------------------------------------------------------------+
                                                   |
                                                   | group = group_buffer.take_finalized()
@@ -51,20 +51,20 @@ _batcher_loop
 Batcher                                              training_batch_queue
 +-------------------------------------------------+   +----------------------------------------------+
 | accumulated TrainingSampleGroups                |   | size 1; holds TrainingBatch | None           |
-| pack at num_groups_per_train_step               |   +---------------------+------------------------+
+| pack at num_prompts_per_train_step               |   +---------------------+------------------------+
 +-------------------------------------------------+                         |
                                                                          | packed = training_batch_queue.get()
                                                                          v
 _trainer_loop
 +----------------------------------------------------------------------------------------------------------+
-| train batch -> optim -> push/pull weights -> buffer.release_active_groups(num_groups_per_train_step)     |
+| train batch -> optim -> push/pull weights -> buffer.release_active_groups(num_prompts_per_train_step)     |
 +----------------------------------------------------------------------------------------------------------+
 
 Backpressure (each loop: what it consumes/produces, and what gates each side):
 _data_input_loop
   produces: RolloutGroupWork into group_buffer
     waits for:    a free active slot (group_buffer.wait_for_slot)
-    unblocked by: _trainer_loop release_active_groups(num_groups_per_train_step, "trained") after the pull
+    unblocked by: _trainer_loop release_active_groups(num_prompts_per_train_step, "trained") after the pull
                   (and _batcher_loop release_active_groups(1,"untrainable_group"))
 _rollout_loop[N]
   consumes: a WAITING RolloutGroupWork (group_buffer.claim_next)
@@ -156,11 +156,11 @@ class AsyncLoopConfig(Configurable.Config):
     num_training_steps: int = 10
     """Optimizer steps to run."""
 
-    num_groups_per_train_step: int = 8
+    num_prompts_per_train_step: int = 8
     """Global number of prompt groups, across all DPs, whose surviving rollouts compose
     one train step (the global_batch_size, in groups)."""
 
-    group_size: int = 8
+    num_samples_per_prompt: int = 8
     """Sibling rollouts sampled per prompt (the GRPO group)."""
 
     max_offpolicy_steps: int = 3
@@ -209,7 +209,13 @@ class Controller(Configurable):
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
         dump_folder: str = "outputs/rl"
-        """Root output folder for RL artifacts (temp weights, logs, etc.)."""
+        """Base output folder for RL artifacts (temp weights, logs, etc.).
+
+        When not overridden on the CLI, ``train.py`` appends a per-run
+        ``{config_name}-{timestamp}`` subfolder so each launch writes to a unique
+        location and never resumes from / collides with a previous run's
+        checkpoints. Pass ``--dump_folder`` to set an exact path (e.g. to resume a
+        specific run)."""
 
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
@@ -481,13 +487,13 @@ class Controller(Configurable):
             trainer_mesh: ProcMesh the trainer actor is spawned on.
             generator_meshes: ProcMesh objects the generator actors are spawned on.
         """
-        # Peak concurrent rollout sequences (groups * group_size, or the validation pass); sizes max_num_seqs below.
+        # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
         max_active_rollout_groups = (
             async_loop.max_offpolicy_steps + 1
-        ) * async_loop.num_groups_per_train_step
+        ) * async_loop.num_prompts_per_train_step
         rollout_concurrency = max(
-            max_active_rollout_groups * async_loop.group_size,
+            max_active_rollout_groups * async_loop.num_samples_per_prompt,
             async_loop.validation.num_samples,
         )
         # Renderer thread pool: render work is CPU-bound, so size to CPU count (decoupled from rollout concurrency).
@@ -604,7 +610,7 @@ class Controller(Configurable):
         self, *, num_groups: int, sampling: SamplingConfig, step: int
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
-        # TODO: group_size=1 (best-of-1) only. Support best-of-N.
+        # TODO: num_samples_per_prompt=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         samples = [self._rollouter.get_validation_sample() for _ in range(num_groups)]
@@ -616,7 +622,7 @@ class Controller(Configurable):
                     # Negative ids keep validation disjoint from training group ids, so their
                     # request_ids can't collide in the shared engine (e.g. post-validation).
                     group_id=-(i + 1),
-                    group_size=1,
+                    num_samples_per_prompt=1,
                     sampling=sampling,
                     renderer=self.renderer,
                 )
@@ -708,7 +714,7 @@ class Controller(Configurable):
         # Buffer capacity caps how far generation runs ahead of the trainer (bounds off-policy staleness).
         max_active_rollout_groups = (
             async_loop.max_offpolicy_steps + 1
-        ) * async_loop.num_groups_per_train_step
+        ) * async_loop.num_prompts_per_train_step
 
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,
@@ -719,7 +725,7 @@ class Controller(Configurable):
             trainer=self.trainer,
             generator_router=self.generator_router,
             group_buffer=self._group_buffer,
-            num_groups_per_train_step=async_loop.num_groups_per_train_step,
+            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
         )
 
         # training_sample_builder
@@ -727,7 +733,7 @@ class Controller(Configurable):
 
         # batcher
         batcher = async_loop.batcher.build(
-            num_groups_per_train_step=async_loop.num_groups_per_train_step,
+            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
             dp_degree=self.trainer_dp_degree,
             pad_id=self.renderer._tokenizer.eos_token_id,
         )
@@ -741,7 +747,7 @@ class Controller(Configurable):
         generate_fn = self._make_generate_fn(metrics_prefix="generator")
 
         # One rollout worker per active buffer slot: lets generation fill the whole off-policy window,
-        # including the cold start (step 0 fills every active slot, not just num_groups_per_train_step per wave).
+        # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
         # TODO: support warm start
         rollout_tasks = [
             asyncio.create_task(
@@ -834,7 +840,7 @@ class Controller(Configurable):
     async def _data_input_loop(self, group_buffer: RolloutGroupWorkBuffer) -> None:
         """produces a RolloutGroupWork into group_buffer.
         waits for:    a free active slot (group_buffer.wait_for_slot)
-        unblocked by: _trainer_loop release_active_groups(num_groups_per_train_step, "trained")
+        unblocked by: _trainer_loop release_active_groups(num_prompts_per_train_step, "trained")
             after the pull (and _batcher_loop release_active_groups(1,"untrainable_group"))
 
         Separate from `_rollout_loop`, so slow data prep (e.g. on-the-fly question generation) overlaps
@@ -886,7 +892,7 @@ class Controller(Configurable):
                         generate_fn=generate_fn,
                         sample=work.sample,
                         group_id=work.group_id,
-                        group_size=self.config.async_loop.group_size,
+                        num_samples_per_prompt=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                         renderer=self.renderer,
                     )

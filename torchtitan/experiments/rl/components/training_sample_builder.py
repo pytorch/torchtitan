@@ -74,7 +74,7 @@ class TrainingSampleBuilder(Configurable):
 
         # Zero-std reward: no learning signal across siblings.
         # TODO(robustness): if EVERY group is zero-std (e.g. a degenerate model emitting a constant
-        # reward), the batcher never reaches num_groups_per_train_step, the trainer never steps, and
+        # reward), the batcher never reaches num_prompts_per_train_step, the trainer never steps, and
         # no step metrics are logged (they flush at train step) -> a silent hang. Emit a warning /
         # heartbeat (e.g. when N consecutive groups drop with no batch packed) so this is visible.
         rewards = [rollout.reward for rollout in rollout_group.rollouts]
