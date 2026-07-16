@@ -817,6 +817,7 @@ class WorldModel(BaseModel):
         compressor_std: float
         transformer: TransformerConfig
         plan_head: TransformerConfig
+        experimental_pose_only_xy: bool
         x_embedder: PatchEmbedderLinearsConfig = field(init=False)
         augments_pos_ref_augment_embedder: ConditioningEmbedderLinearsConfig = field(
             init=False
@@ -1092,6 +1093,13 @@ class WorldModel(BaseModel):
                 input_pos_mask_pair.input_mask,
             )
 
+        if self.config.experimental_pose_only_xy:
+            augments_pos_ref_augment = augments_pos_ref_augment * (
+                augments_pos_ref_augment.new_tensor((1.0, 1.0, 0.0))
+            )
+            ref_augment_from_augments_euler = ref_augment_from_augments_euler * (
+                ref_augment_from_augments_euler.new_tensor((0.0, 0.0, 1.0))
+            )
         pos_embed = (
             self.pos_embed[:, input_pos] if input_pos is not None else self.pos_embed
         )
