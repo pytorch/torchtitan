@@ -267,9 +267,7 @@ class FlexAttention(Module):
         typechecking into Flex. Attention preserves the query's sharding (output
         is (B, N, L, H) with the same batch/head/seq layout as ``q``), so ``out``
         takes ``q``'s full SPMD type (local type + shard-dim PartitionSpec), and
-        ``lse`` takes the same minus the trailing (unsharded) head dim. Copying
-        ``q``'s full type keeps this correct even when the module is not wrapped
-        in an outer ``local_map`` boundary that would otherwise restamp ``out``.
+        ``lse`` takes the same minus the trailing (unsharded) head dim.
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
         """
         with spmd.no_typecheck():
