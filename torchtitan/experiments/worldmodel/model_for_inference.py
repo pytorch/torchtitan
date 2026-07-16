@@ -337,9 +337,9 @@ class WorldModelForInference(WorldModel):
         trajectory = [x.clone()] if return_trajectory else None
 
         if cfg > 0.0:
-            pose_mask_u = pose_mask.clone() + 1
-            augments_pos_ref_augment_u = augments_pos_ref_augment.clone() * 0.0
-            ref_augment_from_augments_euler_u = ref_augment_from_augments_euler.clone() * 0.0
+            pose_mask_u = torch.ones_like(pose_mask)
+            augments_pos_ref_augment_u = torch.zeros_like(augments_pos_ref_augment)
+            ref_augment_from_augments_euler_u = torch.zeros_like(ref_augment_from_augments_euler)
 
         dummy_timestep = torch.ones(batch, frames, device=device, dtype=torch.float32)
         model_output: dict[str, torch.Tensor] = {}
@@ -561,6 +561,7 @@ def main() -> None:
         dtype=torch.bfloat16,
         steps=2,
         num_prefill_frames=14,
+        cfg=2.0
     )
     print(
         {
