@@ -57,12 +57,13 @@ The layers have distinct responsibilities:
    `aten._philox_normal_flat_slice_.default` into the shared
    `_run_dtensor_local_rng_op` helper.
 2. `_run_dtensor_local_rng_op` synchronizes the default CUDA generator when
-   needed and describes the local output with `RNGIndexBlock` values. The
+   needed and describes the local output with plain index-block tuples. The
    blocks map the contiguous local tensor into the flattened logical tensor
    without exposing placements to ATen.
-3. `pytorch/torch/distributed/_stateful_rng.py` defines `RNGIndexBlock`, the
-   tensor metadata protocol, the shared `_run_stateful_rng_op` helper, and the
-   scoped mode used by plain tensor producers.
+3. `pytorch/torch/distributed/__init__.py` defines the plain tensor metadata
+   protocol and a lazy `stateful_rng_mode()` context factory.
+   `pytorch/torch/distributed/_stateful_rng.py` owns the shared
+   `_run_stateful_rng_op` helper and scoped mode implementation.
 4. `flat_slice_op_call` is a local alias for one of two ATen overloads:
    `aten._philox_normal_flat_slice_.default` or
    `aten._philox_uniform_flat_slice_.default`.
@@ -101,30 +102,22 @@ placement-independent protocol below.
 ## Placement-Independent Protocol
 
 ```python
-@dataclass(frozen=True)
-class RNGIndexBlock:
-    start_index: int      # First global flat index
-    block_size: int       # Consecutive elements per block
-    block_stride: int     # Distance between global block starts
-    num_blocks: int
-
-
 @runtime_checkable
 class StatefulRNGTensor(Protocol):
     rng_global_numel: int
-    rng_index_blocks: tuple[RNGIndexBlock, ...]
+    # Each block is (start_index, block_size, block_stride, num_blocks).
+    rng_index_blocks: tuple[tuple[int, int, int, int], ...]
 ```
+
+The fields use only built-in types. Producers attach them directly and do not
+import protocol implementation types.
 
 Mappings consume the contiguous local tensor sequentially, so no local offset
 is needed. For `(2, 4)` sharded on dimension 1, the second rank reports:
 
 ```python
-RNGIndexBlock(
-    start_index=2,
-    block_size=2,
-    block_stride=4,
-    num_blocks=2,
-)
+rng_global_numel = 8
+rng_index_blocks = ((2, 2, 4, 2),)
 ```
 
 This supports:
@@ -143,6 +136,7 @@ placement-agnostic.
 
 Attributes cannot intercept operations on a plain `torch.Tensor`. DTensor uses
 its existing custom handlers; other tensor producers use a scoped
-`TorchDispatchMode` during initialization to detect this protocol. That supports
-direct `normal_`, `uniform_`, and `trunc_normal_` without tensor subclasses or
-placement concepts in ATen.
+`TorchDispatchMode`, exposed by `torch.distributed.stateful_rng_mode()`, during
+initialization to detect this protocol. That supports direct `normal_`,
+`uniform_`, and `trunc_normal_` without tensor subclasses or placement concepts
+in ATen.
