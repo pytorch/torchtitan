@@ -2,8 +2,10 @@
 
 ## Goal
 
-Preserve single-device PyTorch initialization numerics when TorchTitan initializes
-DTensor parameters directly under strict SPMD execution.
+Meta-device initialization can materialize parameters as DTensors before their
+random initialization runs. Stateful random ops on those DTensors should produce
+the same logical full tensor and generator progression as initializing one tensor
+on a single CUDA device under strict SPMD execution.
 
 Assumptions for the first implementation:
 
@@ -15,7 +17,7 @@ Assumptions for the first implementation:
 ## Chosen Contract
 
 Use PyTorch's stateful DTensor Philox replay path. Do not introduce a
-TorchTitan-level parameter-FQN RNG stream for this path.
+parameter-FQN RNG stream for this path.
 
 For each DTensor random init call, PyTorch should:
 
@@ -24,7 +26,7 @@ For each DTensor random init call, PyTorch should:
 3. fill each local tensor from its logical flat indices;
 4. advance the generator by the full tensor's RNG increment.
 
-TorchTitan should keep using stock stateful `nn.init` callables so the dense and
+Callers keep using stock stateful `nn.init` callables so the single-device and
 DTensor paths consume the same global RNG stream under strict SPMD.
 
 ## Current Solution
