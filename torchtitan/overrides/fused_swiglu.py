@@ -498,7 +498,7 @@ def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
     fused.sharding_config = ShardingConfig(
         state_shardings={"w13": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings=base.in_src_shardings if base is not None else None,
-        in_dst_shardings=base.in_dst_shardings if base is not None else None,
+        in_redist=base.in_redist if base is not None else None,
     )
     return fused
 

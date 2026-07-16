@@ -58,9 +58,9 @@ class ScaledBiasRowwiseLinear(Linear):
         super().__init__(config)
         self.tp_degree = 1
 
-    def parallelize(self, parallel_dims) -> None:
+    def parallelize(self, parallel_dims, *, module_fqn: str | None = None) -> None:
         self.tp_degree = parallel_dims.tp
-        super().parallelize(parallel_dims)
+        super().parallelize(parallel_dims, module_fqn=module_fqn)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight = (

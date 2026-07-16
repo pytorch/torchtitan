@@ -36,13 +36,15 @@ class Embedding(nn.Embedding, Module):
         super().__init__(config.num_embeddings, config.embedding_dim)
         self.tp_group: dist.ProcessGroup | None = None
 
-    def parallelize(self, parallel_dims: "ParallelDims") -> None:
+    def parallelize(
+        self, parallel_dims: "ParallelDims", *, module_fqn: str | None = None
+    ) -> None:
         # TODO(pianpwk): delete and rely on `current_spmd_mesh().get_group("tp")`
         # once full_dtensor & legacy backends are removed.
         tp_mesh = parallel_dims.get_optional_mesh("tp")
         if tp_mesh is not None:
             self.tp_group = tp_mesh.get_group("tp")
-        super().parallelize(parallel_dims)
+        super().parallelize(parallel_dims, module_fqn=module_fqn)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Runs vocab-parallel embedding when the module has a TP group."""
