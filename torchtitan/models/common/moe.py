@@ -17,7 +17,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
@@ -157,10 +157,10 @@ class GroupedExperts(Module):
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
         return out_TD.view(B, -1, D)
 
-    def parallelize(self, parallel_dims) -> None:
+    def parallelize(self, parallel_dims, *, module_fqn: str | None = None) -> None:
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
         so dispatch/combine see the right meshes at runtime."""
-        super().parallelize(parallel_dims)
+        super().parallelize(parallel_dims, module_fqn=module_fqn)
         # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
         # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
         # DeepEPTokenDispatcher.

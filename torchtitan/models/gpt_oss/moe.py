@@ -232,7 +232,7 @@ class GptOssGroupedExperts(Module):
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
         return out_TD.view(B, -1, D)
 
-    def parallelize(self, parallel_dims) -> None:
+    def parallelize(self, parallel_dims, *, module_fqn: str | None = None) -> None:
         """Parallelize experts and wire dispatcher meshes.
 
         Mirrors ``GroupedExperts.parallelize``: after the base
@@ -241,7 +241,7 @@ class GptOssGroupedExperts(Module):
         ``wire_meshes``. ``GptOssGroupedExperts`` inherits ``Module``
         directly (not ``GroupedExperts``) so it needs its own override.
         """
-        super().parallelize(parallel_dims)
+        super().parallelize(parallel_dims, module_fqn=module_fqn)
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),

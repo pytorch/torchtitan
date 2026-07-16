@@ -139,11 +139,9 @@ class ShardingConfig(Configurable.Config):
             source layout and mesh are explicit.
         out_src_shardings: Source placement of the forward's output as a
             DTensor. When ``local_map`` is set this also tells ``local_map``
-            what to wrap the local output back to. Accepts a single
-            ``SpmdLayout`` (single-output case) or a tuple (multi-
-            output case). ``None``
-            means "infer from the output" (it's already a DTensor at the
-            right placement, or there's no local_map to drive).
+            what to wrap the local output back to. ``None`` means "infer from
+            the output" (it's already a DTensor at the right placement, or
+            there's no local_map to drive).
             e.g. ``{TP: Partial()}`` for the MoE wrapper.
         out_redist: Output redistribution spec. Changes one mesh axis from
             ``src`` to ``dst`` after forward; requires single-tensor
@@ -157,7 +155,7 @@ class ShardingConfig(Configurable.Config):
     state_shardings: dict[str, SpmdLayout] = field(default_factory=dict)
     in_src_shardings: dict[str, SpmdLayout] | None = None
     in_redist: dict[str, PerAxisRedistribution.Config] | None = None
-    out_src_shardings: SpmdLayout | tuple[SpmdLayout, ...] | None = None
+    out_src_shardings: SpmdLayout | None = None
     out_redist: PerAxisRedistribution.Config | None = None
     local_map: LocalMapConfig | None = None
 

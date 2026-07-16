@@ -19,14 +19,14 @@ from spmd_types.runtime import get_local_type, get_partition_spec, has_local_typ
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
-from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import (
+    resolve_dtensor_dst_placements,
     set_current_spmd_mesh,
     spmd_distribute_tensor,
-    spmd_validate_redistributions,
+    validate_sharding_config,
 )
 from torchtitan.distributed.utils import (
     check_dtensor_placements_match,
@@ -37,30 +37,6 @@ from torchtitan.protocols.sharding import (
     resolve_placements,
     ShardingConfig,
 )
-
-
-def _resolve_placements_after_redist(
-    layout: SpmdLayout,
-    redist: PerAxisRedistribution.Config,
-    mesh,
-) -> tuple[Placement, ...]:
-    src_axis_type = layout.per_axis_spmd_types().get(redist.axis)
-    if src_axis_type is not None and src_axis_type != redist.src:
-        raise ValueError(
-            "PerAxisRedistribution src does not match source sharding for "
-            f"axis {redist.axis.value!r}: {redist.src!r} vs {src_axis_type!r}."
-        )
-
-    placements = list(resolve_placements(layout, mesh))
-    mesh_axis_names = mesh.mesh_dim_names or ()
-    axis = redist.axis.value
-    if axis not in mesh_axis_names:
-        return tuple(placements)
-
-    axis_idx = mesh_axis_names.index(axis)
-    if mesh.size(axis_idx) > 1:
-        placements[axis_idx] = spmd.spmd_type_to_dtensor_placement(redist.dst)
-    return tuple(placements)
 
 
 class Module(nn.Module, Configurable):
@@ -273,7 +249,12 @@ class Module(nn.Module, Configurable):
         ]
         return self._pos_arg_list
 
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
+    def parallelize(
+        self,
+        parallel_dims: ParallelDims,
+        *,
+        module_fqn: str | None = None,
+    ) -> None:
         """Parallelize this module and all Module children recursively.
 
         For each module with a ``sharding_config``:
@@ -295,21 +276,28 @@ class Module(nn.Module, Configurable):
             )
         self._parallelized = True
 
-        queue = list(self.children())
+        queue = list(self.named_children())
         while queue:
-            child = queue.pop()
+            child_name, child = queue.pop()
+            child_fqn = child_name if module_fqn is None else f"{module_fqn}.{child_name}"
             if isinstance(child, Module):
-                child.parallelize(parallel_dims)
+                child.parallelize(parallel_dims, module_fqn=child_fqn)
             else:
                 # Look through non-Module wrappers, e.g., CheckpointWrapper.
-                queue.extend(child.children())
+                queue.extend(
+                    (f"{child_fqn}.{name}", grandchild)
+                    for name, grandchild in child.named_children()
+                )
 
         # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
         if self._sharding_config is None:
             return
 
         if parallel_dims.spmd_backend == "spmd_types":
-            spmd_validate_redistributions(self._sharding_config)
+            validate_sharding_config(
+                self._sharding_config,
+                module_name=module_fqn or "",
+            )
         self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
         self._build_redistribution_specs()
@@ -484,7 +472,7 @@ class Module(nn.Module, Configurable):
         self,
         fn: Callable,
         parallel_dims: ParallelDims,
-        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+        out_src: SpmdLayout,
     ) -> Callable:
         """Apply DTensor local_map for a local-tensor compute region."""
         sharding_config = self._sharding_config
@@ -492,10 +480,7 @@ class Module(nn.Module, Configurable):
         lm = sharding_config.local_map
         assert lm is not None
 
-        if isinstance(out_src, tuple):
-            out_named: list[SpmdLayout] = [p for p in out_src if p is not None]
-        else:
-            out_named = [out_src]
+        out_named = [out_src]
         # in_grad_placements may contain None for non-tensor args; filter
         # them out for mesh resolution -- local_map passes None through.
         grad_named = lm.in_grad_placements
@@ -527,16 +512,11 @@ class Module(nn.Module, Configurable):
     def _spmd_apply_local_map(
         self,
         fn: Callable,
-        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+        out_src: SpmdLayout,
     ) -> Callable:
         """Apply spmd_types local_map for a local-tensor compute region."""
-        out_types = tree_map(
-            lambda layout: (layout.axis_types, layout.partition_spec),
-            out_src,
-            is_leaf=lambda x: isinstance(x, SpmdLayout),
-        )
         return spmd.local_map(
-            out_types=out_types,
+            out_types=(out_src.axis_types, out_src.partition_spec),
         )(fn)
 
     def _redistribute_inputs(
@@ -569,8 +549,7 @@ class Module(nn.Module, Configurable):
         new_kwargs.update(kwargs)
 
         in_src_shardings = sharding_config.in_src_shardings or {}
-        in_redists = self._in_redists
-        assert in_redists is not None
+        in_redists = self._in_redists or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
@@ -644,7 +623,7 @@ class Module(nn.Module, Configurable):
                     )
 
             if redist_config is not None and isinstance(value, DTensor):
-                desired = _resolve_placements_after_redist(
+                desired = resolve_dtensor_dst_placements(
                     src_spmd_layout, redist_config, mesh
                 )
                 if not check_dtensor_placements_match(
@@ -670,9 +649,9 @@ class Module(nn.Module, Configurable):
 
         out_src = sharding_config.out_src_shardings
         redist = self._out_redist
-        if redist is None:
+        if out_src is None and redist is None:
             return outputs
-        redist_config = redist.config
+        redist_config = redist.config if redist is not None else None
 
         if parallel_dims.spmd_backend == "spmd_types":
             if not isinstance(outputs, torch.Tensor):
@@ -682,11 +661,6 @@ class Module(nn.Module, Configurable):
                 raise ValueError(
                     f"{type(self).__name__}: SPMD output redistribution "
                     "requires explicit out_src_shardings."
-                )
-            if isinstance(out_src, tuple):
-                raise ValueError(
-                    f"{type(self).__name__}: SPMD output redistribution only "
-                    "supports a single tensor output."
                 )
             # SPMD source placements are part of the config contract: assert
             # before redistributing so typechecking catches placement mismatch.
@@ -698,13 +672,8 @@ class Module(nn.Module, Configurable):
                     out_src.partition_spec,
                 )
 
-            return redist(outputs)
+            return redist(outputs) if redist is not None else outputs
 
-        if isinstance(out_src, tuple):
-            raise ValueError(
-                f"{type(self).__name__}: output redistribution only supports "
-                "a single tensor output."
-            )
         if out_src is None:
             raise ValueError(
                 f"{type(self).__name__}: output redistribution requires explicit "
@@ -726,7 +695,10 @@ class Module(nn.Module, Configurable):
                     f"{expected}."
                 )
 
-        desired = _resolve_placements_after_redist(out_src, redist_config, mesh)
+        if redist_config is None:
+            return outputs
+
+        desired = resolve_dtensor_dst_placements(out_src, redist_config, mesh)
         if isinstance(outputs, DTensor) and not check_dtensor_placements_match(
             outputs.placements, desired, outputs.ndim
         ):

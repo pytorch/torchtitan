@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 __all__ = ["FeedForward", "compute_ffn_hidden_dim"]

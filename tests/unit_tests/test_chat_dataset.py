@@ -544,9 +544,8 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             inner_attention=FlexAttention.Config(block_size=4),
         )
 
-        mask = Decoder._create_flex_attention_mask_for_document(
-            None, positions, attn_config
-        )
+        decoder = Decoder.__new__(Decoder)
+        mask = decoder._create_flex_attention_mask_for_document(positions, attn_config)
 
         self.assertEqual(mask.shape, (positions.shape[0], 1, 8, 8))
 

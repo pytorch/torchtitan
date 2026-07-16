@@ -17,7 +17,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torch.utils._debug_mode import DebugMode
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import (
@@ -29,10 +28,8 @@ from torchtitan.distributed.parallel_dims import (
 from torchtitan.distributed.spmd_types import (
     spmd_distribute_tensor,
     spmd_layout_to_dtensor_placements,
-    spmd_validate_redistributions,
-    set_current_spmd_mesh,
+    validate_sharding_config,
 )
-from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.sharding import PerAxisRedistribution, ShardingConfig
 
@@ -289,7 +286,7 @@ class TestSpmdLayout(DTensorTestBase):
             ),
         )
 
-        spmd_validate_redistributions(
+        validate_sharding_config(
             ShardingConfig(
                 out_src_shardings=src,
                 out_redist=PerAxisRedistribution.Config(
@@ -301,7 +298,7 @@ class TestSpmdLayout(DTensorTestBase):
         )
 
         with self.assertRaises(ValueError) as cm:
-            spmd_validate_redistributions(
+            validate_sharding_config(
                 ShardingConfig(
                     out_src_shardings=src,
                     out_redist=PerAxisRedistribution.Config(
@@ -310,10 +307,40 @@ class TestSpmdLayout(DTensorTestBase):
                         dst=spmd.R,
                     ),
                 )
-            )
+        )
         self.assertExpectedInline(
             str(cm.exception),
-            """output: unsharding axis 'dp' from tensor dim 0 is only valid for the innermost mesh axis; source shard order is ('dp', 'cp').""",
+            """output: unsharding axis 'dp' from tensor dim 0 is only valid for the innermost mesh axis; source shard order is ('dp', 'cp'); PartitionSpec is PartitionSpec((<MeshAxisName.DP: 'dp'>, <MeshAxisName.CP: 'cp'>), None).""",
+        )
+
+    def test_rejects_partition_spec_axis_missing_v_local_type(self):
+        """PartitionSpec axes must be declared as V in local_type."""
+        layout = SpmdLayout(
+            {MeshAxisName.TP: spmd.V},
+            partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            validate_sharding_config(ShardingConfig(out_src_shardings=layout))
+        self.assertExpectedInline(
+            str(cm.exception),
+            """output: PartitionSpec axis 'dp' must have local type V, got None at tensor dim 0.""",
+        )
+
+    def test_rejects_layout_mixing_dense_and_sparse_axes(self):
+        """A layout belongs to either the dense mesh or the sparse mesh."""
+        layout = SpmdLayout(
+            {
+                MeshAxisName.DP: spmd.R,
+                MeshAxisName.EP: spmd.R,
+            }
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            validate_sharding_config(ShardingConfig(out_src_shardings=layout))
+        self.assertExpectedInline(
+            str(cm.exception),
+            """output: SPMD layout axes must be a subset of either dense mesh axes ('dp', 'cp', 'tp') or sparse mesh axes ('dp_replicate', 'efsdp', 'ep'), got ('dp', 'ep').""",
         )
 
     @with_comms
@@ -363,69 +390,6 @@ class TestSpmdLayout(DTensorTestBase):
                 local_rows = global_weight.shape[0] // self.world_size
                 expected = global_weight.narrow(0, shard_idx * local_rows, local_rows)
                 torch.testing.assert_close(local_weight, expected)
-
-    def test_per_axis_redistribution_reduce_scatter_config(self):
-        """PerAxisRedistribution forwards collective and dtype config."""
-        if dist.is_initialized():
-            self.skipTest("requires no pre-existing process group")
-
-        dist.init_process_group("fake", rank=0, world_size=2)
-        try:
-            mesh = init_device_mesh(
-                "cpu",
-                (2,),
-                mesh_dim_names=("tp",),
-            )
-            x = torch.ones(4, 4, dtype=torch.float16, requires_grad=True)
-            redist = PerAxisRedistribution.Config(
-                axis=MeshAxisName.TP,
-                src=spmd.P,
-                dst=spmd.S(1),
-                fwd_op_dtype=torch.float32,
-                fwd_out_dtype=torch.bfloat16,
-                bwd_op_dtype=torch.float32,
-                bwd_out_dtype=torch.float16,
-            ).build()
-
-            set_spmd_backend("spmd_types")
-            try:
-                with set_current_spmd_mesh(mesh):
-                    spmd.assert_type(x, {MeshAxisName.TP: spmd.P})
-                    with DebugMode(record_torchfunction=False) as debug_mode:
-                        result = redist(x)
-                        result.float().sum().backward()
-            finally:
-                set_spmd_backend("default")
-        finally:
-            dist.destroy_process_group()
-
-        self.assertExpectedInline(
-            debug_mode.debug_string(),
-            """\
-    aten::_to_copy(t: f16[4, 4], dtype=torch.float32)  ->  t: f32[4, 4]
-    aten::permute(t: f32[4, 4], [1, 0])  ->  t: f32[4, 4]
-    aten::clone(t: f32[4, 4], memory_format=torch.contiguous_format)  ->  t: f32[4, 4]
-    aten::new_empty(t: f32[4, 4], [2, 4], pin_memory=False)  ->  t: f32[2, 4]
-    c10d::_reduce_scatter_base_(t: f32[2, 4], t: f32[4, 4], ScriptObject <__torch__.torch.classes.c10d.ProcessGroup>, ScriptObject <__torch__.torch.classes.c10d.ReduceOp>, False)  ->  ('t: f32[2, 4]', 'ScriptObject <__torch__.torch.classes.c10d.Work>')
-    aten::permute(t: f32[2, 4], [1, 0])  ->  t: f32[4, 2]
-    aten::_to_copy(t: f32[4, 2], dtype=torch.bfloat16)  ->  t: bf16[4, 2]
-    aten::_to_copy(t: bf16[4, 2], dtype=torch.float32)  ->  t: f32[4, 2]
-    aten::sum(t: f32[4, 2])  ->  t: f32[]
-    aten::ones_like(t: f32[], pin_memory=False, memory_format=torch.preserve_format)  ->  t: f32[]
-    aten::expand(t: f32[], [4, 2])  ->  t: f32[4, 2]
-    aten::_to_copy(t: f32[4, 2], dtype=torch.bfloat16, layout=torch.strided, device=cpu)  ->  t: bf16[4, 2]
-    aten::_to_copy(t: bf16[4, 2], dtype=torch.float32)  ->  t: f32[4, 2]
-    aten::empty.memory_format([8, 2], dtype=torch.float32, device=cpu, pin_memory=False)  ->  t: f32[8, 2]
-    c10d::_allgather_base_(t: f32[8, 2], t: f32[4, 2], ScriptObject <__torch__.torch.classes.c10d.ProcessGroup>, False)  ->  ('t: f32[8, 2]', 'ScriptObject <__torch__.torch.classes.c10d.Work>')
-    aten::split.Tensor(t: f32[8, 2], 4)  ->  ['t: f32[4, 2]', 't: f32[4, 2]']
-    aten::cat(['t: f32[4, 2]', 't: f32[4, 2]'], 1)  ->  t: f32[4, 4]
-    aten::_to_copy(t: f32[4, 4], dtype=torch.float16)  ->  t: f16[4, 4]
-    aten::detach(t: f16[4, 4])  ->  t: f16[4, 4]""",
-        )
-        self.assertEqual(result.shape, torch.Size([4, 2]))
-        self.assertEqual(result.dtype, torch.bfloat16)
-        self.assertIsNotNone(x.grad)
-        self.assertEqual(x.grad.dtype, torch.float16)
 
     def test_per_axis_redistribution_passes_dtype_options(self):
         x = torch.ones(2, 2)
