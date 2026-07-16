@@ -11,10 +11,6 @@ import torch
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.models.common.token_dispatcher import (
-    LocalTokenDispatcher,
-    MinimalAsyncEPTokenDispatcher,
-)
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_minimal_async_ep,
 )
@@ -37,7 +33,6 @@ def _build_fused_grouped_experts() -> FusedGroupedExperts:
         dim=_DIM,
         hidden_dim=_HIDDEN,
         num_experts=_E,
-        token_dispatcher=LocalTokenDispatcher.Config(num_experts=_E, top_k=1),
     ).build()
     with torch.no_grad():
         fused.w13.copy_(torch.randn(_E, _HIDDEN, 2, _DIM))
@@ -54,37 +49,16 @@ class TestFusedSwiGLUOverride(unittest.TestCase):
             config.override.imports,
         )
 
-    def test_minimal_async_ep_grouped_experts_config_is_replaced(self):
+    def test_grouped_experts_config_is_replaced(self):
         cfg = GroupedExperts.Config(
             dim=16,
             hidden_dim=32,
             num_experts=4,
-            token_dispatcher=MinimalAsyncEPTokenDispatcher.Config(
-                num_experts=4,
-                top_k=1,
-            ),
         )
 
         replacement = fused_grouped_experts(cfg)
 
         self.assertIsInstance(replacement, FusedGroupedExperts.Config)
-        self.assertIs(replacement.token_dispatcher, cfg.token_dispatcher)
-
-    def test_local_grouped_experts_config_is_replaced(self):
-        cfg = GroupedExperts.Config(
-            dim=16,
-            hidden_dim=32,
-            num_experts=4,
-            token_dispatcher=LocalTokenDispatcher.Config(
-                num_experts=4,
-                top_k=1,
-            ),
-        )
-
-        replacement = fused_grouped_experts(cfg)
-
-        self.assertIsInstance(replacement, FusedGroupedExperts.Config)
-        self.assertIs(replacement.token_dispatcher, cfg.token_dispatcher)
 
 
 class TestFusedGroupedExperts(unittest.TestCase):
@@ -131,7 +105,6 @@ class TestFusedGroupedExperts(unittest.TestCase):
             dim=_DIM,
             hidden_dim=_HIDDEN,
             num_experts=_E,
-            token_dispatcher=LocalTokenDispatcher.Config(num_experts=_E, top_k=1),
             param_init={
                 "w1_EFD": lambda t: t.fill_(1.0),
                 "w2_EDF": lambda t: t.fill_(0.0),
@@ -169,13 +142,11 @@ class TestFusedGroupedExpertsNumerics(unittest.TestCase):
 
     def test_matches_unfused_forward_and_backward(self):
         torch.manual_seed(0)
-        dispatcher = LocalTokenDispatcher.Config(num_experts=_E, top_k=1)
         stock = (
             GroupedExperts.Config(
                 dim=_DIM,
                 hidden_dim=_HIDDEN,
                 num_experts=_E,
-                token_dispatcher=dispatcher,
             )
             .build()
             .cuda()
@@ -185,7 +156,6 @@ class TestFusedGroupedExpertsNumerics(unittest.TestCase):
                 dim=_DIM,
                 hidden_dim=_HIDDEN,
                 num_experts=_E,
-                token_dispatcher=dispatcher,
             )
             .build()
             .cuda()
@@ -209,8 +179,8 @@ class TestFusedGroupedExpertsNumerics(unittest.TestCase):
         x_stock = x.detach().clone().requires_grad_()
         x_fused = x.detach().clone().requires_grad_()
 
-        out_stock = stock._experts_forward(x_stock, num_tokens)
-        out_fused = fused._experts_forward(x_fused, num_tokens)
+        out_stock = stock(x_stock, num_tokens)
+        out_fused = fused(x_fused, num_tokens)
         # bf16 grouped_mm + fp32 silu_and_mul kernel vs two GEMMs: close, not exact.
         torch.testing.assert_close(out_fused, out_stock, atol=2e-2, rtol=2e-2)
 

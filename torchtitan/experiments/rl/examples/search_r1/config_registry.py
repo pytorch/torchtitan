@@ -226,12 +226,11 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            # Generator-only: the DeepEP cudagraph EXPAND override on top of the perf
-            # overrides; the trainer keeps the compact path.
+            # Generator-only: DeepEP cudagraph EXPAND dispatch on top of the perf overrides.
             override=OverrideConfig(
                 imports=[
                     *perf_imports,
-                    "torchtitan.distributed.deepep.inference_override",
+                    "torchtitan.overrides.deepep_inference",
                 ]
             ),
         ),
@@ -252,5 +251,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         moe = getattr(block, "moe", None)
         if moe is None:
             continue
-        moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
+        moe.routed_experts.token_dispatcher.num_max_tokens_per_rank = (
+            num_max_tokens_per_rank
+        )
     return config

@@ -60,7 +60,7 @@ def _get_expert_shard_dim(model: Qwen3Model) -> int | None:
     """Return the shard dim used for expert params, or None if not sharded."""
     for layer in model.layers.values():
         if layer.moe_enabled:
-            for param in layer.moe.experts.parameters():
+            for param in layer.moe.routed_experts.inner_experts.parameters():
                 if hasattr(param, "placements"):
                     for p in param.placements:
                         if isinstance(p, Shard):

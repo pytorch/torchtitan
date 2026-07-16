@@ -241,7 +241,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
 
     def convert(self, model_config):
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(config, self.PAD_MULTIPLE)
+            swap_token_dispatcher(parent, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner
             quantized_cls = _get_float8_grouped_experts_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]
