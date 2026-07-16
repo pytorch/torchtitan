@@ -23,6 +23,7 @@ from torchtitan.distributed.parallel_dims import (
     MeshAxisName,
     ParallelDims,
     SpmdLayout,
+    spmd_layout_per_axis_types,
     unfold_dp_axes,
 )
 from torchtitan.distributed.spmd_types import (
@@ -237,7 +238,9 @@ class TestSpmdLayout(DTensorTestBase):
             partition_spec=spmd.PartitionSpec(MeshAxisName.TP),
         )
 
-        self.assertEqual(layout.per_axis_spmd_types(), {MeshAxisName.TP: spmd.S(0)})
+        self.assertEqual(
+            spmd_layout_per_axis_types(layout), {MeshAxisName.TP: spmd.S(0)}
+        )
         self.assertEqual(
             spmd_layout_to_dtensor_placements(layout),
             {MeshAxisName.TP: Shard(0)},
@@ -259,7 +262,7 @@ class TestSpmdLayout(DTensorTestBase):
         )
 
         self.assertEqual(
-            layout.per_axis_spmd_types(),
+            spmd_layout_per_axis_types(layout),
             {
                 MeshAxisName.DP: spmd.S(0),
                 MeshAxisName.CP: spmd.S(1),
@@ -393,10 +396,6 @@ class TestSpmdLayout(DTensorTestBase):
 
     def test_per_axis_redistribution_passes_dtype_options(self):
         x = torch.ones(2, 2)
-        mesh = unittest.mock.Mock()
-        mesh.mesh_dim_names = ("tp",)
-        mesh.size.return_value = 2
-        mesh.get_group.return_value = "tp_group"
         redist = PerAxisRedistribution.Config(
             axis=MeshAxisName.TP,
             src=spmd.P,
@@ -408,7 +407,6 @@ class TestSpmdLayout(DTensorTestBase):
         ).build()
 
         with (
-            patch("torchtitan.protocols.sharding.current_spmd_mesh", return_value=mesh),
             patch("torchtitan.protocols.sharding.spmd_mesh_size", return_value=2),
             patch("torchtitan.protocols.sharding.spmd.redistribute") as mock,
         ):
@@ -418,7 +416,7 @@ class TestSpmdLayout(DTensorTestBase):
         self.assertIs(result, x)
         mock.assert_called_once_with(
             x,
-            "tp_group",
+            "tp",
             src=spmd.P,
             dst=spmd.S(1),
             op_dtype=torch.float32,
