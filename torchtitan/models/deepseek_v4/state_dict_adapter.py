@@ -31,7 +31,7 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
             "layers.{}.attn.attn_sink": "layers.{}.attention.attn_sink.weight",
             "layers.{}.attn.kv_norm.weight": "layers.{}.attention.kv_norm.weight",
             "layers.{}.attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
-            "layers.{}.attn.wo_a": "layers.{}.attention.wo_a.weight",
+            "layers.{}.attn.wo_a.weight": "layers.{}.attention.wo_a.weight",
             "layers.{}.attn.wo_b.weight": "layers.{}.attention.wo_b.weight",
             "layers.{}.attn.wkv.weight": "layers.{}.attention.wkv.weight",
             "layers.{}.attn.wq_a.weight": "layers.{}.attention.wq_a.weight",
@@ -130,8 +130,16 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
             if any(t in key for t in ("compressor", "indexer", "tid2eid")):
                 new_key = to_hf_map[key]
                 if "tid2eid" in key:
+                    # HF inference stores tid2eid as int32, but the current
+                    # HuggingFaceStorageWriter consolidation path calls
+                    # torch.finfo() for every saved dtype and fails on integer
+                    # tensors. Save as float32 and let HF load_state_dict cast
+                    # into its int32 parameter.
                     value = value.to(torch.float32)
                 hf_state_dict[new_key] = value
+
+            elif "attention.attn_sink.weight" in key:
+                hf_state_dict[self._map_layer(key, to_hf_map)] = value.squeeze(-1)
 
             elif "moe.experts" in key:
                 abstract_key = self._abstract_key(key, count=1)
@@ -175,6 +183,9 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
                 if "tid2eid" in key:
                     value = value.to(torch.int64)
                 state_dict[new_key] = value
+
+            elif "attn.attn_sink" in key:
+                state_dict[self._map_layer(key, self.from_hf_map)] = value.unsqueeze(-1)
 
             elif "ffn.experts" in key:
                 abstract_key = self._abstract_key(key, count=2)
