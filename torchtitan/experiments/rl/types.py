@@ -26,7 +26,7 @@ class RolloutTurnID:
     group_id: int
     """Globally-unique GRPO group id; siblings share it (the sticky-routing key, sans turn)."""
     rollout_id: int
-    """Sibling index within the group (0..group_size-1)."""
+    """Sibling index within the group (0..num_samples_per_prompt-1)."""
     turn_id: int
     """Turn index within the rollout; for a TrainingSample, the turn where begins.
     This is not 0 when a single rollout is split into multiple training samples."""
@@ -137,7 +137,7 @@ class TrainingBatch:
     """Packed microbatches for one optimizer step.
 
     Example:
-        # 5 training samples, effective length 5 each; seq_len=10, local_batch_size=2, dp_degree=1
+        # 5 training samples, effective length 5 each; seq_len=10, microbatch_size=2, dp_degree=1
         # next-fit rows -> [[s5, s5], [s5, s5], [s5]] = 3 rows; rows_per_microbatch = 2 * 1 = 2
         # -> 2 microbatches (3 rows padded to 4 with one pad-only row):
         #    microbatches = [[TrainingMicrobatch(token_ids=[2, 10])],

@@ -50,12 +50,12 @@ class WeightSyncManager:
         trainer,  # PolicyTrainer actor handle
         generator_router: InterGeneratorRouter,
         group_buffer: RolloutGroupWorkBuffer,
-        num_groups_per_train_step: int,
+        num_prompts_per_train_step: int,
     ) -> None:
         self._trainer = trainer
         self._generator_router = generator_router
         self._group_buffer = group_buffer
-        self._num_groups_per_train_step = num_groups_per_train_step
+        self._num_prompts_per_train_step = num_prompts_per_train_step
 
         # Step 0 has no `wait_prev_push/pull`, so we start with a noop task.
         self._trainer_push_task: asyncio.Task = asyncio.create_task(_noop())
@@ -122,5 +122,5 @@ class WeightSyncManager:
         # Born-fresh: admit the next groups only now that the generators are on `version`, so a new
         # rollout starts at the current version (keeps policy_age <= max_offpolicy_steps).
         await self._group_buffer.release_active_groups(
-            self._num_groups_per_train_step, reason="trained"
+            self._num_prompts_per_train_step, reason="trained"
         )
