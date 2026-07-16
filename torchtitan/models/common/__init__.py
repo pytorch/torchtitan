@@ -24,6 +24,7 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SharedExperts
+from .linear import Linear, ScaledBiasRowwiseLinear
 from .moe import MoE
 from .nn_modules import (
     Conv1d,
@@ -32,7 +33,6 @@ from .nn_modules import (
     GroupNorm,
     Identity,
     LayerNorm,
-    Linear,
     RMSNorm,
     SiLU,
 )
@@ -67,6 +67,7 @@ __all__ = [
     "QKVLinear",
     "RMSNorm",
     "RoPE",
+    "ScaledBiasRowwiseLinear",
     "ScaledDotProductAttention",
     "SiLU",
     "TransformerBlock",
