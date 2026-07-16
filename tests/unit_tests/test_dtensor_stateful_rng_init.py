@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from functools import partial
 import unittest
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -31,7 +31,9 @@ class TestDTensorStatefulRngInit(DTensorTestBase):
         torch.manual_seed(123)
         tensor = torch.empty(shape, device=self.device_type)
         init_fn(tensor)
-        return tensor.cpu()
+        state = torch.cuda.get_rng_state()
+        next_draw = torch.rand(17, device=self.device_type)
+        return tensor.cpu(), state, next_draw.cpu()
 
     def _dtensor_init(self, shape: tuple[int, ...], init_fn):
         torch.manual_seed(123)
@@ -42,21 +44,26 @@ class TestDTensorStatefulRngInit(DTensorTestBase):
             [Shard(0)],
         )
         init_fn(tensor)
-        return tensor.full_tensor().cpu()
+        state = torch.cuda.get_rng_state()
+        next_draw = torch.rand(17, device=self.device_type)
+        return tensor.full_tensor().cpu(), state, next_draw.cpu()
+
+    def _assert_init_matches_dense(self, shape: tuple[int, ...], init_fn):
+        expected, expected_state, expected_next = self._dense_init(shape, init_fn)
+        actual, actual_state, actual_next = self._dtensor_init(shape, init_fn)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
+        torch.testing.assert_close(actual_next, expected_next, rtol=0, atol=0)
 
     @with_comms
     def test_normal_matches_dense(self):
         init_fn = partial(nn.init.normal_, mean=0.1, std=0.02)
-        expected = self._dense_init((17, 11), init_fn)
-        actual = self._dtensor_init((17, 11), init_fn)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self._assert_init_matches_dense((37, 19), init_fn)
 
     @with_comms
     def test_uniform_matches_dense(self):
         init_fn = partial(nn.init.uniform_, a=-0.2, b=0.3)
-        expected = self._dense_init((13, 17), init_fn)
-        actual = self._dtensor_init((13, 17), init_fn)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self._assert_init_matches_dense((41, 17), init_fn)
 
     @with_comms
     def test_trunc_normal_matches_dense(self):
@@ -67,9 +74,7 @@ class TestDTensorStatefulRngInit(DTensorTestBase):
             a=-0.06,
             b=0.06,
         )
-        expected = self._dense_init((19, 13), init_fn)
-        actual = self._dtensor_init((19, 13), init_fn)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self._assert_init_matches_dense((43, 13), init_fn)
 
 
 if __name__ == "__main__":

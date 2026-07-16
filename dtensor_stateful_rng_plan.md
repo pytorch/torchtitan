@@ -10,9 +10,7 @@ Assumptions for the first implementation:
 - all ranks run the same parameter traversal;
 - all ranks make the same init calls in the same order;
 - tensor-parallel DTensor local shards are contiguous slices in the dense
-  flattened tensor space supported by the PyTorch DTensor RNG handlers;
-- single-rank dense initialization followed by sharding is the test oracle, not
-  the runtime implementation.
+  flattened tensor space supported by the PyTorch DTensor RNG handlers.
 
 ## Chosen Contract
 
@@ -28,6 +26,78 @@ For each DTensor random init call, PyTorch should:
 
 TorchTitan should keep using stock stateful `nn.init` callables so the dense and
 DTensor paths consume the same global RNG stream under strict SPMD.
+
+## Current Solution
+
+The solution is split between PyTorch and TorchTitan.
+
+PyTorch owns the runtime behavior:
+
+- `torch/distributed/tensor/_ops/_random_ops.py` registers custom DTensor
+  handlers for `aten.normal_.default` and `aten.uniform_.default`.
+- On CUDA, those handlers read the shared Philox seed/offset, compute the local
+  shard's dense flattened start offset, call internal CUDA ops for the local
+  dense-equivalent slice, and then advance the generator by the full dense
+  tensor's RNG increment.
+- The dense-equivalent replay contract is CUDA-only. CPU and other non-CUDA
+  DTensor random init keep existing local-op behavior and are outside the
+  single-device numerics guarantee.
+- `aten/src/ATen/native/native_functions.yaml` defines internal generic
+  `_philox_normal_dense_slice_` and `_philox_uniform_dense_slice_` ops. Their
+  schemas contain no DTensor concepts: they accept the logical dense element
+  count and the flat start of the output slice. Torchgen creates their functional
+  and out variants as required for functionalization.
+- `aten/src/ATen/native/cuda/PhiloxDistribution.cu` implements those ops by
+  replaying the dense CUDA distribution kernel's Philox mapping. Each local
+  output element is generated from its logical dense global flat index, not from
+  its local shard index.
+
+TorchTitan owns the integration contract and regression test:
+
+- TorchTitan keeps model initialization on stock stateful `nn.init` callables.
+  It does not add parameter-scoped seeds or a TorchTitan-side FQN RNG stream for
+  this path.
+- `tests/unit_tests/test_dtensor_stateful_rng_init.py` compares direct DTensor
+  initialization with dense single-device initialization followed by gathering.
+  It covers `nn.init.normal_`, `nn.init.uniform_`, and `nn.init.trunc_normal_`.
+  `trunc_normal_` is covered through its stateful uniform draw plus deterministic
+  elementwise transforms. The test uses multi-block tensors and also compares
+  the generator state and next random draw after initialization.
+
+The important invariant is generator-state parity. Under strict SPMD, every rank
+enters the same init calls in the same order. For each DTensor init, PyTorch
+consumes RNG as if the dense logical tensor were initialized on one CUDA device,
+while each rank writes only its local shard.
+
+## Validation Contract
+
+Single-rank dense initialization followed by sharding is the test oracle, not the
+runtime implementation. The runtime initializes DTensor shards in place, and the
+test compares the gathered DTensor result against the dense single-device result.
+
+## Supported Shape And Mesh Scope
+
+The current PyTorch handler supports contiguous local shards in dense flattened
+tensor space. For the TorchTitan test and target tensor-parallel initialization
+path, this means a 1D CUDA mesh with `Shard(0)` over tensors whose remaining
+dimensions are fully local on each rank.
+
+The handler explicitly rejects CUDA local shards that are not contiguous slices
+of the dense flattened tensor. That keeps unsupported shard layouts from
+silently producing different numerics. Replicated tensors and empty local shards
+follow the same handler path when their local tensor constraints are satisfied.
+
+## Non-Goals
+
+- Preserve numerics when ranks do not execute the same init calls in the same
+  order.
+- Preserve legacy full-model RNG streams for pipeline-parallel chunks that skip
+  parameters owned by other chunks.
+- Support every possible DTensor placement. Additional placements need separate
+  dense-index mapping and tests.
+- Introduce TorchTitan FQN-derived seeds. That remains useful for non-SPMD or
+  model-surgery resilience, but it is not needed for the strict-SPMD contract and
+  would change the stateful single-device RNG stream.
 
 ## Iterations
 
@@ -58,6 +128,14 @@ collects the full model init order and consumes RNG for skipped parameters.
   at `import torch` by the PyTorch source/build mismatch described below.
 - After rebuilding PyTorch from the trimmed DTensor RNG commit,
   `python tests/unit_tests/test_dtensor_stateful_rng_init.py`: passed.
+- `ninja -C build install -j 96` in the PyTorch checkout: passed.
+- PyTorch `lintrunner` on the four touched source and test files: passed.
+- `python test/distributed/tensor/test_random_ops.py -k stateful_init`: two
+  tests passed.
+- The expanded TorchTitan test: three tests passed.
+- Targeted TorchTitan pre-commit hooks passed with `pyrefly-check` skipped.
+  Pyrefly still fails on existing repository-wide missing dependencies and
+  baseline type errors unrelated to this change.
 
 ## Resolved Blocker
 
