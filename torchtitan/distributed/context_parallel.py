@@ -28,8 +28,244 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     ScaledDotProductAttention,
     VarlenAttention,
+    VarlenMetadata,
 )
 from torchtitan.tools.logging import logger
+
+
+class _AllToAllWithInverse(torch.autograd.Function):
+    """All-to-all that scatters one tensor dimension and gathers another.
+
+    Forward chunks ``input_tensor`` on ``scatter_dim``, exchanges chunks across
+    ``group``, and concatenates the received chunks on ``gather_dim``. Backward
+    performs the inverse exchange, so the primitive can be used inside
+    sequence/head layout swaps for context-parallel modules.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        input_tensor: torch.Tensor,
+        group: dist.ProcessGroup,
+        world_size: int,
+        scatter_dim: int,
+        gather_dim: int,
+    ) -> torch.Tensor:
+        ctx.group = group
+        ctx.world_size = world_size
+        ctx.scatter_dim = scatter_dim
+        ctx.gather_dim = gather_dim
+
+        return _all_to_all_single_dim_swap(
+            input_tensor,
+            group,
+            world_size,
+            scatter_dim,
+            gather_dim,
+        )
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(ctx, grad_output: torch.Tensor):
+        grad_input = _all_to_all_single_dim_swap(
+            grad_output,
+            ctx.group,
+            ctx.world_size,
+            ctx.gather_dim,
+            ctx.scatter_dim,
+        )
+        return grad_input, None, None, None, None
+
+
+def _all_to_all_single_dim_swap(
+    input_tensor: torch.Tensor,
+    group: dist.ProcessGroup,
+    world_size: int,
+    scatter_dim: int,
+    gather_dim: int,
+) -> torch.Tensor:
+    """Scatter one dimension and concatenate peers along another dimension."""
+
+    send = input_tensor.movedim(scatter_dim, 0).contiguous()
+    recv = torch.empty_like(send)
+    dist.all_to_all_single(recv, send, group=group)
+    recv_chunks = recv.chunk(world_size, dim=0)
+    return torch.cat(
+        [chunk.movedim(0, scatter_dim) for chunk in recv_chunks],
+        dim=gather_dim,
+    )
+
+
+def _normalize_dim(dim: int, ndim: int) -> int:
+    if dim < 0:
+        dim += ndim
+    if dim < 0 or dim >= ndim:
+        raise IndexError(f"Dimension out of range: got {dim} for tensor rank {ndim}.")
+    return dim
+
+
+def _cp_world_size(cp_mesh: DeviceMesh) -> int:
+    if cp_mesh.ndim != 1:
+        raise ValueError(
+            "Context-parallel exchanges require a 1D DeviceMesh, but got "
+            f"a {cp_mesh.ndim}D mesh."
+        )
+    return cp_mesh.size()
+
+
+def _all_to_all_with_inverse(
+    input_tensor: torch.Tensor,
+    cp_mesh: DeviceMesh,
+    *,
+    scatter_dim: int,
+    gather_dim: int,
+) -> torch.Tensor:
+    """Exchange tensor chunks across a CP mesh with inverse autograd."""
+
+    scatter_dim = _normalize_dim(scatter_dim, input_tensor.ndim)
+    gather_dim = _normalize_dim(gather_dim, input_tensor.ndim)
+    if scatter_dim == gather_dim:
+        raise ValueError("scatter_dim and gather_dim must be different dimensions.")
+    world_size = _cp_world_size(cp_mesh)
+    if world_size == 1:
+        return input_tensor
+    if input_tensor.shape[scatter_dim] % world_size != 0:
+        raise ValueError(
+            f"Context-parallel all-to-all requires dim {scatter_dim} size "
+            f"{input_tensor.shape[scatter_dim]} to be divisible by CP size {world_size}."
+        )
+    if not dist.is_initialized():
+        raise RuntimeError(
+            "Context-parallel all-to-all requires torch.distributed to be initialized."
+        )
+    return _AllToAllWithInverse.apply(
+        input_tensor,
+        cp_mesh.get_group(),
+        world_size,
+        scatter_dim,
+        gather_dim,
+    )
+
+
+def sequence_to_head_all_to_all(
+    tensor: torch.Tensor,
+    cp_mesh: DeviceMesh,
+    *,
+    sequence_dim: int = 1,
+    head_dim: int = 2,
+) -> torch.Tensor:
+    """Convert a sequence-sharded tensor into a head-sharded full-sequence tensor."""
+
+    return _all_to_all_with_inverse(
+        tensor,
+        cp_mesh,
+        scatter_dim=head_dim,
+        gather_dim=sequence_dim,
+    )
+
+
+def head_to_sequence_all_to_all(
+    tensor: torch.Tensor,
+    cp_mesh: DeviceMesh,
+    *,
+    sequence_dim: int = 1,
+    head_dim: int = 2,
+) -> torch.Tensor:
+    """Convert a head-sharded full-sequence tensor back into sequence shards."""
+
+    return _all_to_all_with_inverse(
+        tensor,
+        cp_mesh,
+        scatter_dim=sequence_dim,
+        gather_dim=head_dim,
+    )
+
+
+class _PreviousSequenceShardTail(torch.autograd.Function):
+    """Receive the previous CP rank's sequence tail and route gradients back."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        local_tail: torch.Tensor,
+        group: dist.ProcessGroup,
+        local_rank: int,
+        world_size: int,
+    ) -> torch.Tensor:
+        ctx.group = group
+        ctx.local_rank = local_rank
+        ctx.world_size = world_size
+
+        local_tail = local_tail.contiguous()
+        recv_tail = (
+            torch.empty_like(local_tail)
+            if local_rank > 0
+            else torch.zeros_like(local_tail)
+        )
+
+        recv_req = None
+        send_req = None
+        if local_rank > 0:
+            recv_req = dist.irecv(recv_tail, group_src=local_rank - 1, group=group)
+        if local_rank < world_size - 1:
+            send_req = dist.isend(local_tail, group_dst=local_rank + 1, group=group)
+        if recv_req is not None:
+            recv_req.wait()
+        if send_req is not None:
+            send_req.wait()
+        return recv_tail
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(ctx, grad_output: torch.Tensor):
+        grad_output = grad_output.contiguous()
+        grad_input = (
+            torch.empty_like(grad_output)
+            if ctx.local_rank < ctx.world_size - 1
+            else torch.zeros_like(grad_output)
+        )
+
+        recv_req = None
+        send_req = None
+        if ctx.local_rank < ctx.world_size - 1:
+            recv_req = dist.irecv(
+                grad_input, group_src=ctx.local_rank + 1, group=ctx.group
+            )
+        if ctx.local_rank > 0:
+            send_req = dist.isend(
+                grad_output, group_dst=ctx.local_rank - 1, group=ctx.group
+            )
+        if recv_req is not None:
+            recv_req.wait()
+        if send_req is not None:
+            send_req.wait()
+        return grad_input.contiguous(), None, None, None
+
+
+def previous_sequence_shard_tail(
+    local_tail: torch.Tensor,
+    cp_mesh: DeviceMesh,
+) -> torch.Tensor:
+    """Return the previous CP rank's local sequence tail with autograd support.
+
+    Rank 0 receives zeros. In the single-rank case this returns a zero tensor
+    connected to ``local_tail`` with zero gradient, which keeps small unit tests
+    and non-CP code paths simple.
+    """
+
+    world_size = _cp_world_size(cp_mesh)
+    if world_size == 1:
+        return local_tail * 0
+    if not dist.is_initialized():
+        raise RuntimeError(
+            "previous_sequence_shard_tail requires torch.distributed to be initialized."
+        )
+    return _PreviousSequenceShardTail.apply(
+        local_tail,
+        cp_mesh.get_group(),
+        cp_mesh.get_local_rank(),
+        world_size,
+    )
 
 
 def apply_cp_to_forward(
@@ -101,7 +337,22 @@ def apply_cp_to_forward(
             mod.forward = _make_cp_forward(original_forward, cp_mesh)
 
     elif isinstance(first, VarlenAttention):
-        raise NotImplementedError("Variable-length attention CP is not yet supported")
+        for mod in attention_modules:
+            original_forward = mod.forward
+
+            def _make_cp_forward(orig_fn, mesh):
+                def cp_forward(q, k, v, **kwargs):
+                    q = sequence_to_head_all_to_all(q, mesh, sequence_dim=1, head_dim=2)
+                    k = sequence_to_head_all_to_all(k, mesh, sequence_dim=1, head_dim=2)
+                    v = sequence_to_head_all_to_all(v, mesh, sequence_dim=1, head_dim=2)
+                    output = orig_fn(q, k, v, **kwargs)
+                    return head_to_sequence_all_to_all(
+                        output, mesh, sequence_dim=1, head_dim=2
+                    )
+
+                return cp_forward
+
+            mod.forward = _make_cp_forward(original_forward, cp_mesh)
     else:
         raise NotImplementedError(
             f"Context Parallel forward wrapping is not supported for "
@@ -177,7 +428,7 @@ def cp_shard(
         inputs: Tuple of input tensors to be sharded along the sequence
             dimension
         attention_masks: Attention masks to be sharded. Supports None,
-            BlockMask, or dict[str, BlockMask]
+            BlockMask, dict[str, BlockMask], or replicated VarlenMetadata.
         load_balancer_type: Type of load balancer to use. Options:
             - "headtail": Use HeadTailLoadBalancer (for SDPA)
             - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
@@ -197,9 +448,14 @@ def cp_shard(
               dict[str, BlockMask]) or None
 
     Raises:
-        ValueError: If load_balancer_type is "ptrr" and attention_masks
-            is None or a dict
+        ValueError: If load_balancer_type is incompatible with attention_masks.
     """
+    if isinstance(attention_masks, VarlenMetadata) and load_balancer_type is not None:
+        raise ValueError(
+            "VarlenMetadata requires contiguous sequence shards; set "
+            "load_balancer_type=None."
+        )
+
     seq_len = inputs[0].size(input_seq_dim)
     cp_world_size = cp_mesh.size(0)
 
@@ -229,7 +485,7 @@ def cp_shard(
                 load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
             case _:
                 raise ValueError(
-                    f"Invalid load_balancer_type '{load_balancer_type}'. "
+                    f"Invalid load_balancer_type {load_balancer_type!r}. "
                     f"Must be one of: 'headtail', 'ptrr', or None"
                 )
 
@@ -247,6 +503,8 @@ def cp_shard(
     # on the Q seq dimension, not KV.
     MASK_Q_SEQ_DIM = 2
     if attention_masks is not None:
+        if isinstance(attention_masks, VarlenMetadata):
+            return inputs, attention_masks
         assert isinstance(attention_masks, (BlockMask, dict))
         masks = (
             [attention_masks]
@@ -264,7 +522,7 @@ def cp_shard(
             (
                 masks[0]
                 if isinstance(attention_masks, BlockMask)
-                else {k: v for k, v in zip(attention_masks.keys(), masks)}
+                else {k: v for k, v in zip(attention_masks.keys(), masks, strict=True)}
             ),
         )
 
