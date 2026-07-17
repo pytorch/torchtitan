@@ -10,11 +10,11 @@ Sets ``_sharding_config`` on every HF sub-module so that a single
 ``model.parallelize(parallel_dims)`` call handles all TP distribution
 and forward wrapping via the Module protocol.
 
-Unlike Titan's own models (which use ``local_map`` on inner attention
-to convert DTensors to local tensors before SDPA), HF attention
-internals (view, RoPE, SDPA) operate directly on DTensors. This works
-because DTensor dispatch handles these ops transparently. The rotary
-embedding's buffers are also distributed so its computed cos/sin are
+The flex-attention kernel uses ``local_map`` (via ``_attach_flex_kernel``) to
+convert q/k/v from DTensors to local tensors around the flex HOP, mirroring
+Titan's own attention. Other HF internals (view, RoPE) operate directly on
+DTensors, which works because DTensor dispatch handles those ops transparently.
+The rotary embedding's buffers are also distributed so its computed cos/sin are
 DTensors, avoiding mixed plain-Tensor / DTensor errors in RoPE.
 
 MoE layers are already Titan Module instances with ShardingConfig and
@@ -124,15 +124,8 @@ def set_hf_sharding_configs(
         rope._sharding_config = _rope_config(rope, enable_sp=enable_sp)
 
     # Per-layer modules
-    from torchtitan.experiments.transformers_modeling_backend.model import (
-        _uses_flex_attention,
-    )
-
-    use_flex = _uses_flex_attention(model.model.config)
     for transformer_block in model.layers:
-        _set_layer_sharding_configs(
-            transformer_block, enable_sp=enable_sp, use_flex=use_flex
-        )
+        _set_layer_sharding_configs(transformer_block, enable_sp=enable_sp)
 
     # Completeness backstop: every parameter/buffer-bearing module this function
     # is responsible for must have a sharding config, or it silently mixes a
@@ -201,15 +194,13 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
     ).build()
 
 
-def _set_layer_sharding_configs(
-    layer: nn.Module, *, enable_sp: bool, use_flex: bool
-) -> None:
+def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
     """Set ``_sharding_config`` on each sub-module of a decoder layer.
 
     Covers norms, attention projections, and (for non-MoE layers) dense MLP.
-    MoE layers have their own ShardingConfig from the Titan MoE swap. When
-    ``use_flex`` is set, also attaches the flex-attention kernel Module that
-    carries the attention local_map (see ``_attach_flex_kernel``).
+    MoE layers have their own ShardingConfig from the Titan MoE swap. Also
+    attaches the flex-attention kernel Module that carries the attention
+    local_map (see ``_attach_flex_kernel``).
     """
     # --- Norms ---
     if hasattr(layer, "input_layernorm"):
@@ -241,10 +232,8 @@ def _set_layer_sharding_configs(
     )
 
     # Flex attention: attach the kernel Module that carries the attention
-    # local_map so q/k/v are computed on local (head-sharded) tensors. Only
-    # needed under flex (the SDPA path runs directly on DTensors).
-    if use_flex:
-        _attach_flex_kernel(attn)
+    # local_map so q/k/v are computed on local (head-sharded) tensors.
+    _attach_flex_kernel(attn)
 
     # Query projection. Detected independently of the KV path: a model may
     # use low-rank Q (q_a_proj/q_b_proj, e.g. DeepSeek-V3, GLM-4.7) or

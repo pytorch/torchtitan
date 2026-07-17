@@ -27,9 +27,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import cp_shard
 from torchtitan.experiments.transformers_modeling_backend.config_registry import (
     transformers_modeling_backend_debugmodel,
-    transformers_modeling_backend_debugmodel_flex,
     transformers_modeling_backend_debugmodel_moe,
-    transformers_modeling_backend_debugmodel_moe_flex,
 )
 
 
@@ -43,11 +41,6 @@ def main():
         "--balancer", default="none", choices=["none", "headtail", "ptrr"]
     )
     parser.add_argument("--moe", action="store_true", help="use the flex MoE model")
-    parser.add_argument(
-        "--no_flex",
-        action="store_true",
-        help="use SDPA attention (ring CP) instead of flex",
-    )
     args = parser.parse_args()
     balancer = None if args.balancer == "none" else args.balancer
 
@@ -71,20 +64,12 @@ def main():
     )
     dist_utils.set_spmd_backend(args.backend)
 
-    # Build the job config, tweak for a small deterministic run. --no_flex
-    # selects the SDPA debug config (ring CP) instead of the flex one.
-    if args.no_flex:
-        cfg = (
-            transformers_modeling_backend_debugmodel_moe()
-            if args.moe
-            else transformers_modeling_backend_debugmodel()
-        )
-    else:
-        cfg = (
-            transformers_modeling_backend_debugmodel_moe_flex()
-            if args.moe
-            else transformers_modeling_backend_debugmodel_flex()
-        )
+    # Build the job config, tweak for a small deterministic run.
+    cfg = (
+        transformers_modeling_backend_debugmodel_moe()
+        if args.moe
+        else transformers_modeling_backend_debugmodel()
+    )
     cfg.hf_model = args.hf_model
     cfg.training.seq_len = args.seq_len
     cfg.training.local_batch_size = args.bs

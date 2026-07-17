@@ -15,8 +15,8 @@ and across world sizes by weight init). This checks logits directly:
   3. Run CP+PP  (cp=2, pp=2) loading the seed; dump per-microbatch logits.
   4. Assert every CP-only sample matches some CP+PP microbatch (per CP shard).
 
-Runs the flex (ptrr) and SDPA (headtail) paths. Kept fast (small seq, 1 step,
-fp32 so CP/PP reduction noise isn't hidden by bf16). Needs 4 GPUs; self-skips
+Runs the flex (ptrr) attention path. Kept fast (small seq, 1 step, fp32 so
+CP/PP reduction noise isn't hidden by bf16). Needs 4 GPUs; self-skips
 otherwise. Logits are dumped by the ``HF_BACKEND_LOGIT_DUMP`` hook in
 HFTransformerModel.forward.
 
@@ -24,7 +24,7 @@ The real CP+PP path can only be exercised through the trainer/pipeline runtime,
 so this orchestrates subprocess launches at different GPU counts (1/2/4) -- it
 cannot be expressed in the single-``ngpu`` OverrideDefinitions framework.
 
-Usage: python -m torchtitan.experiments.transformers_modeling_backend.tests.cp_pp_numerical [--cases flex sdpa]
+Usage: python -m torchtitan.experiments.transformers_modeling_backend.tests.cp_pp_numerical [--cases flex]
 """
 
 import argparse
@@ -46,8 +46,7 @@ _COMMON = (
 )
 _CASES = {
     # name: (config, cp load balancer)
-    "flex": ("transformers_modeling_backend_debugmodel_flex", "ptrr"),
-    "sdpa": ("transformers_modeling_backend_debugmodel", "headtail"),
+    "flex": ("transformers_modeling_backend_debugmodel", "ptrr"),
 }
 _TOL = 2e-2  # bf16/flex reduction-order noise (fp32 run is ~5e-7 in practice)
 

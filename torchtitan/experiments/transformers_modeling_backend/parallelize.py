@@ -71,63 +71,6 @@ def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         kernel.forward = _make_cp_forward(kernel.forward)
 
 
-def _wire_sdpa_attention_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
-    """Enable ring attention for the SDPA path under context parallelism.
-
-    Registers a CP-aware SDPA attention function that re-expresses the local
-    (sequence-sharded) q/k/v as DTensors sharded on the CP axis, so PyTorch's
-    context-parallel dispatcher runs ring attention -- handling causal masking
-    and load balancing across ranks. The trainer shards inputs/positions on the
-    seq axis (headtail balancer for SDPA), so q/k/v arrive locally seq-sharded;
-    this only wraps them for the dispatcher and unwraps the output back to a
-    local tensor. Unlike the flex path (explicit k/v all-gather with a full-KV
-    BlockMask), SDPA has no mask, so correctness relies on the dispatcher's
-    is_causal ring rather than a materialized mask.
-    """
-    import torch.nn.functional as F
-    from torch.distributed.tensor import DTensor, Shard
-    from torch.distributed.tensor.experimental._context_parallel._attention import (
-        _enable_context_parallel_dispatcher,
-    )
-    from transformers.integrations.sdpa_attention import repeat_kv
-    from transformers.modeling_utils import AttentionInterface
-
-    _enable_context_parallel_dispatcher()
-    impl = model.model.config._attn_implementation
-    placement = [Shard(2)]  # q/k/v are (b, heads, seq, dim); seq on dim 2
-
-    def _cp_sdpa(module, query, key, value, attention_mask, **kwargs):
-        # Expand GQA kv heads to full heads before the ring dispatcher. SDPA's
-        # enable_gqa broadcast path does not compose with CP ring attention (it
-        # yields mixed Tensor/DTensor ops); repeat_kv gives plain MHA, which the
-        # dispatcher handles. Then call SDPA directly (mirroring HF's shim:
-        # is_causal when there's no explicit mask) on seq-sharded DTensors.
-        n_rep = getattr(module, "num_key_value_groups", 1) or 1
-        if n_rep > 1:
-            key = repeat_kv(key, n_rep)
-            value = repeat_kv(value, n_rep)
-        query = DTensor.from_local(query, cp_mesh, placement, run_check=False)
-        key = DTensor.from_local(key, cp_mesh, placement, run_check=False)
-        value = DTensor.from_local(value, cp_mesh, placement, run_check=False)
-        is_causal = (
-            query.shape[2] > 1
-            and attention_mask is None
-            and getattr(module, "is_causal", True)
-        )
-        out = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            scale=kwargs.get("scaling"),
-            is_causal=is_causal,
-        )
-        out = out.to_local() if isinstance(out, DTensor) else out
-        return out.transpose(1, 2).contiguous(), None
-
-    AttentionInterface._global_mapping[impl] = _cp_sdpa
-
-
 # ---------------------------------------------------------------------------
 # Main parallelization entry point
 # ---------------------------------------------------------------------------
@@ -169,19 +112,15 @@ def parallelize_hf_transformers(
             "Titan-native embedding, and attention kernels are pending)."
         )
 
-    # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
-    # the flex kernel's local_map redistributes k/v from seq-sharded to
-    # CP-Replicate (all-gather); see _attach_flex_kernel in hf_sharding.py. The
-    # CP-sharded BlockMask is built and sharded on its Q axis upstream (trainer,
-    # ptrr balancer). Note: the ptrr balancer requires the number of Q blocks
-    # (seq_len / flex BLOCK_SIZE) to be divisible by the CP degree; too-short
-    # sequences raise "num_tasks N must be divisible by group_size" from the
-    # balancer -- this is a CP+ptrr constraint, independent of PP.
-    from torchtitan.experiments.transformers_modeling_backend.model import (
-        _uses_flex_attention,
-    )
-
-    use_flex = _uses_flex_attention(model.model.config)
+    # Flex attention is the only attention path and supports FSDP, TP, CP, and PP
+    # (in any combination). Under CP the flex kernel's local_map redistributes
+    # k/v from seq-sharded to CP-Replicate (all-gather); see _attach_flex_kernel
+    # in hf_sharding.py. The CP-sharded BlockMask is built and sharded on its Q
+    # axis upstream (trainer, ptrr balancer). Note: the ptrr balancer requires
+    # the number of Q blocks (seq_len / flex BLOCK_SIZE) to be divisible by the
+    # CP degree; too-short sequences raise "num_tasks N must be divisible by
+    # group_size" from the balancer -- this is a CP+ptrr constraint, independent
+    # of PP.
 
     # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
     # Some models (Gemma4) share the embedding and lm_head weight
@@ -214,13 +153,11 @@ def parallelize_hf_transformers(
         build_and_swap_native_moe(model, parallel_dims)
 
     # 2. Convert HF modules to Module protocol.
-    # TP/EP always need it. CP-only needs it too when flex is enabled: the flex
-    # kernel's local_map is what all-gathers k/v across the CP axis, and it is
-    # only installed by the sharding pass below.
+    # TP/EP always need it. CP-only needs it too: the flex kernel's local_map is
+    # what all-gathers k/v across the CP axis, and it is only installed by the
+    # sharding pass below.
     needs_module_protocol = (
-        parallel_dims.tp_enabled
-        or parallel_dims.ep_enabled
-        or (parallel_dims.cp_enabled and use_flex)
+        parallel_dims.tp_enabled or parallel_dims.ep_enabled or parallel_dims.cp_enabled
     )
     if needs_module_protocol:
         from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
@@ -242,31 +179,16 @@ def parallelize_hf_transformers(
         # the CP axis (on the seq dim). Must run before model.parallelize so the
         # wrap is captured inside the local_map region and operates on the local
         # (already TP-head-sharded, CP-seq-sharded) tensors.
-        if parallel_dims.cp_enabled and use_flex:
+        if parallel_dims.cp_enabled:
             _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
 
-        # 4. Single parallelize call — handles TP, EP, MoE, everything
+        # 4. Single parallelize call -- handles TP, EP, MoE, everything
         model.parallelize(parallel_dims)
 
         if parallel_dims.tp_enabled:
             maybe_enable_async_tp(
                 parallelism, compile_config, parallel_dims.get_mesh("tp")
             )
-
-    # SDPA (non-flex) + CP: wire ring attention. The flex+CP path is handled
-    # inside the module-protocol block above (_wrap_flex_kernel_cp). Without
-    # this, SDPA under CP would attend only to each rank's local shard (silently
-    # wrong). TP+CP is only supported via flex (SDPA q/k/v are already TP
-    # DTensors, which the CP DTensor wrap cannot compose with here).
-    if parallel_dims.cp_enabled and not use_flex:
-        if parallel_dims.tp_enabled:
-            raise NotImplementedError(
-                "SDPA attention with tensor parallelism + context parallelism is "
-                "not supported. Use flex attention "
-                "(attn_implementation='flex_torchtitan') for TP+CP, "
-                "or run context parallelism without tensor parallelism."
-            )
-        _wire_sdpa_attention_cp(model, parallel_dims.get_mesh("cp"))
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components

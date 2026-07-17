@@ -7,12 +7,11 @@
 """Cross-sample leakage test for the flex-attention (packing) path.
 
 When samples are packed into one sequence, attention must not cross document
-boundaries. The forced ``is_causal`` SDPA path cannot express that; flex
-attention with a document BlockMask can. This verifies that the document mask
-the backend builds (``get_attention_masks``) actually blocks cross-document
-attention through the backend's flex function (``_flex_attention_torchtitan``):
-perturbing an earlier document's keys/values must leave a later document's
-output bit-identical.
+boundaries. Flex attention with a document BlockMask expresses that. This
+verifies that the document mask the backend builds (``get_attention_masks``)
+actually blocks cross-document attention through the backend's flex function
+(``_flex_attention_torchtitan``): perturbing an earlier document's keys/values
+must leave a later document's output bit-identical.
 
 Run with:
     python -m pytest \
@@ -82,13 +81,13 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
 
 
 class TestAttnMaskTypeValidation(unittest.TestCase):
-    """block_causal masking requires the flex impl; SDPA must fail loud.
+    """Flex is the only attention path; block_causal is always supported.
 
     Building the config is lightweight (no model build, no GPU/distributed), so
-    this validates the guard in HFTransformerModel.Config.__init__ directly.
+    this checks that a block_causal config builds without error.
     """
 
-    def test_block_causal_requires_flex(self):
+    def test_block_causal_builds(self):
         from torchtitan.experiments.transformers_modeling_backend import (
             TitanModelConfig,
         )
@@ -96,28 +95,7 @@ class TestAttnMaskTypeValidation(unittest.TestCase):
             HFTransformerModel,
         )
 
-        # Default attn_implementation is sdpa_torchtitan, which cannot express
-        # cross-document masking -- block_causal must raise.
-        with self.assertRaisesRegex(ValueError, "block_causal"):
-            HFTransformerModel.Config(
-                model_config=TitanModelConfig(
-                    dim=256,
-                    n_layers=2,
-                    n_heads=16,
-                    n_kv_heads=16,
-                    attn_mask_type="block_causal",
-                ),
-            )
-
-    def test_block_causal_with_flex_ok(self):
-        from torchtitan.experiments.transformers_modeling_backend import (
-            TitanModelConfig,
-        )
-        from torchtitan.experiments.transformers_modeling_backend.model import (
-            HFTransformerModel,
-        )
-
-        # flex_torchtitan supports the document BlockMask -- no error.
+        # Flex supports the document BlockMask -- no error.
         HFTransformerModel.Config(
             model_config=TitanModelConfig(
                 dim=256,
@@ -126,7 +104,6 @@ class TestAttnMaskTypeValidation(unittest.TestCase):
                 n_kv_heads=16,
                 attn_mask_type="block_causal",
             ),
-            attn_implementation="flex_torchtitan",
         )
 
 

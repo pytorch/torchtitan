@@ -33,8 +33,8 @@ class HFTransformerTrainer(Trainer):
        pretraining path builds, so an SFT flavor only needs the flex impl plus
        attn_mask_type="block_causal".
 
-    2. Fails loud when a flex model runs under CP with the SDPA-only "headtail"
-       load balancer, which cannot shard a flex ``BlockMask`` (see
+    2. Fails loud when a model runs under CP with the "headtail" load balancer,
+       which cannot shard a flex ``BlockMask`` (see
        ``_validate_cp_load_balancer``).
     """
 
@@ -47,26 +47,21 @@ class HFTransformerTrainer(Trainer):
         self._validate_cp_load_balancer()
 
     def _validate_cp_load_balancer(self) -> None:
-        """Reject headtail load balancing for flex attention under CP.
+        """Reject headtail load balancing under CP.
 
-        A flex ``BlockMask`` can only be sharded by the "ptrr" balancer (or with
-        balancing disabled via None); the default "headtail" is SDPA-only and
-        cannot shard it. Raise rather than silently overriding a user-set value.
+        A flex ``BlockMask`` (the only attention path here) can only be sharded
+        by the "ptrr" balancer (or with balancing disabled via None); the
+        default "headtail" cannot shard it. Raise rather than silently
+        overriding a user-set value.
         """
-        from torchtitan.experiments.transformers_modeling_backend.model import (
-            _uses_flex_attention,
-        )
-
         if not self.parallel_dims.cp_enabled:
-            return
-        if not _uses_flex_attention(self.model_config):
             return
         if self.config.parallelism.context_parallel_load_balancer == "headtail":
             raise ValueError(
-                "context_parallel_load_balancer='headtail' is SDPA-only and "
-                "cannot shard a flex-attention BlockMask under context "
-                "parallelism. Set --parallelism.context_parallel_load_balancer "
-                "to 'ptrr' (or None to disable balancing)."
+                "context_parallel_load_balancer='headtail' cannot shard a "
+                "flex-attention BlockMask under context parallelism. Set "
+                "--parallelism.context_parallel_load_balancer to 'ptrr' (or "
+                "None to disable balancing)."
             )
 
     def post_dataloading_process(

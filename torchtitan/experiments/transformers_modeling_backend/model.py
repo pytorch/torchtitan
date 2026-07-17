@@ -18,7 +18,6 @@ from torch.nn.attention.flex_attention import and_masks
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
-from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
@@ -159,17 +158,14 @@ def _get_moe_attr_name(layer: nn.Module) -> str | None:
     return "mlp" if hasattr(layer, "mlp") else None
 
 
-def _uses_flex_attention(config) -> bool:
-    """True if the flex attention impl is selected (vs SDPA).
-
-    Reads the HF ``_attn_implementation`` slot (set by
-    ``_configure_hf_attention`` and preserved onto the loaded HF config),
-    falling back to the public ``attn_implementation`` attribute.
-    """
-    impl = getattr(config, "_attn_implementation", None) or getattr(
-        config, "attn_implementation", ""
-    )
-    return impl == "flex_torchtitan"
+# Flex attention is the only attention path in this backend. The custom impl
+# name is registered in the HF ``AttentionInterface`` (see
+# ``_configure_hf_attention``) and set on ``config._attn_implementation`` so HF
+# routes attention through ``_flex_attention_torchtitan`` -- bypassing HF's
+# per-model ``_supports_flex_attn`` gate. A causal or document/packing BlockMask
+# is applied via the titan-built mask (is_causal alone cannot express
+# cross-sample masking); see ``get_attention_masks``.
+_ATTN_IMPLEMENTATION = "flex_torchtitan"
 
 
 def _uses_dsa(config) -> bool:
@@ -219,14 +215,12 @@ class HFTransformerModel(BaseModel):
         def __init__(
             self,
             model_config,
-            # HuggingFace specific args
-            attn_implementation: str = "sdpa_torchtitan",
             **kwargs,
         ):
             # Explicitly call PretrainedConfig.__init__ (not via MRO, since
             # Configurable.Config's generated __init__ doesn't chain to it)
             PretrainedConfig.__init__(
-                self, attn_implementation=attn_implementation, **kwargs
+                self, attn_implementation=_ATTN_IMPLEMENTATION, **kwargs
             )
             # Set param_init and sharding_config before Module.Config.build()
             # accesses them. PretrainedConfig.__getattribute__ doesn't
@@ -248,21 +242,9 @@ class HFTransformerModel(BaseModel):
             self._create_getter_setter_dynamically(is_moe=self.is_moe)
 
             self._titan_injected_model_args = {}
-            self._configure_hf_attention(attn_implementation)
+            self._configure_hf_attention()
 
             self._initialize_attributes(model_config)
-
-            # block_causal masking can only be expressed via a flex BlockMask;
-            # the SDPA impl only has is_causal. Fail loud rather than silently
-            # dropping the document boundaries.
-            if getattr(
-                self, "attn_mask_type", "causal"
-            ) == "block_causal" and not _uses_flex_attention(self):
-                raise ValueError(
-                    "attn_mask_type='block_causal' requires "
-                    "attn_implementation='flex_torchtitan'; the SDPA impl "
-                    "cannot express cross-document masking."
-                )
 
         def build(self, **kwargs):
             """Override build() to use _replace() instead of dataclasses.replace().
@@ -343,35 +325,31 @@ class HFTransformerModel(BaseModel):
                 if attr_name not in self._tt_to_hf_attribute_map:
                     self._titan_injected_model_args[attr_name] = value
 
-        def _configure_hf_attention(self, attn_implementation: str):
-            """Configure HuggingFace attention settings.
+        def _configure_hf_attention(self):
+            """Configure HuggingFace attention to route through flex attention.
 
-            Two impls are supported. "sdpa_torchtitan" (the default) is SDPA with
-            is_causal and no explicit mask. "flex_torchtitan" routes attention
-            through flex so a causal or document/packing BlockMask can be applied
-            -- is_causal alone cannot express cross-sample (packed) masking. The
-            titan-built BlockMask (see ``get_attention_masks``) rides HF's normal
-            ``attention_mask`` argument (HF returns an already-4D/BlockMask mask
-            as-is), so no custom mask plumbing is needed. The custom impl name
-            only exists to bypass HF's per-model ``_supports_flex_attn`` gate.
+            Flex is the only attention path in this backend. It routes attention
+            through the flex HOP so a causal or document/packing BlockMask can be
+            applied -- is_causal alone cannot express cross-sample (packed)
+            masking. The titan-built BlockMask (see ``get_attention_masks``)
+            rides HF's normal ``attention_mask`` argument (HF returns an
+            already-4D/BlockMask mask as-is), so no custom mask plumbing is
+            needed. The custom impl name only exists to bypass HF's per-model
+            ``_supports_flex_attn`` gate.
             """
-            if attn_implementation == "flex_torchtitan":
-                AttentionInterface._global_mapping[
-                    attn_implementation
-                ] = _flex_attention_torchtitan
-            else:
-                # NOTE:(3outeille):This will force create_causal_mask to return None
-                AttentionInterface._global_mapping[
-                    attn_implementation
-                ] = sdpa_attention_forward
-            self._titan_injected_model_args["attn_implementation"] = attn_implementation
-            self.attn_implementation = attn_implementation
+            AttentionInterface._global_mapping[
+                _ATTN_IMPLEMENTATION
+            ] = _flex_attention_torchtitan
+            self._titan_injected_model_args[
+                "attn_implementation"
+            ] = _ATTN_IMPLEMENTATION
+            self.attn_implementation = _ATTN_IMPLEMENTATION
             # HF selects the attention function from ``config._attn_implementation``.
             # PretrainedConfig has no ``attn_implementation`` property in this
-            # version, so the line above only sets a dead plain attribute — set the
+            # version, so the line above only sets a dead plain attribute -- set the
             # underscore field directly (it is preserved through update_from_config,
             # which skips underscore keys when copying the loaded HF config).
-            self._attn_implementation = attn_implementation
+            self._attn_implementation = _ATTN_IMPLEMENTATION
 
         def _create_getter_setter_dynamically(self, is_moe: bool):
             """
@@ -1065,17 +1043,13 @@ class HFTransformerModel(BaseModel):
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).
 
-        Returns None unless the flex attention impl is selected; the SDPA impl
-        relies on ``is_causal`` and needs no explicit mask. ``forward`` (or the
-        trainer under CP) calls this and passes the result through as the HF
-        ``attention_mask``. ``attn_mask_type`` selects the mask: "block_causal"
-        is causal AND same-document, so packed samples don't attend across
-        boundaries (which ``is_causal`` alone cannot express); "causal" is plain
-        causal (flex with no mask would be full attention, so a causal BlockMask
-        is still required).
+        ``forward`` (or the trainer under CP) calls this and passes the result
+        through as the HF ``attention_mask``. ``attn_mask_type`` selects the
+        mask: "block_causal" is causal AND same-document, so packed samples
+        don't attend across boundaries (which ``is_causal`` alone cannot
+        express); "causal" is plain causal (flex with no mask would be full
+        attention, so a causal BlockMask is still required).
         """
-        if not _uses_flex_attention(self.model.config):
-            return None
         if _uses_dsa(self.model.config):
             # DSA models cannot consume a flex BlockMask: their indexer and main
             # attention treat the mask as a dense additive tensor (see
@@ -1132,11 +1106,13 @@ class HFTransformerModel(BaseModel):
     def forward(self, *args, **kwargs):
         positions = kwargs.pop("positions", None)
         attention_masks = kwargs.pop("attention_masks", None)
-        use_flex = _uses_flex_attention(self.model.config)
 
-        if use_flex and positions is not None:
+        if positions is not None:
             # Per-document positions (reset at packed-sample boundaries) drive
-            # RoPE under flex; the BlockMask handles cross-sample masking.
+            # RoPE; the BlockMask handles cross-sample masking. Under CP these are
+            # the sequence-sharded global positions (load-balancer permuted),
+            # which is exactly what RoPE needs for each local shard -- a plain
+            # arange would use the wrong positions.
             kwargs["position_ids"] = positions
             # Build the BlockMask here rather than in the core
             # trainer: the trainer only builds masks for Decoder.Config models,
@@ -1146,12 +1122,6 @@ class HFTransformerModel(BaseModel):
             # here is safe.
             if attention_masks is None:
                 attention_masks = self.get_attention_masks(positions)
-        elif positions is not None:
-            # SDPA path: honor the passed positions so RoPE is correct. Under CP
-            # these are the sequence-sharded global positions (load-balancer
-            # permuted), which is exactly what RoPE needs for each local shard --
-            # a plain arange would use the wrong positions.
-            kwargs["position_ids"] = positions
         else:
             local_seq_len = self.max_seq_len
             local_seq_len //= (

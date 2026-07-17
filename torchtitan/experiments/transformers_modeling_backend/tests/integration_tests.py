@@ -81,7 +81,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             [
                 [
                     "--module transformers_modeling_backend",
-                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--config transformers_modeling_backend_debugmodel",
                     "--parallelism.data_parallel_shard_degree -1",
                     "--training.steps 2",
                 ],
@@ -94,7 +94,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             [
                 [
                     "--module transformers_modeling_backend",
-                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--config transformers_modeling_backend_debugmodel",
                     "--parallelism.data_parallel_shard_degree -1",
                     "--parallelism.tensor_parallel_degree 2",
                     "--training.steps 2",
@@ -108,7 +108,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             [
                 [
                     "--module transformers_modeling_backend",
-                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--config transformers_modeling_backend_debugmodel",
                     "--parallelism.data_parallel_shard_degree 1",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.context_parallel_load_balancer ptrr",
@@ -125,21 +125,6 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
                     "--module transformers_modeling_backend",
                     "--config transformers_modeling_backend_debugmodel",
                     "--parallelism.data_parallel_shard_degree 1",
-                    "--parallelism.context_parallel_degree 2",
-                    "--parallelism.context_parallel_load_balancer headtail",
-                    "--training.steps 2",
-                ],
-            ],
-            "Transformers Backend SDPA FSDP+CP",
-            "transformers_modeling_backend_sdpa_fsdp+cp",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module transformers_modeling_backend",
-                    "--config transformers_modeling_backend_debugmodel_flex",
-                    "--parallelism.data_parallel_shard_degree 1",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.context_parallel_load_balancer ptrr",
@@ -154,7 +139,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             [
                 [
                     "--module transformers_modeling_backend",
-                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--config transformers_modeling_backend_debugmodel",
                     "--parallelism.data_parallel_shard_degree 1",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule 1F1B",
@@ -171,7 +156,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             [
                 [
                     "--module transformers_modeling_backend",
-                    "--config transformers_modeling_backend_debugmodel_moe_flex",
+                    "--config transformers_modeling_backend_debugmodel_moe",
                     "--parallelism.data_parallel_shard_degree -1",
                     "--parallelism.expert_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
@@ -187,7 +172,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             [
                 [
                     "--module transformers_modeling_backend",
-                    "--config transformers_modeling_backend_debugmodel_moe_flex",
+                    "--config transformers_modeling_backend_debugmodel_moe",
                     "--parallelism.data_parallel_shard_degree -1",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
