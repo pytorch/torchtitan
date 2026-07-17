@@ -172,6 +172,23 @@ def _uses_flex_attention(config) -> bool:
     return impl == "flex_torchtitan"
 
 
+def _uses_dsa(config) -> bool:
+    """True if the model uses DeepSeek-style sparse attention (DSA).
+
+    DSA models (e.g. GLM-5, model_type 'glm_moe_dsa') run an auxiliary
+    "indexer" sub-attention that scores all keys and selects the top-k per
+    query, expressing the selection as a dense additive mask. The indexer and
+    the main attention both consume the incoming attention mask as a plain
+    tensor -- the modeling code calls ``.dim()`` on it, adds it to the score
+    matrix, and combines it with the top-k selection into a dense additive mask
+    that is then handed to the attention interface. A flex ``BlockMask`` has no
+    ``.dim()`` and cannot be added elementwise, so DSA needs a dense 4D tensor
+    mask instead of a BlockMask (flex still runs, consuming the dense mask as a
+    ``score_mask``). Detected by the DSA-specific ``index_topk`` config attr.
+    """
+    return getattr(config, "index_topk", None) is not None
+
+
 class HFTransformerModel(BaseModel):
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor inputs.
     _skip_lm_head: bool = False
@@ -1059,6 +1076,14 @@ class HFTransformerModel(BaseModel):
         """
         if not _uses_flex_attention(self.model.config):
             return None
+        if _uses_dsa(self.model.config):
+            # DSA models cannot consume a flex BlockMask: their indexer and main
+            # attention treat the mask as a dense additive tensor (see
+            # ``_uses_dsa``). Return a dense 4D additive causal mask so the DSA
+            # modeling code works (its ``create_causal_mask`` returns an
+            # already-4D mask as-is) and flex applies the model-built dense mask
+            # as a ``score_mask``.
+            return self._build_dense_attention_mask(positions)
         if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
             mask_mod = and_masks(
                 get_causal_mask_mod(),
@@ -1077,6 +1102,32 @@ class HFTransformerModel(BaseModel):
             BLOCK_SIZE=128,
             separate_full_blocks=not is_in_batch_invariant_mode(),
         )
+
+    def _build_dense_attention_mask(self, positions: torch.Tensor) -> torch.Tensor:
+        """Dense 4D additive attention mask for DSA models under flex.
+
+        DSA (DeepSeek sparse attention) models cannot use a flex BlockMask (see
+        ``_uses_dsa``); they need a dense additive tensor mask. Build a
+        ``[B, 1, S, S]`` mask with ``0.0`` on allowed positions and ``-inf``
+        elsewhere. "causal" allows key ``j <= query i``; "block_causal"
+        additionally requires same-document (positions reset to 0 at each packed
+        sample boundary), mirroring ``get_causal_mask_mod`` /
+        ``get_document_mask_mod``. The batch dim is materialized (not broadcast)
+        so flex's ``score_mod`` can index it per batch element.
+        """
+        batch_size, seq_len = positions.shape
+        device = positions.device
+        dtype = self.tok_embeddings.weight.dtype
+        idx = torch.arange(seq_len, device=device)
+        # [S, S] causal: query i (row) may attend to key j (col) when j <= i.
+        allowed = (idx[:, None] >= idx[None, :]).unsqueeze(0).expand(batch_size, -1, -1)
+        if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
+            doc_ids = torch.cumsum((positions == 0).int(), dim=1) - 1  # [B, S]
+            same_doc = doc_ids[:, :, None] == doc_ids[:, None, :]  # [B, S, S]
+            allowed = allowed & same_doc
+        mask = torch.zeros((batch_size, seq_len, seq_len), device=device, dtype=dtype)
+        mask.masked_fill_(~allowed, float("-inf"))
+        return mask.unsqueeze(1)  # [B, 1, S, S]
 
     def forward(self, *args, **kwargs):
         positions = kwargs.pop("positions", None)
