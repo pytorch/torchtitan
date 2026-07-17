@@ -5,11 +5,9 @@
 
 from dataclasses import dataclass
 
-import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 
 
@@ -60,11 +58,8 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
                 )
 
     def forward(self, x_BLD, expert_bias_E=None, *, input_ids=None):
-        scores = F.linear(
-            x_BLD.float(),
-            self.gate.weight.float(),
-            None if self.gate.bias is None else self.gate.bias.float(),
-        )
+        with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
+            scores = self.gate(x_BLD)
         if self.score_func == "sigmoid":
             scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
@@ -73,20 +68,18 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
             scores = F.softplus(scores).sqrt()
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
-        if get_spmd_backend() == "spmd_types":
-            spmd.assert_type_like(scores, x_BLD)
 
         if self.hash:
             if input_ids is None:
                 raise ValueError("input_ids is required for DeepSeek V4 hash routing.")
             selected_experts_indices = self.tid2eid.to(input_ids.device)[input_ids]
-            if get_spmd_backend() == "spmd_types":
-                spmd.assert_type_like(selected_experts_indices, x_BLD)
         else:
-            scores_for_choice = (
+            scores_for_choice_BLE = (
                 scores if expert_bias_E is None else scores + expert_bias_E
             )
-            selected_experts_indices = scores_for_choice.topk(self.top_k, dim=-1)[1]
+            selected_experts_indices = scores_for_choice_BLE.topk(
+                self.top_k, dim=-1
+            )[1]
 
         top_scores = scores.gather(dim=-1, index=selected_experts_indices)
 
@@ -95,9 +88,6 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
                 scores
             )
 
-        if get_spmd_backend() == "spmd_types":
-            spmd.assert_type_like(top_scores, x_BLD)
-            spmd.assert_type_like(selected_experts_indices, x_BLD)
         if self.route_norm:
             top_scores /= top_scores.sum(dim=-1, keepdim=True) + 1e-20
         top_scores *= self.route_scale

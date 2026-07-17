@@ -445,7 +445,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 if get_spmd_backend() == "spmd_types"
                 else self.ep_mesh.get_group()
             )
-            if get_spmd_backend() == "spmd_types":
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 num_local_tokens_per_expert_E = spmd.reinterpret_mesh(
                     num_local_tokens_per_expert_E, spmd.current_mesh()
                 )
