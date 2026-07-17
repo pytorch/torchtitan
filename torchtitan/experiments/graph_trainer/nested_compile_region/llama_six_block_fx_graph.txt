@@ -1,0 +1,553 @@
+class <lambda>(torch.nn.Module):
+    def forward(
+        self,
+        arg0_1: "f32[2048, 256][256, 1]cpu",
+        arg1_1: "f32[768, 256][256, 1]cpu",
+        arg2_1: "f32[256, 256][256, 1]cpu",
+        arg3_1: "f32[768, 256][256, 1]cpu",
+        arg4_1: "f32[256, 768][768, 1]cpu",
+        arg5_1: "f32[768, 256][256, 1]cpu",
+        arg6_1: "f32[256][1]cpu",
+        arg7_1: "f32[256][1]cpu",
+        arg8_1: "f32[768, 256][256, 1]cpu",
+        arg9_1: "f32[256, 256][256, 1]cpu",
+        arg10_1: "f32[768, 256][256, 1]cpu",
+        arg11_1: "f32[256, 768][768, 1]cpu",
+        arg12_1: "f32[768, 256][256, 1]cpu",
+        arg13_1: "f32[256][1]cpu",
+        arg14_1: "f32[256][1]cpu",
+        arg15_1: "f32[768, 256][256, 1]cpu",
+        arg16_1: "f32[256, 256][256, 1]cpu",
+        arg17_1: "f32[768, 256][256, 1]cpu",
+        arg18_1: "f32[256, 768][768, 1]cpu",
+        arg19_1: "f32[768, 256][256, 1]cpu",
+        arg20_1: "f32[256][1]cpu",
+        arg21_1: "f32[256][1]cpu",
+        arg22_1: "f32[768, 256][256, 1]cpu",
+        arg23_1: "f32[256, 256][256, 1]cpu",
+        arg24_1: "f32[768, 256][256, 1]cpu",
+        arg25_1: "f32[256, 768][768, 1]cpu",
+        arg26_1: "f32[768, 256][256, 1]cpu",
+        arg27_1: "f32[256][1]cpu",
+        arg28_1: "f32[256][1]cpu",
+        arg29_1: "f32[768, 256][256, 1]cpu",
+        arg30_1: "f32[256, 256][256, 1]cpu",
+        arg31_1: "f32[768, 256][256, 1]cpu",
+        arg32_1: "f32[256, 768][768, 1]cpu",
+        arg33_1: "f32[768, 256][256, 1]cpu",
+        arg34_1: "f32[256][1]cpu",
+        arg35_1: "f32[256][1]cpu",
+        arg36_1: "f32[768, 256][256, 1]cpu",
+        arg37_1: "f32[256, 256][256, 1]cpu",
+        arg38_1: "f32[768, 256][256, 1]cpu",
+        arg39_1: "f32[256, 768][768, 1]cpu",
+        arg40_1: "f32[768, 256][256, 1]cpu",
+        arg41_1: "f32[256][1]cpu",
+        arg42_1: "f32[256][1]cpu",
+        arg43_1: "f32[256][1]cpu",
+        arg44_1: "f32[2048, 256][256, 1]cpu",
+        arg45_1: "c64[131072, 8][8, 1]cpu",
+        arg46_1: "c64[131072, 8][8, 1]cpu",
+        arg47_1: "c64[131072, 8][8, 1]cpu",
+        arg48_1: "c64[131072, 8][8, 1]cpu",
+        arg49_1: "c64[131072, 8][8, 1]cpu",
+        arg50_1: "c64[131072, 8][8, 1]cpu",
+        arg51_1: "i64[1, 4][4, 1]cpu",
+        arg52_1: "i64[1, 4][4, 1]cpu",
+    ):
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/embedding.py:53 in forward, code: return F.embedding(
+        embedding: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.embedding.default(arg0_1, arg51_1);  arg0_1 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        repeated_subgraph0 = self.repeated_subgraph0
+
+        # Annotation: {'call_id': 0} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph = torch.ops.higher_order.invoke_subgraph(repeated_subgraph0, 'fw_nested_region_0', arg1_1, arg2_1, arg3_1, arg4_1, arg5_1, arg6_1, arg7_1, arg45_1, embedding, None, None);  repeated_subgraph0 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph[0];  invoke_subgraph = None
+        repeated_subgraph0_1 = self.repeated_subgraph0
+
+        # Annotation: {'call_id': 1} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_1 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph0_1, 'fw_nested_region_0', arg8_1, arg9_1, arg10_1, arg11_1, arg12_1, arg13_1, arg14_1, arg46_1, getitem, None, None);  repeated_subgraph0_1 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_1: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_1[0];  invoke_subgraph_1 = None
+        repeated_subgraph0_2 = self.repeated_subgraph0
+
+        # Annotation: {'call_id': 2} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_2 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph0_2, 'fw_nested_region_0', arg15_1, arg16_1, arg17_1, arg18_1, arg19_1, arg20_1, arg21_1, arg47_1, getitem_1, None, None);  repeated_subgraph0_2 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_2: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_2[0];  invoke_subgraph_2 = None
+        repeated_subgraph0_3 = self.repeated_subgraph0
+
+        # Annotation: {'call_id': 3} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_3 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph0_3, 'fw_nested_region_0', arg22_1, arg23_1, arg24_1, arg25_1, arg26_1, arg27_1, arg28_1, arg48_1, getitem_2, None, None);  repeated_subgraph0_3 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_3: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_3[0];  invoke_subgraph_3 = None
+        repeated_subgraph0_4 = self.repeated_subgraph0
+
+        # Annotation: {'call_id': 4} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_4 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph0_4, 'fw_nested_region_0', arg29_1, arg30_1, arg31_1, arg32_1, arg33_1, arg34_1, arg35_1, arg49_1, getitem_3, None, None);  repeated_subgraph0_4 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_4: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_4[0];  invoke_subgraph_4 = None
+        repeated_subgraph0_5 = self.repeated_subgraph0
+
+        # Annotation: {'call_id': 5} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_5 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph0_5, 'fw_nested_region_0', arg36_1, arg37_1, arg38_1, arg39_1, arg40_1, arg41_1, arg42_1, arg50_1, getitem_4, None, None);  repeated_subgraph0_5 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_5: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_5[0];  invoke_subgraph_5 = None
+
+        # File: /home/angelayi/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torch/nn/modules/normalization.py:427 in forward, code: return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
+        pow_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(getitem_5, 2)
+        mean: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mean.dim(pow_1, [2], True);  pow_1 = None
+        add_: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.add_.Scalar(mean, 9.999999747378752e-06);  mean = None
+        rsqrt: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.rsqrt.default(add_);  add_ = None
+        detach: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.detach.default(rsqrt)
+        mul: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(getitem_5, rsqrt)
+        mul_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul, arg43_1)
+
+        # File: /home/angelayi/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torch/nn/modules/linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        t: "f32[256, 2048][1, 256]cpu" = torch.ops.aten.t.default(arg44_1);  arg44_1 = None
+        view: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(mul_1, [4, 256]);  mul_1 = None
+        mm: "f32[4, 2048][2048, 1]cpu" = torch.ops.aten.mm.default(view, t)
+        _unsafe_view: "f32[1, 4, 2048][8192, 2048, 1]cpu" = torch.ops.aten._unsafe_view.default(mm, [1, 4, 2048]);  mm = None
+
+        # No stacktrace found for following nodes
+        view_1: "f32[4, 2048][2048, 1]cpu" = torch.ops.aten.view.default(_unsafe_view, [4, 2048]);  _unsafe_view = None
+        view_2: "i64[4][1]cpu" = torch.ops.aten.view.default(arg52_1, [4]);  arg52_1 = None
+        _log_softmax: "f32[4, 2048][2048, 1]cpu" = torch.ops.aten._log_softmax.default(view_1, 1, False);  view_1 = None
+        detach_1: "f32[4, 2048][2048, 1]cpu" = torch.ops.aten.detach.default(_log_softmax)
+        nll_loss_forward = torch.ops.aten.nll_loss_forward.default(_log_softmax, view_2, None, 2, -100)
+        getitem_6: "f32[][]cpu" = nll_loss_forward[0]
+        getitem_7: "f32[][]cpu" = nll_loss_forward[1];  nll_loss_forward = None
+        ones_like: "f32[][]cpu" = torch.ops.aten.ones_like.default(getitem_6, pin_memory = False, memory_format = torch.preserve_format)
+        nll_loss_backward: "f32[4, 2048][2048, 1]cpu" = torch.ops.aten.nll_loss_backward.default(ones_like, _log_softmax, view_2, None, 2, -100, getitem_7);  ones_like = _log_softmax = view_2 = getitem_7 = None
+        detach_2: "f32[4, 2048][2048, 1]cpu" = torch.ops.aten.detach.default(detach_1);  detach_1 = None
+        _log_softmax_backward_data: "f32[4, 2048][2048, 1]cpu" = torch.ops.aten._log_softmax_backward_data.default(nll_loss_backward, detach_2, 1, torch.float32);  nll_loss_backward = detach_2 = None
+        view_3: "f32[1, 4, 2048][8192, 2048, 1]cpu" = torch.ops.aten.view.default(_log_softmax_backward_data, [1, 4, 2048]);  _log_softmax_backward_data = None
+
+        # File: /home/angelayi/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torch/nn/modules/linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        view_4: "f32[4, 2048][2048, 1]cpu" = torch.ops.aten.view.default(view_3, [4, 2048]);  view_3 = None
+        t_1: "f32[2048, 4][1, 2048]cpu" = torch.ops.aten.t.default(view_4)
+        mm_1: "f32[2048, 256][256, 1]cpu" = torch.ops.aten.mm.default(t_1, view);  t_1 = view = None
+        t_2: "f32[256, 2048][1, 256]cpu" = torch.ops.aten.t.default(mm_1);  mm_1 = None
+        t_3: "f32[2048, 256][256, 1]cpu" = torch.ops.aten.t.default(t);  t = None
+        mm_2: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_4, t_3);  view_4 = t_3 = None
+        view_5: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.view.default(mm_2, [1, 4, 256]);  mm_2 = None
+        t_4: "f32[2048, 256][256, 1]cpu" = torch.ops.aten.t.default(t_2);  t_2 = None
+
+        # File: /home/angelayi/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torch/nn/modules/normalization.py:427 in forward, code: return F.rms_norm(x, self.normalized_shape, self.weight, self.eps)
+        mul_2: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(view_5, mul);  mul = None
+        mul_3: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(view_5, arg43_1);  view_5 = arg43_1 = None
+        sum_1: "f32[1, 1, 256][256, 256, 1]cpu" = torch.ops.aten.sum.dim_IntList(mul_2, [0, 1], True);  mul_2 = None
+        view_6: "f32[256][1]cpu" = torch.ops.aten.view.default(sum_1, [256]);  sum_1 = None
+        mul_4: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul_3, getitem_5)
+        mul_5: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul_3, rsqrt);  mul_3 = rsqrt = None
+        sum_2: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.sum.dim_IntList(mul_4, [2], True);  mul_4 = None
+        detach_3: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.detach.default(detach);  detach = None
+        pow_2: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(detach_3, 3);  detach_3 = None
+        mul_6: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mul.Scalar(sum_2, -0.5);  sum_2 = None
+        mul_7: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mul.Tensor(mul_6, pow_2);  mul_6 = pow_2 = None
+        expand: "f32[1, 4, 256][4, 1, 0]cpu" = torch.ops.aten.expand.default(mul_7, [1, 4, 256]);  mul_7 = None
+        div: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.div.Scalar(expand, 256);  expand = None
+        pow_3: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(getitem_5, 1.0);  getitem_5 = None
+        mul_8: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Scalar(pow_3, 2.0);  pow_3 = None
+        mul_9: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(div, mul_8);  div = mul_8 = None
+
+        # No stacktrace found for following nodes
+        add: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(mul_5, mul_9);  mul_5 = mul_9 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        repeated_subgraph1 = self.repeated_subgraph1
+
+        # Annotation: {'call_id': 5} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_6 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph1, 'bw_nested_region_0_0', arg36_1, arg37_1, arg38_1, arg39_1, arg40_1, arg41_1, arg42_1, arg50_1, getitem_4, None, None, add);  repeated_subgraph1 = arg36_1 = arg37_1 = arg38_1 = arg39_1 = arg40_1 = arg41_1 = arg42_1 = arg50_1 = getitem_4 = add = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_8: "f32[768, 256][256, 1]cpu" = invoke_subgraph_6[0]
+        getitem_9: "f32[256, 256][256, 1]cpu" = invoke_subgraph_6[1]
+        getitem_10: "f32[768, 256][256, 1]cpu" = invoke_subgraph_6[2]
+        getitem_11: "f32[256, 768][768, 1]cpu" = invoke_subgraph_6[3]
+        getitem_12: "f32[768, 256][256, 1]cpu" = invoke_subgraph_6[4]
+        getitem_13: "f32[256][1]cpu" = invoke_subgraph_6[5]
+        getitem_14: "f32[256][1]cpu" = invoke_subgraph_6[6]
+        getitem_15 = invoke_subgraph_6[7];  getitem_15 = None
+        getitem_16: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_6[8]
+        getitem_17 = invoke_subgraph_6[9];  getitem_17 = None
+        getitem_18 = invoke_subgraph_6[10];  getitem_18 = None
+        getitem_19: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_6[11];  invoke_subgraph_6 = getitem_19 = None
+        repeated_subgraph1_1 = self.repeated_subgraph1
+
+        # Annotation: {'call_id': 4} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_7 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph1_1, 'bw_nested_region_0_0', arg29_1, arg30_1, arg31_1, arg32_1, arg33_1, arg34_1, arg35_1, arg49_1, getitem_3, None, None, getitem_16);  repeated_subgraph1_1 = arg29_1 = arg30_1 = arg31_1 = arg32_1 = arg33_1 = arg34_1 = arg35_1 = arg49_1 = getitem_3 = getitem_16 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_20: "f32[768, 256][256, 1]cpu" = invoke_subgraph_7[0]
+        getitem_21: "f32[256, 256][256, 1]cpu" = invoke_subgraph_7[1]
+        getitem_22: "f32[768, 256][256, 1]cpu" = invoke_subgraph_7[2]
+        getitem_23: "f32[256, 768][768, 1]cpu" = invoke_subgraph_7[3]
+        getitem_24: "f32[768, 256][256, 1]cpu" = invoke_subgraph_7[4]
+        getitem_25: "f32[256][1]cpu" = invoke_subgraph_7[5]
+        getitem_26: "f32[256][1]cpu" = invoke_subgraph_7[6]
+        getitem_27 = invoke_subgraph_7[7];  getitem_27 = None
+        getitem_28: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_7[8]
+        getitem_29 = invoke_subgraph_7[9];  getitem_29 = None
+        getitem_30 = invoke_subgraph_7[10];  getitem_30 = None
+        getitem_31: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_7[11];  invoke_subgraph_7 = getitem_31 = None
+        repeated_subgraph1_2 = self.repeated_subgraph1
+
+        # Annotation: {'call_id': 3} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_8 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph1_2, 'bw_nested_region_0_0', arg22_1, arg23_1, arg24_1, arg25_1, arg26_1, arg27_1, arg28_1, arg48_1, getitem_2, None, None, getitem_28);  repeated_subgraph1_2 = arg22_1 = arg23_1 = arg24_1 = arg25_1 = arg26_1 = arg27_1 = arg28_1 = arg48_1 = getitem_2 = getitem_28 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_32: "f32[768, 256][256, 1]cpu" = invoke_subgraph_8[0]
+        getitem_33: "f32[256, 256][256, 1]cpu" = invoke_subgraph_8[1]
+        getitem_34: "f32[768, 256][256, 1]cpu" = invoke_subgraph_8[2]
+        getitem_35: "f32[256, 768][768, 1]cpu" = invoke_subgraph_8[3]
+        getitem_36: "f32[768, 256][256, 1]cpu" = invoke_subgraph_8[4]
+        getitem_37: "f32[256][1]cpu" = invoke_subgraph_8[5]
+        getitem_38: "f32[256][1]cpu" = invoke_subgraph_8[6]
+        getitem_39 = invoke_subgraph_8[7];  getitem_39 = None
+        getitem_40: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_8[8]
+        getitem_41 = invoke_subgraph_8[9];  getitem_41 = None
+        getitem_42 = invoke_subgraph_8[10];  getitem_42 = None
+        getitem_43: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_8[11];  invoke_subgraph_8 = getitem_43 = None
+        repeated_subgraph1_3 = self.repeated_subgraph1
+
+        # Annotation: {'call_id': 2} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_9 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph1_3, 'bw_nested_region_0_0', arg15_1, arg16_1, arg17_1, arg18_1, arg19_1, arg20_1, arg21_1, arg47_1, getitem_1, None, None, getitem_40);  repeated_subgraph1_3 = arg15_1 = arg16_1 = arg17_1 = arg18_1 = arg19_1 = arg20_1 = arg21_1 = arg47_1 = getitem_1 = getitem_40 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_44: "f32[768, 256][256, 1]cpu" = invoke_subgraph_9[0]
+        getitem_45: "f32[256, 256][256, 1]cpu" = invoke_subgraph_9[1]
+        getitem_46: "f32[768, 256][256, 1]cpu" = invoke_subgraph_9[2]
+        getitem_47: "f32[256, 768][768, 1]cpu" = invoke_subgraph_9[3]
+        getitem_48: "f32[768, 256][256, 1]cpu" = invoke_subgraph_9[4]
+        getitem_49: "f32[256][1]cpu" = invoke_subgraph_9[5]
+        getitem_50: "f32[256][1]cpu" = invoke_subgraph_9[6]
+        getitem_51 = invoke_subgraph_9[7];  getitem_51 = None
+        getitem_52: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_9[8]
+        getitem_53 = invoke_subgraph_9[9];  getitem_53 = None
+        getitem_54 = invoke_subgraph_9[10];  getitem_54 = None
+        getitem_55: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_9[11];  invoke_subgraph_9 = getitem_55 = None
+        repeated_subgraph1_4 = self.repeated_subgraph1
+
+        # Annotation: {'call_id': 1} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_10 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph1_4, 'bw_nested_region_0_0', arg8_1, arg9_1, arg10_1, arg11_1, arg12_1, arg13_1, arg14_1, arg46_1, getitem, None, None, getitem_52);  repeated_subgraph1_4 = arg8_1 = arg9_1 = arg10_1 = arg11_1 = arg12_1 = arg13_1 = arg14_1 = arg46_1 = getitem = getitem_52 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_56: "f32[768, 256][256, 1]cpu" = invoke_subgraph_10[0]
+        getitem_57: "f32[256, 256][256, 1]cpu" = invoke_subgraph_10[1]
+        getitem_58: "f32[768, 256][256, 1]cpu" = invoke_subgraph_10[2]
+        getitem_59: "f32[256, 768][768, 1]cpu" = invoke_subgraph_10[3]
+        getitem_60: "f32[768, 256][256, 1]cpu" = invoke_subgraph_10[4]
+        getitem_61: "f32[256][1]cpu" = invoke_subgraph_10[5]
+        getitem_62: "f32[256][1]cpu" = invoke_subgraph_10[6]
+        getitem_63 = invoke_subgraph_10[7];  getitem_63 = None
+        getitem_64: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_10[8]
+        getitem_65 = invoke_subgraph_10[9];  getitem_65 = None
+        getitem_66 = invoke_subgraph_10[10];  getitem_66 = None
+        getitem_67: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_10[11];  invoke_subgraph_10 = getitem_67 = None
+        repeated_subgraph1_5 = self.repeated_subgraph1
+
+        # Annotation: {'call_id': 0} File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        invoke_subgraph_11 = torch.ops.higher_order.invoke_subgraph(repeated_subgraph1_5, 'bw_nested_region_0_0', arg1_1, arg2_1, arg3_1, arg4_1, arg5_1, arg6_1, arg7_1, arg45_1, embedding, None, None, getitem_64);  repeated_subgraph1_5 = arg1_1 = arg2_1 = arg3_1 = arg4_1 = arg5_1 = arg6_1 = arg7_1 = arg45_1 = embedding = getitem_64 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+        getitem_68: "f32[768, 256][256, 1]cpu" = invoke_subgraph_11[0]
+        getitem_69: "f32[256, 256][256, 1]cpu" = invoke_subgraph_11[1]
+        getitem_70: "f32[768, 256][256, 1]cpu" = invoke_subgraph_11[2]
+        getitem_71: "f32[256, 768][768, 1]cpu" = invoke_subgraph_11[3]
+        getitem_72: "f32[768, 256][256, 1]cpu" = invoke_subgraph_11[4]
+        getitem_73: "f32[256][1]cpu" = invoke_subgraph_11[5]
+        getitem_74: "f32[256][1]cpu" = invoke_subgraph_11[6]
+        getitem_75 = invoke_subgraph_11[7];  getitem_75 = None
+        getitem_76: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_11[8]
+        getitem_77 = invoke_subgraph_11[9];  getitem_77 = None
+        getitem_78 = invoke_subgraph_11[10];  getitem_78 = None
+        getitem_79: "f32[1, 4, 256][1024, 256, 1]cpu" = invoke_subgraph_11[11];  invoke_subgraph_11 = getitem_79 = None
+
+        # File: /home/angelayi/local/torchtitan/torchtitan/models/common/embedding.py:53 in forward, code: return F.embedding(
+        embedding_dense_backward: "f32[2048, 256][256, 1]cpu" = torch.ops.aten.embedding_dense_backward.default(getitem_76, arg51_1, 2048, -1, False);  getitem_76 = arg51_1 = None
+        return [getitem_6, embedding_dense_backward, getitem_68, getitem_69, getitem_70, getitem_71, getitem_72, getitem_73, getitem_74, getitem_56, getitem_57, getitem_58, getitem_59, getitem_60, getitem_61, getitem_62, getitem_44, getitem_45, getitem_46, getitem_47, getitem_48, getitem_49, getitem_50, getitem_32, getitem_33, getitem_34, getitem_35, getitem_36, getitem_37, getitem_38, getitem_20, getitem_21, getitem_22, getitem_23, getitem_24, getitem_25, getitem_26, getitem_8, getitem_9, getitem_10, getitem_11, getitem_12, getitem_13, getitem_14, view_6, t_4]
+
+    class repeated_subgraph0(torch.nn.Module):
+        def forward(self, arg0_1: "f32[768, 256][256, 1]cpu", arg1_1: "f32[256, 256][256, 1]cpu", arg2_1: "f32[768, 256][256, 1]cpu", arg3_1: "f32[256, 768][768, 1]cpu", arg4_1: "f32[768, 256][256, 1]cpu", arg5_1: "f32[256][1]cpu", arg6_1: "f32[256][1]cpu", arg7_1: "c64[131072, 8][8, 1]cpu", arg8_1: "f32[1, 4, 256][1024, 256, 1]cpu", arg9_1, arg10_1):
+            # No stacktrace found for following nodes
+            pow_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(arg8_1, 2)
+            mean: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mean.dim(pow_1, [2], True);  pow_1 = None
+            add_: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.add_.Scalar(mean, 9.999999747378752e-06);  mean = None
+            rsqrt: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.rsqrt.default(add_);  add_ = None
+            mul: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(arg8_1, rsqrt);  rsqrt = None
+            mul_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul, arg5_1);  mul = arg5_1 = None
+            t: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(arg0_1);  arg0_1 = None
+            view: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(mul_1, [4, 256]);  mul_1 = None
+            mm: "f32[4, 768][768, 1]cpu" = torch.ops.aten.mm.default(view, t);  view = t = None
+            _unsafe_view: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten._unsafe_view.default(mm, [1, 4, 768]);  mm = None
+            view_1: "f32[1, 4, 16, 3, 16][3072, 768, 48, 16, 1]cpu" = torch.ops.aten.view.default(_unsafe_view, [1, 4, -1, 3, 16]);  _unsafe_view = None
+            split_with_sizes = torch.ops.aten.split_with_sizes.default(view_1, [1, 1, 1], -2);  view_1 = None
+            getitem: "f32[1, 4, 16, 1, 16][3072, 768, 48, 16, 1]cpu" = split_with_sizes[0]
+            getitem_1: "f32[1, 4, 16, 1, 16][3072, 768, 48, 16, 1]cpu" = split_with_sizes[1]
+            getitem_2: "f32[1, 4, 16, 1, 16][3072, 768, 48, 16, 1]cpu" = split_with_sizes[2];  split_with_sizes = None
+            view_2: "f32[1, 4, 16, 16][3072, 768, 48, 1]cpu" = torch.ops.aten.view.default(getitem, [1, 4, 16, 16]);  getitem = None
+            clone: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.clone.default(view_2, memory_format = torch.contiguous_format);  view_2 = None
+            view_3: "f32[1, 4, 16, 16][3072, 768, 48, 1]cpu" = torch.ops.aten.view.default(getitem_1, [1, 4, 16, 16]);  getitem_1 = None
+            clone_1: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.clone.default(view_3, memory_format = torch.contiguous_format);  view_3 = None
+            view_4: "f32[1, 4, 16, 16][3072, 768, 48, 1]cpu" = torch.ops.aten.view.default(getitem_2, [1, 4, 16, 16]);  getitem_2 = None
+            clone_2: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.clone.default(view_4, memory_format = torch.contiguous_format);  view_4 = None
+            slice_1: "c64[4, 8][8, 1]cpu" = torch.ops.aten.slice.Tensor(arg7_1, 0, 0, 4);  arg7_1 = None
+            view_5: "c64[1, 4, 1, 8][32, 8, 8, 1]cpu" = torch.ops.aten.view.default(slice_1, [1, 4, 1, 8]);  slice_1 = None
+            view_6: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view.default(clone, [1, 4, 16, -1, 2]);  clone = None
+            view_as_complex: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.view_as_complex.default(view_6);  view_6 = None
+            view_7: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view.default(clone_1, [1, 4, 16, -1, 2]);  clone_1 = None
+            view_as_complex_1: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.view_as_complex.default(view_7);  view_7 = None
+            mul_2: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.mul.Tensor(view_as_complex, view_5);  view_as_complex = None
+            view_as_real: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view_as_real.default(mul_2);  mul_2 = None
+            view_8: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.view.default(view_as_real, [1, 4, 16, 16]);  view_as_real = None
+            mul_3: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.mul.Tensor(view_as_complex_1, view_5);  view_as_complex_1 = view_5 = None
+            view_as_real_1: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view_as_real.default(mul_3);  mul_3 = None
+            view_9: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.view.default(view_as_real_1, [1, 4, 16, 16]);  view_as_real_1 = None
+            transpose: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.transpose.int(view_8, 1, 2);  view_8 = None
+            transpose_1: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.transpose.int(view_9, 1, 2);  view_9 = None
+            transpose_2: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.transpose.int(clone_2, 1, 2);  clone_2 = None
+            _scaled_dot_product_flash_attention_for_cpu = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu.default(transpose, transpose_1, transpose_2, 0.0, True);  transpose = transpose_1 = transpose_2 = None
+            getitem_3: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = _scaled_dot_product_flash_attention_for_cpu[0]
+            getitem_4: "f32[1, 16, 4][64, 1, 16]cpu" = _scaled_dot_product_flash_attention_for_cpu[1];  _scaled_dot_product_flash_attention_for_cpu = getitem_4 = None
+            transpose_3: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.transpose.int(getitem_3, 1, 2);  getitem_3 = None
+            view_10: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.view.default(transpose_3, [1, 4, -1]);  transpose_3 = None
+            t_1: "f32[256, 256][1, 256]cpu" = torch.ops.aten.t.default(arg1_1);  arg1_1 = None
+            view_11: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(view_10, [4, 256]);  view_10 = None
+            mm_1: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_11, t_1);  view_11 = t_1 = None
+            _unsafe_view_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten._unsafe_view.default(mm_1, [1, 4, 256]);  mm_1 = None
+            add: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(arg8_1, _unsafe_view_1);  arg8_1 = _unsafe_view_1 = None
+            pow_2: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(add, 2)
+            mean_1: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mean.dim(pow_2, [2], True);  pow_2 = None
+            add__1: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.add_.Scalar(mean_1, 9.999999747378752e-06);  mean_1 = None
+            rsqrt_1: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.rsqrt.default(add__1);  add__1 = None
+            mul_4: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(add, rsqrt_1);  rsqrt_1 = None
+            mul_5: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul_4, arg6_1);  mul_4 = arg6_1 = None
+            t_2: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(arg2_1);  arg2_1 = None
+            view_12: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(mul_5, [4, 256])
+            mm_2: "f32[4, 768][768, 1]cpu" = torch.ops.aten.mm.default(view_12, t_2);  view_12 = t_2 = None
+            _unsafe_view_2: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten._unsafe_view.default(mm_2, [1, 4, 768]);  mm_2 = None
+            silu: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.silu.default(_unsafe_view_2);  _unsafe_view_2 = None
+            t_3: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(arg4_1);  arg4_1 = None
+            view_13: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(mul_5, [4, 256]);  mul_5 = None
+            mm_3: "f32[4, 768][768, 1]cpu" = torch.ops.aten.mm.default(view_13, t_3);  view_13 = t_3 = None
+            _unsafe_view_3: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten._unsafe_view.default(mm_3, [1, 4, 768]);  mm_3 = None
+            mul_6: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.mul.Tensor(silu, _unsafe_view_3);  silu = _unsafe_view_3 = None
+            t_4: "f32[768, 256][1, 768]cpu" = torch.ops.aten.t.default(arg3_1);  arg3_1 = None
+            view_14: "f32[4, 768][768, 1]cpu" = torch.ops.aten.view.default(mul_6, [4, 768]);  mul_6 = None
+            mm_4: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_14, t_4);  view_14 = t_4 = None
+            _unsafe_view_4: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten._unsafe_view.default(mm_4, [1, 4, 256]);  mm_4 = None
+            add_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(add, _unsafe_view_4);  add = _unsafe_view_4 = None
+            return (add_1,)
+
+    class repeated_subgraph1(torch.nn.Module):
+        def forward(self, arg0_1: "f32[768, 256][256, 1]cpu", arg1_1: "f32[256, 256][256, 1]cpu", arg2_1: "f32[768, 256][256, 1]cpu", arg3_1: "f32[256, 768][768, 1]cpu", arg4_1: "f32[768, 256][256, 1]cpu", arg5_1: "f32[256][1]cpu", arg6_1: "f32[256][1]cpu", arg7_1: "c64[131072, 8][8, 1]cpu", arg8_1: "f32[1, 4, 256][1024, 256, 1]cpu", arg9_1, arg10_1, arg11_1: "f32[1, 4, 256][1024, 256, 1]cpu"):
+            # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+            pow_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(arg8_1, 2)
+            mean: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mean.dim(pow_1, [2], True);  pow_1 = None
+            add_: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.add_.Scalar(mean, 9.999999747378752e-06);  mean = None
+            rsqrt: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.rsqrt.default(add_);  add_ = None
+            detach: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.detach.default(rsqrt)
+            mul: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(arg8_1, rsqrt)
+            mul_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul, arg5_1)
+            t: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(arg0_1);  arg0_1 = None
+            view: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(mul_1, [4, 256]);  mul_1 = None
+            mm: "f32[4, 768][768, 1]cpu" = torch.ops.aten.mm.default(view, t)
+            _unsafe_view: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten._unsafe_view.default(mm, [1, 4, 768]);  mm = None
+            view_1: "f32[1, 4, 16, 3, 16][3072, 768, 48, 16, 1]cpu" = torch.ops.aten.view.default(_unsafe_view, [1, 4, -1, 3, 16]);  _unsafe_view = None
+            split_with_sizes = torch.ops.aten.split_with_sizes.default(view_1, [1, 1, 1], -2);  view_1 = None
+            getitem: "f32[1, 4, 16, 1, 16][3072, 768, 48, 16, 1]cpu" = split_with_sizes[0]
+            getitem_1: "f32[1, 4, 16, 1, 16][3072, 768, 48, 16, 1]cpu" = split_with_sizes[1]
+            getitem_2: "f32[1, 4, 16, 1, 16][3072, 768, 48, 16, 1]cpu" = split_with_sizes[2];  split_with_sizes = None
+            view_2: "f32[1, 4, 16, 16][3072, 768, 48, 1]cpu" = torch.ops.aten.view.default(getitem, [1, 4, 16, 16]);  getitem = None
+            clone: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.clone.default(view_2, memory_format = torch.contiguous_format);  view_2 = None
+            view_3: "f32[1, 4, 16, 16][3072, 768, 48, 1]cpu" = torch.ops.aten.view.default(getitem_1, [1, 4, 16, 16]);  getitem_1 = None
+            clone_1: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.clone.default(view_3, memory_format = torch.contiguous_format);  view_3 = None
+            view_4: "f32[1, 4, 16, 16][3072, 768, 48, 1]cpu" = torch.ops.aten.view.default(getitem_2, [1, 4, 16, 16]);  getitem_2 = None
+            clone_2: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.clone.default(view_4, memory_format = torch.contiguous_format);  view_4 = None
+            slice_1: "c64[4, 8][8, 1]cpu" = torch.ops.aten.slice.Tensor(arg7_1, 0, 0, 4);  arg7_1 = None
+            view_5: "c64[1, 4, 1, 8][32, 8, 8, 1]cpu" = torch.ops.aten.view.default(slice_1, [1, 4, 1, 8]);  slice_1 = None
+            view_6: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view.default(clone, [1, 4, 16, -1, 2]);  clone = None
+            view_as_complex: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.view_as_complex.default(view_6);  view_6 = None
+            view_7: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view.default(clone_1, [1, 4, 16, -1, 2]);  clone_1 = None
+            view_as_complex_1: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.view_as_complex.default(view_7);  view_7 = None
+            mul_2: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.mul.Tensor(view_as_complex, view_5);  view_as_complex = None
+            view_as_real: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view_as_real.default(mul_2);  mul_2 = None
+            view_8: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.view.default(view_as_real, [1, 4, 16, 16]);  view_as_real = None
+            mul_3: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.mul.Tensor(view_as_complex_1, view_5);  view_as_complex_1 = None
+            view_as_real_1: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view_as_real.default(mul_3);  mul_3 = None
+            view_9: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.view.default(view_as_real_1, [1, 4, 16, 16]);  view_as_real_1 = None
+            transpose: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.transpose.int(view_8, 1, 2);  view_8 = None
+            transpose_1: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.transpose.int(view_9, 1, 2);  view_9 = None
+            transpose_2: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.transpose.int(clone_2, 1, 2);  clone_2 = None
+            _scaled_dot_product_flash_attention_for_cpu = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu.default(transpose, transpose_1, transpose_2, 0.0, True)
+            getitem_3: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = _scaled_dot_product_flash_attention_for_cpu[0]
+            getitem_4: "f32[1, 16, 4][64, 1, 16]cpu" = _scaled_dot_product_flash_attention_for_cpu[1];  _scaled_dot_product_flash_attention_for_cpu = None
+            detach_1: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.detach.default(getitem_3)
+            transpose_3: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.transpose.int(getitem_3, 1, 2);  getitem_3 = None
+            view_10: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.view.default(transpose_3, [1, 4, -1]);  transpose_3 = None
+            t_1: "f32[256, 256][1, 256]cpu" = torch.ops.aten.t.default(arg1_1);  arg1_1 = None
+            view_11: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(view_10, [4, 256]);  view_10 = None
+            mm_1: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_11, t_1)
+            _unsafe_view_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten._unsafe_view.default(mm_1, [1, 4, 256]);  mm_1 = None
+            add: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(arg8_1, _unsafe_view_1);  _unsafe_view_1 = None
+            pow_2: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(add, 2)
+            mean_1: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mean.dim(pow_2, [2], True);  pow_2 = None
+            add__1: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.add_.Scalar(mean_1, 9.999999747378752e-06);  mean_1 = None
+            rsqrt_1: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.rsqrt.default(add__1);  add__1 = None
+            detach_2: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.detach.default(rsqrt_1)
+            mul_4: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(add, rsqrt_1)
+            mul_5: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul_4, arg6_1)
+            t_2: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(arg2_1);  arg2_1 = None
+            view_12: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(mul_5, [4, 256])
+            mm_2: "f32[4, 768][768, 1]cpu" = torch.ops.aten.mm.default(view_12, t_2)
+            _unsafe_view_2: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten._unsafe_view.default(mm_2, [1, 4, 768]);  mm_2 = None
+            silu: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.silu.default(_unsafe_view_2)
+            t_3: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(arg4_1);  arg4_1 = None
+            view_13: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(mul_5, [4, 256]);  mul_5 = None
+            mm_3: "f32[4, 768][768, 1]cpu" = torch.ops.aten.mm.default(view_13, t_3)
+            _unsafe_view_3: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten._unsafe_view.default(mm_3, [1, 4, 768]);  mm_3 = None
+            mul_6: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.mul.Tensor(silu, _unsafe_view_3)
+            t_4: "f32[768, 256][1, 768]cpu" = torch.ops.aten.t.default(arg3_1);  arg3_1 = None
+            view_14: "f32[4, 768][768, 1]cpu" = torch.ops.aten.view.default(mul_6, [4, 768]);  mul_6 = None
+            mm_4: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_14, t_4)
+            _unsafe_view_4: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten._unsafe_view.default(mm_4, [1, 4, 256]);  mm_4 = None
+            add_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(add, _unsafe_view_4);  _unsafe_view_4 = None
+
+            # No stacktrace found for following nodes
+            view_15: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(arg11_1, [4, 256])
+            t_5: "f32[256, 4][1, 256]cpu" = torch.ops.aten.t.default(view_15)
+            mm_5: "f32[256, 768][768, 1]cpu" = torch.ops.aten.mm.default(t_5, view_14);  t_5 = view_14 = None
+            t_6: "f32[768, 256][1, 768]cpu" = torch.ops.aten.t.default(mm_5);  mm_5 = None
+            t_7: "f32[256, 768][768, 1]cpu" = torch.ops.aten.t.default(t_4);  t_4 = None
+            mm_6: "f32[4, 768][768, 1]cpu" = torch.ops.aten.mm.default(view_15, t_7);  view_15 = t_7 = None
+            view_16: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.view.default(mm_6, [1, 4, 768]);  mm_6 = None
+            t_8: "f32[256, 768][768, 1]cpu" = torch.ops.aten.t.default(t_6);  t_6 = None
+            mul_7: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.mul.Tensor(view_16, silu);  silu = None
+            mul_8: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.mul.Tensor(view_16, _unsafe_view_3);  view_16 = _unsafe_view_3 = None
+            view_17: "f32[4, 768][768, 1]cpu" = torch.ops.aten.view.default(mul_7, [4, 768]);  mul_7 = None
+            t_9: "f32[768, 4][1, 768]cpu" = torch.ops.aten.t.default(view_17)
+            mm_7: "f32[768, 256][256, 1]cpu" = torch.ops.aten.mm.default(t_9, view_13);  t_9 = view_13 = None
+            t_10: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(mm_7);  mm_7 = None
+            t_11: "f32[768, 256][256, 1]cpu" = torch.ops.aten.t.default(t_3);  t_3 = None
+            mm_8: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_17, t_11);  view_17 = t_11 = None
+            view_18: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.view.default(mm_8, [1, 4, 256]);  mm_8 = None
+            t_12: "f32[768, 256][256, 1]cpu" = torch.ops.aten.t.default(t_10);  t_10 = None
+            silu_backward: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.silu_backward.default(mul_8, _unsafe_view_2);  mul_8 = _unsafe_view_2 = None
+            view_19: "f32[4, 768][768, 1]cpu" = torch.ops.aten.view.default(silu_backward, [4, 768]);  silu_backward = None
+            t_13: "f32[768, 4][1, 768]cpu" = torch.ops.aten.t.default(view_19)
+            mm_9: "f32[768, 256][256, 1]cpu" = torch.ops.aten.mm.default(t_13, view_12);  t_13 = view_12 = None
+            t_14: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(mm_9);  mm_9 = None
+            t_15: "f32[768, 256][256, 1]cpu" = torch.ops.aten.t.default(t_2);  t_2 = None
+            mm_10: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_19, t_15);  view_19 = t_15 = None
+            view_20: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.view.default(mm_10, [1, 4, 256]);  mm_10 = None
+
+            # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+            add_2: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(view_18, view_20);  view_18 = view_20 = None
+
+            # No stacktrace found for following nodes
+            t_16: "f32[768, 256][256, 1]cpu" = torch.ops.aten.t.default(t_14);  t_14 = None
+            mul_9: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(add_2, mul_4);  mul_4 = None
+            mul_10: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(add_2, arg6_1);  add_2 = arg6_1 = None
+            sum_1: "f32[1, 1, 256][256, 256, 1]cpu" = torch.ops.aten.sum.dim_IntList(mul_9, [0, 1], True);  mul_9 = None
+            view_21: "f32[256][1]cpu" = torch.ops.aten.view.default(sum_1, [256]);  sum_1 = None
+            mul_11: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul_10, add)
+            mul_12: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul_10, rsqrt_1);  mul_10 = rsqrt_1 = None
+            sum_2: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.sum.dim_IntList(mul_11, [2], True);  mul_11 = None
+
+            # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+            add_3: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(arg11_1, mul_12);  arg11_1 = mul_12 = None
+
+            # No stacktrace found for following nodes
+            detach_3: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.detach.default(detach_2);  detach_2 = None
+            pow_3: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(detach_3, 3);  detach_3 = None
+            mul_13: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mul.Scalar(sum_2, -0.5);  sum_2 = None
+            mul_14: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mul.Tensor(mul_13, pow_3);  mul_13 = pow_3 = None
+            expand: "f32[1, 4, 256][4, 1, 0]cpu" = torch.ops.aten.expand.default(mul_14, [1, 4, 256]);  mul_14 = None
+            div: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.div.Scalar(expand, 256);  expand = None
+            pow_4: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(add, 1.0);  add = None
+            mul_15: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Scalar(pow_4, 2.0);  pow_4 = None
+            mul_16: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(div, mul_15);  div = mul_15 = None
+
+            # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+            add_4: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(add_3, mul_16);  add_3 = mul_16 = None
+
+            # No stacktrace found for following nodes
+            view_22: "f32[4, 256][256, 1]cpu" = torch.ops.aten.view.default(add_4, [4, 256])
+            t_17: "f32[256, 4][1, 256]cpu" = torch.ops.aten.t.default(view_22)
+            mm_11: "f32[256, 256][256, 1]cpu" = torch.ops.aten.mm.default(t_17, view_11);  t_17 = view_11 = None
+            t_18: "f32[256, 256][1, 256]cpu" = torch.ops.aten.t.default(mm_11);  mm_11 = None
+            t_19: "f32[256, 256][256, 1]cpu" = torch.ops.aten.t.default(t_1);  t_1 = None
+            mm_12: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_22, t_19);  view_22 = t_19 = None
+            view_23: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.view.default(mm_12, [1, 4, 256]);  mm_12 = None
+            t_20: "f32[256, 256][256, 1]cpu" = torch.ops.aten.t.default(t_18);  t_18 = None
+            view_24: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.view.default(view_23, [1, 4, 16, 16]);  view_23 = None
+            transpose_4: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.transpose.int(view_24, 1, 2);  view_24 = None
+            detach_4: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = torch.ops.aten.detach.default(detach_1);  detach_1 = None
+            _scaled_dot_product_flash_attention_for_cpu_backward = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu_backward.default(transpose_4, transpose, transpose_1, transpose_2, detach_4, getitem_4, 0.0, True);  transpose_4 = transpose = transpose_1 = transpose_2 = detach_4 = getitem_4 = None
+            getitem_5: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = _scaled_dot_product_flash_attention_for_cpu_backward[0]
+            getitem_6: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = _scaled_dot_product_flash_attention_for_cpu_backward[1]
+            getitem_7: "f32[1, 16, 4, 16][1024, 16, 256, 1]cpu" = _scaled_dot_product_flash_attention_for_cpu_backward[2];  _scaled_dot_product_flash_attention_for_cpu_backward = None
+            transpose_5: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.transpose.int(getitem_7, 1, 2);  getitem_7 = None
+            transpose_6: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.transpose.int(getitem_6, 1, 2);  getitem_6 = None
+            transpose_7: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.transpose.int(getitem_5, 1, 2);  getitem_5 = None
+            view_25: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view.default(transpose_6, [1, 4, 16, 8, 2]);  transpose_6 = None
+            view_as_complex_2: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.view_as_complex.default(view_25);  view_25 = None
+            _conj: "c64[1, 4, 1, 8][32, 8, 8, 1]cpu" = torch.ops.aten._conj.default(view_5)
+            clone_3: "c64[1, 4, 1, 8][32, 8, 8, 1]cpu" = torch.ops.aten.clone.default(_conj);  _conj = None
+            mul_17: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.mul.Tensor(view_as_complex_2, clone_3);  view_as_complex_2 = clone_3 = None
+            view_26: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view.default(transpose_7, [1, 4, 16, 8, 2]);  transpose_7 = None
+            view_as_complex_3: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.view_as_complex.default(view_26);  view_26 = None
+            _conj_1: "c64[1, 4, 1, 8][32, 8, 8, 1]cpu" = torch.ops.aten._conj.default(view_5);  view_5 = None
+            clone_4: "c64[1, 4, 1, 8][32, 8, 8, 1]cpu" = torch.ops.aten.clone.default(_conj_1);  _conj_1 = None
+            mul_18: "c64[1, 4, 16, 8][512, 128, 8, 1]cpu" = torch.ops.aten.mul.Tensor(view_as_complex_3, clone_4);  view_as_complex_3 = clone_4 = None
+            view_as_real_2: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view_as_real.default(mul_17);  mul_17 = None
+            view_27: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.view.default(view_as_real_2, [1, 4, 16, 16]);  view_as_real_2 = None
+            view_as_real_3: "f32[1, 4, 16, 8, 2][1024, 256, 16, 2, 1]cpu" = torch.ops.aten.view_as_real.default(mul_18);  mul_18 = None
+            view_28: "f32[1, 4, 16, 16][1024, 256, 16, 1]cpu" = torch.ops.aten.view.default(view_as_real_3, [1, 4, 16, 16]);  view_as_real_3 = None
+            view_29: "f32[1, 4, 16, 1, 16][1024, 256, 16, 16, 1]cpu" = torch.ops.aten.view.default(transpose_5, [1, 4, 16, 1, 16]);  transpose_5 = None
+            view_30: "f32[1, 4, 16, 1, 16][1024, 256, 16, 16, 1]cpu" = torch.ops.aten.view.default(view_27, [1, 4, 16, 1, 16]);  view_27 = None
+            view_31: "f32[1, 4, 16, 1, 16][1024, 256, 16, 16, 1]cpu" = torch.ops.aten.view.default(view_28, [1, 4, 16, 1, 16]);  view_28 = None
+            cat: "f32[1, 4, 16, 3, 16][3072, 768, 48, 16, 1]cpu" = torch.ops.aten.cat.default([view_31, view_30, view_29], 3);  view_31 = view_30 = view_29 = None
+            view_32: "f32[1, 4, 768][3072, 768, 1]cpu" = torch.ops.aten.view.default(cat, [1, 4, 768]);  cat = None
+            view_33: "f32[4, 768][768, 1]cpu" = torch.ops.aten.view.default(view_32, [4, 768]);  view_32 = None
+            t_21: "f32[768, 4][1, 768]cpu" = torch.ops.aten.t.default(view_33)
+            mm_13: "f32[768, 256][256, 1]cpu" = torch.ops.aten.mm.default(t_21, view);  t_21 = view = None
+            t_22: "f32[256, 768][1, 256]cpu" = torch.ops.aten.t.default(mm_13);  mm_13 = None
+            t_23: "f32[768, 256][256, 1]cpu" = torch.ops.aten.t.default(t);  t = None
+            mm_14: "f32[4, 256][256, 1]cpu" = torch.ops.aten.mm.default(view_33, t_23);  view_33 = t_23 = None
+            view_34: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.view.default(mm_14, [1, 4, 256]);  mm_14 = None
+            t_24: "f32[768, 256][256, 1]cpu" = torch.ops.aten.t.default(t_22);  t_22 = None
+            mul_19: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(view_34, mul);  mul = None
+            mul_20: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(view_34, arg5_1);  view_34 = arg5_1 = None
+            sum_3: "f32[1, 1, 256][256, 256, 1]cpu" = torch.ops.aten.sum.dim_IntList(mul_19, [0, 1], True);  mul_19 = None
+            view_35: "f32[256][1]cpu" = torch.ops.aten.view.default(sum_3, [256]);  sum_3 = None
+            mul_21: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul_20, arg8_1)
+            mul_22: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(mul_20, rsqrt);  mul_20 = rsqrt = None
+            sum_4: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.sum.dim_IntList(mul_21, [2], True);  mul_21 = None
+
+            # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+            add_5: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(add_4, mul_22);  add_4 = mul_22 = None
+
+            # No stacktrace found for following nodes
+            detach_5: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.detach.default(detach);  detach = None
+            pow_5: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(detach_5, 3);  detach_5 = None
+            mul_23: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mul.Scalar(sum_4, -0.5);  sum_4 = None
+            mul_24: "f32[1, 4, 1][4, 1, 1]cpu" = torch.ops.aten.mul.Tensor(mul_23, pow_5);  mul_23 = pow_5 = None
+            expand_1: "f32[1, 4, 256][4, 1, 0]cpu" = torch.ops.aten.expand.default(mul_24, [1, 4, 256]);  mul_24 = None
+            div_1: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.div.Scalar(expand_1, 256);  expand_1 = None
+            pow_6: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.pow.Tensor_Scalar(arg8_1, 1.0);  arg8_1 = None
+            mul_25: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Scalar(pow_6, 2.0);  pow_6 = None
+            mul_26: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.mul.Tensor(div_1, mul_25);  div_1 = mul_25 = None
+
+            # File: /home/angelayi/local/torchtitan/torchtitan/models/common/decoder.py:276 in forward, code: h = layer(h, attention_masks, positions)
+            add_6: "f32[1, 4, 256][1024, 256, 1]cpu" = torch.ops.aten.add.Tensor(add_5, mul_26);  add_5 = mul_26 = None
+            return (t_24, t_20, t_16, t_8, t_12, view_35, view_21, None, add_6, None, None, add_1)
