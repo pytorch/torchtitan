@@ -6,23 +6,12 @@
 from dataclasses import dataclass
 from functools import partial
 
-import spmd_types as spmd
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE, SingleComplexRoPE
 from torchtitan.protocols.module import Module
-
-
-def _assert_spmd_replicated_activation(tensor):
-    if get_spmd_backend() == "spmd_types":
-        spmd.assert_type(
-            tensor,
-            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},
-        )
 
 
 class Compressor(Module):
@@ -74,9 +63,9 @@ class Compressor(Module):
         rd = self.rope_head_dim
         ratio = self.compress_ratio
         dtype = x.dtype
-        x = x.float()
-        kv = F.linear(x, self.wkv.weight.float(), self.wkv.bias)
-        score = F.linear(x, self.wgate.weight.float(), self.wgate.bias)
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+            kv = self.wkv(x)
+            score = self.wgate(x)
         if seqlen % ratio != 0:
             raise ValueError(
                 f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
@@ -97,7 +86,6 @@ class Compressor(Module):
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
         kv_rope = self.single_rope(kv_rope.unsqueeze(2), comp_positions)
         kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
-        _assert_spmd_replicated_activation(kv)
         return kv
 
 
@@ -153,13 +141,10 @@ class Indexer(Module):
         bsz, seqlen, _ = x.size()
         rd = self.rope_head_dim
         q = self.wq_b(qr)
-        with spmd.local():
-            q = q.view(bsz, seqlen, self.num_index_heads, self.head_dim)
-            _assert_spmd_replicated_activation(q)
+        q = q.view(bsz, seqlen, self.num_index_heads, self.head_dim)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
         q_rope = self.single_rope(q_rope, positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
-        _assert_spmd_replicated_activation(q)
         q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)
         k = self._rotate_activation(k)
@@ -184,6 +169,4 @@ class Indexer(Module):
         )
         mask = topk_idxs >= compress_causal_limit
         compress_topk_idxs = torch.where(mask, -1, topk_idxs + offset)
-        _assert_spmd_replicated_activation(compress_topk_idxs)
-        _assert_spmd_replicated_activation(index_score)
         return compress_topk_idxs, index_score
