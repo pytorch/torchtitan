@@ -8,58 +8,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
-from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
-    ChunkedLossWrapperWithParamGrads,
+    ChunkedCELossWithParamGrads,
 )
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
-
-EpOverlapChunkDim = Literal["batch", "seq"]
-EpOverlapChunkStrategy = Literal["eager", "graph"]
-
-TRANSFORMER_BLOCK_FQN = "layers.*"
-MOE_BLOCK_FQN = "layers.*.moe"
-SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset({TRANSFORMER_BLOCK_FQN, MOE_BLOCK_FQN})
-
-
-@dataclass(kw_only=True, slots=True)
-class EpOverlapConfig:
-    enabled: bool = False
-    """Enable EP-overlap support for the selected chunking and scheduling mode."""
-
-    chunk_dim: EpOverlapChunkDim = "batch"
-    """Logical input dimension to split for EP-overlap chunking.
-
-    Sequence chunking is only supported for MoE block roots because attention
-    requires full K/V context.
-    """
-
-    strategy: EpOverlapChunkStrategy = "graph"
-    """How selected EP-overlap regions are chunked before scheduling.
-
-    ``eager`` wraps module forwards before tracing. ``graph`` traces the
-    unmodified model and chunks selected regions with an FX graph pass.
-    """
-
-    module_fqn: str = TRANSFORMER_BLOCK_FQN
-    """Single module FQN pattern chunked for EP overlap.
-
-    v1 supports all transformer blocks (``layers.*``) or all MoE blocks
-    (``layers.*.moe``). The overlap scheduler consumes the common chunk metadata
-    produced by either eager or graph chunking.
-    """
-
-    disable_early_grad_accumulation: bool = False
-    """Disable graph chunking's early parameter-gradient accumulation.
-
-    Early accumulation is the performant default: graph chunking materializes
-    parameter-gradient live-outs before distributed grad cast/communication
-    when legal. This flag preserves eager chunking's cast/reduction order for
-    strict bitwise tests.
-    """
 
 
 @dataclass(kw_only=True, slots=True)
@@ -75,16 +31,12 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     passes: list[str] = field(default_factory=list)
     """
-    Additional compiler pass names to apply.
+    Compiler pass names to apply.
     In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
     """
 
     enable_passes: bool = True
-    """When False, skip optional graph passes (both default and user-configured).
-
-    GraphPP still runs mandatory pre-partition normalization passes because its
-    partitioning contracts depend on canonical graph structure.
-    """
+    """When False, skip all graph passes (both default and user-configured)."""
 
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
@@ -94,7 +46,13 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "full", "eager", "sac_and_offload"] = "default"
+    memory_policy: Literal[
+        "default",
+        "full",
+        "eager",
+        "sac_and_offload",
+        "auto_perf_maxing",
+    ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
@@ -137,25 +95,23 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
 
+    memory_budget_gb: float = 100000.0
+    """Peak GPU memory budget (in GB per rank, 1 GB = 1e9 bytes to match the
+    runtime max_alloc measurement) for the ``whole_recompute_and_offload`` policy.
+    The whole-graph ILP minimizes runtime subject to peak <= this budget. The
+    default is effectively unbounded, so the policy is a no-op until a real
+    budget is set (e.g. --compile.memory_budget_gb 24)."""
+
+    runtime_est_mode: str = "cost_model"  # could be "benchmark" or "interpreter", too
+    """Runtime estimation mode for the ``auto_perf_maxing`` policy.
+    Selects the runtime estimator to use for the ILP. Options: `COST_MODEL`, `BENCHMARK`, `INTERPRETER`.
+    """
+
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
     FSDP all-gathers onto a separate CUDA stream from reduce-scatters so the
     two collectives can overlap. It is a no-op when the graph contains no
     FSDP all-gathers."""
-
-    enable_fsdp_dense_region_overlap: bool = False
-    """When True, schedule FSDP AG/RS buckets into neighboring dense regions.
-
-    This is disabled by default because it changes FSDP collective placement
-    and is intended for performance/integration validation, not
-    bitwise-equivalence tests. When EP overlap is also enabled, this scheduler
-    only composes with graph chunking rooted at ``layers.*.moe``; otherwise the
-    explicit request is skipped with a warning. Without EP overlap, it can run
-    as a standalone FSDP scheduling ablation.
-    """
-
-    ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
-    """Configuration for EP-overlap chunking and scheduling."""
 
     precompile_artifact_dir: str = ""
     """
@@ -178,53 +134,6 @@ def validate_autoparallel_config(
             "AutoParallel graph_trainer integration only supports "
             "--compile.mode aot_fx_trace"
         )
-
-
-def validate_ep_overlap_config(
-    ep_overlap_config: EpOverlapConfig,
-) -> tuple[EpOverlapChunkDim, EpOverlapChunkStrategy, str]:
-    chunk_dim = ep_overlap_config.chunk_dim
-    if chunk_dim not in ("batch", "seq"):
-        raise ValueError(
-            "--compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
-            "--compile.ep_overlap.enabled is set"
-        )
-
-    chunk_strategy = ep_overlap_config.strategy
-    if chunk_strategy not in ("eager", "graph"):
-        raise ValueError(
-            "--compile.ep_overlap.strategy must be 'eager' or 'graph' when "
-            "--compile.ep_overlap.enabled is set"
-        )
-
-    module_fqn = ep_overlap_config.module_fqn
-    if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
-        raise ValueError(
-            "--compile.ep_overlap.module_fqn must be either 'layers.*' "
-            "or 'layers.*.moe' for ep_overlap"
-        )
-    if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
-        raise ValueError(
-            "--compile.ep_overlap.chunk_dim seq is only supported with "
-            "--compile.ep_overlap.module_fqn layers.*.moe"
-        )
-
-    return chunk_dim, chunk_strategy, module_fqn
-
-
-def trace_input_preparer_keys(
-    compile_config: GraphTrainerCompileConfig,
-) -> list[str]:
-    """Return feature names whose trace-input hooks should run.
-
-    ``compile.passes`` remains the escape hatch for standalone graph passes.
-    EP overlap has structured config because enabling it also controls eager
-    module wrapping and later scheduling behavior.
-    """
-    names = list(compile_config.passes)
-    if compile_config.ep_overlap.enabled:
-        names.append("ep_overlap")
-    return list(dict.fromkeys(names))
 
 
 def to_graph_trainer_config(
@@ -255,7 +164,6 @@ def to_graph_trainer_config(
     d["model_spec"] = replace(
         base_config.model_spec,
         parallelize_fn=graph_spec.parallelize_fn,
-        pipelining_fn=graph_spec.pipelining_fn,
         model=graph_model,
     )
     d.pop("compile")
@@ -270,8 +178,8 @@ def to_graph_trainer_config(
     # graph_trainer's tracer requires explicit autograd outputs for lm_head
     # params instead of relying on .grad side effects from chunk_loss.backward().
     loss_cfg = d.get("loss")
-    if isinstance(loss_cfg, ChunkedLossWrapper.Config):
-        d["loss"] = ChunkedLossWrapperWithParamGrads.Config(
+    if isinstance(loss_cfg, ChunkedCELoss.Config):
+        d["loss"] = ChunkedCELossWithParamGrads.Config(
             **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
         )
 
