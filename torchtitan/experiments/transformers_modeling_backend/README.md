@@ -34,8 +34,38 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
         - `kyutai/helium-1-preview-2b`
         - `allenai/OLMo-7B-hf`
         - `mistralai/Ministral-8B-Instruct-2410`
-    - MoE
-        - `Qwen/Qwen3-30B-A3B`
+    - MoE (see the table below for parallelism support)
+        - `Qwen/Qwen3-30B-A3B` (qwen3_moe, GQA)
+        - `mistralai/Mixtral-8x7B-Instruct-v0.1` (mixtral, GQA)
+        - `allenai/OLMoE-1B-7B-0924` (olmoe, GQA)
+        - `deepseek-ai/DeepSeek-V2-Lite` (deepseek_v2, MLA)
+        - `deepseek-ai/DeepSeek-V3` (deepseek_v3, MLA)
+        - `zai-org/GLM-4.7` (glm4_moe, MLA)
+        - `zai-org/GLM-5` (glm_moe_dsa, MLA + DSA sparse attention)
+        - `google/gemma-4-26B-A4B-it` (gemma4_text)
+
+### Attention
+
+Attention runs on **FlexAttention** (the only attention path; the SDPA path was
+removed). The MoE block is swapped to TorchTitan's grouped-experts MoE to enable
+expert parallelism and the `grouped_mm` fast path. `attn_mask_type` selects the
+flex mask: `causal` (plain causal) or `block_causal` (causal + same-document, for
+packed / SFT sequences).
+
+### MoE parallelism support
+
+Validated at debug scale (2-step loss decreasing) across the combinations below.
+FSDP composes with every listed axis.
+
+| Model(s) | attn | TP | EP | CP | notes |
+|---|---|---|---|---|---|
+| Qwen3-30B-A3B | GQA | yes | yes | yes | full matrix up to TP+EP+CP |
+| Mixtral-8x7B, OLMoE-1B-7B | GQA | yes | yes | yes | TP+EP, EP+CP |
+| DeepSeek-V2-Lite, V3, GLM-4.7 | MLA | yes | yes | yes* | TP+EP; *flex+CP verified on DeepSeek-V2-Lite (EP+CP) |
+| GLM-5 | MLA + DSA | no | yes | no | DSA indexer fails loud under TP; CP not wired -- FSDP/EP only |
+| Gemma-4-26B-A4B | GQA | no | yes | no | attention TP not viable (num_global_key_value_heads=2) -- FSDP/EP only |
+
+PP is not yet wired for the MoE path (see Further work).
 
 ## Known issues to address later
 
