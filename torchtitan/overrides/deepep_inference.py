@@ -6,7 +6,10 @@
 
 """Override: switch DeepEP MoE dispatch to the cudagraph-able EXPAND layout for inference.
 
-Imported per-actor via ``--override.imports torchtitan.distributed.deepep.inference_override``
+Targets the ``moe.routed_experts.token_dispatcher`` node; composes with the sibling
+``fused_grouped_experts`` override on ``inner_experts`` without conflict.
+
+Imported per-actor via ``--override.imports torchtitan.overrides.deepep_inference``
 (e.g. on the RL generator's ``override``, separate from the trainer's). The shared
 ``model_spec`` keeps its default compact, host-synced, backward-able DeepEP path for the
 trainer; on the generator this override flips the DeepEP dispatchers to the static,

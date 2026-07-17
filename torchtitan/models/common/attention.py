@@ -17,9 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
 import spmd_types as spmd
-
 import torch
 import torch.nn.functional as F
+from spmd_types.runtime import get_partition_spec
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -264,8 +264,12 @@ class FlexAttention(Module):
     ):
         """Run compiled FlexAttention outside SPMD typechecking.
 
-        Compiled regions are not currently compatible with SPMD typechecking,
-        so propagate types at the boundary instead of typechecking into Flex.
+        Compiled regions are not currently compatible with SPMD typechecking, so
+        the opaque kernel output is re-typed at the boundary instead of
+        typechecking into Flex. Attention preserves the query's sharding (output
+        is (B, N, L, H) with the same batch/head/seq layout as ``q``), so ``out``
+        takes ``q``'s full SPMD type (local type + shard-dim PartitionSpec), and
+        ``lse`` takes the same minus the trailing (unsharded) head dim.
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
         """
         with spmd.no_typecheck():
@@ -281,9 +285,13 @@ class FlexAttention(Module):
                 kernel_options=kernel_options,
             )
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "tp", "cp", None))
+            q_local = spmd.get_local_type(q)
+            q_ps = get_partition_spec(q)
+            spmd.assert_type(out, q_local, q_ps)
             if return_aux.lse:
-                spmd.assert_type(aux.lse, spmd.V, spmd.PartitionSpec("dp", "tp", "cp"))
+                # lse is (B, N, L) = q minus the trailing (unsharded) head dim.
+                lse_ps = None if q_ps is None else spmd.PartitionSpec(*q_ps[:-1])
+                spmd.assert_type(aux.lse, q_local, lse_ps)
         return out, aux
 
     def forward(

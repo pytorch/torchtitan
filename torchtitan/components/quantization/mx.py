@@ -176,7 +176,8 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
 
     def convert(self, model_config):
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(config, self.config.pad_multiple)
+            # ``parent`` is the RoutedExperts.Config owning inner_experts + dispatcher.
+            swap_token_dispatcher(parent, self.config.pad_multiple)
             base_module_cls = type(config)._owner
             quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]
