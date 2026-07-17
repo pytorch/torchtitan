@@ -28,6 +28,10 @@ class OverrideDefinitions:
     requires_fa3: bool = False
     # --comm.mode torchcomms; skip if torchcomms is not installed.
     requires_torchcomms: bool = False
+    # DeepEP / HybridEP MoE backends; skip if deep_ep is not installed.
+    requires_deep_ep: bool = False
+    # Float8 / MX / torchao converters; skip if torchao is not installed.
+    requires_torchao: bool = False
     timeout: int | None = None
 
     def __repr__(self):

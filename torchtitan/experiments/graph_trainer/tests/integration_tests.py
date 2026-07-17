@@ -508,6 +508,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+HybridEP",
             "aot_fx_trace_deepseek_v3_hybridep",
             ngpu=4,
+            requires_deep_ep=True,
             disabled=True,
         ),
         # MinimalAsyncEP avoids the standard all-to-all load-balancing path and

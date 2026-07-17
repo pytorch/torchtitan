@@ -33,6 +33,16 @@ def has_torchcomms() -> bool:
     return importlib.util.find_spec("torchcomms") is not None
 
 
+def has_deep_ep() -> bool:
+    """True if the optional deep_ep package is importable (DeepEP / HybridEP)."""
+    return importlib.util.find_spec("deep_ep") is not None
+
+
+def has_torchao() -> bool:
+    """True if the optional torchao package is importable."""
+    return importlib.util.find_spec("torchao") is not None
+
+
 def _hash_model_impl(
     model: torch.nn.Module,
     algo: str,

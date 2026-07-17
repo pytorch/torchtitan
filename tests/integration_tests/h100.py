@@ -38,6 +38,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ],
             "Float8 test",
             "float8",
+            requires_torchao=True,
         ),
         OverrideDefinitions(
             [
@@ -65,6 +66,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "FSDP+async TP+PP+torch.compile+Float8",
             "fsdp+tp+cp+compile+float8",
             ngpu=8,
+            requires_torchao=True,
         ),
         OverrideDefinitions(
             [
@@ -79,6 +81,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "HSDP+CP+torch.compile+Float8",
             "hsdp+cp+compile+float8",
             ngpu=8,
+            requires_torchao=True,
         ),
         OverrideDefinitions(
             [
@@ -93,6 +96,8 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "DeepSeek V3 FSDP+HybridEP+compile",
             "deepseek_v3_fsdp+hybridep+compile",
             ngpu=4,
+            # HybridEPBuffer / ElasticBuffer come from deep_ep (hybrid-ep branch).
+            requires_deep_ep=True,
             # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
             skip_rocm_test=True,
         ),

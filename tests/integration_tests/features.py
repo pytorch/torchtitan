@@ -611,6 +611,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Float8 emulate + LoRA training test",
             "float8_emulate_lora",
             ngpu=8,
+            requires_torchao=True,
         ),
         OverrideDefinitions(
             [

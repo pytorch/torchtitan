@@ -19,7 +19,13 @@ from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
-from tests.utils import has_fa3, has_torchcomms, num_available_gpus
+from tests.utils import (
+    has_deep_ep,
+    has_fa3,
+    has_torchao,
+    has_torchcomms,
+    num_available_gpus,
+)
 
 
 _TEST_SUITES_FUNCTION = {
@@ -203,11 +209,7 @@ def _filter_tests(
         ):
             continue
         # VarlenAttention activates FA3 on SM90+; skip if flash-attn-3 is missing.
-        if (
-            test_flavor.requires_fa3
-            and has_cuda_capability(9, 0)
-            and not has_fa3()
-        ):
+        if test_flavor.requires_fa3 and has_cuda_capability(9, 0) and not has_fa3():
             logger.info(
                 f"Skipping test {test_flavor.test_name} that requires FA3 on SM90+,"
                 f" because flash-attn-3 is not available"
@@ -217,6 +219,18 @@ def _filter_tests(
             logger.info(
                 f"Skipping test {test_flavor.test_name} that requires torchcomms,"
                 f" because torchcomms is not available"
+            )
+            continue
+        if test_flavor.requires_deep_ep and not has_deep_ep():
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires deep_ep,"
+                f" because deep_ep is not available"
+            )
+            continue
+        if test_flavor.requires_torchao and not has_torchao():
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires torchao,"
+                f" because torchao is not available"
             )
             continue
         if effective_ngpu < test_flavor.ngpu:
