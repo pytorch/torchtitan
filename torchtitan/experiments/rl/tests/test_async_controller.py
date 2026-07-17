@@ -10,6 +10,7 @@ the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID
 import asyncio
 
 import pytest
+import torch
 
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
@@ -94,9 +95,9 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch.num_global_valid_tokens > 0
 
 
-def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
-    # 5 real rows, local_batch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
-    # Round-robin dealing spreads the pad rows so no (microbatch, rank) cell is all-pad.
+def test_packing_flushes_microbatch_on_overflow() -> None:
+    # Each rank has a four-token budget. Four two-token samples fill the first
+    # microbatch across two ranks; the fifth starts a second microbatch.
     batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=2)).build(
         num_prompts_per_train_step=1,
         dp_degree=2,
@@ -107,10 +108,113 @@ def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
     )
     assert batch is not None
     assert group_is_trainable
-    cells = [microbatch for ranks in batch.microbatches for microbatch in ranks]
-    assert len(cells) == 4  # 2 microbatches x 2 ranks
-    for cell in cells:
-        assert cell.loss_mask.any()
+    assert len(batch.microbatches) == 2  # flushed once on overflow
+    assert all(len(ranks) == 2 for ranks in batch.microbatches)  # dp_degree ranks each
+    assert all(
+        microbatch.token_ids.shape == (4,)
+        for ranks in batch.microbatches
+        for microbatch in ranks
+    )
+    # Every sample is trained: 5 samples x 2 trained tokens each.
+    assert batch.num_global_valid_tokens == 5 * 2
+
+
+def _variable_length_group(group_id: int, *, lengths: list[int]) -> TrainingSampleGroup:
+    # token_ids of length n -> n-1 packed tokens; loss_mask trains all but the first.
+    def sample(rollout_id: int, n: int) -> TrainingSample:
+        return TrainingSample(
+            min_policy_version=0,
+            max_policy_version=0,
+            rollout_id=RolloutTurnID(
+                group_id=group_id, rollout_id=rollout_id, turn_id=0
+            ),
+            token_ids=list(range(n)),
+            loss_mask=[False] + [True] * (n - 1),
+            logprobs=[0.0] * n,
+            advantage=[0.0] + [1.0] * (n - 1),
+        )
+
+    return TrainingSampleGroup(
+        group_id=group_id,
+        training_samples=[sample(i, n) for i, n in enumerate(lengths)],
+        metrics=[],
+    )
+
+
+def _metric_value(batch, key: str) -> float:
+    metric_value = next(metric.value for metric in batch.metrics if metric.key == key)
+    assert isinstance(metric_value, m.NoReduce)
+    return metric_value.value
+
+
+def test_packing_uses_the_full_flat_rank_token_budget() -> None:
+    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=4)).build(
+        num_prompts_per_train_step=1, dp_degree=1, pad_id=0
+    )
+    batch, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(0, lengths=[4, 4, 3])
+    )
+
+    assert batch is not None
+    assert group_is_trainable
+    assert len(batch.microbatches) == 1
+    microbatch = batch.microbatches[0][0]
+    assert microbatch.token_ids.shape == (8,)
+    assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
+    assert _metric_value(batch, "train_batch/padding_frac") == 0.0
+
+
+def test_packing_balances_dp_rank_square_cost() -> None:
+    # A few long sequences among many short ones. The longest-processing-time
+    # assignment evens the per-rank full-attention cost.
+    lengths = [63, 63, 33, 33, 33, 17, 17, 17, 17, 9, 9, 9, 9, 9, 9, 5, 5, 5]
+    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=64)).build(
+        num_prompts_per_train_step=1, dp_degree=2, pad_id=0
+    )
+    batch, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(0, lengths=lengths)
+    )
+    assert batch is not None
+    assert group_is_trainable
+    # 1.0 is perfect DP-rank balance; count-based round-robin on this data is ~1.1.
+    assert _metric_value(batch, "train_batch/cost_imbalance") <= 1.05
+
+
+def test_packing_minimizes_microbatches_on_bad_arrival_order() -> None:
+    # One rank has a 64-token budget. Longest-first packing pairs the two
+    # effective length-29 samples, producing three microbatches instead of four.
+    lengths = [40, 30, 40, 30]
+    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=1, seq_len=64)).build(
+        num_prompts_per_train_step=1, dp_degree=1, pad_id=0
+    )
+    batch, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(0, lengths=lengths)
+    )
+    assert batch is not None
+    assert group_is_trainable
+    assert _metric_value(batch, "train_batch/num_microbatches") == 3
+
+
+def test_packing_cost_model_receives_1d_sequence_lengths() -> None:
+    observed_inputs: list[torch.Tensor] = []
+
+    def linear_cost(sequence_lengths: torch.Tensor) -> torch.Tensor:
+        observed_inputs.append(sequence_lengths.clone())
+        return sequence_lengths
+
+    batcher = Batcher.Config(
+        batch=BatchConfig(local_batch_size=1, seq_len=16),
+        cost_model=linear_cost,
+    ).build(num_prompts_per_train_step=1, dp_degree=2, pad_id=0)
+    batch, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(0, lengths=[9, 7, 5])
+    )
+
+    assert batch is not None
+    assert group_is_trainable
+    assert observed_inputs
+    assert all(sequence_lengths.ndim == 1 for sequence_lengths in observed_inputs)
+    assert observed_inputs[0].tolist() == [8, 6, 4]
 
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:

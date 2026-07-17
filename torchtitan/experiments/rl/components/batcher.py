@@ -9,10 +9,12 @@
 """
 
 import logging
-import math
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Annotated
 
 import torch
+import tyro
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
@@ -25,7 +27,13 @@ from torchtitan.experiments.rl.types import (
 
 logger = logging.getLogger(__name__)
 
-# Per-field pad values + tensor dtypes for a packed row.
+
+def quadratic_sequence_cost(sequence_lengths: torch.Tensor) -> torch.Tensor:
+    """Return the full-attention cost for each sequence length in a 1D tensor."""
+    return sequence_lengths.square()
+
+
+# Per-field pad values and tensor dtypes for a packed microbatch.
 _PAD_VALUES: dict[str, int | float | bool] = {
     "input_ids": 0,  # overwritten with pad_id in __init__-bound builds
     "labels": 0,
@@ -53,12 +61,13 @@ class BatchConfig:
     """
 
     local_batch_size: int = 8
-    """Per-DP-rank microbatch size (rows per forward pass). If the number of tokens in the
-    rollouts exceed the number of rows*seq_len, a new microbatch is started.
-    If it is less, the remaining rows are padded to this size."""
+    """Number of max-length sequences in each DP rank's token budget.
+
+    The model input is flat with shape ``[local_batch_size * seq_len]``.
+    """
 
     seq_len: int = 2048
-    """Tokens per row (packed sequence length)."""
+    """Maximum length of one packed sequence."""
 
 
 class Batcher(Configurable):
@@ -84,6 +93,14 @@ class Batcher(Configurable):
         """When non-zero, pad each sample to a multiple of this value
         before packing. Used by flex attention in batch-invariant mode
         so that block boundaries align regardless of batch composition."""
+        cost_model: Annotated[
+            Callable[[torch.Tensor], torch.Tensor], tyro.conf.Suppress
+        ] = quadratic_sequence_cost
+        """Map a 1D tensor of sequence lengths to one cost per sequence.
+
+        The default models full attention with ``sequence_length**2``. Set this
+        programmatically for architectures with a different compute profile.
+        """
 
     def __init__(
         self,
@@ -97,6 +114,7 @@ class Batcher(Configurable):
         self.seq_len = config.batch.seq_len
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
+        self._cost_model = config.cost_model
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
@@ -114,7 +132,7 @@ class Batcher(Configurable):
             batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
             batcher.add_training_samples(training_sample_group=group1)  # -> (TrainingBatch, True)
         """
-        # Drop samples longer than seq_len: can't fill a row
+        # A single sample cannot exceed the configured context length.
         samples = training_sample_group.training_samples
         kept = [s for s in samples if self.num_tokens_to_pack(s) <= self.seq_len]
         num_dropped = len(samples) - len(kept)
@@ -154,22 +172,27 @@ class Batcher(Configurable):
             num_rollout_groups,
             num_metric_only_groups,
         ) = self._take_groups()
-        # Next-fit all taken training_samples into rows.
-        rows = self._assign_training_samples_to_rows(training_samples)
-        packed_rows = [self._pack_training_sample_row(row) for row in rows]
+        assignments = self._assign_training_samples_to_microbatches(training_samples)
+        microbatches = [
+            [self._pack_training_samples(samples) for samples in rank_assignments]
+            for rank_assignments in assignments
+        ]
         num_global_valid_tokens = sum(
             int(
-                (row["loss_mask"] & torch.isfinite(row["generator_logprobs"]))
+                (microbatch.loss_mask & torch.isfinite(microbatch.generator_logprobs))
                 .sum()
                 .item()
             )
-            for row in packed_rows
+            for rank_microbatches in microbatches
+            for microbatch in rank_microbatches
         )
         num_response_tokens = sum(
-            int(row["loss_mask"].sum().item()) for row in packed_rows
+            int(microbatch.loss_mask.sum().item())
+            for rank_microbatches in microbatches
+            for microbatch in rank_microbatches
         )
         return TrainingBatch(
-            microbatches=self._build_microbatch_grid(packed_rows),
+            microbatches=microbatches,
             num_global_valid_tokens=num_global_valid_tokens,
             metrics=[
                 *metrics,
@@ -183,7 +206,7 @@ class Batcher(Configurable):
                     ),
                 ),
                 *self._packing_metrics(
-                    packed_rows,
+                    assignments,
                     training_samples,
                     num_rollout_groups,
                     num_metric_only_groups,
@@ -226,39 +249,87 @@ class Batcher(Configurable):
             num_metric_only_groups,
         )
 
-    def _assign_training_samples_to_rows(
+    def _assign_training_samples_to_microbatches(
         self, training_samples: list[TrainingSample]
-    ) -> list[list[TrainingSample]]:
-        """Next-fit training_samples into rows of <= ``seq_len`` tokens (the caller already capped the count).
+    ) -> list[list[list[TrainingSample]]]:
+        """Pack samples into fixed-token-budget rank inputs, grouped by microbatch.
+
+        Each DP rank receives one flat 1D input with capacity
+        ``local_batch_size * seq_len``. Samples are ordered by estimated cost and
+        assigned to the lowest-cost rank where they fit. If no rank has enough
+        capacity, the current microbatch is emitted and packing continues in a
+        fresh one.
 
         Example:
 
-            # seq_len=10, training_sample effective lengths [5, 5, 5]
-            _assign_training_samples_to_rows([e5, e5, e5])  # -> [[e5, e5], [e5]]
+            # dp_degree=2, tokens_per_rank=10, lengths [6, 5, 5, 4]
+            # -> one microbatch with rank assignments [[e6, e4], [e5, e5]]
         """
-        # TODO(async-rl): assignment is greedy next-fit. Swap in smarter algorithms here -- e.g. best-fit,
-        #   DP/CP/PP load balancing, or balancing tokens across DP rows on a seq_len**2 budget.
-        rows: list[list[TrainingSample]] = []
-        current_row: list[TrainingSample] = []
-        current_len = 0
-        for training_sample in training_samples:
-            num_tokens_to_pack = self.num_tokens_to_pack(training_sample)
+        num_tokens_per_rank = self.local_batch_size * self.seq_len
+        sample_lengths = [
+            self.num_tokens_to_pack(training_sample)
+            for training_sample in training_samples
+        ]
+        sample_costs = self._sequence_costs(sample_lengths)
+        ordered_samples = sorted(
+            zip(training_samples, sample_lengths, sample_costs, strict=True),
+            key=lambda item: (item[2], item[1]),
+            reverse=True,
+        )
 
-            # doesn't fit, close the row
-            if current_row and current_len + num_tokens_to_pack > self.seq_len:
-                rows.append(current_row)
-                current_row, current_len = [], 0
+        microbatches: list[list[list[TrainingSample]]] = []
+        rank_assignments: list[list[TrainingSample]] = [
+            [] for _ in range(self._dp_degree)
+        ]
+        rank_num_tokens = [0] * self._dp_degree
+        rank_costs = [0.0] * self._dp_degree
 
-            current_row.append(training_sample)
-            current_len += num_tokens_to_pack
+        for training_sample, sequence_length, cost in ordered_samples:
+            eligible_ranks = [
+                rank
+                for rank in range(self._dp_degree)
+                if rank_num_tokens[rank] + sequence_length <= num_tokens_per_rank
+            ]
+            if not eligible_ranks:
+                microbatches.append(rank_assignments)
+                rank_assignments = [[] for _ in range(self._dp_degree)]
+                rank_num_tokens = [0] * self._dp_degree
+                rank_costs = [0.0] * self._dp_degree
+                eligible_ranks = list(range(self._dp_degree))
 
-        if current_row:
-            rows.append(current_row)
+            rank = min(
+                eligible_ranks,
+                key=lambda candidate: (
+                    rank_costs[candidate],
+                    rank_num_tokens[candidate],
+                    candidate,
+                ),
+            )
+            rank_assignments[rank].append(training_sample)
+            rank_num_tokens[rank] += sequence_length
+            rank_costs[rank] += cost
 
-        return rows
+        microbatches.append(rank_assignments)
+        return microbatches
+
+    def _sequence_costs(self, sequence_lengths: list[int]) -> list[float]:
+        """Evaluate the configured cost model on a 1D sequence-length tensor."""
+        lengths = torch.tensor(sequence_lengths, dtype=torch.long)
+        costs = self._cost_model(lengths)
+        if costs.shape != lengths.shape:
+            raise ValueError(
+                "Batcher cost_model must return one cost per sequence length; "
+                f"got input shape {tuple(lengths.shape)} and output shape "
+                f"{tuple(costs.shape)}."
+            )
+        if not torch.isfinite(costs).all() or torch.any(costs < 0):
+            raise ValueError(
+                "Batcher cost_model must return finite, non-negative costs."
+            )
+        return [float(cost) for cost in costs]
 
     def num_tokens_to_pack(self, training_sample: TrainingSample) -> int:
-        """Tokens this training_sample contributes to a packed row.
+        """Tokens this training_sample contributes to a packed input.
 
         The loss-target split drops the last token (``input_ids = raw[:-1]``), and batch-invariant
         mode rounds the length up to ``per_sample_pad_multiple``.
@@ -274,64 +345,30 @@ class Batcher(Configurable):
             num_tokens = ((num_tokens + multiple - 1) // multiple) * multiple
         return num_tokens
 
-    def _build_microbatch_grid(
-        self, packed_rows: list[dict]
-    ) -> list[list[TrainingMicrobatch]]:
-        """Build `[num_microbatches][dp_degree]` from however many rows packing produced (variable count).
-
-        Each (microbatch, rank) takes its rows round-robin. Pad-only rows are appended last, so dealing them round-robin
-        spreads them across microbatches/ranks instead of all landing on the last one.
-
-        Example:
-            # local_batch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
-            # The 3 pad rows land on 3 different (microbatch, rank) pairs; none is all padding.
-        """
-        rows_per_microbatch = self.local_batch_size * self._dp_degree
-        num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
-
-        # Pad up to a full grid
-        while len(packed_rows) < num_microbatches * rows_per_microbatch:
-            packed_rows.append(self._pack_training_sample_row([]))
-
-        # [num_rows] -> [num_microbatches][dp_degree], dealing rows round-robin so padding spreads out
-        grid: list[list[TrainingMicrobatch]] = []
-        for microbatch in range(num_microbatches):
-            ranks: list[TrainingMicrobatch] = []
-            for rank in range(self._dp_degree):
-                start = microbatch * self._dp_degree + rank
-                # this (microbatch, rank)'s rows: every (num_microbatches * dp_degree)-th row from `start`
-                ranks.append(
-                    self.collate(
-                        packed_rows[start :: num_microbatches * self._dp_degree]
-                    )
-                )
-            grid.append(ranks)
-        return grid
-
     # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
     #   so callers swap logic per modality (images, ...).
-    def _pack_training_sample_row(self, training_samples: list[TrainingSample]) -> dict:
-        """Concatenate one row's samples into a `[seq_len]` padded token chunk.
+    def _pack_training_samples(
+        self, training_samples: list[TrainingSample]
+    ) -> TrainingMicrobatch:
+        """Concatenate samples into one flat, fixed-token-budget microbatch.
+
         - Labels and logits are shifted
         -`positions` restart at 0 per sample
-        -`seq_lens` keeps per-sample lengths
 
         Example:
 
-            # two 3-token samples [10, 11, 12] and [20, 21, 22], seq_len=8, pad_id=0
-            # each sample drops one token via the raw[:-1]/raw[1:] split (3 -> 2), then the row pads to 8:
+            # two 3-token samples, num_tokens_per_rank=8, pad_id=0
+            # each sample drops one token via the raw[:-1]/raw[1:] split:
             input_ids = [10, 11, 20, 21, 0, 0, 0, 0]
             labels    = [11, 12, 21, 22, 0, 0, 0, 0]
-            positions = [ 0,  1,  0,  1, 0, 0, 0, 0]   # restart at 0 per sample, then pad
-            seq_lens  = [2, 2]                         # per-sample lengths after the split (4 real tokens, 4 pad)
+            positions = [ 0,  1,  0,  1, 0, 1, 2, 3]
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
-        row: dict[str, list] = {key: [] for key in keys}
+        packed_fields: dict[str, list] = {key: [] for key in keys}
         positions: list[int] = []
-        seq_lens: list[int] = []
 
-        # Shift labals/logits + pad to per_sample_pad_multiple.
+        # Shift labels/logits + pad to per_sample_pad_multiple.
         for training_sample in training_samples:
             sample = {
                 "input_ids": training_sample.token_ids[:-1],
@@ -352,59 +389,85 @@ class Batcher(Configurable):
                     )
                 sample_len = padded_len
 
-            # extend row
+            # Extend the packed token fields.
             for key in keys:
-                row[key].extend(sample[key])
+                packed_fields[key].extend(sample[key])
             positions.extend(range(sample_len))
-            seq_lens.append(sample_len)
 
-        # Pad the row up to seq_len.
-        pad_len = self.seq_len - len(positions)
+        num_tokens_per_rank = self.local_batch_size * self.seq_len
+        pad_len = num_tokens_per_rank - len(positions)
         if pad_len > 0:
             for key in keys:
-                row[key].extend([pad_values[key]] * pad_len)
+                packed_fields[key].extend([pad_values[key]] * pad_len)
             positions.extend(range(pad_len))
 
-        packed = {key: torch.tensor(row[key], dtype=_DTYPES[key]) for key in keys}
-        packed["positions"] = torch.tensor(positions, dtype=torch.long)
-        packed["seq_lens"] = seq_lens
-        return packed
-
-    # TODO: accept a collate_fn on Batcher.Config (like the pre-trainer's
-    # dataloader) and wire a non-pretraining collate only when a caller actually
-    # needs one.
-    @staticmethod
-    def collate(rows: list[dict]) -> TrainingMicrobatch:
-        """Concatenate packed rows into a single flat microbatch."""
         return TrainingMicrobatch(
-            token_ids=torch.cat([row["input_ids"] for row in rows]),
-            labels=torch.cat([row["labels"] for row in rows]),
-            positions=torch.cat([row["positions"] for row in rows]),
-            generator_logprobs=torch.cat([row["generator_logprobs"] for row in rows]),
-            loss_mask=torch.cat([row["loss_mask"] for row in rows]),
-            advantages=torch.cat([row["advantages"] for row in rows]),
+            token_ids=torch.tensor(
+                packed_fields["input_ids"], dtype=_DTYPES["input_ids"]
+            ),
+            labels=torch.tensor(packed_fields["labels"], dtype=_DTYPES["labels"]),
+            positions=torch.tensor(positions, dtype=torch.long),
+            generator_logprobs=torch.tensor(
+                packed_fields["generator_logprobs"],
+                dtype=_DTYPES["generator_logprobs"],
+            ),
+            loss_mask=torch.tensor(
+                packed_fields["loss_mask"], dtype=_DTYPES["loss_mask"]
+            ),
+            advantages=torch.tensor(
+                packed_fields["advantages"], dtype=_DTYPES["advantages"]
+            ),
         )
+
+    def _cost_imbalance(self, assignments: list[list[list[TrainingSample]]]) -> float:
+        """Return mean microbatch max-rank cost divided by mean-rank cost.
+
+        1.0 is perfect DP-rank balance; higher means a straggler rank gates the
+        lockstep forward/backward pass.
+        """
+        ratios: list[float] = []
+        for microbatch_assignments in assignments:
+            rank_costs = [
+                sum(
+                    self._sequence_costs(
+                        [self.num_tokens_to_pack(sample) for sample in samples]
+                    )
+                )
+                for samples in microbatch_assignments
+            ]
+            total = sum(rank_costs)
+            if total > 0:
+                ratios.append(max(rank_costs) * self._dp_degree / total)
+        return sum(ratios) / len(ratios) if ratios else 1.0
 
     def _packing_metrics(
         self,
-        packed_rows: list[dict],
+        assignments: list[list[list[TrainingSample]]],
         training_samples: list[TrainingSample],
         num_rollout_groups: int,
         num_metric_only_groups: int,
     ) -> list[m.Metric]:
         """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
-        total_slots = len(packed_rows) * self.seq_len
-        non_padded = sum(sum(row["seq_lens"]) for row in packed_rows)
+        num_tokens_per_rank = self.local_batch_size * self.seq_len
+        total_slots = len(assignments) * self._dp_degree * num_tokens_per_rank
+        non_padded = sum(
+            self.num_tokens_to_pack(sample)
+            for microbatch_assignments in assignments
+            for samples in microbatch_assignments
+            for sample in samples
+        )
         return [
             m.Metric(
                 "train_batch/padding_frac",
                 m.NoReduce((total_slots - non_padded) / total_slots),
             ),
             m.Metric(
+                "train_batch/cost_imbalance",
+                m.NoReduce(self._cost_imbalance(assignments)),
+            ),
+            m.Metric(
                 "train_batch/num_microbatches",
-                m.NoReduce(
-                    float(len(packed_rows) // (self.local_batch_size * self._dp_degree))
-                ),
+                m.NoReduce(float(len(assignments))),
             ),
             m.Metric(
                 "train_batch/num_rollout_groups", m.NoReduce(float(num_rollout_groups))
