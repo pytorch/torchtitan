@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import functools
 import gc
 import logging
 import math
@@ -19,7 +20,15 @@ import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
+from monarch.actor import (
+    Actor,
+    Channel,
+    context,
+    current_rank,
+    endpoint,
+    Port,
+    PortReceiver,
+)
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
@@ -34,6 +43,13 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.observability import metrics as m
+from torchtitan.experiments.rl.observability.vllm_otel_stat_logger import (
+    VllmOtelStatLogger,
+)
+from torchtitan.experiments.rl.observability.vllm_stat_common import (
+    StatLoggerContext,
+    VllmStatLoggerBase,
+)
 from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
 )
@@ -49,7 +65,7 @@ from torchtitan.protocols.sharding import resolve_placements, SpmdLayout
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig, CompilationConfig, ParallelConfig
+from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -704,6 +720,11 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
+        vllm_stat_loggers: list[type[VllmStatLoggerBase]] = field(
+            default_factory=lambda: [VllmOtelStatLogger]
+        )
+        """Loggers used by vLLM engines to export metrics."""
+
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -865,9 +886,20 @@ class VLLMGenerator(Actor, Configurable):
 
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")
-            # TODO(async-rl): capture engine-aggregate stats (KV-cache util, queue depth, preemptions,
-            #   prefix-cache hit rate) via a `StatLoggerBase` in `from_engine_args`;
-            self._engine = LLMEngine.from_engine_args(engine_args)
+            logger_context = StatLoggerContext(
+                rank=self._rank,
+                tp_rank=self._tp_rank,
+                dp_rank=self._dp_rank,
+                generator_name=context().actor_instance.actor_id.actor_name,
+                output_dir=output_dir,
+            )
+            stat_loggers = [
+                functools.partial(cls, context=logger_context)
+                for cls in config.vllm_stat_loggers
+            ]
+            self._engine = LLMEngine.from_engine_args(
+                engine_args, stat_loggers=stat_loggers or None
+            )
             logger.info("vLLM rollout engine initialized")
 
         # The default PG was initialized during engine build. Confirm the Monarch rank
