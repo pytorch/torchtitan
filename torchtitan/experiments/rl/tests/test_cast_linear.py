@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.experiments.rl.models.cast_linear import CastLinear, LMHeadCastConverter
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.qwen3 import qwen3_configs
 
 

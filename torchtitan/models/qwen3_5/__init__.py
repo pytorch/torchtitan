@@ -15,9 +15,9 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear  # noqa: F401
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_experts_config,
     make_ffn_config,
     make_moe_config,
+    make_routed_experts_config,
     make_router_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -442,7 +442,7 @@ def _build_qwen35_moe_layers(
                         score_func="softmax",
                         route_norm=True,
                     ),
-                    experts=make_experts_config(
+                    routed_experts=make_routed_experts_config(
                         dim=dim,
                         hidden_dim=moe_hidden_dim,
                         num_experts=num_experts,

@@ -292,10 +292,12 @@ This same rule answers the parent/child question directly. Say override A
 targets a parent Config (e.g. `MoE.Config`) and override B targets a Config
 nested inside it (e.g. `GroupedExperts.Config`):
 
-- **Disjoint subtrees** (A on `...layers.0.moe`, B on `...layers.1.moe.experts`)
-  — the claimed nodes are unrelated, so both apply.
-- **Overlapping** (A on `...layers.0.moe`, B on `...layers.0.moe.experts`) — B's
-  node is inside A's, the ancestor case above, so we **error**.
+- **Disjoint subtrees** (A on `...layers.0.moe`, B on
+  `...layers.1.moe.routed_experts.inner_experts`) — the claimed nodes are
+  unrelated, so both apply.
+- **Overlapping** (A on `...layers.0.moe`, B on
+  `...layers.0.moe.routed_experts.inner_experts`) — B's node is inside A's, the
+  ancestor case above, so we **error**.
 
 We error rather than pick one of the two plausible behaviors implicitly:
 

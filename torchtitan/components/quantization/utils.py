@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     HybridEPTokenDispatcher,
@@ -30,32 +30,35 @@ def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) ->
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-def swap_token_dispatcher(config, pad_multiple: int) -> None:
-    """Swap token dispatcher config to support padded grouped GEMMs.
+def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
+    """Swap the routed-experts token dispatcher config to support padded grouped GEMMs.
 
-    Requires a dispatcher that handles padding (TorchAOTokenDispatcher or
-    DeepEP hybridep). Raises ValueError if the dispatcher doesn't support it.
+    Takes the ``RoutedExperts.Config`` (which owns the ``token_dispatcher`` child) and
+    swaps its dispatcher in place. Requires a dispatcher that handles padding
+    (TorchAOTokenDispatcher or DeepEP hybridep). Raises ValueError if the
+    dispatcher doesn't support it.
     """
-    if isinstance(
-        config.token_dispatcher, AllToAllTokenDispatcher.Config
-    ) and not isinstance(config.token_dispatcher, TorchAOTokenDispatcher.Config):
-        config.token_dispatcher = TorchAOTokenDispatcher.Config(
-            num_experts=config.token_dispatcher.num_experts,
-            top_k=config.token_dispatcher.top_k,
+    dispatcher = routed_experts_config.token_dispatcher
+    if isinstance(dispatcher, AllToAllTokenDispatcher.Config) and not isinstance(
+        dispatcher, TorchAOTokenDispatcher.Config
+    ):
+        routed_experts_config.token_dispatcher = TorchAOTokenDispatcher.Config(
+            num_experts=dispatcher.num_experts,
+            top_k=dispatcher.top_k,
             pad_multiple=pad_multiple,
         )
-    elif isinstance(config.token_dispatcher, HybridEPTokenDispatcher.Config):
-        config.token_dispatcher = HybridEPTokenDispatcher.Config(
-            num_experts=config.token_dispatcher.num_experts,
-            top_k=config.token_dispatcher.top_k,
-            non_blocking_capacity_factor=config.token_dispatcher.non_blocking_capacity_factor,
+    elif isinstance(dispatcher, HybridEPTokenDispatcher.Config):
+        routed_experts_config.token_dispatcher = HybridEPTokenDispatcher.Config(
+            num_experts=dispatcher.num_experts,
+            top_k=dispatcher.top_k,
+            non_blocking_capacity_factor=dispatcher.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
         )
     else:
         raise ValueError(
             f"MoE quantization requires a token dispatcher that supports "
             f"padding (TorchAOTokenDispatcher or HybridEPTokenDispatcher), "
-            f"got {type(config.token_dispatcher).__name__}."
+            f"got {type(dispatcher).__name__}."
         )
 
 
