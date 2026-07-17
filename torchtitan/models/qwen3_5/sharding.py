@@ -35,7 +35,7 @@ from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 if TYPE_CHECKING:
-    from torchtitan.models.common import SharedExperts
+    from torchtitan.models.common import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.model import (
         GatedDeltaNet,
         Qwen35Attention,
@@ -172,7 +172,7 @@ def _set_qwen35_layer_sharding(
 
 
 def _set_shared_expert_gate_sharding(
-    shared_experts: "SharedExperts.Config | None",
+    shared_experts: "SigmoidGatedFeedForward.Config | None",
 ) -> None:
     """Shard Qwen3.5's shared-expert sigmoid gate.
 

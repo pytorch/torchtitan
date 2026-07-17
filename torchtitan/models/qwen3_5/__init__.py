@@ -16,7 +16,7 @@ from torchtitan.models.common import (  # noqa: F401
     Conv1d,
     Embedding,
     Linear,
-    SharedExperts,
+    SigmoidGatedFeedForward,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -122,7 +122,7 @@ def _offset_norm(dim: int) -> OffsetRMSNorm.Config:
 
 def _shared_experts_config(
     *, dim: int, hidden_dim: int, layer_id: int
-) -> SharedExperts.Config:
+) -> SigmoidGatedFeedForward.Config:
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
     ffn = make_ffn_config(
         dim=dim,
@@ -130,7 +130,7 @@ def _shared_experts_config(
         w1_param_init=_LINEAR_INIT,
         w2w3_param_init=_depth_init(layer_id),
     )
-    return SharedExperts.Config(
+    return SigmoidGatedFeedForward.Config(
         w1=ffn.w1,
         w2=ffn.w2,
         w3=ffn.w3,

@@ -34,7 +34,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
 )
-from torchtitan.models.common.feed_forward import SharedExperts
+from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
@@ -111,10 +111,10 @@ def build_and_swap_native_moe(
         )
 
         # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but leaves the
-        # SharedExperts sigmoid gate to model-specific code. Replicate it (weight
+        # SigmoidGatedFeedForward gate to model-specific code. Replicate it (weight
         # and output), matching qwen3_5's _set_shared_expert_gate_sharding.
         shared = moe_config.shared_experts
-        if isinstance(shared, SharedExperts.Config):
+        if isinstance(shared, SigmoidGatedFeedForward.Config):
             shared.gate.sharding_config = ShardingConfig(
                 state_shardings={
                     "weight": dense_param_placement(tp=spmd.R),
@@ -526,10 +526,10 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
-            # SharedExperts is a FeedForward subclass, so w1/w2/w3 stay flat
+            # SigmoidGatedFeedForward is a FeedForward subclass, so w1/w2/w3 stay flat
             # (no nested ``ffn.`` level) and are directly shardable by
             # set_moe_sharding_config.
-            shared_experts = SharedExperts.Config(
+            shared_experts = SigmoidGatedFeedForward.Config(
                 w1=ffn_config.w1,
                 w2=ffn_config.w2,
                 w3=ffn_config.w3,

@@ -61,7 +61,7 @@ _MODEL_CONFIGS = {
         use_cache=False,
     ),
     # Qwen2-MoE: sigmoid-gated shared expert (out = sigmoid(gate(x)) * ffn(x)).
-    # Exercises the SharedExperts path; deepseek_v2/v3 cover additive shared
+    # Exercises the SigmoidGatedFeedForward path; deepseek_v2/v3 cover additive shared
     # experts, so this is the only config that hits the gated variant.
     "qwen2_moe": dict(
         model_type="qwen2_moe",
