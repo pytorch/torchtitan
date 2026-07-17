@@ -81,7 +81,7 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
 
 
 class TestAttnMaskTypeValidation(unittest.TestCase):
-    """Flex is the only attention path; block_causal is always supported.
+    """A block_causal config builds a flex BlockMask and is supported.
 
     Building the config is lightweight (no model build, no GPU/distributed), so
     this checks that a block_causal config builds without error.

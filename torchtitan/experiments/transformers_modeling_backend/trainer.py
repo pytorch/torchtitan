@@ -49,8 +49,8 @@ class HFTransformerTrainer(Trainer):
     def _validate_cp_load_balancer(self) -> None:
         """Reject headtail load balancing under CP.
 
-        A flex ``BlockMask`` (the only attention path here) can only be sharded
-        by the "ptrr" balancer (or with balancing disabled via None); the
+        A flex ``BlockMask`` can only be sharded by the "ptrr" balancer (or with
+        balancing disabled via None); the
         default "headtail" cannot shard it. Raise rather than silently
         overriding a user-set value.
         """

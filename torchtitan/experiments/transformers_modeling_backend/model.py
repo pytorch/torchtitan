@@ -158,8 +158,8 @@ def _get_moe_attr_name(layer: nn.Module) -> str | None:
     return "mlp" if hasattr(layer, "mlp") else None
 
 
-# Flex attention is the only attention path in this backend. The custom impl
-# name is registered in the HF ``AttentionInterface`` (see
+# The backend routes attention through flex. The custom impl name is registered
+# in the HF ``AttentionInterface`` (see
 # ``_configure_hf_attention``) and set on ``config._attn_implementation`` so HF
 # routes attention through ``_flex_attention_torchtitan`` -- bypassing HF's
 # per-model ``_supports_flex_attn`` gate. A causal or document/packing BlockMask
@@ -328,9 +328,9 @@ class HFTransformerModel(BaseModel):
         def _configure_hf_attention(self):
             """Configure HuggingFace attention to route through flex attention.
 
-            Flex is the only attention path in this backend. It routes attention
-            through the flex HOP so a causal or document/packing BlockMask can be
-            applied -- is_causal alone cannot express cross-sample (packed)
+            Routes attention through the flex HOP so a causal or document/packing
+            BlockMask can be applied -- is_causal alone cannot express
+            cross-sample (packed)
             masking. The titan-built BlockMask (see ``get_attention_masks``)
             rides HF's normal ``attention_mask`` argument (HF returns an
             already-4D/BlockMask mask as-is), so no custom mask plumbing is

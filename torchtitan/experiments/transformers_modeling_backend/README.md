@@ -46,11 +46,10 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 
 ### Attention
 
-Attention runs on **FlexAttention** (the only attention path; the SDPA path was
-removed). The MoE block is swapped to TorchTitan's grouped-experts MoE to enable
-expert parallelism and the `grouped_mm` fast path. `attn_mask_type` selects the
-flex mask: `causal` (plain causal) or `block_causal` (causal + same-document, for
-packed / SFT sequences).
+Attention runs on **FlexAttention**. The MoE block is swapped to TorchTitan's
+grouped-experts MoE to enable expert parallelism and the `grouped_mm` fast path.
+`attn_mask_type` selects the flex mask: `causal` (plain causal) or `block_causal`
+(causal + same-document, for packed / SFT sequences).
 
 ### MoE parallelism support
 

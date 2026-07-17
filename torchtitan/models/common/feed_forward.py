@@ -59,9 +59,7 @@ class SigmoidGatedFeedForward(FeedForward):
 
     The output is ``sigmoid(gate(x)) * ffn(x)``. Inherits ``w1/w2/w3`` from
     FeedForward so weight FQNs are flat (no nested ``ffn.`` level), which keeps
-    the weights directly shardable. Commonly used as an MoE shared expert (e.g.
-    DeepSeek, Qwen3.5), but not specific to that role -- any gated FFN can use
-    it. Models without a gate use a plain ``FeedForward`` instead.
+    the weights directly shardable.
     """
 
     @dataclass(kw_only=True, slots=True)

@@ -112,8 +112,8 @@ def parallelize_hf_transformers(
             "Titan-native embedding, and attention kernels are pending)."
         )
 
-    # Flex attention is the only attention path and supports FSDP, TP, CP, and PP
-    # (in any combination). Under CP the flex kernel's local_map redistributes
+    # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
+    # the flex kernel's local_map redistributes
     # k/v from seq-sharded to CP-Replicate (all-gather); see _attach_flex_kernel
     # in hf_sharding.py. The CP-sharded BlockMask is built and sharded on its Q
     # axis upstream (trainer, ptrr balancer). Note: the ptrr balancer requires

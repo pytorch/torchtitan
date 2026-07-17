@@ -24,10 +24,9 @@ The real CP+PP path can only be exercised through the trainer/pipeline runtime,
 so this orchestrates subprocess launches at different GPU counts (1/2/4) -- it
 cannot be expressed in the single-``ngpu`` OverrideDefinitions framework.
 
-Usage: python -m torchtitan.experiments.transformers_modeling_backend.tests.cp_pp_numerical [--cases flex]
+Usage: python -m torchtitan.experiments.transformers_modeling_backend.tests.cp_pp_numerical
 """
 
-import argparse
 import glob
 import os
 import subprocess
@@ -44,10 +43,9 @@ _COMMON = (
     "--training.local_batch_size 4 --training.seq_len 256 --training.steps 1 "
     "--training.mixed_precision_param float32 --debug.seed 42 --debug.deterministic"
 )
-_CASES = {
-    # name: (config, cp load balancer)
-    "flex": ("transformers_modeling_backend_debugmodel", "ptrr"),
-}
+# The flex BlockMask requires the ptrr CP load balancer.
+_CONFIG = "transformers_modeling_backend_debugmodel"
+_BALANCER = "ptrr"
 _TOL = 2e-2  # bf16/flex reduction-order noise (fp32 run is ~5e-7 in practice)
 
 
@@ -117,11 +115,11 @@ def _compare(ref_dir: str, cp_pp_dir: str) -> None:
     print(f"  PASS (worst rel={worst:.3e}, tol={_TOL})")
 
 
-def _run_case(name: str, work: str) -> None:
-    config, balancer = _CASES[name]
-    print(f"\n==== CP+PP numerical: {name} (config={config} balancer={balancer}) ====")
-    seed = os.path.join(work, f"seed_{name}")
-    co, pp = os.path.join(work, f"co_{name}"), os.path.join(work, f"pp_{name}")
+def _run_case(work: str) -> None:
+    config, balancer = _CONFIG, _BALANCER
+    print(f"\n==== CP+PP numerical (config={config} balancer={balancer}) ====")
+    seed = os.path.join(work, "seed")
+    co, pp = os.path.join(work, "co"), os.path.join(work, "pp")
     os.makedirs(co, exist_ok=True)
     os.makedirs(pp, exist_ok=True)
 
@@ -150,7 +148,7 @@ def _run_case(name: str, work: str) -> None:
             2,
             config,
             f"{_COMMON} {load} {bal} --parallelism.data_parallel_shard_degree 1 "
-            f"--dump_folder {os.path.join(work, f'out_co_{name}')}",
+            f"--dump_folder {os.path.join(work, 'out_co')}",
         ),
         env={"HF_BACKEND_LOGIT_DUMP": co},
     )
@@ -162,7 +160,7 @@ def _run_case(name: str, work: str) -> None:
             config,
             f"{_COMMON} {load} {bal} --parallelism.pipeline_parallel_degree 2 "
             f"--parallelism.pipeline_parallel_schedule 1F1B "
-            f"--dump_folder {os.path.join(work, f'out_pp_{name}')}",
+            f"--dump_folder {os.path.join(work, 'out_pp')}",
         ),
         env={"HF_BACKEND_LOGIT_DUMP": pp},
     )
@@ -172,20 +170,13 @@ def _run_case(name: str, work: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--cases", nargs="+", default=list(_CASES), choices=list(_CASES)
-    )
-    args = parser.parse_args()
-
     n = torch.cuda.device_count()
     if n < 4:
         print(f"SKIP: CP+PP numerical test needs 4 GPUs, found {n}")
         return
 
     with tempfile.TemporaryDirectory() as work:
-        for name in args.cases:
-            _run_case(name, work)
+        _run_case(work)
     print("\nALL CP+PP numerical checks PASSED")
 
 
