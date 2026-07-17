@@ -167,12 +167,12 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
 
     if moe is not None:
         # Presence required: >0 toggles MoE/EP branches.
-        hf["num_experts"] = moe.experts.num_experts
+        hf["num_experts"] = moe.routed_experts.inner_experts.num_experts
         # Unused: only per-model loaders (qwen3_moe, deepseek_v2, ...) and v1/metrics/perf.py (off) read these.
         hf[
             "num_experts_per_tok"
         ] = moe.router.top_k  # top_k is on the router, not experts
-        hf["moe_intermediate_size"] = moe.experts.hidden_dim
+        hf["moe_intermediate_size"] = moe.routed_experts.inner_experts.hidden_dim
         hf["decoder_sparse_step"] = 1
         hf.setdefault("norm_topk_prob", True)
 

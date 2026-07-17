@@ -24,11 +24,10 @@ import torch.nn as nn
 
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.config_utils import (
-    make_experts_config,
     make_ffn_config,
     make_moe_config,
+    make_routed_experts_config,
     make_router_config,
-    make_token_dispatcher_config,
 )
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
@@ -469,9 +468,6 @@ def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]
             dim=2,
             hidden_dim=4,
             num_experts=2,
-            token_dispatcher=make_token_dispatcher_config(
-                num_experts=2, top_k=1, comm_backend="standard"
-            ),
         ).build()
 
     init_fn = partial(nn.init.trunc_normal_, std=0.02)
@@ -507,7 +503,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
     )
 
     expert_init, _ = _get_expert_param_info()
-    experts = make_experts_config(
+    routed_experts = make_routed_experts_config(
         dim=params["dim"],
         hidden_dim=params["moe_intermediate_size"],
         num_experts=params["num_experts"],
@@ -546,7 +542,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
     return make_moe_config(
         num_experts=params["num_experts"],
         router=router,
-        experts=experts,
+        routed_experts=routed_experts,
         shared_experts=shared_experts,
         load_balance_coeff=params["load_balance_coeff"],
     )
