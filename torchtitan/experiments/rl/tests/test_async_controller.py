@@ -90,9 +90,9 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch.num_global_valid_tokens > 0
 
 
-def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
-    # 5 real rows, local_batch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
-    # Round-robin dealing spreads the pad rows so no (microbatch, rank) cell is all-pad.
+def test_packing_flushes_microbatch_on_overflow() -> None:
+    # rows_per_microbatch = local_batch_size * dp_degree = 4; seq_len=2 so each 2-token sample
+    # fills one row. 5 samples: 4 fill microbatch 0's rows, the 5th fits none -> flush -> microbatch 1.
     batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=2)).build(
         num_groups_per_train_step=1,
         dp_degree=2,
@@ -102,10 +102,66 @@ def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
         training_sample_group=_trainable_group(0, num_samples=5)
     )
     assert batch is not None
-    cells = [microbatch for ranks in batch.microbatches for microbatch in ranks]
-    assert len(cells) == 4  # 2 microbatches x 2 ranks
-    for cell in cells:
-        assert cell.loss_mask.any(dim=1).any()  # at least one real (non-pad) row
+    assert len(batch.microbatches) == 2  # flushed once on overflow
+    assert all(len(ranks) == 2 for ranks in batch.microbatches)  # dp_degree ranks each
+    # Every sample is trained: 5 samples x 2 trained tokens each (loss_mask=[F,T,T] -> [T,T]).
+    assert batch.num_global_valid_tokens == 5 * 2
+
+
+def _variable_length_group(group_id: int, *, lengths: list[int]) -> TrainingSampleGroup:
+    # token_ids of length n -> n-1 packed tokens; loss_mask trains all but the first.
+    def sample(rollout_id: int, n: int) -> TrainingSample:
+        return TrainingSample(
+            min_policy_version=0,
+            max_policy_version=0,
+            rollout_id=RolloutTurnID(
+                group_id=group_id, rollout_id=rollout_id, turn_id=0
+            ),
+            token_ids=list(range(n)),
+            loss_mask=[False] + [True] * (n - 1),
+            logprobs=[0.0] * n,
+            advantage=[0.0] + [1.0] * (n - 1),
+        )
+
+    return TrainingSampleGroup(
+        group_id=group_id,
+        training_samples=[sample(i, n) for i, n in enumerate(lengths)],
+        metrics=[],
+    )
+
+
+def _metric_value(batch, key: str) -> float:
+    return next(metric.value.value for metric in batch.metrics if metric.key == key)
+
+
+def test_packing_balances_dp_rank_square_cost() -> None:
+    # A few long sequences among many short ones. The longest-processing-time deal evens the
+    # per-rank square (sum seq_len**2) attention cost, so no DP rank straggler gates the step.
+    lengths = [63, 63, 33, 33, 33, 17, 17, 17, 17, 9, 9, 9, 9, 9, 9, 5, 5, 5]
+    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=64)).build(
+        num_groups_per_train_step=1, dp_degree=2, pad_id=0
+    )
+    batch = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(0, lengths=lengths)
+    )
+    assert batch is not None
+    # 1.0 is perfect DP-rank balance; count-based round-robin on this data is ~1.1.
+    assert _metric_value(batch, "train_batch/cost_imbalance") <= 1.05
+
+
+def test_packing_minimizes_microbatches_on_bad_arrival_order() -> None:
+    # rows_per_microbatch=1 (local_batch_size=1, dp_degree=1), so each microbatch is one row.
+    # Longest-first packing pairs the two 30s into one row (58<=64); the two 40s can't share a row
+    # (80>64) -> 3 microbatches, not 4 (which arrival-order packing would produce).
+    lengths = [40, 30, 40, 30]
+    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=1, seq_len=64)).build(
+        num_groups_per_train_step=1, dp_degree=1, pad_id=0
+    )
+    batch = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(0, lengths=lengths)
+    )
+    assert batch is not None
+    assert _metric_value(batch, "train_batch/num_microbatches") == 3
 
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
