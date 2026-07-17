@@ -209,6 +209,10 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
+    # Batch invariance requires strict on-policy: the generator must run the
+    # latest weights before generating so trainer/generator logprobs stay
+    # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
+    config.async_loop.max_offpolicy_steps = 0
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -357,6 +361,9 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=5,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
@@ -600,20 +607,23 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     EXPAND layout, so this generator enables CUDA graph capture.
 
     Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
-    host-synced, backward-able DeepEP path), while the generator applies the per-actor
-    ``deepep_inference`` override (``generator.override``) to its own copy, switching its
-    DeepEP dispatchers to the cudagraph-able EXPAND layout (``cudagraphable=True``). The
-    override touches only the generator's spec, so the trainer and weight sync are unaffected.
-    (This mirrors how converters are config-time/shared while overrides are per-actor.)
+    host-synced, backward-able DeepEP path), while the generator applies per-actor
+    overrides (``generator.override``) to its own copy (``fused_swiglu`` +
+    ``deepep_inference``) to switch its dispatchers to the cudagraph-able EXPAND layout.
+    The overrides touch only the generator's spec, so the trainer and weight sync are
+    unaffected.
     """
     config = rl_grpo_qwen3_moe_debug_varlen()
     config.model_spec = model_registry(
         "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
     )
-    # Generator-only override -> DeepEP cudagraph-able EXPAND dispatch; trainer keeps compact.
+    # Generator-only overrides -> cudagraph-able DeepEP EXPAND dispatch; trainer keeps compact.
     # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
     config.generator.override = OverrideConfig(
-        imports=["torchtitan.distributed.deepep.inference_override"]
+        imports=[
+            "torchtitan.overrides.fused_swiglu",
+            "torchtitan.overrides.deepep_inference",
+        ]
     )
     config.generator.cudagraph = VLLMCudagraphConfig(
         enable=True, mode="FULL_AND_PIECEWISE"
@@ -636,7 +646,9 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         moe = getattr(block, "moe", None)
         if moe is None:
             continue
-        moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
+        moe.routed_experts.token_dispatcher.num_max_tokens_per_rank = (
+            num_max_tokens_per_rank
+        )
     return config
 
 
@@ -663,6 +675,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
@@ -789,7 +804,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     """Qwen3-30B-A3B GRPO with throughput overrides (8 GPUs: 4 gen + 4 train).
 
     Same model/parallelism/data as ``rl_grpo_qwen3_30b_a3b_varlen``, but applies
-    two opt-in overrides (per-actor) to both the trainer and generator:
+    opt-in overrides (per-actor) to both the trainer and generator:
 
     * ``fused_swiglu`` fuses the dense and grouped-experts gate+up projections
       into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
@@ -837,6 +852,9 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
         num_generators=3,
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),

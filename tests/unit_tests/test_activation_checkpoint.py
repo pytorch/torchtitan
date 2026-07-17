@@ -10,7 +10,7 @@ from copy import deepcopy
 import torch
 from torch.utils.flop_counter import FlopCounterMode
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
 

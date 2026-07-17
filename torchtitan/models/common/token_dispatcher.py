@@ -243,7 +243,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
     ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
-    by the owning ``GroupedExperts.parallelize`` override via
+    by the owning ``RoutedExperts.parallelize`` override via
     ``wire_meshes``.
     """
 
@@ -269,7 +269,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) and get_spmd_backend() != "spmd_types":
+        ) or get_spmd_backend() != "spmd_types":
             return all_to_all_single(
                 num_local_tokens_per_expert_E.view(ep_size, -1),
                 None,
@@ -336,7 +336,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) and get_spmd_backend() != "spmd_types":
+        ) or get_spmd_backend() != "spmd_types":
             return all_to_all_single(
                 routed_input_ND,
                 output_splits,
@@ -364,7 +364,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) and get_spmd_backend() != "spmd_types":
+        ) or get_spmd_backend() != "spmd_types":
             return all_to_all_single(
                 routed_output_RD,
                 input_splits,
@@ -1156,7 +1156,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
 
         Args:
             x_TD, topk_scores_TK, topk_expert_ids_TK,
-                num_local_tokens_per_expert_E: standard ``GroupedExperts``
+                num_local_tokens_per_expert_E: standard ``RoutedExperts``
                 dispatch inputs; see ``torchtitan.models.common.moe`` for shape
                 suffix definitions.
 
