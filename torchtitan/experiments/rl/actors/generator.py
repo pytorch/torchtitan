@@ -291,8 +291,7 @@ class SamplingConfig:
 
 
 class RequestDispatcher:
-    """Owns the generator's DP/TP request dispatch, hiding the rank layout behind
-    a small interface so ``VLLMGenerator`` does not deal with it directly.
+    """Handles the generator's DP/TP request dispatch.
 
     Every rank holds one dispatcher; methods act according to the rank's role:
     - Rank 0 is the coordinator (and DP0's tp_rank=0): it holds the generation
@@ -334,35 +333,18 @@ class RequestDispatcher:
         self,
         *,
         rank: int,
-        parallelism: InferenceParallelismConfig,
+        dp_rank: int,
+        tp_rank: int,
+        dp_degree: int,
         broadcast_group: dist.ProcessGroup,
-        vllm_parallel_config: ParallelConfig,
         intra_generator_router: IntraGeneratorRouter.Config,
     ):
         self._rank = rank
-        # Only DP and TP are supported, so ``tp_degree`` ranks make up one DP
-        # replica. EP does not change the global-rank -> (dp, tp) mapping, so it
-        # needs no handling here. TODO: revisit if PP/CP are ever added.
-        self._dp_degree = parallelism.data_parallel_degree
-        tp_degree = parallelism.tensor_parallel_degree
-        # Which DP replica this rank belongs to (== vLLM's data_parallel_rank).
-        self._dp_rank = rank // tp_degree
-        # Rank within the DP replica
-        self._tp_rank = rank % tp_degree
+        self._dp_degree = dp_degree
+        self._dp_rank = dp_rank
+        self._tp_rank = tp_rank
         # Reused for the one-time result-port broadcast (see ``setup``).
         self._broadcast_group = broadcast_group
-
-        # Confirm our derived layout matches what vLLM computed independently.
-        assert vllm_parallel_config.data_parallel_size == self._dp_degree, (
-            f"DP layout mismatch on rank {self._rank}: our dp_size "
-            f"({self._dp_degree}) != vLLM data_parallel_size "
-            f"({vllm_parallel_config.data_parallel_size})"
-        )
-        assert vllm_parallel_config.data_parallel_rank == self._dp_rank, (
-            f"DP layout mismatch on rank {self._rank}: our dp_rank "
-            f"({self._dp_rank}) != vLLM data_parallel_rank "
-            f"({vllm_parallel_config.data_parallel_rank})"
-        )
 
         # RANK-0 OUTBOX: futures the engine loop resolves so the awaiting endpoint
         # returns. Only rank 0 ever populates this.
@@ -778,6 +760,13 @@ class VLLMGenerator(Actor, Configurable):
 
         self._max_num_seqs = max_num_seqs
 
+        self._rank = current_rank().rank
+        self._dp_degree = config.parallelism.data_parallel_degree
+        tp_degree = config.parallelism.tensor_parallel_degree
+        # TODO: revisit if PP/CP are added.
+        self._dp_rank = self._rank // tp_degree
+        self._tp_rank = self._rank % tp_degree
+
         # FULL_AND_PIECEWISE runs prefill/mixed-batch attention eager via the
         # @eager_break_during_capture decorator in rl/models/attention.py, which
         # reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time -- so the env must be
@@ -881,10 +870,30 @@ class VLLMGenerator(Actor, Configurable):
             self._engine = LLMEngine.from_engine_args(engine_args)
             logger.info("vLLM rollout engine initialized")
 
+        # The default PG was initialized during engine build. Confirm the Monarch rank
+        # we used for the layout above matches the torch-distributed global rank, so the
+        # two views can't silently diverge.
+        assert self._rank == dist.get_rank(), (
+            f"rank mismatch: Monarch current_rank().rank ({self._rank}) != "
+            f"torch dist.get_rank() ({dist.get_rank()})"
+        )
+        # Confirm the DP layout we computed above matches what vLLM derived
+        # independently during engine build, so the two views can't silently diverge.
+        vllm_parallel_config = self._engine.vllm_config.parallel_config
+        assert vllm_parallel_config.data_parallel_size == self._dp_degree, (
+            f"DP layout mismatch on rank {self._rank}: our dp_size "
+            f"({self._dp_degree}) != vLLM data_parallel_size "
+            f"({vllm_parallel_config.data_parallel_size})"
+        )
+        assert vllm_parallel_config.data_parallel_rank == self._dp_rank, (
+            f"DP layout mismatch on rank {self._rank}: our dp_rank "
+            f"({self._dp_rank}) != vLLM data_parallel_rank "
+            f"({vllm_parallel_config.data_parallel_rank})"
+        )
+
         self.policy_version = 0
 
         # --- Continuous-batching state (see the class docstring) ---
-        self._rank = dist.get_rank()
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
         self._engine_loop_condition = (
             asyncio.Condition()
@@ -895,9 +904,10 @@ class VLLMGenerator(Actor, Configurable):
         # completion fan-in (see its docstring).
         self._request_dispatcher = RequestDispatcher(
             rank=self._rank,
-            parallelism=config.parallelism,
+            dp_rank=self._dp_rank,
+            tp_rank=self._tp_rank,
+            dp_degree=self._dp_degree,
             broadcast_group=self._broadcast_group,
-            vllm_parallel_config=self._engine.vllm_config.parallel_config,
             intra_generator_router=config.intra_generator_router,
         )
 
