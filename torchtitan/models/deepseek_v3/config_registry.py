@@ -66,17 +66,17 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    # Quantize the MoE expert grouped GEMMs to MXFP8. compile is enabled so the
-    # converter's compile requirement is satisfied. pad_multiple=128 is required
-    # by the CuTeDSL quantization kernel on sm_100 (e.g. B200); the default of 32
-    # only suffices on older architectures.
-    compile_config = CompileConfig(enable=True, components=["model"])
-    config.compile = compile_config
+    # Quantize the MoE expert grouped GEMMs to MXFP8.
+    # pad_multiple=128 is required by the CuTeDSL quantization kernel
+    # on sm_100 (e.g. B200)
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
     config.model_spec = model_registry(
         "debugmodel",
         converters=[
             MXFP8GroupedExpertsConverter.Config(
-                model_compile_enabled=True,
+                model_compile_enabled=model_compile_enabled,
                 pad_multiple=128,
             ),
         ],
