@@ -187,7 +187,7 @@ def get_peak_flops(device_name: str) -> float:
 
     elif device_name.startswith("TPU"):
         # Google Cloud TPU: dense BF16 matrix-engine (MXU) peak, per device.
-        # Sources: https://cloud.google.com/tpu/docs/{v4,v5e,v5p,v6e,tpu7x}
+        # Source: https://cloud.google.com/tpu/docs/system-architecture-tpu-vm
         if "v4" in device_name:
             return 275e12
         elif "v5e" in device_name:
