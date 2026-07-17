@@ -30,7 +30,9 @@ Note on numerical precision:
        route_norm. Fix: use ``sorted=True``.
 
 Usage:
-    python -m torchtitan.experiments.transformers_modeling_backend.tests.numerical_equivalence
+    Run this script from the repo root (torchtitan must be importable), passing
+    --models <model_type>. See the add_moe_model skill's SKILL.md for the full
+    command.
 """
 
 import argparse

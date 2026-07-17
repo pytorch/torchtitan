@@ -49,7 +49,7 @@ extended for new models. Expected changes include:
   component differently (feed-forward `mlp` vs `feed_forward`, final norm `norm`
   vs `final_layernorm`). Add a new model's variant to the relevant lookup
   (`_get_moe_attr_name`, the `HFTransformerModel` accessor properties).
-- `tests/numerical_equivalence.py` — add the model's synthetic test config
+- `scripts/numerical_equivalence.py` — add the model's synthetic test config
 
 When blockers are found in Phase 1, fix them in the experiment code before
 proceeding to Phase 2. Do NOT stop and ask — implement the fixes, then
@@ -237,7 +237,7 @@ Phase 2.
 ## Phase 2: Add Synthetic Test Config
 
 Add an entry to `_MODEL_CONFIGS` in
-`torchtitan/experiments/transformers_modeling_backend/tests/numerical_equivalence.py`.
+`torchtitan/experiments/transformers_modeling_backend/.claude/skills/add_moe_model/scripts/numerical_equivalence.py`.
 
 ### Config rules
 
@@ -313,8 +313,8 @@ the integration, do not loosen the thresholds.
 ### 3a. Synthetic test
 
 ```bash
-CUDA_VISIBLE_DEVICES=<gpu> python -m \
-    torchtitan.experiments.transformers_modeling_backend.tests.numerical_equivalence \
+CUDA_VISIBLE_DEVICES=<gpu> python \
+    torchtitan/experiments/transformers_modeling_backend/.claude/skills/add_moe_model/scripts/numerical_equivalence.py \
     --models <model_type>
 ```
 
@@ -330,8 +330,8 @@ If it fails, diagnose:
 ### 3b. Pretrained test (if weights available)
 
 ```bash
-CUDA_VISIBLE_DEVICES=<gpu> python -m \
-    torchtitan.experiments.transformers_modeling_backend.tests.numerical_equivalence_pretrained \
+CUDA_VISIBLE_DEVICES=<gpu> python \
+    torchtitan/experiments/transformers_modeling_backend/.claude/skills/add_moe_model/scripts/numerical_equivalence_pretrained.py \
     --model_dir <path>
 ```
 
@@ -635,7 +635,7 @@ experts is a true blocker requiring upstream changes.
 | Shared expert round-trip broken | `state_dict_adapter.py` | Fix reverse patterns in `_build_titan_to_hf_patterns()` |
 | MoE layer attr is `feed_forward` not `mlp` | `model.py`, `moe_replacement.py` | Handle alternative attribute name |
 | Attention projection not in ShardingConfig | `hf_sharding.py` | Add case to `_set_layer_sharding_configs` using `colwise_config()`/`_replicate_config()` |
-| Model rejects `grouped_mm` | `tests/numerical_equivalence.py` | Skip `_experts_implementation` for this model |
+| Model rejects `grouped_mm` | `scripts/numerical_equivalence.py` | Skip `_experts_implementation` for this model |
 | `trust_remote_code` import error | Config loading | Try without `trust_remote_code` first |
 | `num_hidden_layers=1` has no MoE layer | Test config | Set `first_k_dense_replace=0` or increase layers |
 | State dict keys missing after round-trip | `state_dict_adapter.py` | Add patterns in `_build_hf_to_titan_patterns()` / `_build_titan_to_hf_patterns()` |
@@ -647,7 +647,7 @@ experts is a true blocker requiring upstream changes.
 
 | File | Change |
 |------|--------|
-| `tests/numerical_equivalence.py` | Add entry to `_MODEL_CONFIGS` |
+| `scripts/numerical_equivalence.py` | Add entry to `_MODEL_CONFIGS` |
 | `state_dict_adapter.py` | Add key patterns (only if round-trip fails) |
 | `hf_sharding.py` | Add ShardingConfig entries (only if new projection/norm names) |
 | `moe_replacement.py` | Add probing logic (only if new MoE pattern) |

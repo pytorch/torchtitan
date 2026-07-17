@@ -12,8 +12,9 @@ the weight transfer and routing logic are correct with production weights,
 not just random initialization.
 
 Usage:
-    python -m torchtitan.experiments.transformers_modeling_backend.tests.numerical_equivalence_pretrained \
-        --model_dir /tmp/mreso/models/OLMoE-1B-7B-0924
+    Run this script from the repo root (torchtitan must be importable), passing
+    --model_dir <path> (e.g. /tmp/mreso/models/OLMoE-1B-7B-0924). See the
+    add_moe_model skill's SKILL.md for the full command.
 """
 
 import argparse
@@ -28,8 +29,6 @@ _COMPARE_METRICS = ("kl_div", "cos_sim", "max_abs_diff", "mean_abs_diff")
 
 @torch.no_grad()
 def test_pretrained(model_dir: str, device: torch.device, seed: int = 42) -> dict:
-    from transformers import AutoConfig, AutoModelForCausalLM
-
     from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
         _build_moe_config,
         _probe_hf_moe_block,
@@ -37,6 +36,7 @@ def test_pretrained(model_dir: str, device: torch.device, seed: int = 42) -> dic
     from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
         hf_to_titan_moe_state_dict,
     )
+    from transformers import AutoConfig, AutoModelForCausalLM
 
     model_name = os.path.basename(model_dir)
 

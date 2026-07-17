@@ -181,7 +181,8 @@ def main():
     ref_scale = ref_logits.float().abs().max().item()
     rel = max_abs / max(ref_scale, 1e-9)
     # Dense flex+CP is bit-exact up to fp32 noise. MoE adds grouped_mm f32
-    # accumulation-order differences (documented in numerical_equivalence.py) plus
+    # accumulation-order differences (documented in the add_moe_model skill's
+    # scripts/numerical_equivalence.py) plus
     # FSDP expert-shard reduction order, so it uses a looser tolerance; the
     # residual stays flat across CP degrees (a real CP bug would give rel ~O(1)).
     tol = 2e-3 if args.moe else 1e-4
