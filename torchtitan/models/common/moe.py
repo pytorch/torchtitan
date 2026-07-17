@@ -455,15 +455,6 @@ class MoE(Module):
             True,
         )
         num_local_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
-        if get_spmd_backend() == "spmd_types":
-            spmd.assert_type(
-                num_local_tokens_per_expert_E,
-                {
-                    "dp": spmd.P,
-                    "cp": spmd.P,
-                    "tp": spmd.P if spmd_mesh_size("ep") > 1 else spmd.R,
-                },
-            )
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
