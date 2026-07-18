@@ -5,7 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data import (
+    GrainDataLoader,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -13,31 +17,20 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.multimodal.mm_datasets import multimodal_dataloader
+from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    MM_DATASETS,
+    MultiModalProcessor,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry, QWEN3_5_SPECIAL_TOKENS
 
 
-def _dataloader(dataset: str, **kwargs) -> GrainDataLoader.Config:
-    return multimodal_dataloader(
-        dataset=dataset,
-        max_images_per_batch=128,
-        patch_size=16,
-        temporal_patch_size=2,
-        spatial_merge_size=2,
-        min_pixels=65536,
-        max_pixels=16777216,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        build_mrope_positions=True,
-        **kwargs,
-    )
-
-
 def qwen35_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
+    dataset = MM_DATASETS["cc12m-test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -48,7 +41,32 @@ def qwen35_debugmodel() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m-test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -78,6 +96,7 @@ def qwen35_debugmodel_varlen_attn() -> Trainer.Config:
 
 def qwen35_debugmodel_moe() -> Trainer.Config:
     model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
+    dataset = MM_DATASETS["cc12m-test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -88,7 +107,32 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m-test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
@@ -113,6 +157,7 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
 
 def qwen35_0_8b() -> Trainer.Config:
     model_spec = model_registry("0.8B")
+    dataset = MM_DATASETS["cc12m"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -122,7 +167,32 @@ def qwen35_0_8b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-0.8B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -143,6 +213,7 @@ def qwen35_0_8b() -> Trainer.Config:
 
 def qwen35_2b() -> Trainer.Config:
     model_spec = model_registry("2B")
+    dataset = MM_DATASETS["cc12m"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -152,7 +223,32 @@ def qwen35_2b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-2B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -173,6 +269,7 @@ def qwen35_2b() -> Trainer.Config:
 
 def qwen35_4b() -> Trainer.Config:
     model_spec = model_registry("4B")
+    dataset = MM_DATASETS["cc12m"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -182,7 +279,32 @@ def qwen35_4b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-4B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -202,6 +324,7 @@ def qwen35_4b() -> Trainer.Config:
 
 def qwen35_9b() -> Trainer.Config:
     model_spec = model_registry("9B")
+    dataset = MM_DATASETS["cc12m"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -211,7 +334,32 @@ def qwen35_9b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -233,6 +381,7 @@ def qwen35_9b() -> Trainer.Config:
 
 def qwen35_27b() -> Trainer.Config:
     model_spec = model_registry("27B")
+    dataset = MM_DATASETS["cc12m"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -242,7 +391,32 @@ def qwen35_27b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-27B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -264,6 +438,7 @@ def qwen35_27b() -> Trainer.Config:
 
 def qwen35_35b_a3b() -> Trainer.Config:
     model_spec = model_registry("35B-A3B", moe_comm_backend="standard")
+    dataset = MM_DATASETS["cc12m"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -273,7 +448,32 @@ def qwen35_35b_a3b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -297,6 +497,7 @@ def qwen35_35b_a3b() -> Trainer.Config:
 
 def qwen35_122b_a10b() -> Trainer.Config:
     model_spec = model_registry("122B-A10B", moe_comm_backend="standard")
+    dataset = MM_DATASETS["cc12m"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -306,7 +507,32 @@ def qwen35_122b_a10b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-122B-A10B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -330,6 +556,7 @@ def qwen35_122b_a10b() -> Trainer.Config:
 
 def qwen35_397b_a17b() -> Trainer.Config:
     model_spec = model_registry("397B-A17B", moe_comm_backend="standard")
+    dataset = MM_DATASETS["cc12m"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -339,7 +566,32 @@ def qwen35_397b_a17b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-397B-A17B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=65536,
+                    max_pixels=16777216,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(

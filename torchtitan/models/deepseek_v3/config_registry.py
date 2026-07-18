@@ -5,6 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -16,9 +20,8 @@ from torchtitan.components.quantization import (
 )
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -46,7 +49,9 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=c4_text_dataloader("c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -68,15 +73,6 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
-
-
-def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel", num_mtp_layers=1)
-    config.loss = MTPLoss.Config(
-        global_vocab_size=decoder_vocab_size(config.model_spec),
-    )
-    return config
 
 
 def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
@@ -145,7 +141,9 @@ def deepseek_v3_16b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model_spec=model_spec,
-        dataloader=c4_text_dataloader("c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
         optimizer=default_adamw(lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             decay_ratio=0.8,
@@ -214,7 +212,9 @@ def deepseek_v3_671b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_spec,
-        dataloader=c4_text_dataloader("c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
         optimizer=default_adamw(lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,

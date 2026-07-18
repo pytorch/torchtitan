@@ -10,15 +10,36 @@ source -> process -> mix/concat -> pack -> batch -> collate -> trainer
 
 ## Built-in text pretraining
 
-Use the built-in C4 recipes directly:
+Compose the built-in C4 dataset directly:
 
 ```python
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+    TextCollator,
+)
+from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
 
-config.dataloader = c4_text_dataloader("c4_test")        # local test asset
-config.dataloader = c4_text_dataloader("c4")             # streamed train split
-config.dataloader = c4_text_dataloader("c4_validation")  # streamed validation split
+dataset = DATASETS["c4_test"]
+config.dataloader = GrainDataLoader.Config(
+    dataset=ConcatThenSplitPackingConfig(
+        dataset=SingleDatasetConfig(
+            source=HuggingFaceRandomAccessSource.Config(
+                path=dataset.path,
+                loader=dataset.loader,
+            ),
+            process=HuggingFaceTextProcessor.Config(
+                text_processor=dataset.sample_processor,
+            ),
+        ),
+    ),
+    collator=TextCollator.Config(),
+)
 ```
+
+Use `HuggingFaceStreamingSource` with `DATASETS["c4"]` or `DATASETS["c4_validation"]` for the streamed splits.
 
 Pretraining uses concat-then-split packing:
 
@@ -181,7 +202,17 @@ documents = DatasetConcatConfig(datasets=(books, code, math))
 SFT uses the same source, loader, batching, distributed, and checkpoint path. It changes row processing and uses whole-example first-fit packing.
 
 ```python
-from torchtitan.hf_datasets.text_datasets import chat_dataloader
+from functools import partial
+
+from datasets import load_dataset
+from torchtitan.components.data import (
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+    TextCollator,
+)
+from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
 
 def question_answer_to_messages(row):
@@ -191,14 +222,25 @@ def question_answer_to_messages(row):
     ]
 
 
-config.dataloader = chat_dataloader(
-    dataset_path="openai/gsm8k",
-    load_dataset_kwargs={
-        "name": "main",
-        "split": "train",
-        "revision": "<immutable-revision>",
-    },
-    sample_processor=question_answer_to_messages,
+config.dataloader = GrainDataLoader.Config(
+    dataset=FirstFitPackingConfig(
+        dataset=SingleDatasetConfig(
+            source=HuggingFaceRandomAccessSource.Config(
+                path="openai/gsm8k",
+                loader=partial(
+                    load_dataset,
+                    name="main",
+                    split="train",
+                    revision="<immutable-revision>",
+                ),
+            ),
+            process=ChatProcessor.Config(
+                sample_processor=question_answer_to_messages,
+            ),
+            filters=(lambda sample: sample is not None,),
+        ),
+    ),
+    collator=TextCollator.Config(),
 )
 ```
 
@@ -288,32 +330,80 @@ Images use the same loader and source contracts. Their processors and collators 
 Flux:
 
 ```python
-from torchtitan.models.flux.flux_datasets import flux_dataloader
+from torchtitan.components.data import (
+    GrainDataLoader,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+)
+from torchtitan.models.flux.flux_datasets import (
+    DATASETS,
+    FluxCollator,
+    FluxSampleProcessor,
+)
 
-config.dataloader = flux_dataloader(
-    dataset="cc12m-wds",
-    prompt_dropout_prob=0.447,
-    img_size=256,
+dataset = DATASETS["cc12m-wds"]
+config.dataloader = GrainDataLoader.Config(
+    dataset=SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path=dataset.path,
+            loader=dataset.loader,
+        ),
+        process=FluxSampleProcessor.Config(
+            data_processor=dataset.sample_processor,
+            prompt_dropout_prob=0.447,
+            img_size=256,
+        ),
+        filters=(lambda sample: sample is not None,),
+    ),
+    collator=FluxCollator.Config(),
+    shuffle=False,
 )
 ```
 
 Qwen:
 
 ```python
-from torchtitan.hf_datasets.multimodal.mm_datasets import multimodal_dataloader
+from torchtitan.components.data import (
+    GrainDataLoader,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+)
+from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    MM_DATASETS,
+    MMSamplePackingConfig,
+    MultiModalProcessor,
+)
 
-config.dataloader = multimodal_dataloader(
-    dataset="cc12m-wds",
-    packing_buffer_size=128,
-    max_images_per_batch=128,
-    patch_size=16,
-    temporal_patch_size=2,
-    spatial_merge_size=2,
-    min_pixels=65_536,
-    max_pixels=16_777_216,
-    image_mean=(0.5, 0.5, 0.5),
-    image_std=(0.5, 0.5, 0.5),
-    build_mrope_positions=True,
+dataset = MM_DATASETS["cc12m"]
+config.dataloader = GrainDataLoader.Config(
+    dataset=MMSamplePackingConfig(
+        dataset=SingleDatasetConfig(
+            source=HuggingFaceStreamingSource.Config(
+                path=dataset.path,
+                loader=dataset.loader,
+            ),
+            process=MultiModalProcessor.Config(
+                sample_processor=dataset.sample_processor,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                min_pixels=65_536,
+                max_pixels=16_777_216,
+                image_mean=(0.5, 0.5, 0.5),
+                image_std=(0.5, 0.5, 0.5),
+            ),
+            filters=(lambda sample: sample is not None,),
+        ),
+        buffer_size=128,
+    ),
+    collator=MultiModalCollator.Config(
+        max_images_per_batch=128,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        build_mrope_positions=True,
+    ),
 )
 ```
 

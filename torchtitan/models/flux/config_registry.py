@@ -5,6 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import (
+    GrainDataLoader,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+)
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -12,7 +17,12 @@ from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
-from torchtitan.models.flux.flux_datasets import flux_dataloader
+from torchtitan.models.flux.flux_datasets import (
+    DATASETS,
+    FluxCollator,
+    FluxSampleProcessor,
+    FluxValidationDatasetConfig,
+)
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.models.flux.validate import FluxValidator
@@ -22,6 +32,8 @@ from . import model_registry
 
 def flux_debugmodel() -> FluxTrainer.Config:
     hf_assets_path = "tests/assets/tokenizer"
+    dataset = DATASETS["cc12m-test"]
+    validation_dataset = DATASETS["cc12m-test"]
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
         loss=MSELoss.Config(),
@@ -46,9 +58,21 @@ def flux_debugmodel() -> FluxTrainer.Config:
             steps=10,
             disable_cuda_graphs=True,
         ),
-        dataloader=flux_dataloader(
-            prompt_dropout_prob=0.447,
-            img_size=256,
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=FluxSampleProcessor.Config(
+                    data_processor=dataset.sample_processor,
+                    prompt_dropout_prob=0.447,
+                    img_size=256,
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=FluxCollator.Config(),
+            shuffle=False,
         ),
         parallelism=ParallelismConfig(context_parallel_degree=1),
         activation_checkpoint=FullAC.Config(),
@@ -64,14 +88,26 @@ def flux_debugmodel() -> FluxTrainer.Config:
                 classifier_free_guidance_scale=5.0,
                 denoising_steps=4,
             ),
-            dataloader=flux_dataloader(
-                # Validate on the local cc12m-test asset (no HF download) so CI
-                # does not flake on the network. Production flux_dev/flux_schnell
-                # still validate on the real coco-validation set.
-                dataset="cc12m-test",
-                prompt_dropout_prob=0.0,
-                img_size=256,
-                generate_timesteps=True,
+            # Validate on the local cc12m-test asset (no HF download) so CI
+            # does not flake on the network. Production flux_dev/flux_schnell
+            # still validate on the real coco-validation set.
+            dataloader=GrainDataLoader.Config(
+                dataset=FluxValidationDatasetConfig(
+                    dataset=SingleDatasetConfig(
+                        source=HuggingFaceStreamingSource.Config(
+                            path=validation_dataset.path,
+                            loader=validation_dataset.loader,
+                        ),
+                        process=FluxSampleProcessor.Config(
+                            data_processor=validation_dataset.sample_processor,
+                            prompt_dropout_prob=0.0,
+                            img_size=256,
+                        ),
+                        filters=(lambda sample: sample is not None,),
+                    ),
+                ),
+                collator=FluxCollator.Config(),
+                shuffle=False,
             ),
             save_img_count=1,
             save_img_folder="img",
@@ -86,6 +122,8 @@ def flux_debugmodel() -> FluxTrainer.Config:
 
 
 def flux_dev() -> FluxTrainer.Config:
+    dataset = DATASETS["cc12m-wds"]
+    validation_dataset = DATASETS["coco-validation"]
     return FluxTrainer.Config(
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
@@ -108,10 +146,21 @@ def flux_dev() -> FluxTrainer.Config:
             steps=30000,
             disable_cuda_graphs=True,
         ),
-        dataloader=flux_dataloader(
-            dataset="cc12m-wds",
-            prompt_dropout_prob=0.447,
-            img_size=256,
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=FluxSampleProcessor.Config(
+                    data_processor=dataset.sample_processor,
+                    prompt_dropout_prob=0.447,
+                    img_size=256,
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=FluxCollator.Config(),
+            shuffle=False,
         ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
@@ -123,11 +172,23 @@ def flux_dev() -> FluxTrainer.Config:
                 classifier_free_guidance_scale=5.0,
                 denoising_steps=50,
             ),
-            dataloader=flux_dataloader(
-                dataset="coco-validation",
-                prompt_dropout_prob=0,
-                img_size=256,
-                generate_timesteps=True,
+            dataloader=GrainDataLoader.Config(
+                dataset=FluxValidationDatasetConfig(
+                    dataset=SingleDatasetConfig(
+                        source=HuggingFaceStreamingSource.Config(
+                            path=validation_dataset.path,
+                            loader=validation_dataset.loader,
+                        ),
+                        process=FluxSampleProcessor.Config(
+                            data_processor=validation_dataset.sample_processor,
+                            prompt_dropout_prob=0,
+                            img_size=256,
+                        ),
+                        filters=(lambda sample: sample is not None,),
+                    ),
+                ),
+                collator=FluxCollator.Config(),
+                shuffle=False,
             ),
             save_img_count=50,
             save_img_folder="img",
@@ -137,6 +198,8 @@ def flux_dev() -> FluxTrainer.Config:
 
 
 def flux_schnell() -> FluxTrainer.Config:
+    dataset = DATASETS["cc12m-wds"]
+    validation_dataset = DATASETS["coco-validation"]
     return FluxTrainer.Config(
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
@@ -159,10 +222,21 @@ def flux_schnell() -> FluxTrainer.Config:
             steps=30000,
             disable_cuda_graphs=True,
         ),
-        dataloader=flux_dataloader(
-            dataset="cc12m-wds",
-            prompt_dropout_prob=0.447,
-            img_size=256,
+        dataloader=GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=FluxSampleProcessor.Config(
+                    data_processor=dataset.sample_processor,
+                    prompt_dropout_prob=0.447,
+                    img_size=256,
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=FluxCollator.Config(),
+            shuffle=False,
         ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
@@ -174,11 +248,23 @@ def flux_schnell() -> FluxTrainer.Config:
                 classifier_free_guidance_scale=5.0,
                 denoising_steps=50,
             ),
-            dataloader=flux_dataloader(
-                dataset="coco-validation",
-                prompt_dropout_prob=0,
-                img_size=256,
-                generate_timesteps=True,
+            dataloader=GrainDataLoader.Config(
+                dataset=FluxValidationDatasetConfig(
+                    dataset=SingleDatasetConfig(
+                        source=HuggingFaceStreamingSource.Config(
+                            path=validation_dataset.path,
+                            loader=validation_dataset.loader,
+                        ),
+                        process=FluxSampleProcessor.Config(
+                            data_processor=validation_dataset.sample_processor,
+                            prompt_dropout_prob=0,
+                            img_size=256,
+                        ),
+                        filters=(lambda sample: sample is not None,),
+                    ),
+                ),
+                collator=FluxCollator.Config(),
+                shuffle=False,
             ),
             save_img_count=50,
             save_img_folder="img",

@@ -5,13 +5,21 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+    TextCollator,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.validate import Validator
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
+from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
@@ -20,6 +28,7 @@ from . import model_registry
 
 def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
     model_spec = model_registry("debugmodel", attn_backend=attn_backend)
+    dataset = DATASETS["c4_test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -29,7 +38,20 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=c4_text_dataloader("c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path=dataset.path,
+                        loader=dataset.loader,
+                    ),
+                    process=HuggingFaceTextProcessor.Config(
+                        text_processor=dataset.sample_processor,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -67,6 +89,7 @@ def gpt_oss_debugmodel_flex() -> Trainer.Config:
 
 def gpt_oss_20b() -> Trainer.Config:
     model_spec = model_registry("20b")
+    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -75,7 +98,20 @@ def gpt_oss_20b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/gpt-oss-20b",
         model_spec=model_spec,
-        dataloader=c4_text_dataloader("c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceStreamingSource.Config(
+                        path=dataset.path,
+                        loader=dataset.loader,
+                    ),
+                    process=HuggingFaceTextProcessor.Config(
+                        text_processor=dataset.sample_processor,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -98,6 +134,7 @@ def gpt_oss_20b() -> Trainer.Config:
 
 def gpt_oss_120b() -> Trainer.Config:
     model_spec = model_registry("120b")
+    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -106,7 +143,20 @@ def gpt_oss_120b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/gpt-oss-120b",
         model_spec=model_spec,
-        dataloader=c4_text_dataloader("c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceStreamingSource.Config(
+                        path=dataset.path,
+                        loader=dataset.loader,
+                    ),
+                    process=HuggingFaceTextProcessor.Config(
+                        text_processor=dataset.sample_processor,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,

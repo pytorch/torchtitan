@@ -8,19 +8,29 @@ import os
 import unittest
 
 from copy import deepcopy
-from dataclasses import replace
+from functools import partial
 
 import grain.python as grain
 import numpy as np
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.data.dataset import BuildOptions, DataRuntime
-from torchtitan.components.data.packing import token_sequence_to_shifted_features
+from torchtitan.components.data.collators import TextCollator
+from torchtitan.components.data.dataset import (
+    BuildOptions,
+    DataRuntime,
+    SingleDatasetConfig,
+)
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.packing import (
+    FirstFitPackingConfig,
+    token_sequence_to_shifted_features,
+)
+from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.text_datasets import chat_dataloader, ChatProcessor
+from torchtitan.hf_datasets.text_datasets import ChatProcessor
 from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttention,
@@ -69,24 +79,43 @@ def _build_processor(seq_len=2048, sample_processor=_process_sample):
 
 
 def _build_rows(seq_len):
-    config = chat_dataloader(
-        dataset_path="json",
-        load_dataset_kwargs={"data_files": _DATA_PATH, "split": "train"},
-        sample_processor=_process_sample,
+    dataset = FirstFitPackingConfig(
+        dataset=SingleDatasetConfig(
+            source=HuggingFaceRandomAccessSource.Config(
+                path="json",
+                loader=partial(
+                    load_dataset,
+                    data_files=_DATA_PATH,
+                    split="train",
+                ),
+            ),
+            process=ChatProcessor.Config(sample_processor=_process_sample),
+            filters=(lambda sample: sample is not None,),
+        )
     )
-    return config.dataset.build(
+    return dataset.build(
         runtime=_runtime(seq_len),
         options=BuildOptions(shuffle=False, repeat=False),
     )
 
 
 def _build_dataloader(seq_len=128, world_size=1, rank=0):
-    config = replace(
-        chat_dataloader(
-            dataset_path="json",
-            load_dataset_kwargs={"data_files": _DATA_PATH, "split": "train"},
-            sample_processor=_process_sample,
+    config = GrainDataLoader.Config(
+        dataset=FirstFitPackingConfig(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceRandomAccessSource.Config(
+                    path="json",
+                    loader=partial(
+                        load_dataset,
+                        data_files=_DATA_PATH,
+                        split="train",
+                    ),
+                ),
+                process=ChatProcessor.Config(sample_processor=_process_sample),
+                filters=(lambda sample: sample is not None,),
+            )
         ),
+        collator=TextCollator.Config(),
         seed=42,
         shuffle=True,
         repeat=True,

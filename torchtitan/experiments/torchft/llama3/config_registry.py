@@ -4,6 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+    TextCollator,
+)
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -14,7 +21,7 @@ from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
+from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 
@@ -23,6 +30,7 @@ from . import model_registry
 
 def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
     model_spec = model_registry("debugmodel")
+    dataset = DATASETS["c4_test"]
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_spec),
@@ -50,7 +58,20 @@ def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
             seq_len=2048,
             steps=100,
         ),
-        dataloader=c4_text_dataloader(),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path=dataset.path,
+                        loader=dataset.loader,
+                    ),
+                    process=HuggingFaceTextProcessor.Config(
+                        text_processor=dataset.sample_processor,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
+        ),
         checkpoint=TorchFTCheckpointManager.Config(
             interval=10,
             last_save_model_only=False,

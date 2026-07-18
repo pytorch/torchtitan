@@ -8,6 +8,11 @@ import unittest
 
 import torch
 from datasets import load_dataset
+from torchtitan.components.data import (
+    GrainDataLoader,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+)
 from torchtitan.config import ConfigManager
 from torchtitan.hf_datasets import DatasetConfig
 
@@ -18,13 +23,15 @@ class TestFluxDataLoader(unittest.TestCase):
         from torchtitan.models.flux.flux_datasets import (
             _cc12m_wds_data_processor,
             DATASETS,
-            flux_dataloader,
+            FluxCollator,
+            FluxSampleProcessor,
         )
 
         # Store reference for use in tearDown
         self._DATASETS = DATASETS
         self._cc12m_wds_data_processor = _cc12m_wds_data_processor
-        self._flux_dataloader = flux_dataloader
+        self._FluxCollator = FluxCollator
+        self._FluxSampleProcessor = FluxSampleProcessor
 
         self._DATASETS["cc12m-test-iterable"] = DatasetConfig(
             path="tests/assets/cc12m_test",
@@ -69,10 +76,22 @@ class TestFluxDataLoader(unittest.TestCase):
                         "tests/assets/flux_test_encoders/clip-vit-large-patch14",
                     ]
                 )
-                config.dataloader = self._flux_dataloader(
-                    dataset=dataset_name,
-                    img_size=256,
-                    prompt_dropout_prob=0.447,
+                dataset = self._DATASETS[dataset_name]
+                config.dataloader = GrainDataLoader.Config(
+                    dataset=SingleDatasetConfig(
+                        source=HuggingFaceStreamingSource.Config(
+                            path=dataset.path,
+                            loader=dataset.loader,
+                        ),
+                        process=self._FluxSampleProcessor.Config(
+                            data_processor=dataset.sample_processor,
+                            img_size=256,
+                            prompt_dropout_prob=0.447,
+                        ),
+                        filters=(lambda sample: sample is not None,),
+                    ),
+                    collator=self._FluxCollator.Config(),
+                    shuffle=False,
                 )
 
                 # Build the tokenizer container from config
