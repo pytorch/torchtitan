@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from functools import partial
-
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+)
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.experiments.graph_trainer.configs import (
@@ -13,6 +15,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3 import model_registry as llama3_model_registry
 from torchtitan.models.llama3.config_registry import (
@@ -20,7 +23,6 @@ from torchtitan.models.llama3.config_registry import (
     llama3_70b,
     llama3_8b,
     llama3_debugmodel,
-    llama3_debugmodel_dist_gemm,
 )
 
 from . import model_registry
@@ -28,22 +30,6 @@ from . import model_registry
 
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
-def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
-    """Debug model with the attention and FFN TP collectives folded into the GEMMs.
-
-    The point of running dist-GEMM here rather than only under the eager trainer:
-    GraphTrainer traces the whole model, so this is what proves the fused autograd
-    Functions survive tracing. Needs tensor_parallel_degree > 1 and CUDA; the base
-    config pins spmd_backend to spmd_types.
-    """
-    config = to_graph_trainer_config(
-        llama3_debugmodel_dist_gemm(),
-        partial(model_registry, tp_gemm_backend="dist_gemm"),
-    )
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
@@ -91,6 +77,14 @@ def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
 def graph_trainer_llama3_8b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_8b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_llama3_8b_c4_test() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_8b()
+    config.dataloader = GrainDataLoader.Config(
+        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+    )
     return config
 
 

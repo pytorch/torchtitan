@@ -4,87 +4,77 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Grain-backed `BaseDataLoader`.
-
-The dataset config produces trainer-ready batches (`PackedTokenDatasetConfig` maps to
-`({"input": [B, L], "positions": [B, L]}, labels)` itself); the loader owns building,
-prefetch, and resume. Rank-local Grain state is guarded by data-parallel degree and
-the whole-recipe fingerprint.
-"""
+"""Grain-backed TorchTitan dataloader."""
 
 import dataclasses
+import inspect
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import grain.python as grain
-import torch
 from grain import experimental as grain_experimental
 
-from torchtitan.components.data.dataset import (
-    BuildOptions,
-    DataRuntime,
-    DatasetConfig,
-    fingerprint_parts,
-)
+from torchtitan.components.data.collators import Collator, TrainerBatch
+from torchtitan.components.data.dataset import BuildOptions, DataRuntime, DatasetConfig
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.tokenizer import BaseTokenizer
 
 
-def _jsonable_config_value(value: Any) -> Any:
-    """Recursively lower recipe dataclasses and callables for config logging."""
-    if hasattr(value, "to_dict"):
-        return value.to_dict()
+def _type_name(value: Any) -> str:
+    value_type = value if isinstance(value, type) else type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
+def _normalize_config(value: Any) -> Any:
+    """Represent a config tree with type identity for resume compatibility."""
     if dataclasses.is_dataclass(value):
         return {
-            field.name: _jsonable_config_value(getattr(value, field.name))
-            for field in dataclasses.fields(value)
-            if not field.name.startswith("_")
+            "type": _type_name(value),
+            "fields": {
+                config_field.name: _normalize_config(getattr(value, config_field.name))
+                for config_field in dataclasses.fields(value)
+                if not config_field.name.startswith("_")
+            },
         }
     if isinstance(value, dict):
-        return {str(key): _jsonable_config_value(item) for key, item in value.items()}
+        return {str(key): _normalize_config(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_jsonable_config_value(item) for item in value]
+        return [_normalize_config(item) for item in value]
     if isinstance(value, (str, int, float, bool, type(None))):
         return value
+    if inspect.isfunction(value):
+        if value.__closure__:
+            raise TypeError(
+                f"capturing callable {value.__qualname__} cannot be checkpointed; "
+                "use a configured processor with explicit fields"
+            )
+        identity = f"{value.__module__}.{value.__qualname__}"
+        if value.__name__ == "<lambda>":
+            identity = f"{identity}:{value.__code__.co_firstlineno}"
+        return {"callable": identity}
     if callable(value):
-        module = getattr(value, "__module__", type(value).__module__)
-        qualname = getattr(value, "__qualname__", type(value).__qualname__)
-        return f"{module}:{qualname}"
-    return repr(value)
+        raise TypeError(
+            f"callable {_type_name(value)} must be a dataclass config or top-level function"
+        )
+    return {"type": _type_name(value), "repr": repr(value)}
 
 
 class GrainDataLoader(BaseDataLoader):
-    """Deterministic, resumable dataloader over a grain dataset tree.
-
-    Example (config-registry entry):
-
-        GrainDataLoader.Config(
-            dataset_config=PackedTokenDatasetConfig(
-                dataset=weighted_interleave(
-                    [(math_ds, 2.0), (code_ds, 1.0)]
-                ),
-            ),
-            seed=42,
-        )
-    """
+    """Batches and checkpoints one composed Grain dataset graph."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
-        dataset_config: DatasetConfig
+        dataset: DatasetConfig
+        collator: Collator.Config
         seed: int = 42
         shuffle: bool = True
-        infinite: bool = True
-        prefetch_buffer_size: int = 8
+        repeat: bool = True
+        read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
+        batch_prefetch_buffer_size: int = 8
 
         def to_dict(self) -> dict[str, Any]:
-            # Configurable.Config uses dataclasses.asdict for a nested plain
-            # dataclass, which leaves processor functions non-JSON-serializable.
-            return {
-                field.name: _jsonable_config_value(getattr(self, field.name))
-                for field in dataclasses.fields(self)
-                if not field.name.startswith("_")
-            }
+            return _normalize_config(self)
 
     def __init__(
         self,
@@ -95,51 +85,61 @@ class GrainDataLoader(BaseDataLoader):
         tokenizer: BaseTokenizer,
         seq_len: int,
         local_batch_size: int,
-        # Grain state is exact per batch; checkpoint cadence is owned upstream.
         **_: Any,
     ) -> None:
         self._dp_world_size = dp_world_size
         self._rank_id = f"dp_rank_{dp_rank}"
-        self._pipeline_fingerprint = fingerprint_parts(
-            config.dataset_config.fingerprint(),
-            f"seed={config.seed}",
-            f"shuffle={config.shuffle}",
-            f"infinite={config.infinite}",
-            f"seq_len={seq_len}",
-            f"local_batch_size={local_batch_size}",
-        )
         runtime = DataRuntime(
-            tokenizer=tokenizer, seq_len=seq_len, local_batch_size=local_batch_size
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            local_batch_size=local_batch_size,
+            read_options=config.read_options,
         )
         options = BuildOptions(
             seed=config.seed,
             shuffle=config.shuffle,
-            infinite=config.infinite,
+            repeat=config.repeat,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
         )
-        dataset = config.dataset_config.build(runtime=runtime, options=options)
+        self._pipeline = {
+            "dataset": _normalize_config(config.dataset),
+            "collator": _normalize_config(config.collator),
+            "seed": config.seed,
+            "shuffle": config.shuffle,
+            "repeat": config.repeat,
+            "seq_len": seq_len,
+            "local_batch_size": local_batch_size,
+            "tokenizer": _type_name(tokenizer),
+        }
+
+        dataset = config.dataset.build(runtime=runtime, options=options)
+        collator = config.collator.build(runtime=runtime)
         if isinstance(dataset, grain.MapDataset):
-            dataset = dataset.to_iter_dataset()
+            dataset = dataset.to_iter_dataset(read_options=config.read_options)
+        dataset = dataset.batch(
+            local_batch_size,
+            drop_remainder=True,
+            batch_fn=collator,
+        )
         dataset = grain_experimental.ThreadPrefetchIterDataset(
             dataset,
-            prefetch_buffer_size=config.prefetch_buffer_size,
+            prefetch_buffer_size=config.batch_prefetch_buffer_size,
         )
         self._iterator = iter(dataset)
 
-    def __iter__(self) -> Iterator[tuple[dict[str, Any], torch.Tensor]]:
+    def __iter__(self) -> Iterator[TrainerBatch]:
         return self._iterator
 
     def state_dict(self) -> dict[str, Any]:
         return {
             "version": 1,
             "dp_world_size": self._dp_world_size,
-            "pipeline_fingerprint": self._pipeline_fingerprint,
+            "pipeline": self._pipeline,
             self._rank_id: self._iterator.get_state(),
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # Empty state is valid, matching ParallelAwareDataloader (dataloader.py:150-152).
         if not state_dict:
             return
         if state_dict["version"] != 1:
@@ -148,16 +148,10 @@ class GrainDataLoader(BaseDataLoader):
             )
         if state_dict["dp_world_size"] != self._dp_world_size:
             raise ValueError(
-                f"cannot resume: dp_world_size changed "
-                f"{state_dict['dp_world_size']} -> {self._dp_world_size}"
+                "cannot resume after changing the effective data-parallel degree"
             )
-        # TODO(data-fingerprint-content): metadata-only today (names + sizes + config
-        # identities); content hashing is a follow-up if in-place-edited corpora appear.
-        if state_dict["pipeline_fingerprint"] != self._pipeline_fingerprint:
-            raise ValueError(
-                "cannot resume: data pipeline fingerprint changed; the files, recipe, "
-                "loader options, or batch shape differ from the checkpoint"
-            )
+        if state_dict["pipeline"] != self._pipeline:
+            raise ValueError("cannot resume after changing the data pipeline")
         if self._rank_id not in state_dict:
             raise ValueError(
                 f"checkpoint is missing dataloader state for {self._rank_id}"

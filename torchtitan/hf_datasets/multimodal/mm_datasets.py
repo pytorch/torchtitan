@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multimodal dataset and dataloader for VLM training.
+"""Multimodal dataset processing for VLM training.
 
 Workflow overview::
 
@@ -12,7 +12,7 @@ Workflow overview::
             │
             ▼
     ┌───────────────────────────────────────────────────────┐
-    │  Sample Processor  (per-sample, in Dataset.__iter__)  │
+    │  Sample Processor  (MultiModalProcessor)              │
     │                                                       │
     │  1. Parse raw sample (dataset-specific format)        │
     │     e.g. OBELICS interleaved text/images,             │
@@ -26,19 +26,19 @@ Workflow overview::
     │  3. Process text: insert vision placeholder tokens    │
     │     <|vision_start|><|image_pad|>...<|vision_end|>    │
     │     into text, then tokenize                          │
-    │     → input_ids: Tensor(seq_len,)                     │
-    │     → labels: same as input_ids, with vision tokens   │
+    │     → input_ids: Tensor(num_tokens,)                  │
+    │     → labels: next-token targets, with vision tokens  │
     │       masked to ignore_id (-100)                      │
     └───────────────────────────────────────────────────────┘
             │
-            ▼  (optional, if packing_buffer_size > 0)
+            ▼  (optional, if MMSamplePackingConfig is configured)
     ┌───────────────────────────────────────────────────────┐
     │  Sample Packer                                        │
-    │  Bin-pack short samples into seq_len-length sequences │
+    │  Bin-pack short samples into seq_len-token sequences  │
     │  to reduce padding waste                              │
     └───────────────────────────────────────────────────────┘
             │
-            ▼  DataLoader batches samples (batch_size)
+            ▼  GrainDataLoader batches samples (batch_size)
     ┌───────────────────────────────────────────────────────┐
     │  Collator  (MultiModalCollator)                    │
     │                                                       │
@@ -49,8 +49,8 @@ Workflow overview::
     │     → grid_thw: (N, 3) per-image [T, H', W'] dims    │
     │     (same for videos)                                 │
     │                                                       │
-    │  2. collate_text: pad input_ids/labels across batch   │
-    │     to seq_len, pad batch to target batch_size        │
+    │  2. collate_text: pad text fields to seq_len and      │
+    │     pad to the target batch size                      │
     │     → input_ids: (batch_size, seq_len)                │
     │     → labels: (batch_size, seq_len)                   │
     └───────────────────────────────────────────────────────┘
@@ -61,27 +61,27 @@ Workflow overview::
                      special_tokens: dict[str, int]}, labels
 """
 
-import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
+import grain.python as grain
+import numpy as np
 import torch
 import tyro
-from datasets import Dataset, load_dataset
-from datasets.distributed import split_dataset_by_node
-from torch.distributed.checkpoint.stateful import Stateful
-from torch.utils.data import IterableDataset
 
-from torchtitan.components.dataloader import ParallelAwareDataloader
+from torchtitan.components.data.dataset import (
+    DatasetConfig as GrainDatasetConfig,
+    SampleProcessor,
+    SingleDatasetConfig,
+)
+from torchtitan.components.data.sources import HuggingFaceStreamingSource
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
-from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
-from .mm_collator import MultiModalCollator
 from .utils.image import calculate_vision_tokens, process_image, resize_to_pixel_budget
-from .utils.packing import MMSamplePacker
 from .utils.text import insert_vision_placeholders
 
 
@@ -155,10 +155,13 @@ def _process_mm_sample(
                     width=processed_img.shape[2],
                     patch_size=patch_size,
                     spatial_merge_size=spatial_merge_size,
+                    # TODO(data-mm-temporal-patches): Unify image/video token counting;
+                    # the configured temporal patch size is unused by this image path.
                     temporal_patch_size=1,
                 )
                 processed_images.append(processed_img)
                 num_image_tokens.append(num_tokens)
+                # Keep the accepted image at this aligned position as a placeholder.
                 texts[idx] = None
 
     if len(processed_images) != len([_ for _ in images if _ is not None]):
@@ -180,8 +183,11 @@ def _process_mm_sample(
     )
 
     tokens = tokenizer.encode(processed_text)
-    input_ids = torch.tensor(tokens)
-    labels = torch.tensor(tokens)
+    if len(tokens) < 2:
+        return None
+
+    input_ids = torch.tensor(tokens[:-1])
+    labels = torch.tensor(tokens[1:])
 
     special_token_ids = torch.tensor(
         [
@@ -267,375 +273,187 @@ def _process_cc12_wd_sample(
     )
 
 
-MM_DATASETS = {
-    "obelics": DatasetConfig(
-        path="HuggingFaceM4/OBELICS",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
-        sample_processor=_process_obelics_sample,
-    ),
-    "cc12m": DatasetConfig(
-        path="pixparse/cc12m-wds",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
-        sample_processor=_process_cc12_wd_sample,
-    ),
-    "cc12m-test": DatasetConfig(
-        path="tests/assets/cc12m_test",
-        loader=lambda path: load_dataset(
-            path, split="train", data_files={"train": "*.tar"}, streaming=True
+class MultiModalProcessor(SampleProcessor):
+    """Adapts a multimodal processor to Grain's map contract."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(SampleProcessor.Config):
+        sample_processor: Annotated[Callable, tyro.conf.Suppress]
+        patch_size: int = 16
+        temporal_patch_size: int = 2
+        spatial_merge_size: int = 2
+        min_pixels: int = 65_536
+        max_pixels: int = 16_777_216
+        image_mean: tuple[float, ...] = (0.5, 0.5, 0.5)
+        image_std: tuple[float, ...] = (0.5, 0.5, 0.5)
+        resize_fn: Annotated[
+            Callable[..., tuple[int, int, int, int]], tyro.conf.Suppress
+        ] = resize_to_pixel_budget
+        max_patches: int = 4096
+        max_patches_per_side: int = 512
+        video_dir: str = ""
+        video_fps: float = 2.0
+        video_min_frames: int = 4
+        video_max_frames: int = 768
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        self._config = config
+        self._tokenizer = context.tokenizer
+        self._seq_len = context.seq_len
+
+    def __call__(
+        self,
+        sample: dict[str, Any],
+        rng: np.random.Generator,
+    ) -> dict[str, Any] | None:
+        del rng
+        processed = self._config.sample_processor(
+            sample=sample,
+            tokenizer=self._tokenizer,
+            patch_size=self._config.patch_size,
+            temporal_patch_size=self._config.temporal_patch_size,
+            spatial_merge_size=self._config.spatial_merge_size,
+            min_pixels=self._config.min_pixels,
+            max_pixels=self._config.max_pixels,
+            image_mean=self._config.image_mean,
+            image_std=self._config.image_std,
+            resize_fn=self._config.resize_fn,
+            max_patches=self._config.max_patches,
+            max_patches_per_side=self._config.max_patches_per_side,
+            video_dir=self._config.video_dir,
+            video_fps=self._config.video_fps,
+            video_min_frames=self._config.video_min_frames,
+            video_max_frames=self._config.video_max_frames,
+        )
+        if processed is not None and processed["input_ids"].shape[0] > self._seq_len:
+            logger.warning(
+                f"Sample length {processed['input_ids'].shape[0]} > training "
+                f"seq_len={self._seq_len}. Skip"
+            )
+            return None
+        return processed
+
+
+MM_DATASETS: dict[str, SingleDatasetConfig] = {
+    "obelics": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="HuggingFaceM4/OBELICS",
+            split="train",
         ),
-        sample_processor=_process_cc12_wd_sample,
+        processor=MultiModalProcessor.Config(
+            sample_processor=_process_obelics_sample,
+        ),
+        post_filters=(lambda sample: sample is not None,),
+    ),
+    "cc12m": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="pixparse/cc12m-wds",
+            split="train",
+        ),
+        processor=MultiModalProcessor.Config(
+            sample_processor=_process_cc12_wd_sample,
+        ),
+        post_filters=(lambda sample: sample is not None,),
+    ),
+    "cc12m-test": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="tests/assets/cc12m_test",
+            split="train",
+            load_dataset_kwargs={
+                "data_files": {"train": "*.tar"},
+            },
+        ),
+        processor=MultiModalProcessor.Config(
+            sample_processor=_process_cc12_wd_sample,
+        ),
+        post_filters=(lambda sample: sample is not None,),
     ),
 }
 
 
-def _validate_mm_dataset(
-    dataset_name: str, dataset_path: str | None = None
-) -> tuple[str, Callable, Callable]:
-    """Validate dataset name and path, returning (path, loader, sample_processor)."""
-    if dataset_name not in MM_DATASETS:
-        raise ValueError(
-            f"Dataset {dataset_name} is not supported. "
-            f"Supported datasets are: {list(MM_DATASETS.keys())}"
-        )
+@dataclass(frozen=True, kw_only=True, slots=True)
+class MMSamplePackingConfig:
+    """Packs whole multimodal documents into fixed-length rows."""
 
-    config = MM_DATASETS[dataset_name]
-    path = dataset_path or config.path
-    logger.info(f"Preparing {dataset_name} dataset from {path}")
-    return path, config.loader, config.sample_processor
+    dataset: GrainDatasetConfig
+    num_packing_bins: int = 8
+    """Candidate rows kept open; more bins can reduce padding but retain more media."""
 
+    def __post_init__(self) -> None:
+        if self.num_packing_bins <= 0:
+            raise ValueError("num_packing_bins must be positive")
 
-class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
-    """HuggingFace multimodal dataset with support for sample packing."""
-
-    def __init__(
+    def build(
         self,
-        dataset_name: str,
-        dataset_path: str | None,
-        tokenizer: MultiModalTokenizer,
-        batch_size: int,
-        seq_len: int,
-        patch_size: int,
-        temporal_patch_size: int,
-        spatial_merge_size: int,
-        min_pixels: int,
-        max_pixels: int,
-        image_mean: tuple[float, ...],
-        image_std: tuple[float, ...],
-        packing_buffer_size: int,
-        resize_fn: Callable[..., tuple[int, int, int, int]],
-        max_patches: int,
-        max_patches_per_side: int,
-        dp_rank: int = 0,
-        dp_world_size: int = 1,
-        infinite: bool = False,
-        video_dir: str = "",
-        video_fps: float = 2.0,
-        video_min_frames: int = 4,
-        video_max_frames: int = 768,
-        dataset_subset: str = "",
-    ) -> None:
-        dataset_name = dataset_name.lower()
-
-        path, dataset_loader, self.sample_processor = _validate_mm_dataset(
-            dataset_name, dataset_path
-        )
-
-        # Pass subset to loaders that accept it
-        sig = inspect.signature(dataset_loader)
-        if "subset" in sig.parameters and dataset_subset:
-            ds = dataset_loader(path, subset=dataset_subset)
-        else:
-            ds = dataset_loader(path)
-        self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
-
-        self._tokenizer = tokenizer
-        self.batch_size = batch_size
-        self.seq_len = seq_len
-        self.patch_size = patch_size
-        self.temporal_patch_size = temporal_patch_size
-        self.spatial_merge_size = spatial_merge_size
-        self.min_pixels = min_pixels
-        self.max_pixels = max_pixels
-        self.image_mean = image_mean
-        self.image_std = image_std
-        self.resize_fn = resize_fn
-        self.max_patches = max_patches
-        self.max_patches_per_side = max_patches_per_side
-        self.video_dir = video_dir
-        self.video_fps = video_fps
-        self.video_min_frames = video_min_frames
-        self.video_max_frames = video_max_frames
-        self.enable_packing = packing_buffer_size > 0
-        if self.enable_packing:
-            self.packer = MMSamplePacker(
-                max_seq_length=seq_len,
-                buffer_size=packing_buffer_size,
-                batch_size=batch_size,
-            )
-        self.infinite = infinite
-        self._sample_idx = 0
-        self._hf_state_restored = False
-
-    def __iter__(self):
-        while True:
-            for sample in self._get_data_iter():
-                self._sample_idx += 1
-
-                processed = self.sample_processor(
-                    sample=sample,
-                    tokenizer=self._tokenizer,
-                    patch_size=self.patch_size,
-                    temporal_patch_size=self.temporal_patch_size,
-                    spatial_merge_size=self.spatial_merge_size,
-                    min_pixels=self.min_pixels,
-                    max_pixels=self.max_pixels,
-                    image_mean=self.image_mean,
-                    image_std=self.image_std,
-                    resize_fn=self.resize_fn,
-                    max_patches=self.max_patches,
-                    max_patches_per_side=self.max_patches_per_side,
-                    video_dir=self.video_dir,
-                    video_fps=self.video_fps,
-                    video_min_frames=self.video_min_frames,
-                    video_max_frames=self.video_max_frames,
-                    seq_len=self.seq_len,
-                )
-                if processed is None:
-                    continue
-
-                if processed["input_ids"].shape[0] > self.seq_len:
-                    logger.warning(
-                        f"Sample length {processed['input_ids'].shape[0]} > training {self.seq_len=}. Skip"
-                    )
-                    continue
-
-                if self.enable_packing:
-                    self.packer.add_sample(processed)
-
-                    if self.packer.has_batch_ready():
-                        batch = self.packer.get_next_batch()
-                        if batch:
-                            yield from batch
-                else:
-                    yield processed
-
-            # Flush leftovers in packer when raw samples are exhausted
-            if self.enable_packing:
-                self.packer.flush()
-                while self.packer.has_batch_ready():
-                    # pyrefly: ignore [invalid-yield]
-                    yield from self.packer.get_next_batch()
-                # Drain any remainder that doesn't fill a full batch
-                while self.packer.packed_samples:
-                    yield self.packer.packed_samples.popleft()
-
-            if not self.infinite:
-                break
-            else:
-                self._sample_idx = 0
-
-    def _get_data_iter(self):
-        # TODO: add epoch counter and per-epoch reshuffling (see text_datasets.py)
-
-        # If HF dataset state was restored, iterator already starts
-        # at the right position — no need to skip.
-        if self._hf_state_restored:
-            self._hf_state_restored = False
-            return iter(self._data)
-
-        # Map-style dataset: use random access to skip directly
-        if isinstance(self._data, Dataset):
-            if self._sample_idx >= len(self._data):
-                return iter([])
-            return iter(self._data.select(range(self._sample_idx, len(self._data))))
-
-        # Streaming dataset without restored state: brute-force skip
-        it = iter(self._data)
-        if self._sample_idx > 0:
-            logger.info(
-                f"Skipping {self._sample_idx} samples to resume from checkpoint"
-            )
-            for _ in range(self._sample_idx):
-                next(it)
-
-        return it
-
-    def load_state_dict(self, state_dict):
-        self._sample_idx = state_dict["sample_idx"]
-
-        # Restore HF dataset state if available, enabling fast resume
-        if "hf_dataset_state" in state_dict and hasattr(self._data, "load_state_dict"):
-            self._data.load_state_dict(state_dict["hf_dataset_state"])
-            self._hf_state_restored = True
-
-        if self.enable_packing and "packer_state" in state_dict:
-            packer_state = state_dict["packer_state"]
-            self.packer._sample_buffer = {
-                i: s for i, s in enumerate(packer_state["sample_buffer"])
-            }
-            self.packer._next_id = len(packer_state["sample_buffer"])
-            self.packer.packed_samples.clear()
-            self.packer.packed_samples.extend(packer_state["packed_samples"])
-
-    def state_dict(self):
-        state = {"sample_idx": self._sample_idx}
-
-        # Save HF dataset state for fast resume if supported
-        if hasattr(self._data, "state_dict"):
-            state["hf_dataset_state"] = self._data.state_dict()
-
-        if self.enable_packing:
-            # pyrefly: ignore [bad-typed-dict-key]
-            state["packer_state"] = {
-                "sample_buffer": list(self.packer._sample_buffer.values()),
-                "packed_samples": list(self.packer.packed_samples),
-            }
-
-        return state
-
-
-class MMDataLoader(ParallelAwareDataloader):
-    """Configurable multimodal dataloader for VLM training."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ParallelAwareDataloader.Config):
-        dataset: str = "cc12m-test"
-        """Dataset to use"""
-
-        dataset_subset: str = ""
-        """Dataset subset/config name."""
-
-        infinite: bool = True
-        """Whether to loop the dataset infinitely"""
-
-        # Batching configs
-        packing_buffer_size: int = 0
-        """Set to a value >0 to enable sample packing."""
-
-        max_images_per_batch: int
-        """Max images per batch to bound vision encoder memory."""
-
-        # Preprocessing configs
-        patch_size: int
-        """Patch size of the vision encoder."""
-
-        temporal_patch_size: int
-        """Temporal patch size for video processing."""
-
-        spatial_merge_size: int
-        """Spatially merge visual tokens after encoder. e.g. 2 means 2x2=4 patches merged."""
-
-        patch_order: Literal["block", "raster"] = "block"
-        """Patch sequence layout the collator emits: ``"block"`` (each
-        ``spatial_merge_size**2`` group contiguous, or ``"raster"`` (row-major).
-        Must be ``"block"`` when ``build_mrope_positions`` is set."""
-
-        resize_fn: Annotated[
-            Callable[..., tuple[int, int, int, int]], tyro.conf.Suppress
-        ] = resize_to_pixel_budget
-        """Image-resize strategy (a callable, like ``sample_processor``):
-        ``resize_to_pixel_budget`` or ``resize_to_patch_budget`` (cap patches at
-        ``max_patches``, pad to a ``patch_size * spatial_merge_size`` multiple).
-        Both share the signature ``(h, w, *, patch_size, merge_size,
-        **budget) -> (resize_h, resize_w, pad_h, pad_w)``."""
-
-        min_pixels: int
-        """Minimum number of pixels for image resizing (pixel-budget strategy)."""
-
-        max_pixels: int
-        """Maximum number of pixels for image resizing (pixel-budget strategy)."""
-
-        max_patches: int = 4096
-        """Max raw patches per image."""
-
-        max_patches_per_side: int = 512
-        """Per-side patch cap for the vision position-embedding grid (``navit``)."""
-
-        image_mean: tuple[float, ...]
-        """Per-channel mean for image normalization."""
-
-        image_std: tuple[float, ...]
-        """Per-channel std for image normalization."""
-
-        video_dir: str = ""
-        """Base directory for video files (for datasets with video filename references)."""
-
-        video_fps: float = 2.0
-        """Target frames per second for video sampling."""
-
-        video_min_frames: int = 4
-        """Minimum number of frames to sample from a video."""
-
-        video_max_frames: int = 768
-        """Maximum number of frames to sample from a video."""
-
-        # Other loading configs
-        build_mrope_positions: bool = False
-        """Build 3D MRoPE position IDs (``mrope_positions``) for models that use
-        multi-dimensional RoPE"""
-
-    def __init__(
-        self,
-        config: Config,
         *,
-        dp_world_size: int,
-        dp_rank: int,
-        tokenizer: MultiModalTokenizer,
-        seq_len: int,
-        local_batch_size: int,
-        **kwargs,
-    ):
-        dataset = HuggingFaceMultiModalDataset(
-            dataset_name=config.dataset,
-            dataset_path=config.dataset_path,
-            tokenizer=tokenizer,
-            batch_size=local_batch_size,
-            seq_len=seq_len,
-            patch_size=config.patch_size,
-            temporal_patch_size=config.temporal_patch_size,
-            spatial_merge_size=config.spatial_merge_size,
-            min_pixels=config.min_pixels,
-            max_pixels=config.max_pixels,
-            image_mean=config.image_mean,
-            image_std=config.image_std,
-            packing_buffer_size=config.packing_buffer_size,
-            resize_fn=config.resize_fn,
-            max_patches=config.max_patches,
-            max_patches_per_side=config.max_patches_per_side,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            infinite=config.infinite,
-            video_dir=config.video_dir,
-            video_fps=config.video_fps,
-            video_min_frames=config.video_min_frames,
-            video_max_frames=config.video_max_frames,
-            dataset_subset=config.dataset_subset,
+        context: DatasetBuildContext,
+        dataset_iteration_policy: DatasetIterationPolicy,
+    ) -> grain.IterDataset[dict[str, Any]]:
+        dataset = self.dataset.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy,
         )
-
-        collate_fn = MultiModalCollator(
-            batch_size=local_batch_size,
-            seq_len=seq_len,
-            max_images_per_batch=config.max_images_per_batch,
-            patch_size=config.patch_size,
-            temporal_patch_size=config.temporal_patch_size,
-            spatial_merge_size=config.spatial_merge_size,
-            tokenizer=tokenizer,
-            build_mrope_positions=config.build_mrope_positions,
-            patch_order=config.patch_order,
+        dataset = dataset.filter(
+            lambda sample: len(sample["input_ids"]) <= context.seq_len
         )
-
-        dataloader_kwargs = {
-            "num_workers": config.num_workers,
-            "persistent_workers": config.persistent_workers,
-            "pin_memory": config.pin_memory,
-            "prefetch_factor": config.prefetch_factor,
-            "batch_size": local_batch_size,
-            "collate_fn": collate_fn,
-        }
-
-        super().__init__(
+        dataset = dataset.map(_mm_sample_to_packing_input)
+        if isinstance(dataset, grain.MapDataset):
+            dataset = dataset.to_iter_dataset(read_options=context.read_options)
+        # TODO(data-global-pack-plan): Consider packing before DP sharding so
+        # ranks receive similar text and media work.
+        dataset = grain.experimental.FirstFitPackIterDataset(
             dataset,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            **dataloader_kwargs,
+            length_struct={
+                "input_ids": context.seq_len,
+                "labels": context.seq_len,
+                "positions": context.seq_len,
+            },
+            padding_struct={
+                # pyrefly: ignore [missing-attribute]
+                "input_ids": context.tokenizer.pad_id,
+                "labels": IGNORE_INDEX,
+                "positions": 0,
+            },
+            num_packing_bins=self.num_packing_bins,
+            meta_features=(
+                "labels",
+                "positions",
+                "pixel_values",
+                "pixel_values_videos",
+            ),
+            seed=dataset_iteration_policy.seed,
+            shuffle_bins=dataset_iteration_policy.shuffle,
         )
+        return dataset.map(_packing_output_to_mm_sample)
+
+
+def _mm_sample_to_packing_input(sample: dict[str, Any]) -> dict[str, Any]:
+    """Convert Torch token fields to the arrays expected by Grain packing."""
+    return {
+        "input_ids": np.asarray(sample["input_ids"]),
+        "labels": np.asarray(sample["labels"]),
+        "positions": np.asarray(sample["positions"]),
+        "pixel_values": sample.get("pixel_values", []),
+        "pixel_values_videos": sample.get("pixel_values_videos", []),
+    }
+
+
+def _packing_output_to_mm_sample(
+    packing_output: dict[str, Any],
+) -> dict[str, Any]:
+    """Restore Torch token fields and flatten per-document media lists."""
+    return {
+        "input_ids": torch.from_numpy(packing_output["input_ids"]),
+        "labels": torch.from_numpy(packing_output["labels"]),
+        "positions": torch.from_numpy(packing_output["positions"]),
+        "pixel_values": [
+            image
+            for document_images in packing_output["pixel_values"]
+            for image in document_images
+        ],
+        "pixel_values_videos": [
+            video
+            for document_videos in packing_output["pixel_values_videos"]
+            for video in document_videos
+        ],
+    }

@@ -5,6 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data.collators import TextCollator
+from torchtitan.components.data.dataset import ChatToTokenSequence, SingleDatasetConfig
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.packing import FirstFitPackingConfig
+from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -13,10 +18,7 @@ from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
 )
-from torchtitan.hf_datasets.text_datasets import (
-    ChatDataLoader,
-    HuggingFaceTextDataLoader,
-)
+from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
 from torchtitan.tools.profiler import Profiler
 from . import model_registry
 from .tokenizer import HFBackendTokenizer
@@ -43,7 +45,7 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=c4_text_dataloader("c4_test"),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -143,7 +145,7 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=c4_text_dataloader("c4"),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -159,12 +161,6 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
 
 def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
     """SFT config with real HF pretrained weights loaded via initial_load_in_hf."""
-
-    def process_sample(sample):
-        return [
-            {"role": "user", "content": sample["question"]},
-            {"role": "assistant", "content": sample["answer"]},
-        ]
 
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
@@ -184,14 +180,7 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=ChatDataLoader.Config(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": "tests/assets/sft_test/data.json",
-                "split": "train",
-            },
-            sample_processor=process_sample,
-        ),
+        dataloader=_sft_test_dataloader(),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -209,13 +198,7 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
 
 
 def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
-    """SFT debug config for the transformers backend using ChatDataLoader."""
-
-    def process_sample(sample):
-        return [
-            {"role": "user", "content": sample["question"]},
-            {"role": "assistant", "content": sample["answer"]},
-        ]
+    """SFT debug config for the transformers backend."""
 
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
@@ -239,14 +222,7 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
             seq_len=1024,
             steps=10,
         ),
-        dataloader=ChatDataLoader.Config(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": "tests/assets/sft_test/data.json",
-                "split": "train",
-            },
-            sample_processor=process_sample,
-        ),
+        dataloader=_sft_test_dataloader(),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -258,3 +234,30 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def _sft_test_dataloader() -> GrainDataLoader.Config:
+    return GrainDataLoader.Config(
+        dataset=FirstFitPackingConfig(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceRandomAccessSource.Config(
+                    path="json",
+                    load_dataset_kwargs={
+                        "data_files": "tests/assets/sft_test/data.json",
+                        "split": "train",
+                    },
+                ),
+                process=ChatToTokenSequence.Config(
+                    sample_to_messages=_question_answer_to_messages,
+                ),
+            ),
+        ),
+        collator=TextCollator.Config(),
+    )
+
+
+def _question_answer_to_messages(sample):
+    return [
+        {"role": "user", "content": sample["question"]},
+        {"role": "assistant", "content": sample["answer"]},
+    ]

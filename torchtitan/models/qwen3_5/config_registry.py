@@ -5,6 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data.dataset import SingleDatasetConfig
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -12,26 +15,66 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
+from torchtitan.hf_datasets.multimodal.mm_collator import QwenMultimodalCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    QwenCC12MProcessor,
+    QwenMultimodalPackingConfig,
+    QwenObelicsProcessor,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry, QWEN3_5_SPECIAL_TOKENS
 
 
-def _dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
-    return MMDataLoader.Config(
-        dataset=dataset,
-        max_images_per_batch=128,
+def _dataloader(
+    dataset: str,
+    *,
+    dataset_path: str | None = None,
+    dataset_subset: str = "",
+    max_images_per_batch: int = 128,
+    max_patches_per_batch: int = 8_388_608,
+) -> GrainDataLoader.Config:
+    dataset = dataset.lower()
+    if dataset == "obelics":
+        source_path = dataset_path or "HuggingFaceM4/OBELICS"
+        source_kwargs = {"split": "train"}
+        processor = QwenObelicsProcessor.Config()
+    elif dataset in {"cc12m", "cc12m-test"}:
+        source_path = dataset_path or (
+            "tests/assets/cc12m_test"
+            if dataset == "cc12m-test"
+            else "pixparse/cc12m-wds"
+        )
+        source_kwargs = {"split": "train"}
+        if dataset == "cc12m-test":
+            source_kwargs["data_files"] = {"train": "*.tar"}
+        processor = QwenCC12MProcessor.Config()
+    else:
+        raise ValueError(f"Unsupported Qwen multimodal dataset: {dataset}")
+    if dataset_subset:
+        source_kwargs["name"] = dataset_subset
+
+    process = processor
+    source = HuggingFaceStreamingSource.Config(
+        path=source_path,
+        load_dataset_kwargs=source_kwargs,
+    )
+    packing = QwenMultimodalPackingConfig(
+        dataset=SingleDatasetConfig(source=source, process=process),
+        max_images_per_batch=max_images_per_batch,
+        max_patches_per_batch=max_patches_per_batch,
         patch_size=16,
         temporal_patch_size=2,
-        spatial_merge_size=2,
-        min_pixels=65536,
-        max_pixels=16777216,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        build_mrope_positions=True,
-        **kwargs,
+    )
+    return GrainDataLoader.Config(
+        dataset=packing,
+        collator=QwenMultimodalCollator.Config(
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            build_mrope_positions=True,
+        ),
     )
 
 

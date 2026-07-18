@@ -14,7 +14,7 @@ from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 
@@ -50,7 +50,7 @@ def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
             seq_len=2048,
             steps=100,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(),
+        dataloader=c4_text_dataloader(),
         checkpoint=TorchFTCheckpointManager.Config(
             interval=10,
             last_save_model_only=False,

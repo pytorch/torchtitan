@@ -8,8 +8,15 @@ import unittest
 
 import torch
 
+from torchtitan.components.data.dataset import SingleDatasetConfig
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
+from torchtitan.hf_datasets.multimodal.mm_collator import QwenMultimodalCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    QwenCC12MProcessor,
+    QwenMultimodalPackingConfig,
+)
 
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
@@ -30,16 +37,40 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
     """Test save/load for multimodal dataset, mirroring test_dataset_checkpointing.py."""
 
     def _build_dataloader(self, batch_size, seq_len, world_size, rank):
-        dl_config = MMDataLoader.Config(
-            dataset="cc12m-test",
-            max_images_per_batch=128,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            min_pixels=784,
-            max_pixels=200000,
-            image_mean=(0.5, 0.5, 0.5),
-            image_std=(0.5, 0.5, 0.5),
+        dl_config = GrainDataLoader.Config(
+            dataset=QwenMultimodalPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceStreamingSource.Config(
+                        path="tests/assets/cc12m_test",
+                        load_dataset_kwargs={
+                            "split": "train",
+                            "data_files": {"train": "*.tar"},
+                        },
+                    ),
+                    process=QwenCC12MProcessor.Config(
+                        patch_size=16,
+                        temporal_patch_size=2,
+                        spatial_merge_size=2,
+                        min_pixels=784,
+                        max_pixels=200000,
+                        image_mean=(0.5, 0.5, 0.5),
+                        image_std=(0.5, 0.5, 0.5),
+                    ),
+                ),
+                max_images_per_batch=128,
+                max_patches_per_batch=128 * (200000 // (16 * 16)),
+                patch_size=16,
+                temporal_patch_size=2,
+            ),
+            collator=QwenMultimodalCollator.Config(
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                build_mrope_positions=True,
+            ),
+            batch_prefetch_buffer_size=1,
+            repeat=True,
+            shuffle=False,
         )
 
         return dl_config.build(

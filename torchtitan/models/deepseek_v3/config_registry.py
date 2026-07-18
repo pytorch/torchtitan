@@ -16,7 +16,7 @@ from torchtitan.components.quantization import (
 )
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.trainer import Trainer
@@ -46,7 +46,7 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=c4_text_dataloader("c4_test"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -145,9 +145,7 @@ def deepseek_v3_16b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
-        ),
+        dataloader=c4_text_dataloader("c4"),
         optimizer=default_adamw(lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             decay_ratio=0.8,
@@ -216,9 +214,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
-        ),
+        dataloader=c4_text_dataloader("c4"),
         optimizer=default_adamw(lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
