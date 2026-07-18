@@ -180,9 +180,8 @@ def compute_policy_age_metrics(
         trainer_policy_version: Policy version that will consume this batch.
         min_policy_versions: Oldest sampled policy version for each packed training sample.
         max_offpolicy_steps: Configured max consume-time trainer-version lag (the strict-FIFO bound).
-        window_lookahead_steps: Extra lag that windowed FIFO may admit while a straggler waits
-            (`ceil(window_size / num_prompts_per_train_step)`); `0` under strict FIFO. The hard bound
-            checked here is `max_offpolicy_steps + window_lookahead_steps`.
+        window_lookahead_steps: Extra consume-time lag that windowed FIFO may admit while a straggler
+            waits, measured in train-steps (`s`), NOT window entries.
 
     Example:
         # trainer at v=10; training samples' oldest versions [8, 9] -> ages [2, 1]

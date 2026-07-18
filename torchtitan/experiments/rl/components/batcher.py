@@ -99,6 +99,18 @@ class Batcher(Configurable):
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
 
+    @property
+    def pending_trainable_count(self) -> int:
+        """Trainable groups accumulated toward the next (not-yet-packed) batch (`0 <= r < P`).
+
+        This is the head-phase `r` the work buffer snapshots to size its r-aware look-ahead window
+        (see `RolloutGroupWorkBuffer.take_finalized`): it reflects how far the batcher has filled the
+        in-progress batch.
+        """
+        return sum(
+            bool(group.training_samples) for group in self._groups_for_next_batch
+        )
+
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
     ) -> TrainingBatch | None:

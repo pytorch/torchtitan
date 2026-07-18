@@ -717,6 +717,7 @@ class Controller(Configurable):
 
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,
+            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
         )
 
         # Overlaps each step's weight handoff (push -> pull -> buffer-slot release) with the next step's fwd/bwd
@@ -934,7 +935,9 @@ class Controller(Configurable):
             unblocked by: _trainer_loop training_batch_queue.get()
         """
         while True:
-            rollout_group = await group_buffer.take_finalized()
+            rollout_group = await group_buffer.take_finalized(
+                pending_trainable_count=batcher.pending_trainable_count
+            )
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")
                 break
@@ -1006,16 +1009,14 @@ class Controller(Configurable):
 
                 # Policy age is computed HERE, at consumption time, against the live trainer version, so it is
                 # faithful to what this step trains on -- not the version when the batch was packed.
-                # Windowed FIFO lets up to ceil(window_size / num_prompts_per_train_step) extra train
-                # steps run ahead of a straggler, so the hard tolerance is raised accordingly.
+                # Windowed FIFO keeps the MEAN age ~= max_offpolicy_steps; a straggler head may be bypassed
+                # by at most window_lookahead_steps (s) extra train-steps, so max age = max_offpolicy_steps + s
+                # exactly (s == 0, strict FIFO, keeps this at max_offpolicy_steps + 1).
                 policy_age_panel = compute_policy_age_metrics(
                     trainer_policy_version=self._trainer_policy_version,
                     min_policy_versions=packed.min_policy_versions,
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
-                    window_lookahead_steps=math.ceil(
-                        self._group_buffer.window_size
-                        / self.config.async_loop.num_prompts_per_train_step
-                    ),
+                    window_lookahead_steps=self._group_buffer.window_lookahead_steps,
                 )
 
                 # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by

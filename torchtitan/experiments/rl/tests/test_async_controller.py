@@ -158,12 +158,14 @@ def test_rollout_id_to_string_is_callable_and_uses_int_group_id() -> None:
 
 def test_take_finalized_does_not_release_active_slot() -> None:
     async def run() -> None:
-        buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
+        buffer = RolloutGroupWorkBuffer.Config().build(
+            max_active_rollout_groups=1, num_prompts_per_train_step=1
+        )
         if not await buffer.wait_for_slot():
             raise RuntimeError("buffer closed unexpectedly")
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
         await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[]))
-        await buffer.take_finalized()
+        await buffer.take_finalized(pending_trainable_count=0)
 
         waiter = asyncio.create_task(buffer.wait_for_slot())
         await asyncio.sleep(0)
@@ -177,7 +179,9 @@ def test_take_finalized_does_not_release_active_slot() -> None:
 
 def test_untrainable_group_releases_before_training() -> None:
     async def run() -> None:
-        buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
+        buffer = RolloutGroupWorkBuffer.Config().build(
+            max_active_rollout_groups=1, num_prompts_per_train_step=1
+        )
         batcher = Batcher.Config().build(
             num_prompts_per_train_step=1,
             dp_degree=1,
@@ -210,10 +214,16 @@ def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
 
 
 def _fifo_buffer(
-    *, capacity: int, window_fraction: float = 0.0
+    *,
+    capacity: int,
+    window_lookahead_steps: int = 0,
+    num_prompts_per_train_step: int = 1,
 ) -> RolloutGroupWorkBuffer:
-    return RolloutGroupWorkBuffer.Config(window_fraction=window_fraction).build(
-        max_active_rollout_groups=capacity
+    return RolloutGroupWorkBuffer.Config(
+        window_lookahead_steps=window_lookahead_steps
+    ).build(
+        max_active_rollout_groups=capacity,
+        num_prompts_per_train_step=num_prompts_per_train_step,
     )
 
 
@@ -227,30 +237,32 @@ async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
     await buffer.finalize_work(RolloutGroup(group_id=group_id, rollouts=[]))
 
 
-def test_window_size_derived_from_fraction() -> None:
-    # W = max(1, ceil(window_fraction * capacity)); 0.0 -> strict FIFO (W=1).
-    assert _fifo_buffer(capacity=10).window_size == 1
-    assert _fifo_buffer(capacity=10, window_fraction=0.3).window_size == 3
+def test_window_lookahead_steps_negative_raises() -> None:
+    with pytest.raises(ValueError, match="window_lookahead_steps"):
+        _fifo_buffer(capacity=10, window_lookahead_steps=-1)
+
+
+def test_num_prompts_per_train_step_invalid_raises() -> None:
+    with pytest.raises(ValueError, match="num_prompts_per_train_step"):
+        _fifo_buffer(capacity=10, num_prompts_per_train_step=0)
+
+
+def test_window_lookahead_steps_property() -> None:
+    assert _fifo_buffer(capacity=10).window_lookahead_steps == 0
     assert (
-        _fifo_buffer(capacity=10, window_fraction=0.01).window_size == 1
-    )  # floored at 1
-    assert _fifo_buffer(capacity=10, window_fraction=1.0).window_size == 10
-
-
-def test_window_fraction_out_of_range_raises() -> None:
-    with pytest.raises(ValueError, match="window_fraction"):
-        _fifo_buffer(capacity=10, window_fraction=1.5)
+        _fifo_buffer(capacity=10, window_lookahead_steps=2).window_lookahead_steps == 2
+    )
 
 
 def test_strict_fifo_blocks_on_unfinalized_head() -> None:
     async def run() -> None:
-        buffer = _fifo_buffer(capacity=4)  # window_fraction=0.0 -> W=1
+        buffer = _fifo_buffer(capacity=4)  # window_lookahead_steps=0 -> strict FIFO
         for group_id in range(2):
             await _admit(buffer, group_id)
         await buffer.claim_next()  # g0 -> INFLIGHT (head stuck)
         await _finalize(buffer, 1)  # only g1 finalized
 
-        taker = asyncio.create_task(buffer.take_finalized())
+        taker = asyncio.create_task(buffer.take_finalized(pending_trainable_count=0))
         await asyncio.sleep(0)
         assert not taker.done()  # strict FIFO: g1 finalized but head g0 is not -> stall
 
@@ -262,34 +274,109 @@ def test_strict_fifo_blocks_on_unfinalized_head() -> None:
 
 def test_windowed_fifo_greedy_within_window_and_anchored_at_head() -> None:
     async def run() -> None:
-        # capacity 10, window_fraction 0.3 -> W=3, window = [head, head+2].
-        buffer = _fifo_buffer(capacity=10, window_fraction=0.3)
-        assert buffer.window_size == 3
-        for group_id in range(4):
+        # s=1, P=2, head-phase r0=0 -> window_end = h + (s+1)*P - r0 - 1 = h + 3.
+        # One extra train-step's worth (P=2 groups) is bypassable ahead of the stuck head.
+        buffer = _fifo_buffer(
+            capacity=10, window_lookahead_steps=1, num_prompts_per_train_step=2
+        )
+        for group_id in range(5):
             await _admit(buffer, group_id)
         await buffer.claim_next()  # g0 -> INFLIGHT (head stuck)
-        for group_id in (1, 2, 3):
+        for group_id in (1, 2, 3, 4):
             await _finalize(buffer, group_id)
 
-        # Greedy within the window [g0, g2]: g1 and g2 are fetched ahead of the stuck head.
-        assert (await buffer.take_finalized()).group_id == 1
-        assert (await buffer.take_finalized()).group_id == 2
+        # Greedy within the window [g0, g3]: g1, g2, g3 fetched ahead of the stuck head.
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 1
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 2
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 3
 
-        # Holes count: consuming g1/g2 does NOT move the head, so g3 stays outside [g0, g2].
-        taker = asyncio.create_task(buffer.take_finalized())
+        # Anchored: consuming g1/g2/g3 does NOT move the head, so g4 stays outside [g0, g3].
+        taker = asyncio.create_task(buffer.take_finalized(pending_trainable_count=0))
         await asyncio.sleep(0)
-        assert not taker.done()  # g3 finalized but beyond the window -> blocked
+        assert not taker.done()  # g4 finalized but beyond the window -> blocked
 
-        # Consuming the head slides the window; g3 becomes eligible.
+        # Consuming the head slides the window; g4 becomes eligible.
         await _finalize(buffer, 0)
         assert (await taker).group_id == 0
-        assert (await buffer.take_finalized()).group_id == 3
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 4
+
+    asyncio.run(run())
+
+
+def test_window_lookahead_is_phase_exact_across_r0() -> None:
+    # Same s and P, different head-phase r0 at head-stall must bypass the SAME number of groups
+    # (exactly (s+1)*P - r0 non-head entries fit) -- the property fixed-entry windows lacked.
+    async def _bypassable_count(*, r0: int, s: int, p: int) -> int:
+        # Big capacity so the active-slot budget never limits the window under test.
+        buffer = _fifo_buffer(
+            capacity=64, window_lookahead_steps=s, num_prompts_per_train_step=p
+        )
+        num_groups = (s + 2) * p + 1
+        for group_id in range(num_groups):
+            await _admit(buffer, group_id)
+        await buffer.claim_next()  # g0 -> INFLIGHT (head stuck at phase r0)
+        for group_id in range(1, num_groups):
+            await _finalize(buffer, group_id)
+
+        taken = 0
+        while True:
+            taker = asyncio.create_task(
+                buffer.take_finalized(pending_trainable_count=r0)
+            )
+            await asyncio.sleep(0)
+            if not taker.done():
+                taker.cancel()
+                break
+            await taker
+            taken += 1
+        return taken
+
+    async def run() -> None:
+        p, s = 4, 1
+        # window size W = (s+1)*P - r0; non-head bypassable entries = W - 1.
+        assert await _bypassable_count(r0=0, s=s, p=p) == (s + 1) * p - 0 - 1
+        assert await _bypassable_count(r0=p - 1, s=s, p=p) == (s + 1) * p - (p - 1) - 1
+        # The EXTRA train-steps both incur is floor((r0 + (W-1)) / P) = s in both cases.
+        for r0 in (0, p - 1):
+            bypassed = await _bypassable_count(r0=r0, s=s, p=p)
+            window_size = bypassed + 1  # + the head itself
+            assert (r0 + (window_size - 1)) // p == s
+
+    asyncio.run(run())
+
+
+def test_window_anchored_until_head_consumed() -> None:
+    # Consuming non-head groups must NOT slide the window (r0 held) until the head leaves.
+    async def run() -> None:
+        # s=1, P=2, r0=0 -> window_end = h + 3.
+        buffer = _fifo_buffer(
+            capacity=10, window_lookahead_steps=1, num_prompts_per_train_step=2
+        )
+        for group_id in range(6):
+            await _admit(buffer, group_id)
+        await buffer.claim_next()  # g0 stuck
+        for group_id in (1, 2, 3, 4, 5):
+            await _finalize(buffer, group_id)
+
+        # g1..g3 consumable; g4, g5 outside [g0, g3].
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 1
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 2
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 3
+        taker = asyncio.create_task(buffer.take_finalized(pending_trainable_count=0))
+        await asyncio.sleep(0)
+        assert not taker.done()  # window did not slide despite 3 holes
+
+        # Now consume the head; window slides to g4 and g4/g5 become eligible.
+        await _finalize(buffer, 0)
+        assert (await taker).group_id == 0
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 4
+        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 5
 
     asyncio.run(run())
 
 
 def test_policy_age_tolerance_accounts_for_window_lookahead() -> None:
-    # Hard bound = max_offpolicy_steps + window_lookahead_steps = 3 + 2 = 5.
+    # Hard bound = max_offpolicy_steps + window_lookahead_steps = 3 + 2 = 5 (exact).
     # Age exactly at the bound is allowed; one past it raises.
     metrics = compute_policy_age_metrics(
         trainer_policy_version=5,
