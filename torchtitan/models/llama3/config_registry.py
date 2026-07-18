@@ -4,17 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import numpy as np
-
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.data.dataset import (
-    DataRuntime,
-    SingleDatasetConfig,
-    TokenSample,
-)
+from torchtitan.components.data.collators import TextCollator
+from torchtitan.components.data.dataset import ChatToTokenSequence, SingleDatasetConfig
 from torchtitan.components.data.loader import GrainDataLoader
-from torchtitan.components.data.packing import PackedTokenDatasetConfig
-from torchtitan.components.data.sources import JsonlSourceConfig
+from torchtitan.components.data.packing import FirstFitPackingConfig
+from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -23,10 +18,7 @@ from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import (
-    ChatDataLoader,
-    HuggingFaceTextDataLoader,
-)
+from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
@@ -56,9 +48,7 @@ def llama3_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4_test",
-        ),
+        dataloader=c4_text_dataloader("c4_test"),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
         checkpoint=CheckpointManager.Config(
@@ -69,36 +59,9 @@ def llama3_debugmodel() -> Trainer.Config:
         validator=Validator.Config(
             freq=5,
             steps=10,
+            dataloader=c4_text_dataloader("c4_test"),
         ),
     )
-
-
-def c4_text_to_token_sample(row: dict, runtime: DataRuntime) -> TokenSample:
-    """Tokenize one C4 row with a pretraining loss mask."""
-    assert runtime.tokenizer is not None
-    token_ids = np.asarray(
-        runtime.tokenizer.encode(row["text"], add_bos=True, add_eos=True),
-        dtype=np.int64,
-    )
-    return TokenSample(
-        token_ids=token_ids,
-        loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
-    )
-
-
-def llama3_debugmodel_grain() -> Trainer.Config:
-    """Llama 3 debug model using the Grain-backed local C4 pipeline."""
-    config = llama3_debugmodel()
-    config.dataloader = GrainDataLoader.Config(
-        dataset_config=PackedTokenDatasetConfig(
-            dataset=SingleDatasetConfig(
-                source=JsonlSourceConfig(patterns=("tests/assets/c4_test/data.json",)),
-                sample_processor=c4_text_to_token_sample,
-            ),
-        ),
-        seed=42,
-    )
-    return config
 
 
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
@@ -173,9 +136,7 @@ def llama3_8b() -> Trainer.Config:
             seq_len=8192,
             steps=1000,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
-        ),
+        dataloader=c4_text_dataloader("c4"),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=SelectiveAC.Config(),
         validator=Validator.Config(
@@ -208,9 +169,7 @@ def llama3_70b() -> Trainer.Config:
             seq_len=8192,
             steps=1000,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
-        ),
+        dataloader=c4_text_dataloader("c4"),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
         ),
@@ -258,9 +217,7 @@ def llama3_405b() -> Trainer.Config:
             seq_len=8192,
             steps=3000,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
-        ),
+        dataloader=c4_text_dataloader("c4"),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
             enable_async_tensor_parallel=True,
@@ -277,12 +234,6 @@ def llama3_405b() -> Trainer.Config:
 
 def sft_debugmodel() -> Trainer.Config:
     """SFT debug config with Llama3 debugmodel and local test data."""
-
-    def process_sample(sample):
-        return [
-            {"role": "user", "content": sample["question"]},
-            {"role": "assistant", "content": sample["answer"]},
-        ]
 
     model_spec = model_registry("debugmodel", attn_backend="flex")
 
@@ -306,13 +257,22 @@ def sft_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=ChatDataLoader.Config(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": "tests/assets/sft_test/data.json",
-                "split": "train",
-            },
-            sample_processor=process_sample,
+        dataloader=GrainDataLoader.Config(
+            dataset=FirstFitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path="json",
+                        load_dataset_kwargs={
+                            "data_files": "tests/assets/sft_test/data.json",
+                            "split": "train",
+                        },
+                    ),
+                    process=ChatToTokenSequence.Config(
+                        sample_to_messages=_question_answer_to_messages,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(
@@ -321,3 +281,10 @@ def sft_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def _question_answer_to_messages(sample):
+    return [
+        {"role": "user", "content": sample["question"]},
+        {"role": "assistant", "content": sample["answer"]},
+    ]

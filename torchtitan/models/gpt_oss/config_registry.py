@@ -12,7 +12,7 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.validate import Validator
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
@@ -30,9 +30,7 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4_test",
-        ),
+        dataloader=c4_text_dataloader("c4_test"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -80,7 +78,7 @@ def gpt_oss_20b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/gpt-oss-20b",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=c4_text_dataloader("c4"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -111,7 +109,7 @@ def gpt_oss_120b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/gpt-oss-120b",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=c4_text_dataloader("c4"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,

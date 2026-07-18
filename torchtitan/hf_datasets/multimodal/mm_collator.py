@@ -4,37 +4,40 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multimodal collator for VLM datasets."""
+"""Qwen multimodal collator for Grain rows."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
+from torchtitan.components.data.collators import Collator, TrainerBatch
+from torchtitan.components.data.dataset import DataRuntime
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.tools.logging import logger
 from .utils.image import vision_to_patches
 from .utils.text import pad_batch_dim, pad_seq_len
 
 
-@dataclass
-class MultiModalCollator:
-    """Multimodal collator for VLM training.
+class QwenMultimodalCollator(Collator):
+    """Collates ordered Qwen rows into the model's multimodal input contract."""
 
-    Handles both image and text data, converting images to patches
-    and preparing text for model input.
-    """
+    @dataclass(kw_only=True, slots=True)
+    class Config(Collator.Config):
+        patch_size: int = 16
+        temporal_patch_size: int = 2
+        spatial_merge_size: int = 2
+        build_mrope_positions: bool = False
 
-    batch_size: int
-    seq_len: int
-    max_images_per_batch: int
-    patch_size: int
-    temporal_patch_size: int
-    spatial_merge_size: int
-    tokenizer: MultiModalTokenizer
-    build_mrope_positions: bool
+    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
+        self.batch_size = runtime.local_batch_size
+        self.seq_len = runtime.seq_len
+        self.patch_size = config.patch_size
+        self.temporal_patch_size = config.temporal_patch_size
+        self.spatial_merge_size = config.spatial_merge_size
+        self.tokenizer = runtime.tokenizer
+        self.build_mrope_positions = config.build_mrope_positions
 
     def collate_images(
         self, all_images: list[torch.Tensor]
@@ -299,26 +302,9 @@ class MultiModalCollator:
 
         return mrope_positions
 
-    def __call__(
-        self, batch: list[dict[str, Any]]
-    ) -> tuple[dict[str, torch.Tensor | None], torch.Tensor]:
+    def __call__(self, batch: Sequence[dict[str, Any]]) -> TrainerBatch:
         """Collate batch with patch-based approach."""
-        images_per_sample: list[int] = []
-        for sample in batch:
-            num_images = len(sample.get("pixel_values", []))
-            for vid in sample.get("pixel_values_videos", []):
-                num_images += vid.shape[0] // self.temporal_patch_size
-            images_per_sample.append(num_images)
-
-        total_images = sum(images_per_sample)
-        while total_images > self.max_images_per_batch and batch:
-            removed_images = images_per_sample.pop()
-            total_images -= removed_images
-            batch.pop()
-            logger.warning(
-                f"Removed sample with {removed_images} vision entries to keep "
-                f"total <= {self.max_images_per_batch}"
-            )
+        batch = list(batch)
 
         all_images = [
             img
@@ -365,5 +351,4 @@ class MultiModalCollator:
                 video_token_id=special_tokens["video_id"],
             )
 
-        # pyrefly: ignore [bad-return]
         return input_dict, labels

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 import spmd_types as spmd
 import torch
 
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
@@ -30,6 +31,8 @@ from torchtitan.models.flux.utils import (
 )
 from torchtitan.trainer import Trainer
 
+from .flux_datasets import flux_image_size
+
 
 class FluxTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
@@ -46,7 +49,11 @@ class FluxTrainer(Trainer):
         # Compute image token count: autoencoder downscales the image,
         # then pack_latents tiles the latent into 2×2 patches.
         # pyrefly: ignore [missing-attribute]
-        img_size = config.dataloader.img_size
+        if not isinstance(config.dataloader, GrainDataLoader.Config):
+            raise ValueError(
+                "FluxTrainer requires GrainDataLoader.Config for dataloader"
+            )
+        img_size = flux_image_size(config.dataloader.dataset)
         ae_downscale = IMAGE_LATENT_SIZE_RATIO
         latent_side_width = img_size // ae_downscale // PATCH_WIDTH
         latent_side_height = img_size // ae_downscale // PATCH_HEIGHT

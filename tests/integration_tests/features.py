@@ -548,7 +548,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--validator.enable",
-                    "--validator.dataloader.dataset c4_test",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
                     "--parallelism.pipeline_parallel_degree=2",

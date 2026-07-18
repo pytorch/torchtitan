@@ -4,130 +4,221 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import unittest
+from dataclasses import dataclass
 
+import grain.python as grain
+import numpy as np
+import PIL.Image
 import torch
-from datasets import load_dataset
-from torchtitan.config import ConfigManager
-from torchtitan.hf_datasets import DatasetConfig
+
+from torchtitan.components.data.dataset import (
+    BuildOptions,
+    DataRuntime,
+    SingleDatasetConfig,
+)
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.models.flux.flux_datasets import (
+    FluxCollator,
+    FluxSampleProcessor,
+    FluxValidationTimestepConfig,
+)
 
 
-class TestFluxDataLoader(unittest.TestCase):
-    def setUp(self):
-        # Import here to avoid circular import during test collection
-        from torchtitan.models.flux.flux_datasets import (
-            _cc12m_wds_data_processor,
-            DATASETS,
-            FluxDataLoader,
+class FakeTokenizer:
+    def encode(self, text: str) -> dict[str, torch.Tensor]:
+        value = len(text)
+        return {
+            "t5": torch.full((5,), value, dtype=torch.long),
+            "clip": torch.full((3,), value + 100, dtype=torch.long),
+        }
+
+
+@dataclass(frozen=True)
+class RowsSourceConfig:
+    rows: tuple[dict, ...]
+
+    def build(self, **_):
+        return self.rows
+
+
+def _image(width: int, height: int, offset: int) -> PIL.Image.Image:
+    y, x = np.mgrid[:height, :width]
+    pixels = np.stack(
+        (
+            (x * 17 + offset) % 256,
+            (y * 29 + offset * 3) % 256,
+            ((x + y) * 11 + offset * 7) % 256,
+        ),
+        axis=-1,
+    ).astype(np.uint8)
+    return PIL.Image.fromarray(pixels, mode="RGB")
+
+
+def _rows(count: int, *, image_size: int = 8) -> tuple[dict, ...]:
+    return tuple(
+        {
+            "image": _image(
+                image_size + 11 if index % 2 == 0 else image_size,
+                image_size if index % 2 == 0 else image_size + 9,
+                index,
+            ),
+            "prompt": f"sample-{index}",
+        }
+        for index in range(count)
+    )
+
+
+def _runtime(batch_size: int = 2) -> DataRuntime:
+    return DataRuntime(
+        tokenizer=FakeTokenizer(),
+        seq_len=8,
+        local_batch_size=batch_size,
+        read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+    )
+
+
+def _options(*, seed: int = 17, repeat: bool = True) -> BuildOptions:
+    return BuildOptions(
+        seed=seed,
+        shuffle=False,
+        repeat=repeat,
+        dp_rank=0,
+        dp_world_size=1,
+    )
+
+
+def _dataset(
+    rows: tuple[dict, ...],
+    *,
+    image_size: int = 8,
+    dropout: float = 0.0,
+) -> SingleDatasetConfig:
+    return SingleDatasetConfig(
+        source=RowsSourceConfig(rows),
+        process=FluxSampleProcessor.Config(
+            image_field="image",
+            caption_field="prompt",
+            image_size=image_size,
+            prompt_dropout_prob=dropout,
+        ),
+        filters=(lambda row: row is not None,),
+    )
+
+
+def _loader(
+    dataset,
+    *,
+    batch_size: int = 2,
+    seed: int = 17,
+    repeat: bool = True,
+):
+    return GrainDataLoader.Config(
+        dataset=dataset,
+        collator=FluxCollator.Config(),
+        seed=seed,
+        shuffle=False,
+        repeat=repeat,
+        batch_prefetch_buffer_size=1,
+    ).build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        seq_len=8,
+        local_batch_size=batch_size,
+    )
+
+
+def test_flux_processor_uses_seeded_crop_and_prompt_dropout():
+    dataset = _dataset(_rows(12), dropout=0.5)
+    first = list(
+        dataset.build(
+            runtime=_runtime(),
+            options=_options(seed=91, repeat=False),
         )
-
-        # Store reference for use in tearDown
-        self._DATASETS = DATASETS
-        self._cc12m_wds_data_processor = _cc12m_wds_data_processor
-        self._FluxDataLoader = FluxDataLoader
-
-        self._DATASETS["cc12m-test-iterable"] = DatasetConfig(
-            path="tests/assets/cc12m_test",
-            loader=lambda path: load_dataset(
-                path, split="train", data_files={"train": "*tar"}
-            ).to_iterable_dataset(num_shards=4),
-            sample_processor=self._cc12m_wds_data_processor,
+    )
+    second = list(
+        dataset.build(
+            runtime=_runtime(),
+            options=_options(seed=91, repeat=False),
         )
+    )
 
-    def tearDown(self):
-        del self._DATASETS["cc12m-test-iterable"]
+    assert len(first) == len(second) == 12
+    for actual, expected in zip(first, second, strict=True):
+        assert actual[0]["prompt"] == expected[0]["prompt"]
+        assert torch.equal(actual[0]["t5"], expected[0]["t5"])
+        assert torch.equal(actual[0]["clip"], expected[0]["clip"])
+        assert torch.equal(actual[1], expected[1])
 
-    def test_load_dataset(self):
-        # The test checks for the correct tensor shapes during the first num_steps
-        # The next num_steps ensure the loaded from checkpoint dataloader generates tokens and labels correctly
-        for world_size in [2]:
-            for rank in range(world_size):
-                dataset_name = "cc12m-test-iterable"
-                batch_size = 1
+    assert any(
+        torch.equal(row[0]["t5"], torch.zeros_like(row[0]["t5"])) for row in first
+    )
+    assert any(not torch.equal(first[0][1], row[1]) for row in first[1:])
 
-                num_steps = 15
 
-                # TODO: if num_steps * batch_size * world_size is larger than the number of samples
-                # in the dataset, then the test will fail, due to huggingface's
-                # non-resumption when checkpointing after the first epoch
+def test_flux_loader_checkpoint_restores_random_transform_without_reseeding():
+    dataset = _dataset(_rows(20), dropout=0.5)
+    loader = _loader(dataset, seed=91)
+    iterator = iter(loader)
+    next(iterator)
+    state = loader.state_dict()
+    expected = next(iterator)
 
-                # Load flux config via --module/--config
-                config_manager = ConfigManager()
-                config = config_manager.parse_args(
-                    [
-                        "--module",
-                        "flux",
-                        "--config",
-                        "flux_debugmodel",
-                        "--training.local_batch_size",
-                        str(batch_size),
-                        "--dataloader.img_size",
-                        str(256),
-                        "--dataloader.dataset",
-                        dataset_name,
-                        "--dataloader.prompt_dropout_prob",
-                        "0.447",
-                        "--tokenizer.test_mode",
-                        "--tokenizer.t5_tokenizer_path",
-                        "tests/assets/tokenizer",
-                        "--tokenizer.clip_tokenizer_path",
-                        "tests/assets/tokenizer",
-                        "--encoder.random_init",
-                        "--encoder.t5_encoder",
-                        "tests/assets/flux_test_encoders/t5-v1_1-xxl",
-                        "--encoder.clip_encoder",
-                        "tests/assets/flux_test_encoders/clip-vit-large-patch14",
-                    ]
-                )
+    torch.rand(100)
+    restored = _loader(dataset, seed=91)
+    restored.load_state_dict(state)
+    actual = next(iter(restored))
 
-                # Build the tokenizer container from config
-                tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+    assert actual[0]["prompt"] == expected[0]["prompt"]
+    assert torch.equal(actual[0]["t5"], expected[0]["t5"])
+    assert torch.equal(actual[0]["clip"], expected[0]["clip"])
+    assert torch.equal(actual[1], expected[1])
 
-                dl = config.dataloader.build(
-                    dp_world_size=world_size,
-                    dp_rank=rank,
-                    local_batch_size=batch_size,
-                    tokenizer=tokenizer,
-                )
 
-                it = iter(dl)
+def test_flux_validation_timesteps_follow_accepted_rows_and_restore():
+    rows = list(_rows(8))
+    rows[1] = {
+        "image": _image(4, 12, 99),
+        "prompt": "rejected",
+    }
+    dataset = FluxValidationTimestepConfig(
+        dataset=_dataset(tuple(rows)),
+        generate_timesteps=True,
+    )
+    loader = _loader(dataset, batch_size=2, repeat=True)
+    iterator = iter(loader)
 
-                for i in range(0, num_steps):
-                    input_data, labels = next(it)
+    first = next(iterator)
+    assert torch.equal(
+        first[0]["timestep"],
+        torch.tensor([0.0625, 0.1875], dtype=torch.float64),
+    )
+    state = loader.state_dict()
+    expected = next(iterator)
 
-                    assert (
-                        len(input_data) == 3
-                    )  # (clip_encodings, t5_encodings, prompt)
-                    assert labels.shape == (batch_size, 3, 256, 256)
-                    assert input_data["clip"].shape == (
-                        batch_size,
-                        77,
-                    )
-                    assert input_data["t5"].shape == (
-                        batch_size,
-                        256,
-                    )
+    restored = _loader(
+        FluxValidationTimestepConfig(
+            dataset=_dataset(tuple(rows)),
+            generate_timesteps=True,
+        ),
+        batch_size=2,
+        repeat=True,
+    )
+    restored.load_state_dict(state)
+    actual = next(iter(restored))
+    assert torch.equal(actual[0]["timestep"], expected[0]["timestep"])
+    assert torch.equal(actual[1], expected[1])
 
-                state = dl.state_dict()
 
-                # Create new dataloader, restore checkpoint, and check if next data yielded is the same as above
-                dl_resumed = config.dataloader.build(
-                    dp_world_size=world_size,
-                    dp_rank=rank,
-                    local_batch_size=batch_size,
-                    tokenizer=tokenizer,
-                )
-                dl_resumed.load_state_dict(state)
-                it_resumed = iter(dl_resumed)
+def test_flux_collator_preserves_trainer_batch_contract():
+    loader = _loader(_dataset(_rows(3)), batch_size=2, repeat=False)
+    inputs, labels = next(iter(loader))
 
-                for i in range(num_steps):
-                    # Set torch manual seed before each dataloader iteration to ensure consistent randomness
-                    # across dataloaders for testing purposes.
-                    torch.manual_seed(i)
-                    expected_input_ids, expected_labels = next(it)
-                    torch.manual_seed(i)
-                    input_ids, labels = next(it_resumed)
-
-                    assert torch.equal(input_ids["clip"], expected_input_ids["clip"])
-                    assert torch.equal(input_ids["t5"], expected_input_ids["t5"])
-                    assert torch.equal(labels, expected_labels)
+    assert set(inputs) == {"t5", "clip", "prompt"}
+    assert inputs["t5"].shape == (2, 5)
+    assert inputs["clip"].shape == (2, 3)
+    assert inputs["prompt"] == ["sample-0", "sample-1"]
+    assert labels.shape == (2, 3, 8, 8)
+    assert labels.dtype == torch.float32
+    assert labels.min() >= -1.0
+    assert labels.max() <= 1.0

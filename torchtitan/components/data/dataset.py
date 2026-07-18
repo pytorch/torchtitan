@@ -4,314 +4,331 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Dataset composition for the grain dataloader.
+"""Composable dataset recipes backed by Grain."""
 
-Mental model: common text configs lower to a Grain `MapDataset`; custom configs may
-return an `IterDataset`.
-
-    leaf:    source -> process -> filters          (SingleDatasetConfig)
-    compose: combine_fn(leaves)                    (MultiDatasetConfig)
-    global:  seed shuffle -> DP stride shard -> repeat   (finish_map_dataset, applied once)
-
-Example:
-
-    dataset_config = weighted_interleave([
-        (SingleDatasetConfig(source=JsonlSourceConfig(patterns=("math_*.jsonl",)),
-                             sample_processor=text_row_to_token_sample), 2.0),
-        (SingleDatasetConfig(source=JsonlSourceConfig(patterns=("code_*.jsonl",)),
-                             sample_processor=text_row_to_token_sample), 1.0),
-    ])
-    # -> deterministic 2:1 document interleave, globally shuffled, sharded per DP rank
-"""
-
-import hashlib
-import inspect
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from typing import Any, Protocol
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from typing import Any, Protocol, TypeAlias
 
 import grain.python as grain
 import numpy as np
 
-from torchtitan.components.data.sources import SourceConfig
+from torchtitan.components.data.sources import RandomAccessSource, SourceConfig
 from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.config import Configurable
+
+
+GrainDataset: TypeAlias = grain.MapDataset | grain.IterDataset
+ChatMessages: TypeAlias = list[dict[str, Any]]
+SampleToMessages: TypeAlias = Callable[[dict[str, Any]], ChatMessages]
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class DataRuntime:
-    """Training objects and sizes available while a dataset recipe is built."""
+    """Objects and sizes available while a dataset recipe is built."""
 
+    tokenizer: BaseTokenizer
     seq_len: int
     local_batch_size: int
-    tokenizer: BaseTokenizer | None = None
+    read_options: grain.ReadOptions
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class BuildOptions:
-    """Deterministic build parameters applied globally, once, by `finish_map_dataset`."""
+    """Run policy supplied once by the loader."""
 
     seed: int = 0
     shuffle: bool = True
-    infinite: bool = True
+    repeat: bool = True
     dp_rank: int = 0
     dp_world_size: int = 1
 
 
 class DatasetConfig(Protocol):
-    """Anything that lowers to a grain dataset; the escape hatch for custom pipelines."""
+    """Builds one node of a Grain dataset graph."""
 
-    def build(
-        self, *, runtime: DataRuntime, options: BuildOptions
-    ) -> grain.MapDataset | grain.IterDataset:
-        ...
-
-    def fingerprint(self) -> str:
+    def build(self, *, runtime: DataRuntime, options: BuildOptions) -> GrainDataset:
         ...
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class TokenSample:
-    """One document after processing: token ids plus which positions train the loss.
+class TokenSequence:
+    """One tokenized document and the positions that train the loss."""
 
-    Example:
+    token_ids: np.ndarray
+    loss_mask: np.ndarray
 
-        # SFT: prompt tokens masked out, response tokens trained
-        TokenSample(
-            token_ids=np.array([1, 15, 27, 99, 42, 2]),
-            loss_mask=np.array([False, False, False, True, True, True]),
+
+class SampleProcessor(Configurable, ABC):
+    """Configured row processor using Grain-provided deterministic randomness."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    @abstractmethod
+    def __call__(
+        self,
+        sample: Any,
+        rng: np.random.Generator,
+    ) -> Any:
+        ...
+
+
+class TextToTokenSequence(SampleProcessor):
+    """Tokenizes one text field for causal-language-model pretraining."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(SampleProcessor.Config):
+        text_field: str = "text"
+
+    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
+        self._text_field = config.text_field
+        self._tokenizer = runtime.tokenizer
+
+    def __call__(
+        self,
+        sample: dict[str, Any],
+        rng: np.random.Generator,
+    ) -> TokenSequence:
+        del rng
+        token_ids = np.asarray(
+            self._tokenizer.encode(
+                sample[self._text_field],
+                add_bos=True,
+                add_eos=True,
+            ),
+            dtype=np.int64,
         )
-    """
-
-    token_ids: np.ndarray  # [doc_tokens]
-    loss_mask: np.ndarray  # [doc_tokens] bool; True = train on this position's label
-
-
-# A processor maps a raw source row to the sample expected by downstream stages.
-# Built-in processors and filters must be deterministic functions of their arguments.
-SampleProcessor = Callable[..., Any]
-FilterFn = Callable[..., bool]
-
-
-def fingerprint_parts(*parts: str) -> str:
-    """sha256 over NUL-separated parts (separators prevent ("ab","c")/("a","bc") collisions)."""
-    digest = hashlib.sha256()
-    for part in parts:
-        digest.update(part.encode())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def callable_fingerprint(fn: Callable[..., Any] | None) -> str:
-    """Stable identity of a configured callable for resume fingerprints.
-
-    Configured callable objects (mixers, packers with values) must implement
-    `fingerprint()` naming their configuration; plain functions use module:qualname;
-    lambdas add their line number so two same-file lambdas differ. Renaming or moving
-    a function invalidates checkpoints on purpose: a conservative false rejection is
-    safer than resuming grain state into a stream with different semantics.
-    """
-    if fn is None:
-        return "none"
-    fingerprint = getattr(fn, "fingerprint", None)
-    if fingerprint is not None:
-        return fingerprint_parts(
-            f"{type(fn).__module__}:{type(fn).__qualname__}", fingerprint()
+        return TokenSequence(
+            token_ids=token_ids,
+            loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
         )
-    if inspect.isfunction(fn) or inspect.ismethod(fn):
-        name = f"{fn.__module__}:{fn.__qualname__}"
-        if fn.__name__ == "<lambda>":
-            return f"{name}:{fn.__code__.co_firstlineno}"
-        return name
-    raise TypeError(
-        f"configured callable {type(fn).__qualname__} must implement fingerprint()"
-    )
 
 
-def _bind_runtime(fn: Callable[..., Any], runtime: DataRuntime) -> Callable[[Any], Any]:
-    """Bind `(row)` or `(row, runtime)` by REQUIRED positional arity.
+class ChatToTokenSequence(SampleProcessor):
+    """Applies a chat template and marks the assistant response for training."""
 
-    Example:
+    @dataclass(kw_only=True, slots=True)
+    class Config(SampleProcessor.Config):
+        sample_to_messages: SampleToMessages
+        train_on_assistant_only: bool = True
 
-        def a(row): ...                    # called as a(row)
-        def b(row, runtime): ...           # called as b(row, runtime)
-        def c(row, suffix="!"): ...        # called as c(row) — optionals are not runtime
-    """
-    positional = [
-        parameter
-        for parameter in inspect.signature(fn).parameters.values()
-        if parameter.kind
-        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    required = [p for p in positional if p.default is inspect.Parameter.empty]
-    if len(required) == 1:
-        return fn
-    if len(required) == 2 and len(positional) == 2:
-        return lambda row: fn(row, runtime)
-    raise TypeError(f"{getattr(fn, '__name__', fn)} must take (row) or (row, runtime)")
+    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
+        if runtime.tokenizer.eos_id is None:
+            raise ValueError("ChatToTokenSequence requires a tokenizer EOS token")
+        self._sample_to_messages = config.sample_to_messages
+        self._train_on_assistant_only = config.train_on_assistant_only
+        self._tokenizer = runtime.tokenizer
+        self._eos_id = runtime.tokenizer.eos_id
+
+    def __call__(
+        self,
+        sample: dict[str, Any],
+        rng: np.random.Generator,
+    ) -> TokenSequence:
+        del rng
+        messages = self._sample_to_messages(sample)
+        _validate_single_turn_messages(messages)
+
+        full_text = self._tokenizer.apply_chat_template(messages).rstrip("\n")
+        token_ids = self._tokenizer.encode(
+            full_text,
+            add_bos=True,
+            add_eos=False,
+        )
+        if token_ids[-1] != self._eos_id:
+            token_ids.append(self._eos_id)
+
+        loss_mask = np.ones(len(token_ids), dtype=np.bool_)
+        if self._train_on_assistant_only:
+            prompt_text = self._tokenizer.apply_chat_template(
+                messages[:1],
+                add_generation_prompt=True,
+            )
+            prompt_length = len(
+                self._tokenizer.encode(
+                    prompt_text,
+                    add_bos=True,
+                    add_eos=False,
+                )
+            )
+            loss_mask[:prompt_length] = False
+
+        return TokenSequence(
+            token_ids=np.asarray(token_ids, dtype=np.int64),
+            loss_mask=loss_mask,
+        )
 
 
-def finish_map_dataset(
-    dataset: grain.MapDataset, *, options: BuildOptions
+def _validate_single_turn_messages(messages: ChatMessages) -> None:
+    if len(messages) != 2:
+        raise ValueError(
+            f"expected one user and one assistant message, got {len(messages)}"
+        )
+    if messages[0]["role"] != "user":
+        raise ValueError(
+            f"first message must have role 'user', got {messages[0]['role']!r}"
+        )
+    if messages[1]["role"] != "assistant":
+        raise ValueError(
+            f"second message must have role 'assistant', got {messages[1]['role']!r}"
+        )
+
+
+def _apply_process(
+    dataset: GrainDataset,
+    process: SampleProcessor.Config | Callable[[Any], Any] | None,
+    *,
+    runtime: DataRuntime,
+    seed: int,
+) -> GrainDataset:
+    if process is None:
+        return dataset
+    if isinstance(process, SampleProcessor.Config):
+        processor = process.build(runtime=runtime)
+        return dataset.random_map(processor, seed=seed)
+    return dataset.map(process)
+
+
+def _finish_random_access(
+    dataset: grain.MapDataset,
+    *,
+    options: BuildOptions,
 ) -> grain.MapDataset:
-    """Apply the global stages exactly once: seed shuffle -> DP stride shard -> repeat.
-
-    Shuffle reseeds per epoch by construction; sharding after shuffle gives each rank a
-    disjoint 1/N of a global permutation (verified: research/opus/probes/firstfit_shard_probe.py).
-    """
     if options.shuffle:
         dataset = dataset.shuffle(seed=options.seed)
-    if options.dp_world_size > 1:
-        # a rank with zero rows stops producing batches and hangs SPMD collectives
-        if len(dataset) < options.dp_world_size:
-            raise ValueError(
-                f"dataset has {len(dataset)} rows, fewer than "
-                f"dp_world_size={options.dp_world_size}"
-            )
-        dataset = dataset[options.dp_rank :: options.dp_world_size]
-    if options.infinite:
+    if len(dataset) < options.dp_world_size:
+        raise ValueError(
+            f"dataset has {len(dataset)} rows, fewer than "
+            f"dp_world_size={options.dp_world_size}"
+        )
+    dataset = dataset[options.dp_rank :: options.dp_world_size]
+    if options.repeat:
         dataset = dataset.repeat()
+    return dataset
+
+
+def _finish_streaming(
+    dataset: grain.IterDataset,
+    *,
+    options: BuildOptions,
+    shuffle_window_size: int,
+) -> grain.IterDataset:
+    if options.repeat:
+        dataset = grain.experimental.RepeatIterDataset(dataset)
+    if options.shuffle:
+        dataset = grain.experimental.WindowShuffleIterDataset(
+            dataset,
+            window_size=shuffle_window_size,
+            seed=options.seed,
+        )
     return dataset
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class SingleDatasetConfig:
-    """One source with its row-level processing.
-
-    Example:
-
-        def c4_row_to_token_sample(row: dict, runtime: DataRuntime) -> TokenSample:
-            ids = np.asarray(runtime.tokenizer.encode(row["text"], add_bos=True, add_eos=True))
-            return TokenSample(token_ids=ids, loss_mask=np.ones(ids.shape, dtype=np.bool_))
-
-        SingleDatasetConfig(
-            source=JsonlSourceConfig(patterns=("data.json",)),
-            sample_processor=c4_row_to_token_sample,
-        )
-    """
+    """One source with row processing, filtering, and run policy."""
 
     source: SourceConfig
-    sample_processor: SampleProcessor | None = None
-    sample_filters: tuple[FilterFn, ...] = ()
+    process: SampleProcessor.Config | Callable[[Any], Any] | None = None
+    filters: tuple[Callable[[Any], bool], ...] = ()
+    shuffle_window_size: int = 10_000
 
-    def build_processed_dataset(self, *, runtime: DataRuntime) -> grain.MapDataset:
-        """Build source -> sample processor -> sample filters, without global stages."""
-        dataset = grain.MapDataset.source(self.source.build())
-        if self.sample_processor is not None:
-            dataset = dataset.map(_bind_runtime(self.sample_processor, runtime))
-        for filter_fn in self.sample_filters:
-            dataset = dataset.filter(_bind_runtime(filter_fn, runtime))
-        return dataset
+    def build(self, *, runtime: DataRuntime, options: BuildOptions) -> GrainDataset:
+        if self.filters and not options.repeat and options.dp_world_size > 1:
+            raise ValueError(
+                "finite filtered datasets are not supported with data parallelism"
+            )
+        source = self.source.build(runtime=runtime, options=options)
+        if isinstance(source, grain.IterDataset):
+            dataset = _apply_process(
+                source,
+                self.process,
+                runtime=runtime,
+                seed=options.seed + options.dp_rank,
+            )
+            for filter_fn in self.filters:
+                dataset = dataset.filter(filter_fn)
+            return _finish_streaming(
+                dataset,
+                options=options,
+                shuffle_window_size=self.shuffle_window_size,
+            )
 
-    def build(self, *, runtime: DataRuntime, options: BuildOptions) -> grain.MapDataset:
-        return finish_map_dataset(
-            self.build_processed_dataset(runtime=runtime),
-            options=options,
+        if not isinstance(source, RandomAccessSource):
+            raise TypeError("source must support len/getitem or be a Grain IterDataset")
+        dataset = grain.MapDataset.source(source)
+        dataset = _apply_process(
+            dataset,
+            self.process,
+            runtime=runtime,
+            seed=options.seed,
         )
-
-    def fingerprint(self) -> str:
-        return fingerprint_parts(
-            type(self).__qualname__,
-            self.source.fingerprint(),
-            callable_fingerprint(self.sample_processor),
-            *(callable_fingerprint(filter_fn) for filter_fn in self.sample_filters),
-        )
-
-
-# A combiner receives child configs so it can inspect source metadata and build finite
-# selected views. It must build each child it uses via
-# `build_processed_dataset` and must not apply global shuffle/shard/repeat.
-DatasetCombineFn = Callable[
-    [tuple[SingleDatasetConfig, ...], DataRuntime, BuildOptions], grain.MapDataset
-]
+        for filter_fn in self.filters:
+            dataset = dataset.filter(filter_fn)
+        return _finish_random_access(dataset, options=options)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class MultiDatasetConfig:
-    """Several sources combined before global shuffle, sharding, and repetition."""
+class WeightedDataset:
+    """A dataset and its relative selection weight."""
 
-    datasets: tuple[SingleDatasetConfig, ...]
-    combine_fn: DatasetCombineFn
-
-    def build(self, *, runtime: DataRuntime, options: BuildOptions) -> grain.MapDataset:
-        combined = self.combine_fn(self.datasets, runtime, options)
-        return finish_map_dataset(combined, options=options)
-
-    def fingerprint(self) -> str:
-        return fingerprint_parts(
-            type(self).__qualname__,
-            callable_fingerprint(self.combine_fn),
-            *(dataset.fingerprint() for dataset in self.datasets),
-        )
+    dataset: DatasetConfig
+    weight: float = 1.0
 
 
-@dataclass(frozen=True, slots=True)
-class WeightedDatasetInterleave:
-    """Deterministic document-proportion interleave (grain index arithmetic, not RNG).
+@dataclass(frozen=True, kw_only=True, slots=True)
+class DatasetMixConfig:
+    """Deterministically interleaves weighted child datasets."""
 
-    Example:
+    datasets: tuple[WeightedDataset, ...]
 
-        WeightedDatasetInterleave(weights=(2.0, 1.0))
-        # children [a0,a1,a2,...], [b0,b1,...] -> [a0, a1, b0, a2, a3, b1, ...]
-    """
+    def build(self, *, runtime: DataRuntime, options: BuildOptions) -> GrainDataset:
+        if not self.datasets or any(item.weight <= 0 for item in self.datasets):
+            raise ValueError("DatasetMixConfig requires positive-weight datasets")
+        children = [
+            item.dataset.build(
+                runtime=runtime,
+                options=replace(options, seed=options.seed + index),
+            )
+            for index, item in enumerate(self.datasets)
+        ]
+        weights = [item.weight for item in self.datasets]
+        if all(isinstance(child, grain.MapDataset) for child in children):
+            return grain.MapDataset.mix(children, weights=weights)
+        if all(isinstance(child, grain.IterDataset) for child in children):
+            return grain.IterDataset.mix(children, weights=weights)
+        raise TypeError("a mix cannot combine map and iterable child datasets")
 
-    weights: tuple[float, ...]
 
-    def __call__(
+@dataclass(frozen=True, kw_only=True, slots=True)
+class DatasetConcatConfig:
+    """Concatenates finite children before global shuffle and DP sharding."""
+
+    datasets: tuple[DatasetConfig, ...]
+
+    def build(
         self,
-        datasets: tuple[SingleDatasetConfig, ...],
+        *,
         runtime: DataRuntime,
         options: BuildOptions,
     ) -> grain.MapDataset:
-        del options
-        if len(datasets) != len(self.weights) or any(w <= 0 for w in self.weights):
-            raise ValueError("one positive weight is required per dataset")
+        finite_options = replace(
+            options,
+            shuffle=False,
+            repeat=False,
+            dp_rank=0,
+            dp_world_size=1,
+        )
         children = [
-            dataset.build_processed_dataset(runtime=runtime) for dataset in datasets
+            dataset.build(runtime=runtime, options=finite_options)
+            for dataset in self.datasets
         ]
-        total = sum(self.weights)
-        return grain.MapDataset.mix(
-            children, weights=[weight / total for weight in self.weights]
-        )
-
-    def fingerprint(self) -> str:
-        return fingerprint_parts(
-            type(self).__qualname__, *(repr(weight) for weight in self.weights)
-        )
-
-
-def concatenate_datasets(
-    datasets: tuple[SingleDatasetConfig, ...],
-    runtime: DataRuntime,
-    options: BuildOptions,
-) -> grain.MapDataset:
-    """All of the first dataset, then the second, and so on."""
-    del options
-    return grain.MapDataset.concatenate(
-        [dataset.build_processed_dataset(runtime=runtime) for dataset in datasets]
-    )
-
-
-def weighted_interleave(
-    datasets_and_weights: Sequence[tuple[SingleDatasetConfig, float]],
-) -> MultiDatasetConfig:
-    """Weighted deterministic interleave of several datasets.
-
-    Example:
-
-        weighted_interleave([(math_ds, 2.0), (code_ds, 1.0)])
-        # 2 math docs : 1 code doc, exactly
-    """
-    return MultiDatasetConfig(
-        datasets=tuple(dataset for dataset, _ in datasets_and_weights),
-        combine_fn=WeightedDatasetInterleave(
-            weights=tuple(float(weight) for _, weight in datasets_and_weights)
-        ),
-    )
-
-
-def concat(datasets: Sequence[SingleDatasetConfig]) -> MultiDatasetConfig:
-    """Consume finite datasets one after another, in order."""
-    return MultiDatasetConfig(
-        datasets=tuple(datasets),
-        combine_fn=concatenate_datasets,
-    )
+        if not children or not all(
+            isinstance(child, grain.MapDataset) for child in children
+        ):
+            raise TypeError("DatasetConcatConfig requires map-style children")
+        combined = grain.MapDataset.concatenate(children)
+        return _finish_random_access(combined, options=options)
