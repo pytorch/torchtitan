@@ -8,8 +8,17 @@ import unittest
 
 import torch
 
+from torchtitan.components.data import (
+    GrainDataLoader,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+)
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.hf_datasets.multimodal.mm_datasets import multimodal_dataloader
+from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    MM_DATASETS,
+    MultiModalProcessor,
+)
 
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
@@ -30,16 +39,31 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
     """Test save/load for multimodal dataset, mirroring test_dataset_checkpointing.py."""
 
     def _build_dataloader(self, batch_size, seq_len, world_size, rank):
-        dl_config = multimodal_dataloader(
-            dataset="cc12m-test",
-            max_images_per_batch=128,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            min_pixels=784,
-            max_pixels=200000,
-            image_mean=(0.5, 0.5, 0.5),
-            image_std=(0.5, 0.5, 0.5),
+        dataset = MM_DATASETS["cc12m-test"]
+        dl_config = GrainDataLoader.Config(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path=dataset.path,
+                    loader=dataset.loader,
+                ),
+                process=MultiModalProcessor.Config(
+                    sample_processor=dataset.sample_processor,
+                    patch_size=16,
+                    temporal_patch_size=2,
+                    spatial_merge_size=2,
+                    min_pixels=784,
+                    max_pixels=200000,
+                    image_mean=(0.5, 0.5, 0.5),
+                    image_std=(0.5, 0.5, 0.5),
+                ),
+                filters=(lambda sample: sample is not None,),
+            ),
+            collator=MultiModalCollator.Config(
+                max_images_per_batch=128,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+            ),
         )
 
         return dl_config.build(

@@ -61,11 +61,9 @@ Workflow overview::
                      special_tokens: dict[str, int]}, labels
 """
 
-import inspect
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from typing import Annotated, Any
 
 import grain.python as grain
@@ -79,16 +77,12 @@ from torchtitan.components.data.dataset import (
     DataRuntime,
     DatasetConfig as GrainDatasetConfig,
     SampleProcessor,
-    SingleDatasetConfig,
 )
-from torchtitan.components.data.loader import GrainDataLoader
-from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
-from .mm_collator import MultiModalCollator
 from .utils.image import calculate_vision_tokens, process_image
 from .utils.packing import MMSamplePacker
 from .utils.text import insert_vision_placeholders
@@ -289,22 +283,6 @@ MM_DATASETS = {
 }
 
 
-def _validate_mm_dataset(
-    dataset_name: str, dataset_path: str | None = None
-) -> tuple[str, Callable, Callable]:
-    """Validate dataset name and path, returning (path, loader, sample_processor)."""
-    if dataset_name not in MM_DATASETS:
-        raise ValueError(
-            f"Dataset {dataset_name} is not supported. "
-            f"Supported datasets are: {list(MM_DATASETS.keys())}"
-        )
-
-    config = MM_DATASETS[dataset_name]
-    path = dataset_path or config.path
-    logger.info(f"Preparing {dataset_name} dataset from {path}")
-    return path, config.loader, config.sample_processor
-
-
 class MultiModalProcessor(SampleProcessor):
     """Binds an existing multimodal sample processor to the Grain map contract."""
 
@@ -357,10 +335,6 @@ class MultiModalProcessor(SampleProcessor):
             )
             return None
         return processed
-
-
-def _is_processed_mm_sample(sample: dict[str, Any] | None) -> bool:
-    return sample is not None
 
 
 class _MMSamplePackingDataset(grain.IterDataset[dict[str, Any]]):
@@ -462,74 +436,3 @@ class MMSamplePackingConfig:
             max_seq_length=runtime.seq_len,
             buffer_size=self.buffer_size,
         )
-
-
-def multimodal_dataloader(
-    dataset: str = "cc12m-test",
-    *,
-    dataset_path: str | None = None,
-    dataset_subset: str = "",
-    packing_buffer_size: int = 0,
-    max_images_per_batch: int,
-    patch_size: int,
-    temporal_patch_size: int,
-    spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
-    video_dir: str = "",
-    video_fps: float = 2.0,
-    video_min_frames: int = 4,
-    video_max_frames: int = 768,
-    build_mrope_positions: bool = False,
-    shuffle: bool = False,
-    repeat: bool = True,
-) -> GrainDataLoader.Config:
-    """Build a Grain dataloader for an existing multimodal dataset."""
-    path, dataset_loader, sample_processor = _validate_mm_dataset(
-        dataset,
-        dataset_path,
-    )
-    if dataset_subset and "subset" in inspect.signature(dataset_loader).parameters:
-        dataset_loader = partial(dataset_loader, subset=dataset_subset)
-
-    rows: GrainDatasetConfig = SingleDatasetConfig(
-        source=HuggingFaceStreamingSource.Config(
-            path=path,
-            loader=dataset_loader,
-        ),
-        process=MultiModalProcessor.Config(
-            sample_processor=sample_processor,
-            patch_size=patch_size,
-            temporal_patch_size=temporal_patch_size,
-            spatial_merge_size=spatial_merge_size,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-            image_mean=image_mean,
-            image_std=image_std,
-            video_dir=video_dir,
-            video_fps=video_fps,
-            video_min_frames=video_min_frames,
-            video_max_frames=video_max_frames,
-        ),
-        filters=(_is_processed_mm_sample,),
-    )
-    if packing_buffer_size > 0:
-        rows = MMSamplePackingConfig(
-            dataset=rows,
-            buffer_size=packing_buffer_size,
-        )
-
-    return GrainDataLoader.Config(
-        dataset=rows,
-        collator=MultiModalCollator.Config(
-            max_images_per_batch=max_images_per_batch,
-            patch_size=patch_size,
-            temporal_patch_size=temporal_patch_size,
-            spatial_merge_size=spatial_merge_size,
-            build_mrope_positions=build_mrope_positions,
-        ),
-        shuffle=shuffle,
-        repeat=repeat,
-    )

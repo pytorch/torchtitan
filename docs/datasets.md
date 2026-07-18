@@ -19,7 +19,28 @@ Start with the [Grain data pipeline README](../torchtitan/components/data/README
 The shortest built-in recipe is:
 
 ```python
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+    TextCollator,
+)
+from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
 
-config.dataloader = c4_text_dataloader("c4_test")
+dataset = DATASETS["c4_test"]
+config.dataloader = GrainDataLoader.Config(
+    dataset=ConcatThenSplitPackingConfig(
+        dataset=SingleDatasetConfig(
+            source=HuggingFaceRandomAccessSource.Config(
+                path=dataset.path,
+                loader=dataset.loader,
+            ),
+            process=HuggingFaceTextProcessor.Config(
+                text_processor=dataset.sample_processor,
+            ),
+        ),
+    ),
+    collator=TextCollator.Config(),
+)
 ```

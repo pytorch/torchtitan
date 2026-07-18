@@ -4,7 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
+
+from datasets import load_dataset
+
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+    TextCollator,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -13,7 +26,11 @@ from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader, chat_dataloader
+from torchtitan.hf_datasets.text_datasets import (
+    ChatProcessor,
+    DATASETS,
+    HuggingFaceTextProcessor,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
@@ -23,6 +40,7 @@ from . import model_registry
 
 def llama3_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
+    dataset = DATASETS["c4_test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -43,7 +61,20 @@ def llama3_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=c4_text_dataloader("c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path=dataset.path,
+                        loader=dataset.loader,
+                    ),
+                    process=HuggingFaceTextProcessor.Config(
+                        text_processor=dataset.sample_processor,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
+        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
         checkpoint=CheckpointManager.Config(
@@ -54,7 +85,20 @@ def llama3_debugmodel() -> Trainer.Config:
         validator=Validator.Config(
             freq=5,
             steps=10,
-            dataloader=c4_text_dataloader("c4_test"),
+            dataloader=GrainDataLoader.Config(
+                dataset=ConcatThenSplitPackingConfig(
+                    dataset=SingleDatasetConfig(
+                        source=HuggingFaceRandomAccessSource.Config(
+                            path=dataset.path,
+                            loader=dataset.loader,
+                        ),
+                        process=HuggingFaceTextProcessor.Config(
+                            text_processor=dataset.sample_processor,
+                        ),
+                    ),
+                ),
+                collator=TextCollator.Config(),
+            ),
         ),
     )
 
@@ -110,6 +154,7 @@ def llama3_debugmodel_ce_loss() -> Trainer.Config:
 
 def llama3_8b() -> Trainer.Config:
     model_spec = model_registry("8B")
+    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -131,7 +176,20 @@ def llama3_8b() -> Trainer.Config:
             seq_len=8192,
             steps=1000,
         ),
-        dataloader=c4_text_dataloader("c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceStreamingSource.Config(
+                        path=dataset.path,
+                        loader=dataset.loader,
+                    ),
+                    process=HuggingFaceTextProcessor.Config(
+                        text_processor=dataset.sample_processor,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
+        ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=SelectiveAC.Config(),
         validator=Validator.Config(
@@ -143,6 +201,7 @@ def llama3_8b() -> Trainer.Config:
 
 def llama3_70b() -> Trainer.Config:
     model_spec = model_registry("70B")
+    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -164,7 +223,20 @@ def llama3_70b() -> Trainer.Config:
             seq_len=8192,
             steps=1000,
         ),
-        dataloader=c4_text_dataloader("c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceStreamingSource.Config(
+                        path=dataset.path,
+                        loader=dataset.loader,
+                    ),
+                    process=HuggingFaceTextProcessor.Config(
+                        text_processor=dataset.sample_processor,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
+        ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
         ),
@@ -179,6 +251,7 @@ def llama3_70b() -> Trainer.Config:
 
 def llama3_405b() -> Trainer.Config:
     compile_config = CompileConfig(enable=True)
+    dataset = DATASETS["c4"]
     model_spec = model_registry(
         "405B",
         converters=[
@@ -212,7 +285,20 @@ def llama3_405b() -> Trainer.Config:
             seq_len=8192,
             steps=3000,
         ),
-        dataloader=c4_text_dataloader("c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceStreamingSource.Config(
+                        path=dataset.path,
+                        loader=dataset.loader,
+                    ),
+                    process=HuggingFaceTextProcessor.Config(
+                        text_processor=dataset.sample_processor,
+                    ),
+                ),
+            ),
+            collator=TextCollator.Config(),
+        ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
             enable_async_tensor_parallel=True,
@@ -258,13 +344,22 @@ def sft_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=chat_dataloader(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": "tests/assets/sft_test/data.json",
-                "split": "train",
-            },
-            sample_processor=process_sample,
+        dataloader=GrainDataLoader.Config(
+            dataset=FirstFitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path="json",
+                        loader=partial(
+                            load_dataset,
+                            data_files="tests/assets/sft_test/data.json",
+                            split="train",
+                        ),
+                    ),
+                    process=ChatProcessor.Config(sample_processor=process_sample),
+                    filters=(lambda sample: sample is not None,),
+                ),
+            ),
+            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(

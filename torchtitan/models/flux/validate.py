@@ -21,11 +21,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools.logging import logger
 
 from .configs import SamplingConfig
-from .flux_datasets import (
-    flux_image_size,
-    flux_validation_loader_config,
-    with_flux_validation_timesteps,
-)
+from .flux_datasets import flux_image_size, FluxValidationDatasetConfig
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
@@ -51,9 +47,7 @@ class FluxValidator(Validator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Validator.Config):
-        dataloader: GrainDataLoader.Config = field(
-            default_factory=flux_validation_loader_config
-        )
+        dataloader: GrainDataLoader.Config
         """DataLoader configuration for Flux validation"""
 
         all_timesteps: bool = False
@@ -96,12 +90,15 @@ class FluxValidator(Validator):
 
         assert isinstance(tokenizer, FluxTokenizerContainer)
 
-        self.dl_config = with_flux_validation_timesteps(
-            config.dataloader,
-            generate_timesteps=not config.all_timesteps,
-        )
+        dataset = config.dataloader.dataset
+        if isinstance(dataset, FluxValidationDatasetConfig):
+            dataset = dataset.dataset
         self.dl_config = replace(
-            self.dl_config,
+            config.dataloader,
+            dataset=FluxValidationDatasetConfig(
+                dataset=dataset,
+                generate_timesteps=not config.all_timesteps,
+            ),
             repeat=config.steps != -1,
         )
         self.dp_world_size = dp_world_size

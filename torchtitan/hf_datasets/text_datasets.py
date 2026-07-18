@@ -7,27 +7,16 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 import numpy as np
 import tyro
 from datasets import load_dataset
 
-from torchtitan.components.data.collators import TextCollator
 from torchtitan.components.data.dataset import (
     DataRuntime,
     SampleProcessor,
-    SingleDatasetConfig,
     TokenSequence,
-)
-from torchtitan.components.data.loader import GrainDataLoader
-from torchtitan.components.data.packing import (
-    ConcatThenSplitPackingConfig,
-    FirstFitPackingConfig,
-)
-from torchtitan.components.data.sources import (
-    HuggingFaceRandomAccessSource,
-    HuggingFaceStreamingSource,
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.hf_datasets import DatasetConfig
@@ -64,22 +53,6 @@ DATASETS = {
 }
 
 
-def _validate_dataset(
-    dataset_name: str, dataset_path: str | None = None
-) -> tuple[str, Callable, Callable]:
-    """Validate dataset name and path."""
-    if dataset_name not in DATASETS:
-        raise ValueError(
-            f"Dataset {dataset_name} is not supported. "
-            f"Supported datasets are: {list(DATASETS.keys())}"
-        )
-
-    config = DATASETS[dataset_name]
-    path = dataset_path or config.path
-    logger.info(f"Preparing {dataset_name} dataset from {path}")
-    return path, config.loader, config.sample_processor
-
-
 class HuggingFaceTextProcessor(SampleProcessor):
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
@@ -101,33 +74,6 @@ class HuggingFaceTextProcessor(SampleProcessor):
             token_ids=token_ids,
             loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
         )
-
-
-def c4_text_dataloader(
-    dataset: Literal["c4", "c4_test", "c4_validation"] = "c4_test",
-) -> GrainDataLoader.Config:
-    path, dataset_loader, text_processor = _validate_dataset(dataset)
-    if dataset == "c4_test":
-        source = HuggingFaceRandomAccessSource.Config(
-            path=path,
-            loader=dataset_loader,
-        )
-    else:
-        source = HuggingFaceStreamingSource.Config(
-            path=path,
-            loader=dataset_loader,
-        )
-    return GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(
-            dataset=SingleDatasetConfig(
-                source=source,
-                process=HuggingFaceTextProcessor.Config(
-                    text_processor=text_processor,
-                ),
-            ),
-        ),
-        collator=TextCollator.Config(),
-    )
 
 
 class ChatProcessor(SampleProcessor):
@@ -223,27 +169,3 @@ class ChatProcessor(SampleProcessor):
     ) -> TokenSequence | None:
         del rng
         return self._tokenize_sample(sample)
-
-
-def chat_dataloader(
-    *,
-    dataset_path: str,
-    load_dataset_kwargs: dict[str, Any],
-    sample_processor: Callable,
-) -> GrainDataLoader.Config:
-    """Build a Grain dataloader for single-turn chat data."""
-    return GrainDataLoader.Config(
-        dataset=FirstFitPackingConfig(
-            dataset=SingleDatasetConfig(
-                source=HuggingFaceRandomAccessSource.Config(
-                    path=dataset_path,
-                    loader=partial(load_dataset, **load_dataset_kwargs),
-                ),
-                process=ChatProcessor.Config(
-                    sample_processor=sample_processor,
-                ),
-                filters=(lambda sample: sample is not None,),
-            ),
-        ),
-        collator=TextCollator.Config(),
-    )

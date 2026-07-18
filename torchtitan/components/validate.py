@@ -13,6 +13,13 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+    TextCollator,
+)
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
@@ -20,7 +27,7 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
+from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
@@ -82,8 +89,19 @@ class Validator(BaseValidator):
         """
 
         dataloader: BaseDataLoader.Config = field(
-            default_factory=lambda: replace(
-                c4_text_dataloader("c4_validation"),
+            default_factory=lambda: GrainDataLoader.Config(
+                dataset=ConcatThenSplitPackingConfig(
+                    dataset=SingleDatasetConfig(
+                        source=HuggingFaceStreamingSource.Config(
+                            path=DATASETS["c4_validation"].path,
+                            loader=DATASETS["c4_validation"].loader,
+                        ),
+                        process=HuggingFaceTextProcessor.Config(
+                            text_processor=DATASETS["c4_validation"].sample_processor,
+                        ),
+                    ),
+                ),
+                collator=TextCollator.Config(),
                 repeat=False,
             )
         )

@@ -15,7 +15,6 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .flux_datasets import flux_dataloader
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
 from .model.layers import (
@@ -34,7 +33,6 @@ from .parallelize import parallelize_flux
 
 __all__ = [
     "FluxModel",
-    "flux_dataloader",
     "flux_configs",
     "parallelize_flux",
 ]

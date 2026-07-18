@@ -6,7 +6,7 @@
 
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 import grain.python as grain
@@ -25,8 +25,6 @@ from torchtitan.components.data.dataset import (
     SampleProcessor,
     SingleDatasetConfig,
 )
-from torchtitan.components.data.loader import GrainDataLoader
-from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.tools.logging import logger
@@ -160,22 +158,6 @@ DATASETS = {
 }
 
 
-def _validate_dataset(
-    dataset_name: str, dataset_path: str | None = None
-) -> tuple[str, Callable, Callable]:
-    """Validate dataset name and path."""
-    if dataset_name not in DATASETS:
-        raise ValueError(
-            f"Dataset {dataset_name} is not supported. "
-            f"Supported datasets are: {list(DATASETS.keys())}"
-        )
-
-    config = DATASETS[dataset_name]
-    path = dataset_path or config.path
-    logger.info(f"Preparing {dataset_name} dataset from {path}")
-    return path, config.loader, config.sample_processor
-
-
 class FluxSampleProcessor(SampleProcessor):
     """Applies an existing Flux processor and classifier-free prompt dropout."""
 
@@ -239,12 +221,6 @@ class FluxSampleProcessor(SampleProcessor):
         return sample_dict, labels
 
 
-def _is_processed_flux_sample(
-    sample: tuple[dict[str, Any], torch.Tensor] | None,
-) -> bool:
-    return sample is not None
-
-
 class FluxCollator(Collator):
     """Uses PyTorch's default collation for Flux rows."""
 
@@ -296,50 +272,6 @@ class FluxValidationDatasetConfig:
         return dataset.map_with_index(_add_validation_timestep)
 
 
-def flux_dataloader(
-    dataset: str = "cc12m-test",
-    *,
-    dataset_path: str | None = None,
-    prompt_dropout_prob: float = 0.0,
-    img_size: int = 256,
-    generate_timesteps: bool = False,
-    shuffle: bool = False,
-    repeat: bool = True,
-) -> GrainDataLoader.Config:
-    """Build a Grain dataloader for an existing Flux dataset."""
-    if generate_timesteps and prompt_dropout_prob != 0.0:
-        raise ValueError(
-            "prompt_dropout_prob must be 0.0 when generate_timesteps=True "
-            f"(for validation), but got {prompt_dropout_prob}."
-        )
-
-    path, dataset_loader, data_processor = _validate_dataset(
-        dataset.lower(),
-        dataset_path,
-    )
-    rows: GrainDatasetConfig = SingleDatasetConfig(
-        source=HuggingFaceStreamingSource.Config(
-            path=path,
-            loader=dataset_loader,
-        ),
-        process=FluxSampleProcessor.Config(
-            data_processor=data_processor,
-            prompt_dropout_prob=prompt_dropout_prob,
-            img_size=img_size,
-        ),
-        filters=(_is_processed_flux_sample,),
-    )
-    if generate_timesteps:
-        rows = FluxValidationDatasetConfig(dataset=rows)
-
-    return GrainDataLoader.Config(
-        dataset=rows,
-        collator=FluxCollator.Config(),
-        shuffle=shuffle,
-        repeat=repeat,
-    )
-
-
 def flux_image_size(dataset: GrainDatasetConfig) -> int:
     """Return the image size configured by a Flux dataset processor."""
     if isinstance(dataset, FluxValidationDatasetConfig):
@@ -350,27 +282,3 @@ def flux_image_size(dataset: GrainDatasetConfig) -> int:
     if not isinstance(process, FluxSampleProcessor.Config):
         raise ValueError("Flux dataloader dataset must use FluxSampleProcessor.Config")
     return process.img_size
-
-
-def flux_validation_loader_config() -> GrainDataLoader.Config:
-    return flux_dataloader(
-        dataset="coco-validation",
-        generate_timesteps=True,
-    )
-
-
-def with_flux_validation_timesteps(
-    config: GrainDataLoader.Config,
-    *,
-    generate_timesteps: bool,
-) -> GrainDataLoader.Config:
-    dataset = config.dataset
-    if isinstance(dataset, FluxValidationDatasetConfig):
-        dataset = dataset.dataset
-    return replace(
-        config,
-        dataset=FluxValidationDatasetConfig(
-            dataset=dataset,
-            generate_timesteps=generate_timesteps,
-        ),
-    )
