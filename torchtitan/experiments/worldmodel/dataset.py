@@ -138,7 +138,7 @@ class WorldModelDataLoader(BaseDataLoader):
         val = config.split == "val"
         shuffle_size = local_batch_size * validation_steps * self.local_world_size if val else config.shuffle_size
 
-        self.dataset = self._build_dataset(config, val=val)
+        self.dataset = self._build_dataset(config, val=val, global_rank=dp_rank, global_world_size=dp_world_size)
         self.loader = DataLoader(
             self.dataset,
             DataloaderConfig(
@@ -190,7 +190,7 @@ class WorldModelDataLoader(BaseDataLoader):
         return self.loader.stats()
 
     @staticmethod
-    def _build_dataset(config: Config, *, val: bool):
+    def _build_dataset(config: Config, *, val: bool, global_rank: int, global_world_size: int):
         if config.mock_data:
             return _MockDataset(config)
 
@@ -223,6 +223,8 @@ class WorldModelDataLoader(BaseDataLoader):
             val=val,
             local_rank=int(os.environ.get("LOCAL_RANK", "0")),
             ignore_exceptions=IGNORE_EXCEPTIONS,
+            global_rank=global_rank,
+            global_world_size=global_world_size,
         )
 
 
@@ -231,7 +233,7 @@ def main() -> None:
     from xx.datasets.constants import DEFAULT_TRAIN_LIST
 
     config = _dataloader_config(split="train", dataset=DEFAULT_TRAIN_LIST)
-    dataset = WorldModelDataLoader._build_dataset(config, val=False)
+    dataset = WorldModelDataLoader._build_dataset(config, val=False, global_rank=0, global_world_size=1)
     inputs, targets = next(iter(dataset))
     print(
         {
