@@ -10,7 +10,8 @@
 Fused grouped-experts override.
 
 Importing this module registers a ``GroupedExperts`` override and the
-``torchtitan::silu_and_mul`` custom CUDA op it uses.
+``torchtitan::silu_and_mul`` custom op it uses. The op is implemented with
+triton kernels and supports both CUDA and XPU.
 """
 
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ import triton
 import triton.language as tl
 from torch.distributed.tensor import DTensor
 
+from torchtitan.components.moe_metrics import maybe_record_grouped_gemm
 from torchtitan.config import derive, override
 from torchtitan.models.common.moe import GroupedExperts
 
@@ -240,7 +242,7 @@ def silu_and_mul_backward_kernel(
 @torch.library.custom_op(
     "torchtitan::silu_and_mul",
     mutates_args=(),
-    device_types="cuda",
+    device_types=("cuda", "xpu"),
 )
 def silu_and_mul_op(
     gate: torch.Tensor,
@@ -263,7 +265,7 @@ def silu_and_mul_op_fake(
 @torch.library.custom_op(
     "torchtitan::silu_and_mul_backward",
     mutates_args=(),
-    device_types="cuda",
+    device_types=("cuda", "xpu"),
 )
 def silu_and_mul_backward_op(
     grad_out: torch.Tensor,
@@ -331,6 +333,7 @@ class FusedGroupedExperts(GroupedExperts):
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
+        dispatch_metadata: object | None = None,
     ) -> torch.Tensor:
         if isinstance(self.w1_EFD, DTensor):
             w1_EFD = self.w1_EFD.to_local()
@@ -344,6 +347,18 @@ class FusedGroupedExperts(GroupedExperts):
             w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+
+        maybe_record_grouped_gemm(
+            x_RD=x_RD,
+            w1_EFD=w1_EFD,
+            w2_EDF=w2_EDF,
+            w3_EFD=w3_EFD,
+            num_tokens_per_expert_E=num_tokens_per_expert_E,
+            token_dispatcher=self.token_dispatcher,
+            dispatch_metadata=dispatch_metadata,
+            layer_id=self.layer_id,
+            top_k=self.top_k,
+        )
 
         gate_RF = torch._grouped_mm(
             x_RD.bfloat16(),

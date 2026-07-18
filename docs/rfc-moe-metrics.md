@@ -22,6 +22,17 @@ exposed through:
 
 The feature is disabled by default and has zero overhead when off.
 
+**Eager-mode only (current limitation).** Collection runs the metrics hook
+inside the `fullgraph=True`-compiled expert forward, which cannot trace the
+hook's active-collector body. Enabling metrics therefore requires the model to
+be uncompiled: `metrics.moe.enabled=true` is rejected at setup if model
+compilation is on (`compile.enable=true` with `"model"` in
+`compile.components`). The disabled default path remains fully compile-safe
+(dead-code-eliminated), so metrics-off + compile-on is unaffected. See section
+4.6 for details and the planned path to lift this. This is acceptable because
+metrics collection is an opt-in observability/analysis run, not a production
+training configuration.
+
 ## 2. Motivation
 
 TorchTitan now ships several MoE models (`deepseek_v3`, `llama4`, `gpt_oss`,
@@ -105,19 +116,32 @@ A single shim inside `GroupedExperts._experts_forward`:
 # torchtitan/models/common/moe.py
 from torchtitan.components.moe_metrics import maybe_record_grouped_gemm
 
-def _experts_forward(self, x, num_tokens_per_expert):
+def _experts_forward(self, x, num_tokens_per_expert, dispatch_metadata=None):
     ...
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     maybe_record_grouped_gemm(
-        module=self,
-        x=x, w1=w1, w2=w2, w3=w3,
-        num_tokens_per_expert=num_tokens_per_expert,
-        offsets=offsets,
+        x_RD=x, w1_EFD=w1, w2_EDF=w2, w3_EFD=w3,
+        num_tokens_per_expert_E=num_tokens_per_expert,
+        token_dispatcher=self.token_dispatcher,
+        dispatch_metadata=dispatch_metadata,
+        layer_id=self.layer_id,
+        top_k=self.top_k,
     )
     h = F.silu(torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets))
     h = h * torch._grouped_mm(x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets)
     return torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
 ```
+
+All dispatcher-name and per-expert-count extraction lives inside
+`maybe_record_grouped_gemm`, so the model forward only passes raw handles.
+
+Because the hook lives in the shared `GroupedExperts._experts_forward`, it
+covers every model that routes through it (`deepseek_v3`, `llama4`, `qwen3`,
+etc.). **`gpt_oss` is not supported at this point:** `GptOssGroupedExperts`
+subclasses `nn.Module` (not `GroupedExperts`) and implements its own
+`_experts_forward` that calls `torch._grouped_mm` directly without invoking the
+hook, so its grouped-GEMM shapes and per-expert load are not captured. Wiring
+`gpt_oss` up is left as follow-up work.
 
 `maybe_record_grouped_gemm` is a single `if not enabled: return` check on the
 hot path. When enabled it issues exactly one `.cpu().tolist()` on the
@@ -148,8 +172,6 @@ class MoEMetricCollector:
 Sinks (each optional, each behind a small protocol):
 
 - `JsonlSink(path)` — appends one record per line; cheapest, rank-local.
-- `CsvSink(path)` — flat schema, convenient for pandas / the existing
-  `collective_reports/` style tooling.
 - `TensorBoardSink(writer)` — pushes the aggregated scalars (mean/max/p99
   padding ratio, imbalance, total grouped-GEMM FLOPs) under
   `moe/<layer_id>/...`.
@@ -165,20 +187,45 @@ Extend `torchtitan/config/configs.py`:
 
 ```toml
 [metrics.moe]
-enabled        = false      # master switch
-sample_every   = 1          # record every N steps once enabled
-collect_shapes = true       # the grouped-GEMM (M,K,N) tuples
-collect_imbalance = true    # load-balance scalars to TB
-sinks          = ["jsonl"]  # any of {"jsonl","csv","tb"}
+enabled        = false          # master switch
+sample_every   = 1              # record every N steps once enabled
+sinks          = ["histogram"]  # any of {"jsonl","tb","histogram"}
 output_dir     = "outputs/moe_metrics"
 max_records_per_rank = 100000
-ranks          = "all"      # "all" | "rank0" | "<comma-sep rank list>"
+ranks          = "rank0"        # "all" | "rank0" | "<comma-sep rank list>"
 ```
 
-Sensible default: **off**. When on with defaults, only rank 0 writes JSONL,
-keeping disk overhead bounded.
+Sensible default: **off**. When on with defaults, only rank 0 writes the
+bounded histogram CSV, keeping disk overhead bounded.
 
-### 4.5 Interaction With Existing Features
+**Requires eager mode.** Setting `enabled = true` while the model is compiled
+(`compile.enable = true` with `"model"` in `compile.components`) raises a
+`ValueError` at setup. Run collection with model compilation disabled; see
+section 4.6.
+
+### 4.5 Why Not Reuse `MoE.tokens_per_expert_E`
+
+`MoE` already maintains a `tokens_per_expert_E` buffer for aux-loss-free load
+balancing, so a natural question is whether the metrics can read that buffer
+instead of extracting per-expert counts through `dispatch_metadata`. We keep a
+separate path for three reasons:
+
+- **It is a running accumulator, not the per-step value.** `tokens_per_expert_E`
+  is `add_`-ed into on every step and only reset when the expert-bias update
+  consumes it, so it holds a running sum across steps rather than the
+  instantaneous per-step, per-layer counts the metrics record.
+- **It is double-counted under activation checkpointing.** `MoE.forward`
+  documents (via a TODO) that AC causes `tokens_per_expert_E` to be counted
+  twice. Reading it for metrics would inherit that bug; the collector instead
+  captures counts at the grouped-GEMM call and de-duplicates recomputed
+  forwards itself.
+- **It lacks the padded / per-microbatch granularity the metrics need.** The
+  metrics distinguish active vs. padded per-expert counts
+  (`num_tokens_per_local_expert_e` vs `padded_num_tokens_per_local_expert_e`)
+  and attribute records per layer and per microbatch. The single balancing
+  buffer carries none of that.
+
+### 4.6 Interaction With Existing Features
 
 - **Activation checkpointing.** The existing comment in `MoE.forward` notes
   that AC double-counts `tokens_per_expert`. The new collector is invoked
@@ -188,10 +235,22 @@ keeping disk overhead bounded.
   rank)`. Backward-pass recomputation is detected via
   `torch.is_grad_enabled()` and `torch._C._current_autograd_node()` (cheap,
   no allocation) and suppressed by default.
-- **`torch.compile` / graph trainer.** The collector call lives outside the
-  hot Triton/Inductor region (no tensor ops, just a Python guard). Under
-  `fullgraph=True` we expose a `torch.compiler.allow_in_graph`-friendly
-  no-op stub.
+- **`torch.compile` / graph trainer.** `apply_compile` compiles each
+  `TransformerBlock` with `fullgraph=True`, and the grouped-GEMM hook runs
+  inside the compiled `GroupedExperts._experts_forward`. The hook's first line
+  is a plain module-global bool (`_COLLECTOR_INSTALLED`) check; when no
+  collector is installed (metrics off, the default) Dynamo specializes on the
+  `False` constant and dead-code-eliminates the whole body, so **metrics-off +
+  compile-on is fully graph-clean (verified: zero graph breaks on aot_eager and
+  inductor).** When a collector *is* installed, the body (a `ContextVar` read
+  and record construction) is not `fullgraph`-traceable and raises
+  `Unsupported`. Metrics collection therefore requires the model to be
+  uncompiled: `MetricsProcessor` raises a `ValueError` at setup if both
+  `metrics.moe.enabled` and model compile are on, directing the user to disable
+  one. Since collection is an opt-in observability run, requiring eager for
+  those runs is an acceptable limitation; wiring the hook out of the compiled
+  region (e.g. materializing from the dispatcher metadata post-forward) so
+  collection can coexist with compile is left as follow-up work.
 - **DeepEP / HybridEP.** Those dispatchers already return
   `num_tokens_per_expert_group` after the all-to-all. We extend their
   `metadata` payload with `padded_tokens_per_expert` and `dispatcher` tag;
@@ -199,7 +258,7 @@ keeping disk overhead bounded.
 - **PP / TP / EP.** Records carry `(rank, ep_rank, ep_size)` so an offline
   join recovers the full parallel layout.
 
-### 4.6 Overhead Analysis
+### 4.7 Overhead Analysis
 
 When disabled: one Python-level `if collector is None` per
 `_experts_forward` call (≈ tens of ns), no GPU sync.
@@ -212,11 +271,28 @@ When enabled with default settings:
   so we reuse that synchronization point.
 - One dataclass construction + one `sink.write` per layer per step
   (~O(N_layers) Python work per step).
-- Total measured overhead target: **< 0.5 %** of step time on Llama4-17Bx16E
-  at 8×H100.
 
-A microbenchmark and an opt-in regression test under
-`tests/integration_tests/` will gate this.
+**Measured A/B.** Seed-matched (`--debug.seed 42`) 60-step runs on DeepSeek-V3
+16B, 8xB200, TP=8/EP=8, identical config except the collector toggle
+(`sample_every=10`, `tb`+`histogram` sinks). Comparing steady-state
+(step >= 20, warmup discarded) mean throughput per step:
+
+| configuration | steady-state mean TPS |
+| --- | --- |
+| metrics off | 1473 |
+| metrics on  | 1495 |
+
+The "on" run was within noise of "off" (marginally faster here), i.e. the
+collector overhead is below run-to-run variance. Per-step loss and grad_norm
+were bitwise-identical between the two runs (step 60: loss 6.73730,
+grad_norm 1.3461 in both), confirming the collector does not perturb the
+compute path.
+
+The added work is O(1) per (layer, step) and independent of tokens, sequence
+length, or world size, so the relative overhead shrinks as model/step size
+grows; the only world-size-dependent piece (`gather_object` under
+`ranks=all`) is off the hot path at flush/close and carries tiny per-(step,
+layer) dicts, throttled by `sample_every`.
 
 ## 5. Alternatives Considered
 

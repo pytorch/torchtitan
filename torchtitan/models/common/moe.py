@@ -89,39 +89,15 @@ class GroupedExperts(Module):
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
-        metadata_tokens_per_expert = getattr(
-            dispatch_metadata, "num_tokens_per_local_expert_e", None
-        )
-        metadata_padded_tokens_per_expert = getattr(
-            dispatch_metadata, "padded_num_tokens_per_local_expert_e", None
-        )
-        metadata_dispatcher = getattr(dispatch_metadata, "dispatcher", None)
-
         maybe_record_grouped_gemm(
             x_RD=x_RD,
             w1_EFD=w1_EFD,
             w2_EDF=w2_EDF,
             w3_EFD=w3_EFD,
-            num_tokens_per_expert_E=(
-                metadata_tokens_per_expert
-                if isinstance(metadata_tokens_per_expert, torch.Tensor)
-                else num_tokens_per_expert_E
-            ),
-            padded_num_tokens_per_expert_E=(
-                metadata_padded_tokens_per_expert
-                if isinstance(metadata_padded_tokens_per_expert, torch.Tensor)
-                else num_tokens_per_expert_E
-            ),
-            dispatcher=(
-                metadata_dispatcher
-                if isinstance(metadata_dispatcher, str)
-                else type(self.token_dispatcher)
-                .__name__.replace("TokenDispatcher", "")
-                .lower()
-            ),
+            num_tokens_per_expert_E=num_tokens_per_expert_E,
+            token_dispatcher=self.token_dispatcher,
+            dispatch_metadata=dispatch_metadata,
             layer_id=self.layer_id,
-            ep_rank=getattr(self.token_dispatcher, "ep_rank", 0),
-            ep_size=getattr(self.token_dispatcher, "ep_size", 1),
             top_k=self.top_k,
         )
 

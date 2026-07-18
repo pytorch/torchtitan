@@ -29,25 +29,16 @@ class MoEMetricsConfig:
     sample_every: int = 1
     """Record once every N train steps when enabled."""
 
-    collect_shapes: bool = True
-    """Collect grouped-GEMM shape tuples in each record."""
-
-    collect_imbalance: bool = True
-    """Emit per-(step, layer) load-imbalance stats. Each rank writes intra-rank
-    expert imbalance (min/max/mean/std/CV over its local experts) to
-    ``m_imbalance_rank_{rank}.csv``; rank 0 gathers per-rank loads and writes
-    inter-rank imbalance (across ranks, per step/layer) to
-    ``m_imbalance_global.csv``. The cross-rank gather only runs when
-    ``ranks == 'all'``."""
-
-    sinks: list[Literal["jsonl", "csv", "tb", "histogram"]] = field(
-        default_factory=lambda: ["jsonl"]
+    sinks: list[Literal["jsonl", "tb", "histogram"]] = field(
+        default_factory=lambda: ["histogram"]
     )
-    """Enabled sinks. The ``histogram`` sink accumulates a per-expert token-count
-    (grouped-GEMM M) histogram keyed by layer instead of one record per step,
-    which is far more compact for long runs. The ``tb`` sink logs expert-load
-    heatmaps, histograms, and the run manifest into TorchTitan's TensorBoard run
-    (requires ``metrics.enable_tensorboard``)."""
+    """Enabled sinks. The default ``histogram`` sink accumulates a per-expert
+    token-count (grouped-GEMM M) histogram keyed by layer instead of one record
+    per step, so its storage stays bounded over arbitrarily long runs. The
+    ``jsonl`` sink instead writes one full-fidelity record per step, which is
+    useful for debugging an exact shape sequence but grows with step count. The
+    ``tb`` sink logs expert-load heatmaps, histograms, and the run manifest into
+    TorchTitan's TensorBoard run (requires ``metrics.enable_tensorboard``)."""
 
     output_dir: str = "moe_metrics"
     """Directory under dump_folder where MoE metric artifacts are written."""
@@ -124,27 +115,6 @@ class JsonlSink:
 
     def write_record(self, record: GroupedGemmRecord) -> None:
         self._file.write(json.dumps(asdict(record), ensure_ascii=True) + "\n")
-
-    def flush(self) -> None:
-        self._file.flush()
-
-    def close(self) -> None:
-        self._file.close()
-
-
-class CsvSink:
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = path.open("a", encoding="utf-8", newline="")
-        self._writer: csv.DictWriter | None = None
-
-    def write_record(self, record: GroupedGemmRecord) -> None:
-        row = asdict(record)
-        if self._writer is None:
-            self._writer = csv.DictWriter(self._file, fieldnames=list(row.keys()))
-            if self._file.tell() == 0:
-                self._writer.writeheader()
-        self._writer.writerow(row)
 
     def flush(self) -> None:
         self._file.flush()
@@ -271,6 +241,18 @@ def _moments_to_stats(
 def _r2(value: float) -> float:
     """Round a float to 2 decimal places for compact CSV output."""
     return round(float(value), 2)
+
+
+def _fmt_manifest_value(key: str, value: object) -> object:
+    """Format a manifest value for the markdown table.
+
+    ``top_k`` carries a ``-1`` sentinel when the MoE was built outside a
+    ``Decoder`` (e.g. tests/experiments), so render that as ``unknown`` instead
+    of a misleading numeric ``-1``.
+    """
+    if key == "top_k" and value == -1:
+        return "unknown"
+    return value
 
 
 def _load_stats(
@@ -536,10 +518,12 @@ class TensorBoardMoESink:
         scalars = [(k, v) for k, v in manifest.items() if not isinstance(v, dict)]
         sections = [(k, v) for k, v in manifest.items() if isinstance(v, dict)]
         lines = ["### Run metadata", "", "| field | value |", "| --- | --- |"]
-        lines += [f"| `{k}` | {v} |" for k, v in scalars]
+        lines += [f"| `{k}` | {_fmt_manifest_value(k, v)} |" for k, v in scalars]
         for name, sub in sections:
             lines += ["", f"#### {name}", "", "| field | value |", "| --- | --- |"]
-            lines += [f"| `{k}` | {v} |" for k, v in sub.items()]
+            lines += [
+                f"| `{k}` | {_fmt_manifest_value(k, v)} |" for k, v in sub.items()
+            ]
         return "\n".join(lines)
 
     def _log_to_tensorboard(self, cube, steps, layers, num_local_experts) -> None:
@@ -818,8 +802,7 @@ class MoEMetricCollector:
         # experts, output head) that the grouped-GEMM hook does not see.
         self._dense_gemm_templates: dict | None = None
         # Per-(step, layer) intra-rank accumulators over per-expert M values,
-        # populated in flush() when config.collect_imbalance is set. Storage is
-        # O(sampled steps * MoE layers).
+        # populated in flush(). Storage is O(sampled steps * MoE layers).
         self._imbalance: dict[tuple[int, int], _ImbalanceAccum] = {}
 
         self._enabled = config.enabled and self._is_rank_selected(config.ranks)
@@ -901,16 +884,12 @@ class MoEMetricCollector:
     def _buffered_count(self) -> int:
         return len(self._records_buffer) + len(self._pending_buffer)
 
-    def _materialize(self, pending: _PendingGroupedGemm) -> GroupedGemmRecord:
-        tokens = tuple(
-            int(v) for v in pending.tokens_tensor.detach().to("cpu").tolist()
-        )
-        if pending.padded_tensor is None:
-            padded = tokens
-        else:
-            padded = tuple(
-                int(v) for v in pending.padded_tensor.detach().to("cpu").tolist()
-            )
+    def _record_from_pending(
+        self,
+        pending: _PendingGroupedGemm,
+        tokens: tuple[int, ...],
+        padded: tuple[int, ...],
+    ) -> GroupedGemmRecord:
         return GroupedGemmRecord(
             step=pending.step,
             layer_id=pending.layer_id,
@@ -929,20 +908,63 @@ class MoEMetricCollector:
             dispatcher=pending.dispatcher,
         )
 
+    def _materialize_pending(
+        self, pendings: list[_PendingGroupedGemm]
+    ) -> list[GroupedGemmRecord]:
+        """Materialize buffered pending records with a single batched D2H copy.
+
+        Each pending still holds its small 1-D int token-count tensors (length
+        ``num_local_experts``) on device. Copying them one at a time would force
+        a separate device->host sync per tensor (up to 2 per record); since the
+        payload is only a few ints, that cost is sync latency, not bandwidth.
+        Concatenate every pending's token (and padded) tensor into one 1-D
+        tensor, run a single ``.to("cpu")``, then split the result host-side.
+        This turns ~2N syncs per flush into one. Runs in flush() at end-of-step,
+        never on the (activation-checkpointed) forward path.
+        """
+        # Flatten every device tensor into one list, recording per-pending how
+        # many token / padded entries it contributes (padded_len is None when
+        # the pending has no separate padded tensor).
+        flat: list[torch.Tensor] = []
+        layout: list[tuple[int, int | None]] = []
+        for pending in pendings:
+            tokens_t = pending.tokens_tensor.detach()
+            flat.append(tokens_t)
+            if pending.padded_tensor is None:
+                layout.append((tokens_t.shape[0], None))
+            else:
+                padded_t = pending.padded_tensor.detach()
+                flat.append(padded_t)
+                layout.append((tokens_t.shape[0], padded_t.shape[0]))
+
+        # Single device->host sync for every pending tensor at once.
+        combined = torch.cat(flat).to("cpu").tolist()
+
+        records: list[GroupedGemmRecord] = []
+        cursor = 0
+        for pending, (tokens_len, padded_len) in zip(pendings, layout):
+            tokens = tuple(int(v) for v in combined[cursor : cursor + tokens_len])
+            cursor += tokens_len
+            if padded_len is None:
+                padded = tokens
+            else:
+                padded = tuple(int(v) for v in combined[cursor : cursor + padded_len])
+                cursor += padded_len
+            records.append(self._record_from_pending(pending, tokens, padded))
+        return records
+
     def flush(self) -> None:
         if not self._enabled:
             return
         if self._pending_buffer:
-            for pending in self._pending_buffer:
-                self._records_buffer.append(self._materialize(pending))
+            self._records_buffer.extend(self._materialize_pending(self._pending_buffer))
             self._pending_buffer.clear()
         if not self._records_buffer:
             return
         if self._gemm_templates is None:
             self._capture_templates(self._records_buffer[0])
         for record in self._records_buffer:
-            if self._config.collect_imbalance:
-                self._accumulate_imbalance(record)
+            self._accumulate_imbalance(record)
             for sink in self._sinks:
                 sink.write_record(record)
         for sink in self._sinks:
@@ -1040,7 +1062,7 @@ class MoEMetricCollector:
         ``rank/local`` of the experts with the fewest/most tokens. Float columns
         are rounded to 2 dp.
         """
-        if not self._enabled or not self._config.collect_imbalance:
+        if not self._enabled:
             return
         if not self._imbalance:
             return
@@ -1101,7 +1123,7 @@ class MoEMetricCollector:
         ``load_min_rank``/``load_max_rank`` are the ranks holding the
         least/most total tokens. Float columns are rounded to 2 dp.
         """
-        if not self._config.enabled or not self._config.collect_imbalance:
+        if not self._config.enabled:
             return
 
         distributed = torch.distributed.is_initialized() and self._world_size > 1
@@ -1228,8 +1250,6 @@ class MoEMetricCollector:
         for sink_name in self._config.sinks:
             if sink_name == "jsonl":
                 sinks.append(JsonlSink(output_dir / f"rank_{self._rank}.jsonl"))
-            elif sink_name == "csv":
-                sinks.append(CsvSink(output_dir / f"rank_{self._rank}.csv"))
             elif sink_name == "histogram":
                 sinks.append(
                     HistogramMoESink(output_dir / f"m_histogram_rank_{self._rank}.csv")
@@ -1259,9 +1279,18 @@ _ACTIVE_COLLECTOR: contextvars.ContextVar[
     MoEMetricCollector | None
 ] = contextvars.ContextVar("active_moe_metric_collector", default=None)
 
+# Plain module-global mirror of "is any collector installed", read by
+# ``maybe_record_grouped_gemm`` as its first-line fast path. Unlike the
+# ContextVar, a module global is a compile-time constant Dynamo can specialize
+# on, so the hook body is dead-code-eliminated under ``fullgraph=True`` when no
+# collector is installed (metrics-off + compile-on, the common case).
+_COLLECTOR_INSTALLED: bool = False
+
 
 def set_active_moe_metric_collector(collector: MoEMetricCollector | None) -> None:
+    global _COLLECTOR_INSTALLED
     _ACTIVE_COLLECTOR.set(collector)
+    _COLLECTOR_INSTALLED = collector is not None
 
 
 def get_active_moe_metric_collector() -> MoEMetricCollector | None:
@@ -1363,14 +1392,37 @@ def maybe_record_grouped_gemm(
     w2_EDF: torch.Tensor,
     w3_EFD: torch.Tensor,
     num_tokens_per_expert_E: torch.Tensor,
-    padded_num_tokens_per_expert_E: torch.Tensor | None = None,
-    dispatcher: str,
+    token_dispatcher: object | None = None,
+    dispatch_metadata: object | None = None,
     layer_id: int = -1,
     micro_batch_id: int = 0,
-    ep_rank: int = 0,
-    ep_size: int = 1,
     top_k: int = -1,
 ) -> None:
+    """Record one grouped-GEMM observation for the active MoE collector.
+
+    Called from the shared ``GroupedExperts._experts_forward`` path, so it
+    covers every model that routes through it (llama4, qwen3, deepseek_v3,
+    etc.). It is a no-op unless a collector is active and the current step is
+    sampled.
+
+    ``_COLLECTOR_INSTALLED`` is a plain module-global bool checked before any
+    other work. ``GroupedExperts._experts_forward`` is compiled with
+    ``fullgraph=True`` (see ``apply_compile``), and the ``ContextVar.get`` below
+    is an unsupported graph op. When no collector is installed (the default),
+    Dynamo specializes on the ``False`` global and compiles away the whole body,
+    so metrics-off + compile-on (the common case) has zero graph impact. When a
+    collector IS installed, the body is incompatible with ``fullgraph`` compile;
+    metrics collection therefore requires ``compile.enable = false`` (enforced
+    at setup and documented in the RFC).
+
+    Not supported at this point: gpt_oss. ``GptOssGroupedExperts`` subclasses
+    ``nn.Module`` (not ``GroupedExperts``) and implements its own
+    ``_experts_forward`` that calls ``torch._grouped_mm`` directly without
+    invoking this hook, so gpt_oss grouped-GEMM shapes and per-expert load are
+    not captured. Wiring gpt_oss up is left as follow-up work.
+    """
+    if not _COLLECTOR_INSTALLED:
+        return
     collector = get_active_moe_metric_collector()
     if collector is None or not collector.should_record_current_step():
         return
@@ -1379,6 +1431,34 @@ def maybe_record_grouped_gemm(
         rank = torch.distributed.get_rank()
     else:
         rank = 0
+
+    # Prefer the dispatcher's own dispatch-time metadata (actual per-expert
+    # token counts and reported dispatcher name) when available, else fall back
+    # to the pre-dispatch counts and the dispatcher class name. These reads are
+    # pure Python (getattr/isinstance/type name) with no dispatched tensor ops,
+    # so they are safe on the checkpointed path (see the IMPORTANT note below).
+    metadata_tokens = getattr(dispatch_metadata, "num_tokens_per_local_expert_e", None)
+    tokens_tensor = (
+        metadata_tokens
+        if isinstance(metadata_tokens, torch.Tensor)
+        else num_tokens_per_expert_E
+    )
+    metadata_padded = getattr(
+        dispatch_metadata, "padded_num_tokens_per_local_expert_e", None
+    )
+    padded_tensor = (
+        metadata_padded
+        if isinstance(metadata_padded, torch.Tensor)
+        else num_tokens_per_expert_E
+    )
+    metadata_dispatcher = getattr(dispatch_metadata, "dispatcher", None)
+    dispatcher = (
+        metadata_dispatcher
+        if isinstance(metadata_dispatcher, str)
+        else type(token_dispatcher).__name__.replace("TokenDispatcher", "").lower()
+    )
+    ep_rank = getattr(token_dispatcher, "ep_rank", 0)
+    ep_size = getattr(token_dispatcher, "ep_size", 1)
 
     # IMPORTANT: do not run any dispatched tensor ops here (no ``.to``,
     # ``.tolist``, ``.detach``, arithmetic, etc.). This hook executes inside the
@@ -1403,7 +1483,7 @@ def maybe_record_grouped_gemm(
         gemm_w2=(m_total, int(w2_EDF.shape[-1]), int(w2_EDF.shape[-2])),
         dtype=str(x_RD.dtype).replace("torch.", ""),
         dispatcher=dispatcher,
-        tokens_tensor=num_tokens_per_expert_E,
-        padded_tensor=padded_num_tokens_per_expert_E,
+        tokens_tensor=tokens_tensor,
+        padded_tensor=padded_tensor,
     )
     collector.record_pending(pending)

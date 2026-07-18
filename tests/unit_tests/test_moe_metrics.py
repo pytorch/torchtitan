@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -82,7 +83,7 @@ class TestMoEMetricCollector(unittest.TestCase):
     def test_sample_every_gates_records(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             collector = MoEMetricCollector(
-                config=MoEMetricsConfig(enabled=True, sample_every=2),
+                config=MoEMetricsConfig(enabled=True, sample_every=2, sinks=["jsonl"]),
                 dump_folder=tmpdir,
                 rank=0,
                 world_size=1,
@@ -103,28 +104,10 @@ class TestMoEMetricCollector(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             self.assertIn('"step": 2', lines[0])
 
-    def test_csv_sink_writes_rows(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            collector = MoEMetricCollector(
-                config=MoEMetricsConfig(enabled=True, sinks=["csv"]),
-                dump_folder=tmpdir,
-                rank=0,
-                world_size=1,
-            )
-            collector.begin_step(1)
-            collector.record(_make_record(step=1))
-            collector.flush()
-            collector.close()
-
-            out_file = Path(tmpdir) / "moe_metrics" / "rank_0.csv"
-            self.assertTrue(out_file.exists())
-            rows = out_file.read_text(encoding="utf-8").strip().splitlines()
-            self.assertEqual(len(rows), 2)
-
     def test_grouped_gemm_hook_records_shapes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             collector = MoEMetricCollector(
-                config=MoEMetricsConfig(enabled=True, sample_every=1),
+                config=MoEMetricsConfig(enabled=True, sample_every=1, sinks=["jsonl"]),
                 dump_folder=tmpdir,
                 rank=0,
                 world_size=1,
@@ -139,14 +122,18 @@ class TestMoEMetricCollector(unittest.TestCase):
             num_tokens_per_expert_E = torch.tensor([4, 8], dtype=torch.int64)
             padded_num_tokens_per_expert_E = torch.tensor([8, 8], dtype=torch.int64)
 
+            dispatch_metadata = SimpleNamespace(
+                num_tokens_per_local_expert_e=num_tokens_per_expert_E,
+                padded_num_tokens_per_local_expert_e=padded_num_tokens_per_expert_E,
+                dispatcher="alltoall",
+            )
             maybe_record_grouped_gemm(
                 x_RD=x_RD,
                 w1_EFD=w1_EFD,
                 w2_EDF=w2_EDF,
                 w3_EFD=w3_EFD,
                 num_tokens_per_expert_E=num_tokens_per_expert_E,
-                padded_num_tokens_per_expert_E=padded_num_tokens_per_expert_E,
-                dispatcher="alltoall",
+                dispatch_metadata=dispatch_metadata,
                 layer_id=7,
                 micro_batch_id=1,
                 top_k=6,
@@ -186,13 +173,51 @@ class TestMoEMetricCollector(unittest.TestCase):
                 w2_EDF=torch.randn(1, 4, 8),
                 w3_EFD=torch.randn(1, 8, 4),
                 num_tokens_per_expert_E=torch.tensor([2], dtype=torch.int64),
-                dispatcher="local",
             )
             collector.flush()
             collector.close()
             set_active_moe_metric_collector(None)
 
             self.assertFalse((Path(tmpdir) / "moe_metrics").exists())
+
+    def test_hook_compiles_fullgraph_when_no_collector(self):
+        """The disabled path (no collector installed) must be compile-safe.
+
+        ``GroupedExperts._experts_forward`` is compiled with ``fullgraph=True``,
+        and the hook runs inside it. With no collector installed, the module
+        global ``_COLLECTOR_INSTALLED`` is ``False``, so Dynamo specializes on
+        it and dead-code-eliminates the hook body instead of choking on the
+        ``ContextVar`` read. This guards the common metrics-off + compile-on
+        configuration against regressions.
+        """
+
+        set_active_moe_metric_collector(None)
+
+        class Tiny(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.w1_EFD = torch.nn.Parameter(torch.randn(2, 8, 4))
+                self.w2_EDF = torch.nn.Parameter(torch.randn(2, 4, 8))
+                self.w3_EFD = torch.nn.Parameter(torch.randn(2, 8, 4))
+
+            def forward(self, x_RD, counts):
+                maybe_record_grouped_gemm(
+                    x_RD=x_RD,
+                    w1_EFD=self.w1_EFD,
+                    w2_EDF=self.w2_EDF,
+                    w3_EFD=self.w3_EFD,
+                    num_tokens_per_expert_E=counts,
+                )
+                return x_RD @ self.w1_EFD[0].t()
+
+        torch._dynamo.reset()
+        mod = Tiny()
+        compiled = torch.compile(mod, backend="eager", fullgraph=True)
+        x = torch.randn(3, 4)
+        counts = torch.tensor([1, 2], dtype=torch.int64)
+        # Must not raise Unsupported / graph break under fullgraph.
+        out = compiled(x, counts)
+        self.assertEqual(out.shape, (3, 8))
 
 
 class TestHistogramSinkAndManifest(unittest.TestCase):
@@ -451,25 +476,6 @@ class TestImbalanceStats(unittest.TestCase):
                     "1.0",
                 ],
             )
-
-    def test_imbalance_disabled(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            collector = MoEMetricCollector(
-                config=MoEMetricsConfig(
-                    enabled=True, sinks=["histogram"], collect_imbalance=False
-                ),
-                dump_folder=tmpdir,
-                rank=0,
-                world_size=1,
-            )
-            collector.begin_step(1)
-            collector.record(_make_record(step=1))
-            collector.flush()
-            collector.close()
-
-            moe_dir = Path(tmpdir) / "moe_metrics"
-            self.assertFalse((moe_dir / "m_imbalance_rank_0.csv").exists())
-            self.assertFalse((moe_dir / "m_imbalance_global.csv").exists())
 
 
 class TestTensorBoardMoESink(unittest.TestCase):
