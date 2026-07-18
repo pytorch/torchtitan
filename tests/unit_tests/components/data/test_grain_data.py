@@ -7,17 +7,18 @@
 """CPU tests for the composed Grain data pipeline."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 
 import grain.python as grain
 import numpy as np
 import pytest
 import torch
+from datasets import load_dataset
 
 from torchtitan.components.data.collators import TextCollator
 from torchtitan.components.data.dataset import (
     BuildOptions,
-    ChatToTokenSequence,
     DataRuntime,
     DatasetConcatConfig,
     DatasetMixConfig,
@@ -36,6 +37,7 @@ from torchtitan.components.data.sources import (
     IndexedJsonlSource,
 )
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
 
 class FakeTokenizer:
@@ -119,10 +121,12 @@ def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
     write_jsonl(path, [{"id": index} for index in range(10)])
     config = HuggingFaceStreamingSource.Config(
         path="json",
-        load_dataset_kwargs={
-            "data_files": str(path),
-            "split": "train",
-        },
+        loader=partial(
+            load_dataset,
+            data_files=str(path),
+            split="train",
+            streaming=True,
+        ),
     )
     rank_rows = []
     for rank in range(2):
@@ -150,10 +154,12 @@ def test_finite_filtered_stream_rejects_data_parallelism(tmp_path):
     config = SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="json",
-            load_dataset_kwargs={
-                "data_files": str(path),
-                "split": "train",
-            },
+            loader=partial(
+                load_dataset,
+                data_files=str(path),
+                split="train",
+                streaming=True,
+            ),
         ),
         filters=(lambda row: row["id"] % 2 == 0,),
     )
@@ -314,9 +320,9 @@ def test_chat_processor_masks_prompt_and_trains_assistant():
             {"role": "assistant", "content": sample["answer"]},
         ]
 
-    processor = ChatToTokenSequence.Config(
-        sample_to_messages=question_answer_to_messages,
-    ).build(runtime=RUNTIME)
+    processor = ChatProcessor.Config(
+        sample_processor=question_answer_to_messages,
+    ).build(runtime=replace(RUNTIME, seq_len=64))
     token_sequence = processor(
         {"question": "2+2?", "answer": "4"},
         np.random.default_rng(0),
@@ -327,17 +333,17 @@ def test_chat_processor_masks_prompt_and_trains_assistant():
     )
     prompt_length = len(FakeTokenizer().encode(prompt, add_bos=True, add_eos=False))
 
-    assert not token_sequence.loss_mask[:prompt_length].any()
+    assert not token_sequence.loss_mask[1:prompt_length].any()
     assert token_sequence.loss_mask[prompt_length:].all()
     assert token_sequence.token_ids[-1] == FakeTokenizer.eos_id
 
 
 def test_chat_processor_rejects_non_single_turn_messages():
-    processor = ChatToTokenSequence.Config(
-        sample_to_messages=lambda sample: sample["messages"],
+    processor = ChatProcessor.Config(
+        sample_processor=lambda sample: sample["messages"],
     ).build(runtime=RUNTIME)
 
-    with pytest.raises(ValueError, match="one user and one assistant"):
+    with pytest.raises(ValueError, match="Expected single-turn"):
         processor(
             {"messages": [{"role": "user", "content": "hello"}]},
             np.random.default_rng(0),

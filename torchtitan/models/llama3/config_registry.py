@@ -5,11 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.data.collators import TextCollator
-from torchtitan.components.data.dataset import ChatToTokenSequence, SingleDatasetConfig
-from torchtitan.components.data.loader import GrainDataLoader
-from torchtitan.components.data.packing import FirstFitPackingConfig
-from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -18,7 +13,7 @@ from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
+from torchtitan.hf_datasets.text_datasets import c4_text_dataloader, chat_dataloader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
@@ -235,6 +230,12 @@ def llama3_405b() -> Trainer.Config:
 def sft_debugmodel() -> Trainer.Config:
     """SFT debug config with Llama3 debugmodel and local test data."""
 
+    def process_sample(sample):
+        return [
+            {"role": "user", "content": sample["question"]},
+            {"role": "assistant", "content": sample["answer"]},
+        ]
+
     model_spec = model_registry("debugmodel", attn_backend="flex")
 
     return Trainer.Config(
@@ -257,22 +258,13 @@ def sft_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=GrainDataLoader.Config(
-            dataset=FirstFitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceRandomAccessSource.Config(
-                        path="json",
-                        load_dataset_kwargs={
-                            "data_files": "tests/assets/sft_test/data.json",
-                            "split": "train",
-                        },
-                    ),
-                    process=ChatToTokenSequence.Config(
-                        sample_to_messages=_question_answer_to_messages,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+        dataloader=chat_dataloader(
+            dataset_path="json",
+            load_dataset_kwargs={
+                "data_files": "tests/assets/sft_test/data.json",
+                "split": "train",
+            },
+            sample_processor=process_sample,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(
@@ -281,10 +273,3 @@ def sft_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
-
-
-def _question_answer_to_messages(sample):
-    return [
-        {"role": "user", "content": sample["question"]},
-        {"role": "assistant", "content": sample["answer"]},
-    ]

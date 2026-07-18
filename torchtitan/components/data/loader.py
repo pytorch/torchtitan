@@ -10,6 +10,7 @@ import dataclasses
 import inspect
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 import grain.python as grain
@@ -43,6 +44,12 @@ def _normalize_config(value: Any) -> Any:
         return [_normalize_config(item) for item in value]
     if isinstance(value, (str, int, float, bool, type(None))):
         return value
+    if isinstance(value, partial):
+        return {
+            "partial": _normalize_config(value.func),
+            "args": _normalize_config(value.args),
+            "keywords": _normalize_config(value.keywords),
+        }
     if inspect.isfunction(value):
         if value.__closure__:
             raise TypeError(

@@ -4,38 +4,99 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Qwen multimodal Grain processors and packing recipe."""
+"""Multimodal dataset and dataloader for VLM training.
 
-from abc import abstractmethod
+Workflow overview::
+
+    HuggingFace Dataset (streaming)
+            │
+            ▼
+    ┌───────────────────────────────────────────────────────┐
+    │  Sample Processor  (per-sample, in Dataset.__iter__)  │
+    │                                                       │
+    │  1. Parse raw sample (dataset-specific format)        │
+    │     e.g. OBELICS interleaved text/images,             │
+    │          CC12M text-image pairs                       │
+    │                                                       │
+    │  2. Process vision: decode image/video bytes,         │
+    │     resize to multiples of (patch_size * merge_size), │
+    │     normalize with image_mean/std                     │
+    │     → pixel_values: list[Tensor(T,H,W,C)]            │
+    │                                                       │
+    │  3. Process text: insert vision placeholder tokens    │
+    │     <|vision_start|><|image_pad|>...<|vision_end|>    │
+    │     into text, then tokenize                          │
+    │     → input_ids: Tensor(seq_len,)                     │
+    │     → labels: same as input_ids, with vision tokens   │
+    │       masked to ignore_id (-100)                      │
+    └───────────────────────────────────────────────────────┘
+            │
+            ▼  (optional, if packing_buffer_size > 0)
+    ┌───────────────────────────────────────────────────────┐
+    │  Sample Packer                                        │
+    │  Bin-pack short samples into seq_len-length sequences │
+    │  to reduce padding waste                              │
+    └───────────────────────────────────────────────────────┘
+            │
+            ▼  DataLoader batches samples (batch_size)
+    ┌───────────────────────────────────────────────────────┐
+    │  Collator  (MultiModalCollator)                    │
+    │                                                       │
+    │  1. collate_images: for each image Tensor(T,H,W,C),  │
+    │     reshape into patches (num_patches, patch_dim),    │
+    │     pad all images to same num_patches                │
+    │     → pixel_values: (N, max_patches, patch_dim)       │
+    │     → grid_thw: (N, 3) per-image [T, H', W'] dims    │
+    │     (same for videos)                                 │
+    │                                                       │
+    │  2. collate_text: pad input_ids/labels across batch   │
+    │     to seq_len, pad batch to target batch_size        │
+    │     → input_ids: (batch_size, seq_len)                │
+    │     → labels: (batch_size, seq_len)                   │
+    └───────────────────────────────────────────────────────┘
+            │
+            ▼
+    Model receives: {input_ids, pixel_values, grid_thw,
+                     pixel_values_videos, grid_thw_videos,
+                     special_tokens: dict[str, int]}, labels
+"""
+
+import inspect
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from functools import partial
+from typing import Annotated, Any
 
 import grain.python as grain
 import numpy as np
 import torch
+import tyro
+from datasets import load_dataset
 
 from torchtitan.components.data.dataset import (
     BuildOptions,
     DataRuntime,
-    DatasetConfig,
+    DatasetConfig as GrainDatasetConfig,
     SampleProcessor,
+    SingleDatasetConfig,
 )
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.tools.logging import logger
 
+from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.tools.logging import logger
+from .mm_collator import MultiModalCollator
 from .utils.image import calculate_vision_tokens, process_image
+from .utils.packing import MMSamplePacker
 from .utils.text import insert_vision_placeholders
 
 
-QwenTrainingRow = dict[str, Any]
-
-
-def _process_qwen_sample(
-    *,
+def _process_mm_sample(
     texts: list[str | None],
-    images: list[Any],
+    images: list[bytes | None],
     tokenizer: MultiModalTokenizer,
     patch_size: int,
     temporal_patch_size: int,
@@ -44,110 +105,237 @@ def _process_qwen_sample(
     max_pixels: int,
     image_mean: tuple[float, ...],
     image_std: tuple[float, ...],
-) -> QwenTrainingRow | None:
-    """Convert an ordered parallel text/image representation to a Qwen row."""
+    **kwargs,
+) -> dict[str, Any] | None:
+    """Common processing logic for multimodal samples.
+
+    Args:
+        texts: List of strings with None indicating image positions
+        images: List of image bytes with None for text positions
+        tokenizer: Tokenizer for text processing
+        patch_size: Size of image patches
+        spatial_merge_size: merge 2D image patches to reduce LLM's sequence length.
+            - if 1 (default): no merge, effectively NoOp
+            - if 2: 2x2=4 image patches will be reduced to 1 LLM visual token
+
+    Returns:
+        Dict with:
+            - input_ids: Tensor of token IDs
+            - labels: Tensor of label IDs
+            - pixel_values: List of processed image tensors
+
+    Example:
+        Interleaved format:
+        texts = [text1, None, text2, None, text3]
+        images = [None, img1, None, img2, None]
+
+        Image-text pair format as a special case of interleaved:
+        texts = [None, text]
+        images = [image, None]
+    """
     if not texts or len(texts) != len(images):
         return None
 
-    processed_images: list[torch.Tensor] = []
-    num_image_tokens: list[int] = []
-    processed_texts = list(texts)
-    expected_images = sum(image is not None for image in images)
+    processed_images = []
+    num_image_tokens = []
 
-    for index, image in enumerate(images):
-        if image is None:
-            continue
-        processed_image = process_image(
-            image,
-            patch_size=patch_size,
-            merge_size=spatial_merge_size,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-            image_mean=image_mean,
-            image_std=image_std,
-        )
-        if processed_image is None:
-            logger.warning("Cannot process all images for sample. Dropping")
-            return None
-        num_tokens, _, _ = calculate_vision_tokens(
-            num_frames=1,
-            height=processed_image.shape[1],
-            width=processed_image.shape[2],
-            patch_size=patch_size,
-            spatial_merge_size=spatial_merge_size,
-            temporal_patch_size=temporal_patch_size,
-        )
-        processed_images.append(processed_image)
-        num_image_tokens.append(num_tokens)
-        processed_texts[index] = None
+    for idx, img in enumerate(images):
+        if img is not None:
+            # Resize (to multiples of patch_size x merge_size) and normalize images
+            processed_img = process_image(
+                img,
+                patch_size=patch_size,
+                merge_size=spatial_merge_size,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+                image_mean=image_mean,
+                image_std=image_std,
+            )
+            if processed_img is not None:
+                num_tokens, _, _ = calculate_vision_tokens(
+                    num_frames=1,
+                    height=processed_img.shape[1],
+                    width=processed_img.shape[2],
+                    patch_size=patch_size,
+                    spatial_merge_size=spatial_merge_size,
+                    temporal_patch_size=1,
+                )
+                processed_images.append(processed_img)
+                num_image_tokens.append(num_tokens)
+                texts[idx] = None
 
-    if len(processed_images) != expected_images:
+    if len(processed_images) != len([_ for _ in images if _ is not None]):
         logger.warning("Cannot process all images for sample. Dropping")
         return None
 
+    # Replace image placeholders (None) with image token sequences
     processed_text = insert_vision_placeholders(
-        processed_texts,
+        texts,
         num_image_tokens,
+        # pyrefly: ignore [missing-attribute]
         vision_start_token=tokenizer.vision_start_token,
+        # pyrefly: ignore [missing-attribute]
         vision_token=tokenizer.image_token,
+        # pyrefly: ignore [missing-attribute]
         vision_end_token=tokenizer.vision_end_token,
+        # pyrefly: ignore [bad-argument-type]
         eos_token=tokenizer.eos_token,
     )
-    token_ids = torch.as_tensor(tokenizer.encode(processed_text), dtype=torch.long)
-    labels = token_ids.clone()
-    special_token_ids = torch.as_tensor(
+
+    tokens = tokenizer.encode(processed_text)
+    input_ids = torch.tensor(tokens)
+    labels = torch.tensor(tokens)
+
+    special_token_ids = torch.tensor(
         [
+            # pyrefly: ignore [missing-attribute]
             tokenizer.vision_start_id,
+            # pyrefly: ignore [missing-attribute]
             tokenizer.vision_end_id,
+            # pyrefly: ignore [missing-attribute]
             tokenizer.image_id,
+            # pyrefly: ignore [missing-attribute]
             tokenizer.video_id,
-        ],
-        dtype=token_ids.dtype,
+        ]
     )
-    labels = torch.where(
-        torch.isin(labels, special_token_ids),
-        torch.as_tensor(IGNORE_INDEX, dtype=labels.dtype),
-        labels,
-    )
+    labels = torch.where(torch.isin(labels, special_token_ids), IGNORE_INDEX, labels)
+
     return {
-        "input_ids": token_ids,
+        "input_ids": input_ids,
         "labels": labels,
-        "positions": torch.arange(token_ids.shape[0], dtype=torch.long),
+        "positions": torch.arange(len(input_ids)),
         "pixel_values": processed_images,
     }
 
 
-class _QwenProcessor(SampleProcessor):
+def _process_obelics_sample(
+    sample: dict[str, Any],
+    tokenizer: MultiModalTokenizer,
+    patch_size: int,
+    temporal_patch_size: int,
+    spatial_merge_size: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
+    **kwargs,
+) -> dict[str, Any] | None:
+    """Process a sample from the OBELICS dataset (interleaved text and images)."""
+    return _process_mm_sample(
+        texts=sample.get("texts", []),
+        images=sample.get("images", []),
+        tokenizer=tokenizer,
+        patch_size=patch_size,
+        temporal_patch_size=temporal_patch_size,
+        spatial_merge_size=spatial_merge_size,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        image_mean=image_mean,
+        image_std=image_std,
+    )
+
+
+def _process_cc12_wd_sample(
+    sample: dict[str, Any],
+    tokenizer: MultiModalTokenizer,
+    patch_size: int,
+    temporal_patch_size: int,
+    spatial_merge_size: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
+    **kwargs,
+) -> dict[str, Any] | None:
+    """Process a sample from the CC12-WD dataset (text-image pairs)."""
+    text = sample.get("txt", "")
+    image = sample.get("jpg", None)
+
+    texts = [None, text]
+    images = [image, None]
+
+    return _process_mm_sample(
+        texts=texts,
+        images=images,
+        tokenizer=tokenizer,
+        patch_size=patch_size,
+        temporal_patch_size=temporal_patch_size,
+        spatial_merge_size=spatial_merge_size,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        image_mean=image_mean,
+        image_std=image_std,
+    )
+
+
+MM_DATASETS = {
+    "obelics": DatasetConfig(
+        path="HuggingFaceM4/OBELICS",
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        sample_processor=_process_obelics_sample,
+    ),
+    "cc12m": DatasetConfig(
+        path="pixparse/cc12m-wds",
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        sample_processor=_process_cc12_wd_sample,
+    ),
+    "cc12m-test": DatasetConfig(
+        path="tests/assets/cc12m_test",
+        loader=lambda path: load_dataset(
+            path, split="train", data_files={"train": "*.tar"}, streaming=True
+        ),
+        sample_processor=_process_cc12_wd_sample,
+    ),
+}
+
+
+def _validate_mm_dataset(
+    dataset_name: str, dataset_path: str | None = None
+) -> tuple[str, Callable, Callable]:
+    """Validate dataset name and path, returning (path, loader, sample_processor)."""
+    if dataset_name not in MM_DATASETS:
+        raise ValueError(
+            f"Dataset {dataset_name} is not supported. "
+            f"Supported datasets are: {list(MM_DATASETS.keys())}"
+        )
+
+    config = MM_DATASETS[dataset_name]
+    path = dataset_path or config.path
+    logger.info(f"Preparing {dataset_name} dataset from {path}")
+    return path, config.loader, config.sample_processor
+
+
+class MultiModalProcessor(SampleProcessor):
+    """Binds an existing multimodal sample processor to the Grain map contract."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        patch_size: int = 16
-        temporal_patch_size: int = 2
-        spatial_merge_size: int = 2
-        min_pixels: int = 65_536
-        max_pixels: int = 16_777_216
-        image_mean: tuple[float, ...] = (0.5, 0.5, 0.5)
-        image_std: tuple[float, ...] = (0.5, 0.5, 0.5)
+        sample_processor: Annotated[Callable, tyro.conf.Suppress]
+        patch_size: int
+        temporal_patch_size: int
+        spatial_merge_size: int
+        min_pixels: int
+        max_pixels: int
+        image_mean: tuple[float, ...]
+        image_std: tuple[float, ...]
+        video_dir: str = ""
+        video_fps: float = 2.0
+        video_min_frames: int = 4
+        video_max_frames: int = 768
 
     def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
         self._config = config
         self._tokenizer = runtime.tokenizer
-
-    @abstractmethod
-    def _ordered_parts(
-        self, sample: dict[str, Any]
-    ) -> tuple[list[str | None], list[Any]]:
-        ...
+        self._seq_len = runtime.seq_len
 
     def __call__(
         self,
         sample: dict[str, Any],
         rng: np.random.Generator,
-    ) -> QwenTrainingRow | None:
+    ) -> dict[str, Any] | None:
         del rng
-        texts, images = self._ordered_parts(sample)
-        return _process_qwen_sample(
-            texts=texts,
-            images=images,
+        processed = self._config.sample_processor(
+            sample=sample,
             tokenizer=self._tokenizer,
             patch_size=self._config.patch_size,
             temporal_patch_size=self._config.temporal_patch_size,
@@ -156,286 +344,108 @@ class _QwenProcessor(SampleProcessor):
             max_pixels=self._config.max_pixels,
             image_mean=self._config.image_mean,
             image_std=self._config.image_std,
+            video_dir=self._config.video_dir,
+            video_fps=self._config.video_fps,
+            video_min_frames=self._config.video_min_frames,
+            video_max_frames=self._config.video_max_frames,
+            seq_len=self._seq_len,
         )
-
-
-class QwenObelicsProcessor(_QwenProcessor):
-    """Processes OBELICS' ordered ``texts`` and ``images`` columns."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(_QwenProcessor.Config):
-        pass
-
-    def _ordered_parts(
-        self, sample: dict[str, Any]
-    ) -> tuple[list[str | None], list[Any]]:
-        return list(sample.get("texts", [])), list(sample.get("images", []))
-
-
-class QwenCC12MProcessor(_QwenProcessor):
-    """Processes CC12M-WDS' text/image pair columns."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(_QwenProcessor.Config):
-        text_field: str = "txt"
-        image_field: str = "jpg"
-
-    def _ordered_parts(
-        self, sample: dict[str, Any]
-    ) -> tuple[list[str | None], list[Any]]:
-        return [None, sample.get(self._config.text_field, "")], [
-            sample.get(self._config.image_field),
-            None,
-        ]
-
-
-def _is_qwen_row(row: QwenTrainingRow | None) -> bool:
-    return row is not None
-
-
-def _num_image_patches(
-    image: torch.Tensor,
-    *,
-    patch_size: int,
-    temporal_patch_size: int,
-) -> int:
-    frames, height, width, _ = image.shape
-    return (
-        (frames + temporal_patch_size - 1)
-        // temporal_patch_size
-        * (height // patch_size)
-        * (width // patch_size)
-    )
-
-
-def _vision_admission(
-    row: QwenTrainingRow, *, patch_size: int, temporal_patch_size: int
-) -> tuple[int, int]:
-    num_images = len(row.get("pixel_values", ()))
-    num_patches = sum(
-        _num_image_patches(
-            image,
-            patch_size=patch_size,
-            temporal_patch_size=temporal_patch_size,
-        )
-        for image in row.get("pixel_values", ())
-    )
-    for video in row.get("pixel_values_videos", ()):
-        num_images += (video.shape[0] + temporal_patch_size - 1) // temporal_patch_size
-        num_patches += _num_image_patches(
-            video,
-            patch_size=patch_size,
-            temporal_patch_size=temporal_patch_size,
-        )
-    return num_images, num_patches
-
-
-def _merge_qwen_rows(rows: list[QwenTrainingRow]) -> QwenTrainingRow:
-    labels = [row["labels"].clone() for row in rows]
-    for later_labels in labels[1:]:
-        later_labels[0] = IGNORE_INDEX
-    return {
-        "input_ids": torch.cat([row["input_ids"] for row in rows]),
-        "labels": torch.cat(labels),
-        "positions": torch.cat([row["positions"] for row in rows]),
-        "pixel_values": [
-            image for row in rows for image in row.get("pixel_values", ())
-        ],
-        "pixel_values_videos": [
-            video for row in rows for video in row.get("pixel_values_videos", ())
-        ],
-    }
-
-
-class _QwenMultimodalPackingDataset(grain.IterDataset[QwenTrainingRow]):
-    def __init__(
-        self,
-        parent: grain.IterDataset[QwenTrainingRow],
-        *,
-        max_seq_len: int,
-        local_batch_size: int,
-        max_images_per_batch: int,
-        max_patches_per_batch: int,
-        patch_size: int,
-        temporal_patch_size: int,
-    ) -> None:
-        super().__init__(parent)
-        self._max_seq_len = max_seq_len
-        self._local_batch_size = local_batch_size
-        self._max_images_per_batch = max_images_per_batch
-        self._max_patches_per_batch = max_patches_per_batch
-        self._patch_size = patch_size
-        self._temporal_patch_size = temporal_patch_size
-
-    def __iter__(self) -> "_QwenMultimodalPackingIterator":
-        return _QwenMultimodalPackingIterator(
-            self._parent.__iter__(),
-            max_seq_len=self._max_seq_len,
-            local_batch_size=self._local_batch_size,
-            max_images_per_batch=self._max_images_per_batch,
-            max_patches_per_batch=self._max_patches_per_batch,
-            patch_size=self._patch_size,
-            temporal_patch_size=self._temporal_patch_size,
-        )
-
-
-class _QwenMultimodalPackingIterator(grain.DatasetIterator[QwenTrainingRow]):
-    def __init__(
-        self,
-        parent: grain.DatasetIterator[QwenTrainingRow],
-        *,
-        max_seq_len: int,
-        local_batch_size: int,
-        max_images_per_batch: int,
-        max_patches_per_batch: int,
-        patch_size: int,
-        temporal_patch_size: int,
-    ) -> None:
-        super().__init__(parent)
-        self._max_seq_len = max_seq_len
-        self._local_batch_size = local_batch_size
-        self._max_images_per_batch = max_images_per_batch
-        self._max_patches_per_batch = max_patches_per_batch
-        self._patch_size = patch_size
-        self._temporal_patch_size = temporal_patch_size
-        self._ready_rows: deque[QwenTrainingRow] = deque()
-        self._lookahead: QwenTrainingRow | None = None
-        self._exhausted = False
-
-    def _next_candidate(self) -> QwenTrainingRow | None:
-        if self._lookahead is not None:
-            row = self._lookahead
-            self._lookahead = None
-            return row
-        if self._exhausted:
-            return None
-        while True:
-            try:
-                row = next(self._parent)
-            except StopIteration:
-                self._exhausted = True
-                return None
-            if _is_qwen_row(row):
-                return row
-
-    def _fill_ready_rows(self) -> None:
-        bins: list[list[QwenTrainingRow]] = []
-        image_count = 0
-        patch_count = 0
-        budget_blocked = False
-
-        while True:
-            row = self._next_candidate()
-            if row is None:
-                break
-
-            row_length = int(row["input_ids"].shape[0])
-            if row_length > self._max_seq_len:
-                logger.warning(
-                    "Dropping Qwen sample with length %d > max_seq_len %d",
-                    row_length,
-                    self._max_seq_len,
-                )
-                continue
-
-            row_images, row_patches = _vision_admission(
-                row,
-                patch_size=self._patch_size,
-                temporal_patch_size=self._temporal_patch_size,
+        if processed is not None and processed["input_ids"].shape[0] > self._seq_len:
+            logger.warning(
+                f"Sample length {processed['input_ids'].shape[0]} > training "
+                f"self._seq_len={self._seq_len}. Skip"
             )
-            if (
-                row_images > self._max_images_per_batch
-                or row_patches > self._max_patches_per_batch
-            ):
-                logger.warning(
-                    "Dropping Qwen sample exceeding vision admission limits: "
-                    "images=%d patches=%d",
-                    row_images,
-                    row_patches,
-                )
-                continue
-            if (
-                image_count + row_images > self._max_images_per_batch
-                or patch_count + row_patches > self._max_patches_per_batch
-            ):
-                self._lookahead = row
-                budget_blocked = True
-                break
+            return None
+        return processed
 
-            placed = False
-            for bin_rows in bins:
-                bin_length = sum(
-                    int(candidate["input_ids"].shape[0]) for candidate in bin_rows
-                )
-                if bin_length + row_length <= self._max_seq_len:
-                    bin_rows.append(row)
-                    placed = True
-                    break
-            if not placed and len(bins) < self._local_batch_size:
-                bins.append([row])
-            elif not placed:
-                self._lookahead = row
-                break
-            image_count += row_images
-            patch_count += row_patches
 
-        if not bins:
-            return
+def _is_processed_mm_sample(sample: dict[str, Any] | None) -> bool:
+    return sample is not None
 
-        for bin_rows in bins:
-            self._ready_rows.append(_merge_qwen_rows(bin_rows))
 
-        # Admission limits apply to the fixed loader batch. Empty rows retain
-        # that batch's shape when a vision budget closes it early.
-        if budget_blocked:
-            empty = {
-                "input_ids": torch.empty(0, dtype=torch.long),
-                "labels": torch.empty(0, dtype=torch.long),
-                "positions": torch.empty(0, dtype=torch.long),
-                "pixel_values": [],
-                "pixel_values_videos": [],
-            }
-            while len(self._ready_rows) < self._local_batch_size:
-                self._ready_rows.append(empty)
+class _MMSamplePackingDataset(grain.IterDataset[dict[str, Any]]):
+    def __init__(
+        self,
+        parent: grain.IterDataset[dict[str, Any]],
+        *,
+        max_seq_length: int,
+        buffer_size: int,
+    ) -> None:
+        super().__init__(parent)
+        self._max_seq_length = max_seq_length
+        self._buffer_size = buffer_size
 
-    def __next__(self) -> QwenTrainingRow:
-        if not self._ready_rows:
-            self._fill_ready_rows()
-        if not self._ready_rows:
-            raise StopIteration
-        return self._ready_rows.popleft()
+    def __iter__(self) -> "_MMSamplePackingIterator":
+        return _MMSamplePackingIterator(
+            self._parent.__iter__(),
+            max_seq_length=self._max_seq_length,
+            buffer_size=self._buffer_size,
+        )
+
+
+class _MMSamplePackingIterator(grain.DatasetIterator[dict[str, Any]]):
+    def __init__(
+        self,
+        parent: grain.DatasetIterator[dict[str, Any]],
+        *,
+        max_seq_length: int,
+        buffer_size: int,
+    ) -> None:
+        super().__init__(parent)
+        self._packer = MMSamplePacker(
+            max_seq_length=max_seq_length,
+            buffer_size=buffer_size,
+            batch_size=1,
+        )
+        self._parent_exhausted = False
+        self._flushed = False
+
+    def __next__(self) -> dict[str, Any]:
+        while not self._packer.packed_samples:
+            if self._parent_exhausted:
+                if not self._flushed:
+                    self._packer.flush()
+                    self._flushed = True
+                    continue
+                raise StopIteration
+            try:
+                self._packer.add_sample(next(self._parent))
+            except StopIteration:
+                self._parent_exhausted = True
+        return self._packer.packed_samples.popleft()
 
     def get_state(self) -> dict[str, Any]:
         return {
             "parent": self._parent.get_state(),
-            "ready_rows": list(self._ready_rows),
-            "lookahead": self._lookahead,
-            "exhausted": self._exhausted,
+            "sample_buffer": dict(self._packer._sample_buffer),
+            "next_id": self._packer._next_id,
+            "packed_samples": list(self._packer.packed_samples),
+            "parent_exhausted": self._parent_exhausted,
+            "flushed": self._flushed,
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
         self._parent.set_state(state["parent"])
-        self._ready_rows = deque(state["ready_rows"])
-        self._lookahead = state["lookahead"]
-        self._exhausted = state["exhausted"]
+        self._packer._sample_buffer = dict(state["sample_buffer"])
+        self._packer._next_id = state["next_id"]
+        self._packer.packed_samples = deque(state["packed_samples"])
+        self._parent_exhausted = state["parent_exhausted"]
+        self._flushed = state["flushed"]
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class QwenMultimodalPackingConfig:
-    """Packs Qwen rows while enforcing fixed-batch vision admission limits."""
+class MMSamplePackingConfig:
+    """Packs multimodal rows with the existing scan-and-pick algorithm."""
 
-    dataset: DatasetConfig
-    max_images_per_batch: int
-    max_patches_per_batch: int
-    patch_size: int = 16
-    temporal_patch_size: int = 2
+    dataset: GrainDatasetConfig
+    buffer_size: int
 
     def build(
         self,
         *,
         runtime: DataRuntime,
         options: BuildOptions,
-    ) -> grain.IterDataset[QwenTrainingRow]:
+    ) -> grain.IterDataset[dict[str, Any]]:
         if not options.repeat and options.dp_world_size > 1:
             raise ValueError(
                 "finite packed datasets are not supported with data parallelism"
@@ -444,15 +454,82 @@ class QwenMultimodalPackingConfig:
         if isinstance(parent, grain.MapDataset):
             parent = parent.to_iter_dataset(read_options=runtime.read_options)
         if not isinstance(parent, grain.IterDataset):
-            raise TypeError("Qwen multimodal packing requires a Grain dataset")
+            raise TypeError("multimodal packing requires a Grain dataset")
         # TODO(data-global-pack-plan): Plan packed rows before effective-DP sharding
-        # when SFT/pretraining measurements justify shared length metadata and a cached plan.
-        return _QwenMultimodalPackingDataset(
+        # to support topology-independent resume.
+        return _MMSamplePackingDataset(
             parent,
-            max_seq_len=runtime.seq_len,
-            local_batch_size=runtime.local_batch_size,
-            max_images_per_batch=self.max_images_per_batch,
-            max_patches_per_batch=self.max_patches_per_batch,
-            patch_size=self.patch_size,
-            temporal_patch_size=self.temporal_patch_size,
+            max_seq_length=runtime.seq_len,
+            buffer_size=self.buffer_size,
         )
+
+
+def multimodal_dataloader(
+    dataset: str = "cc12m-test",
+    *,
+    dataset_path: str | None = None,
+    dataset_subset: str = "",
+    packing_buffer_size: int = 0,
+    max_images_per_batch: int,
+    patch_size: int,
+    temporal_patch_size: int,
+    spatial_merge_size: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
+    video_dir: str = "",
+    video_fps: float = 2.0,
+    video_min_frames: int = 4,
+    video_max_frames: int = 768,
+    build_mrope_positions: bool = False,
+    shuffle: bool = False,
+    repeat: bool = True,
+) -> GrainDataLoader.Config:
+    """Build a Grain dataloader for an existing multimodal dataset."""
+    path, dataset_loader, sample_processor = _validate_mm_dataset(
+        dataset,
+        dataset_path,
+    )
+    if dataset_subset and "subset" in inspect.signature(dataset_loader).parameters:
+        dataset_loader = partial(dataset_loader, subset=dataset_subset)
+
+    rows: GrainDatasetConfig = SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path=path,
+            loader=dataset_loader,
+        ),
+        process=MultiModalProcessor.Config(
+            sample_processor=sample_processor,
+            patch_size=patch_size,
+            temporal_patch_size=temporal_patch_size,
+            spatial_merge_size=spatial_merge_size,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
+            image_mean=image_mean,
+            image_std=image_std,
+            video_dir=video_dir,
+            video_fps=video_fps,
+            video_min_frames=video_min_frames,
+            video_max_frames=video_max_frames,
+        ),
+        filters=(_is_processed_mm_sample,),
+    )
+    if packing_buffer_size > 0:
+        rows = MMSamplePackingConfig(
+            dataset=rows,
+            buffer_size=packing_buffer_size,
+        )
+
+    return GrainDataLoader.Config(
+        dataset=rows,
+        collator=MultiModalCollator.Config(
+            max_images_per_batch=max_images_per_batch,
+            patch_size=patch_size,
+            temporal_patch_size=temporal_patch_size,
+            spatial_merge_size=spatial_merge_size,
+            build_mrope_positions=build_mrope_positions,
+        ),
+        shuffle=shuffle,
+        repeat=repeat,
+    )

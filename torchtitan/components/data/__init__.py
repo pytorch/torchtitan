@@ -7,14 +7,12 @@
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import (
     BuildOptions,
-    ChatToTokenSequence,
     DataRuntime,
     DatasetConcatConfig,
     DatasetConfig,
     DatasetMixConfig,
     SampleProcessor,
     SingleDatasetConfig,
-    TextToTokenSequence,
     TokenSequence,
     WeightedDataset,
 )
@@ -31,7 +29,6 @@ from torchtitan.components.data.sources import (
 
 __all__ = [
     "BuildOptions",
-    "ChatToTokenSequence",
     "Collator",
     "ConcatThenSplitPackingConfig",
     "DataRuntime",
@@ -46,7 +43,6 @@ __all__ = [
     "SampleProcessor",
     "SingleDatasetConfig",
     "TextCollator",
-    "TextToTokenSequence",
     "TokenSequence",
     "WeightedDataset",
 ]
