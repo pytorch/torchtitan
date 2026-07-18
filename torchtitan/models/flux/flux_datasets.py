@@ -4,173 +4,249 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Flux-specific Grain processing and dataset recipes."""
-
-from __future__ import annotations
-
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, cast, Protocol, TypeAlias
+from typing import Annotated, Any
 
 import grain.python as grain
 import numpy as np
 import PIL.Image
 import torch
+import tyro
+from datasets import load_dataset
 from torch.utils.data import default_collate
 
 from torchtitan.components.data.collators import Collator, TrainerBatch
 from torchtitan.components.data.dataset import (
     BuildOptions,
     DataRuntime,
-    DatasetConfig,
+    DatasetConfig as GrainDatasetConfig,
     SampleProcessor,
     SingleDatasetConfig,
 )
 from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.data.sources import HuggingFaceStreamingSource
+from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
+from torchtitan.tools.logging import logger
 
 
-FluxTrainingRow: TypeAlias = tuple[dict[str, Any], torch.Tensor]
-
-_VALIDATION_TIMESTEPS = tuple((index + 0.5) / 8 for index in range(8))
-
-
-class _FluxTokenizer(Protocol):
-    def encode(self, text: str) -> Mapping[str, torch.Tensor]:
-        ...
-
-
-def _process_flux_image(
-    image: PIL.Image.Image,
+def _process_cc12m_image(
+    img: PIL.Image.Image,
+    output_size: int = 256,
     *,
-    output_size: int,
     rng: np.random.Generator,
 ) -> torch.Tensor | None:
-    """Resize and randomly crop one image using the Grain-provided RNG."""
-    width, height = image.size
+    """Process CC12M image to the desired size."""
+
+    width, height = img.size
+    # Skip low resolution images
     if width < output_size or height < output_size:
         return None
 
     if width >= height:
-        resized_width = math.ceil(output_size / height * width)
-        image = image.resize((resized_width, output_size))
-        left = int(rng.integers(0, resized_width - output_size + 1))
-        image = image.crop((left, 0, left + output_size, output_size))
+        # resize height to be equal to output_size, then crop
+        new_width, new_height = math.ceil(output_size / height * width), output_size
+        img = img.resize((new_width, new_height))
+        left = int(rng.integers(0, new_width - output_size + 1))
+        resized_img = img.crop((left, 0, left + output_size, output_size))
     else:
-        resized_height = math.ceil(output_size / width * height)
-        image = image.resize((output_size, resized_height))
-        top = int(rng.integers(0, resized_height - output_size + 1))
-        image = image.crop((0, top, output_size, top + output_size))
+        # resize width to be equal to output_size, the crop
+        new_width, new_height = (
+            output_size,
+            math.ceil(output_size / width * height),
+        )
+        img = img.resize((new_width, new_height))
+        lower = int(rng.integers(0, new_height - output_size + 1))
+        resized_img = img.crop((0, lower, output_size, lower + output_size))
 
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    image_CHW = np.array(image, copy=True).transpose((2, 0, 1))
-    return (
-        torch.from_numpy(image_CHW)
-        .to(dtype=torch.float32)
-        .div_(255.0)
-        .mul_(2.0)
-        .sub_(1.0)
-    )
+    assert resized_img.size[0] == resized_img.size[1] == output_size
+
+    # Convert grayscale images, and RGBA, CMYK images
+    if resized_img.mode != "RGB":
+        resized_img = resized_img.convert("RGB")
+
+    # Normalize the image to [-1, 1]
+    np_img = np.array(resized_img).transpose((2, 0, 1))
+    tensor_img = torch.tensor(np_img).float() / 255.0 * 2.0 - 1.0
+
+    # NOTE: The following commented code is an alternative way
+    # img_transform = transforms.Compose(
+    #     [
+    #         transforms.Resize(max(output_size, output_size)),
+    #         transforms.CenterCrop((output_size, output_size)),
+    #         transforms.ToTensor(),
+    #     ]
+    # )
+    # tensor_img = img_transform(img)
+
+    return tensor_img
 
 
-def _validate_flux_tokens(tokens: Mapping[str, torch.Tensor]) -> None:
-    missing = {"t5", "clip"} - tokens.keys()
-    if missing:
-        raise ValueError(f"Flux tokenizer output is missing keys: {sorted(missing)}")
-    for name in ("t5", "clip"):
-        if not isinstance(tokens[name], torch.Tensor):
-            raise ValueError(
-                f"Flux tokenizer output {name!r} must be a tensor, "
-                f"got {type(tokens[name]).__name__}"
-            )
+def _cc12m_wds_data_processor(
+    sample: dict[str, Any],
+    tokenizer: FluxTokenizerContainer,
+    output_size: int = 256,
+    *,
+    rng: np.random.Generator,
+) -> dict[str, Any]:
+    """
+    Preprocess CC12M dataset sample image and text for Flux model.
+
+    Args:
+        sample: A sample from dataset
+        tokenizer: FluxTokenizerContainer that encodes text with both T5 and CLIP
+        output_size: The output image size
+
+    """
+    img = _process_cc12m_image(sample["jpg"], output_size=output_size, rng=rng)
+    tokens = tokenizer.encode(sample["txt"])
+
+    return {
+        "image": img,
+        **tokens,
+        "prompt": sample["txt"],
+    }
+
+
+def _coco_data_processor(
+    sample: dict[str, Any],
+    tokenizer: FluxTokenizerContainer,
+    output_size: int = 256,
+    *,
+    rng: np.random.Generator,
+) -> dict[str, Any]:
+    """
+    Preprocess COCO dataset sample image and text for Flux model.
+
+    Args:
+        sample: A sample from dataset
+        tokenizer: FluxTokenizerContainer that encodes text with both T5 and CLIP
+        output_size: The output image size
+
+    """
+    img = _process_cc12m_image(sample["image"], output_size=output_size, rng=rng)
+    prompt = sample["caption"]
+    if isinstance(prompt, list):
+        prompt = prompt[0]
+    tokens = tokenizer.encode(prompt)
+
+    return {
+        "image": img,
+        **tokens,
+        "prompt": prompt,
+    }
+
+
+DATASETS = {
+    "cc12m-wds": DatasetConfig(
+        path="pixparse/cc12m-wds",
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        sample_processor=_cc12m_wds_data_processor,
+    ),
+    "cc12m-test": DatasetConfig(
+        path="tests/assets/cc12m_test",
+        loader=lambda path: load_dataset(
+            path, split="train", data_files={"train": "*.tar"}, streaming=True
+        ),
+        sample_processor=_cc12m_wds_data_processor,
+    ),
+    "coco-validation": DatasetConfig(
+        path="howard-hou/COCO-Text",
+        loader=lambda path: load_dataset(path, split="validation", streaming=True),
+        sample_processor=_coco_data_processor,
+    ),
+}
+
+
+def _validate_dataset(
+    dataset_name: str, dataset_path: str | None = None
+) -> tuple[str, Callable, Callable]:
+    """Validate dataset name and path."""
+    if dataset_name not in DATASETS:
+        raise ValueError(
+            f"Dataset {dataset_name} is not supported. "
+            f"Supported datasets are: {list(DATASETS.keys())}"
+        )
+
+    config = DATASETS[dataset_name]
+    path = dataset_path or config.path
+    logger.info(f"Preparing {dataset_name} dataset from {path}")
+    return path, config.loader, config.sample_processor
 
 
 class FluxSampleProcessor(SampleProcessor):
-    """Crop, tokenize, and apply classifier-free prompt dropout to one row."""
+    """Applies an existing Flux processor and classifier-free prompt dropout."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        image_field: str = "jpg"
-        caption_field: str = "txt"
-        image_size: int = 256
+        data_processor: Annotated[Callable, tyro.conf.Suppress]
         prompt_dropout_prob: float = 0.0
+        img_size: int = 256
 
         def __post_init__(self) -> None:
-            if self.image_size <= 0:
-                raise ValueError(f"image_size must be positive, got {self.image_size}")
             if not 0.0 <= self.prompt_dropout_prob <= 1.0:
                 raise ValueError(
                     "prompt_dropout_prob must be in [0, 1], "
                     f"got {self.prompt_dropout_prob}"
                 )
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        runtime: DataRuntime,
-    ) -> None:
-        self._image_field = config.image_field
-        self._caption_field = config.caption_field
-        self._image_size = config.image_size
-        self._prompt_dropout_prob = config.prompt_dropout_prob
-        self._tokenizer = cast(_FluxTokenizer, runtime.tokenizer)
+    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
+        if not isinstance(runtime.tokenizer, FluxTokenizerContainer):
+            raise ValueError(
+                "Flux dataloader requires a FluxTokenizerContainer as tokenizer. "
+                "Set tokenizer=FluxTokenizerContainer.Config(...) in your trainer config."
+            )
+        self._tokenizer = runtime.tokenizer
         empty_tokens = self._tokenizer.encode("")
-        _validate_flux_tokens(empty_tokens)
-        self._empty_tokens = empty_tokens
+        self._t5_empty_token = empty_tokens["t5"]
+        self._clip_empty_token = empty_tokens["clip"]
+        self._data_processor = config.data_processor
+        self.prompt_dropout_prob = config.prompt_dropout_prob
+        self.img_size = config.img_size
 
     def __call__(
         self,
-        sample: Mapping[str, Any],
+        sample: dict[str, Any],
         rng: np.random.Generator,
-    ) -> FluxTrainingRow | None:
-        image = sample[self._image_field]
-        if not isinstance(image, PIL.Image.Image):
-            raise ValueError(
-                f"Flux image must be PIL.Image.Image, got {type(image).__name__}"
-            )
-
-        prompt = sample[self._caption_field]
-        if isinstance(prompt, list):
-            if not prompt:
-                raise ValueError("Flux caption list must not be empty")
-            prompt = prompt[0]
-        if not isinstance(prompt, str):
-            raise ValueError(
-                f"Flux caption must be a string, got {type(prompt).__name__}"
-            )
-
-        image_tensor = _process_flux_image(
-            image,
-            output_size=self._image_size,
+    ) -> tuple[dict[str, Any], torch.Tensor] | None:
+        # Use the dataset-specific preprocessor
+        sample_dict = self._data_processor(
+            sample,
+            self._tokenizer,
+            output_size=self.img_size,
             rng=rng,
         )
-        if image_tensor is None:
+
+        # skip low quality image or image with color channel = 1
+        if sample_dict["image"] is None:
+            sample_id = sample.get("__key__", "unknown")
+            logger.warning(
+                f"Low quality image {sample_id} is skipped in Flux Dataloader."
+            )
             return None
 
-        tokens = self._tokenizer.encode(prompt)
-        _validate_flux_tokens(tokens)
-        t5_tokens = tokens["t5"]
-        clip_tokens = tokens["clip"]
-        if rng.random() < self._prompt_dropout_prob:
-            t5_tokens = self._empty_tokens["t5"]
-        if rng.random() < self._prompt_dropout_prob:
-            clip_tokens = self._empty_tokens["clip"]
+        # Classifier-free guidance: Replace some of the strings with empty strings.
+        dropout_prob = self.prompt_dropout_prob
+        if dropout_prob > 0.0:
+            if rng.random() < dropout_prob:
+                sample_dict["t5"] = self._t5_empty_token
+            if rng.random() < dropout_prob:
+                sample_dict["clip"] = self._clip_empty_token
 
-        return (
-            {
-                "t5": t5_tokens,
-                "clip": clip_tokens,
-                "prompt": prompt,
-            },
-            image_tensor,
-        )
+        labels = sample_dict.pop("image")
+        return sample_dict, labels
+
+
+def _is_processed_flux_sample(
+    sample: tuple[dict[str, Any], torch.Tensor] | None,
+) -> bool:
+    return sample is not None
 
 
 class FluxCollator(Collator):
-    """Collates Flux rows into the trainer's ``(inputs, labels)`` contract."""
+    """Uses PyTorch's default collation for Flux rows."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
@@ -179,37 +255,32 @@ class FluxCollator(Collator):
     def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
         del config, runtime
 
-    def __call__(self, rows: Sequence[FluxTrainingRow]) -> TrainerBatch:
+    def __call__(
+        self,
+        rows: Sequence[tuple[dict[str, Any], torch.Tensor]],
+    ) -> TrainerBatch:
         return default_collate(list(rows))
+
+
+_VALIDATION_TIMESTEPS = tuple((index + 0.5) / 8 for index in range(8))
 
 
 def _add_validation_timestep(
     index: int,
-    sample: FluxTrainingRow,
-) -> FluxTrainingRow:
-    inputs, labels = sample
-    inputs = dict(inputs)
-    inputs["timestep"] = _VALIDATION_TIMESTEPS[index % len(_VALIDATION_TIMESTEPS)]
-    return inputs, labels
+    sample: tuple[dict[str, Any], torch.Tensor],
+) -> tuple[dict[str, Any], torch.Tensor]:
+    sample_dict, labels = sample
+    sample_dict = dict(sample_dict)
+    sample_dict["timestep"] = _VALIDATION_TIMESTEPS[index % len(_VALIDATION_TIMESTEPS)]
+    return sample_dict, labels
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class FluxValidationTimestepConfig:
+class FluxValidationDatasetConfig:
     """Adds checkpointable round-robin validation timesteps to Flux rows."""
 
-    dataset: DatasetConfig
+    dataset: GrainDatasetConfig
     generate_timesteps: bool = True
-
-    def __post_init__(self) -> None:
-        if (
-            self.generate_timesteps
-            and isinstance(self.dataset, SingleDatasetConfig)
-            and isinstance(self.dataset.process, FluxSampleProcessor.Config)
-            and self.dataset.process.prompt_dropout_prob != 0.0
-        ):
-            raise ValueError(
-                "prompt_dropout_prob must be 0.0 when generate_timesteps=True"
-            )
 
     def build(
         self,
@@ -225,114 +296,66 @@ class FluxValidationTimestepConfig:
         return dataset.map_with_index(_add_validation_timestep)
 
 
-def _cc12m_source() -> HuggingFaceStreamingSource.Config:
-    return HuggingFaceStreamingSource.Config(
-        path="pixparse/cc12m-wds",
-        load_dataset_kwargs={"split": "train"},
-    )
-
-
-def _cc12m_test_source() -> HuggingFaceStreamingSource.Config:
-    return HuggingFaceStreamingSource.Config(
-        path="tests/assets/cc12m_test",
-        load_dataset_kwargs={
-            "split": "train",
-            "data_files": {"train": "*.tar"},
-        },
-    )
-
-
-def _coco_validation_source() -> HuggingFaceStreamingSource.Config:
-    return HuggingFaceStreamingSource.Config(
-        path="howard-hou/COCO-Text",
-        load_dataset_kwargs={"split": "validation"},
-    )
-
-
-_FLUX_SOURCES = {
-    "cc12m-wds": _cc12m_source,
-    "cc12m-test": _cc12m_test_source,
-    "coco-validation": _coco_validation_source,
-}
-
-
-def flux_dataset_config(
-    dataset_name: str,
+def flux_dataloader(
+    dataset: str = "cc12m-test",
     *,
-    image_size: int = 256,
+    dataset_path: str | None = None,
     prompt_dropout_prob: float = 0.0,
-) -> SingleDatasetConfig:
-    """Create a Flux source recipe with its source-specific field names."""
-    try:
-        source_factory = _FLUX_SOURCES[dataset_name.lower()]
-    except KeyError as error:
+    img_size: int = 256,
+    generate_timesteps: bool = False,
+    shuffle: bool = False,
+    repeat: bool = True,
+) -> GrainDataLoader.Config:
+    """Build a Grain dataloader for an existing Flux dataset."""
+    if generate_timesteps and prompt_dropout_prob != 0.0:
         raise ValueError(
-            f"Dataset {dataset_name} is not supported. "
-            f"Supported datasets are: {sorted(_FLUX_SOURCES)}"
-        ) from error
+            "prompt_dropout_prob must be 0.0 when generate_timesteps=True "
+            f"(for validation), but got {prompt_dropout_prob}."
+        )
 
-    if dataset_name.lower() == "coco-validation":
-        image_field, caption_field = "image", "caption"
-    else:
-        image_field, caption_field = "jpg", "txt"
-
-    return SingleDatasetConfig(
-        source=source_factory(),
+    path, dataset_loader, data_processor = _validate_dataset(
+        dataset.lower(),
+        dataset_path,
+    )
+    rows: GrainDatasetConfig = SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path=path,
+            loader=dataset_loader,
+        ),
         process=FluxSampleProcessor.Config(
-            image_field=image_field,
-            caption_field=caption_field,
-            image_size=image_size,
+            data_processor=data_processor,
             prompt_dropout_prob=prompt_dropout_prob,
+            img_size=img_size,
         ),
-        filters=(_is_valid_flux_row,),
+        filters=(_is_processed_flux_sample,),
+    )
+    if generate_timesteps:
+        rows = FluxValidationDatasetConfig(dataset=rows)
+
+    return GrainDataLoader.Config(
+        dataset=rows,
+        collator=FluxCollator.Config(),
+        shuffle=shuffle,
+        repeat=repeat,
     )
 
 
-def flux_validation_dataset_config(
-    dataset_name: str = "coco-validation",
-    *,
-    image_size: int = 256,
-    generate_timesteps: bool = True,
-) -> FluxValidationTimestepConfig:
-    return FluxValidationTimestepConfig(
-        dataset=flux_dataset_config(
-            dataset_name,
-            image_size=image_size,
-            prompt_dropout_prob=0.0,
-        ),
-        generate_timesteps=generate_timesteps,
-    )
-
-
-def _is_valid_flux_row(sample: FluxTrainingRow | None) -> bool:
-    return sample is not None
-
-
-def flux_image_size(dataset: DatasetConfig) -> int:
-    """Return the image size bound by a Flux dataset processor."""
-    if isinstance(dataset, FluxValidationTimestepConfig):
+def flux_image_size(dataset: GrainDatasetConfig) -> int:
+    """Return the image size configured by a Flux dataset processor."""
+    if isinstance(dataset, FluxValidationDatasetConfig):
         dataset = dataset.dataset
     if not isinstance(dataset, SingleDatasetConfig):
         raise ValueError("Flux dataloader dataset must be a SingleDatasetConfig")
     process = dataset.process
     if not isinstance(process, FluxSampleProcessor.Config):
         raise ValueError("Flux dataloader dataset must use FluxSampleProcessor.Config")
-    return process.image_size
+    return process.img_size
 
 
-def flux_validation_loader_config(
-    *,
-    dataset_name: str = "coco-validation",
-    image_size: int = 256,
-) -> GrainDataLoader.Config:
-    """Build the generic Grain loader recipe used by Flux validation."""
-    return GrainDataLoader.Config(
-        dataset=flux_validation_dataset_config(
-            dataset_name,
-            image_size=image_size,
-            generate_timesteps=True,
-        ),
-        collator=FluxCollator.Config(),
+def flux_validation_loader_config() -> GrainDataLoader.Config:
+    return flux_dataloader(
+        dataset="coco-validation",
+        generate_timesteps=True,
     )
 
 
@@ -341,28 +364,13 @@ def with_flux_validation_timesteps(
     *,
     generate_timesteps: bool,
 ) -> GrainDataLoader.Config:
-    """Return a loader recipe with the requested validation timestep behavior."""
     dataset = config.dataset
-    if isinstance(dataset, FluxValidationTimestepConfig):
+    if isinstance(dataset, FluxValidationDatasetConfig):
         dataset = dataset.dataset
     return replace(
         config,
-        dataset=FluxValidationTimestepConfig(
+        dataset=FluxValidationDatasetConfig(
             dataset=dataset,
             generate_timesteps=generate_timesteps,
         ),
     )
-
-
-__all__ = [
-    "FluxCollator",
-    "FluxSampleProcessor",
-    "FluxTrainingRow",
-    "FluxValidationTimestepConfig",
-    "_VALIDATION_TIMESTEPS",
-    "flux_dataset_config",
-    "flux_image_size",
-    "flux_validation_dataset_config",
-    "flux_validation_loader_config",
-    "with_flux_validation_timesteps",
-]

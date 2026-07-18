@@ -10,11 +10,8 @@ authors = [
 ]
 keywords = ["pytorch", "training", "llm"]
 dependencies = [
-    # Deterministic, checkpointable data pipelines
-    "grain==0.2.18",
-
     # Stateful Dataloader
-    "torchdata>=0.8.0",
+    "grain==0.2.18",
 
     # Checkpointing
     "torch_checkpointing>=0.1.0",

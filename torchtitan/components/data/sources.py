@@ -9,12 +9,12 @@
 import glob
 import json
 from array import array
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import grain.python as grain
-from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
 
 from torchtitan.config import Configurable
@@ -92,14 +92,10 @@ class HuggingFaceRandomAccessSource(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         path: str
-        load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
+        loader: Callable[[str], Any]
 
     def __init__(self, config: Config, **_: Any) -> None:
-        self._dataset = load_dataset(
-            config.path,
-            streaming=False,
-            **config.load_dataset_kwargs,
-        )
+        self._dataset = config.loader(config.path)
 
     def __len__(self) -> int:
         return len(self._dataset)
@@ -131,14 +127,10 @@ class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         path: str
-        load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
+        loader: Callable[[str], Any]
 
     def __init__(self, config: Config, *, options: Any, **_: Any) -> None:
-        dataset = load_dataset(
-            config.path,
-            streaming=True,
-            **config.load_dataset_kwargs,
-        )
+        dataset = config.loader(config.path)
         if not hasattr(dataset, "state_dict") or not hasattr(
             dataset, "load_state_dict"
         ):

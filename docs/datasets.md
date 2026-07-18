@@ -23,28 +23,3 @@ from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
 
 config.dataloader = c4_text_dataloader("c4_test")
 ```
-
-A custom text corpus is:
-
-```python
-from torchtitan.components.data import (
-    ConcatThenSplitPackingConfig,
-    GrainDataLoader,
-    IndexedJsonlSource,
-    SingleDatasetConfig,
-    TextCollator,
-    TextToTokenSequence,
-)
-
-config.dataloader = GrainDataLoader.Config(
-    dataset=ConcatThenSplitPackingConfig(
-        dataset=SingleDatasetConfig(
-            source=IndexedJsonlSource.Config(
-                patterns=("/data/books/*.jsonl",),
-            ),
-            process=TextToTokenSequence.Config(text_field="text"),
-        ),
-    ),
-    collator=TextCollator.Config(),
-)
-```

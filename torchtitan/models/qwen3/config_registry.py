@@ -7,11 +7,6 @@
 from typing import cast
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.data.collators import TextCollator
-from torchtitan.components.data.dataset import ChatToTokenSequence, SingleDatasetConfig
-from torchtitan.components.data.loader import GrainDataLoader
-from torchtitan.components.data.packing import FirstFitPackingConfig
-from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -24,7 +19,7 @@ from torchtitan.components.quantization import NVFP4LinearConverter
 from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import c4_text_dataloader
+from torchtitan.hf_datasets.text_datasets import c4_text_dataloader, chat_dataloader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
@@ -439,6 +434,18 @@ def qwen3_moe_deepep() -> Trainer.Config:
 def sft_qwen3_8b_math() -> Trainer.Config:
     """Qwen3-8B SFT on GSM8K math dataset."""
 
+    def process_sample(sample):
+        answer = sample["answer"]
+        reasoning, final_answer = answer.rsplit("####", 1)
+        return [
+            {"role": "user", "content": sample["question"]},
+            {
+                "role": "assistant",
+                "reasoning_content": reasoning.strip(),
+                "content": final_answer.strip(),
+            },
+        ]
+
     model_spec = model_registry("8B", attn_backend="varlen")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -460,19 +467,10 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             seq_len=2048,
             steps=180,
         ),
-        dataloader=GrainDataLoader.Config(
-            dataset=FirstFitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceRandomAccessSource.Config(
-                        path="openai/gsm8k",
-                        load_dataset_kwargs={"name": "main", "split": "train"},
-                    ),
-                    process=ChatToTokenSequence.Config(
-                        sample_to_messages=_gsm8k_to_messages,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+        dataloader=chat_dataloader(
+            dataset_path="openai/gsm8k",
+            load_dataset_kwargs={"name": "main", "split": "train"},
+            sample_processor=process_sample,
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,
@@ -483,15 +481,3 @@ def sft_qwen3_8b_math() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
-
-
-def _gsm8k_to_messages(sample):
-    reasoning, final_answer = sample["answer"].rsplit("####", 1)
-    return [
-        {"role": "user", "content": sample["question"]},
-        {
-            "role": "assistant",
-            "reasoning_content": reasoning.strip(),
-            "content": final_answer.strip(),
-        },
-    ]

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 import torch
+from torch.utils.data import default_collate
 
 from torchtitan.components.data.dataset import DataRuntime
 from torchtitan.components.data.packing import TextTrainingRow
@@ -44,10 +45,5 @@ class TextCollator(Collator):
         del config, runtime
 
     def __call__(self, rows: Sequence[TextTrainingRow]) -> TrainerBatch:
-        return (
-            {
-                key: torch.stack([inputs[key] for inputs, _ in rows])
-                for key in rows[0][0]
-            },
-            torch.stack([labels for _, labels in rows]),
-        )
+        inputs, labels = default_collate(list(rows))
+        return inputs, labels

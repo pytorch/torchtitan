@@ -20,8 +20,6 @@ from torchtitan.config import Configurable
 
 
 GrainDataset: TypeAlias = grain.MapDataset | grain.IterDataset
-ChatMessages: TypeAlias = list[dict[str, Any]]
-SampleToMessages: TypeAlias = Callable[[dict[str, Any]], ChatMessages]
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -74,107 +72,6 @@ class SampleProcessor(Configurable, ABC):
         rng: np.random.Generator,
     ) -> Any:
         ...
-
-
-class TextToTokenSequence(SampleProcessor):
-    """Tokenizes one text field for causal-language-model pretraining."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(SampleProcessor.Config):
-        text_field: str = "text"
-
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
-        self._text_field = config.text_field
-        self._tokenizer = runtime.tokenizer
-
-    def __call__(
-        self,
-        sample: dict[str, Any],
-        rng: np.random.Generator,
-    ) -> TokenSequence:
-        del rng
-        token_ids = np.asarray(
-            self._tokenizer.encode(
-                sample[self._text_field],
-                add_bos=True,
-                add_eos=True,
-            ),
-            dtype=np.int64,
-        )
-        return TokenSequence(
-            token_ids=token_ids,
-            loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
-        )
-
-
-class ChatToTokenSequence(SampleProcessor):
-    """Applies a chat template and marks the assistant response for training."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(SampleProcessor.Config):
-        sample_to_messages: SampleToMessages
-        train_on_assistant_only: bool = True
-
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
-        if runtime.tokenizer.eos_id is None:
-            raise ValueError("ChatToTokenSequence requires a tokenizer EOS token")
-        self._sample_to_messages = config.sample_to_messages
-        self._train_on_assistant_only = config.train_on_assistant_only
-        self._tokenizer = runtime.tokenizer
-        self._eos_id = runtime.tokenizer.eos_id
-
-    def __call__(
-        self,
-        sample: dict[str, Any],
-        rng: np.random.Generator,
-    ) -> TokenSequence:
-        del rng
-        messages = self._sample_to_messages(sample)
-        _validate_single_turn_messages(messages)
-
-        full_text = self._tokenizer.apply_chat_template(messages).rstrip("\n")
-        token_ids = self._tokenizer.encode(
-            full_text,
-            add_bos=True,
-            add_eos=False,
-        )
-        if token_ids[-1] != self._eos_id:
-            token_ids.append(self._eos_id)
-
-        loss_mask = np.ones(len(token_ids), dtype=np.bool_)
-        if self._train_on_assistant_only:
-            prompt_text = self._tokenizer.apply_chat_template(
-                messages[:1],
-                add_generation_prompt=True,
-            )
-            prompt_length = len(
-                self._tokenizer.encode(
-                    prompt_text,
-                    add_bos=True,
-                    add_eos=False,
-                )
-            )
-            loss_mask[:prompt_length] = False
-
-        return TokenSequence(
-            token_ids=np.asarray(token_ids, dtype=np.int64),
-            loss_mask=loss_mask,
-        )
-
-
-def _validate_single_turn_messages(messages: ChatMessages) -> None:
-    if len(messages) != 2:
-        raise ValueError(
-            f"expected one user and one assistant message, got {len(messages)}"
-        )
-    if messages[0]["role"] != "user":
-        raise ValueError(
-            f"first message must have role 'user', got {messages[0]['role']!r}"
-        )
-    if messages[1]["role"] != "assistant":
-        raise ValueError(
-            f"second message must have role 'assistant', got {messages[1]['role']!r}"
-        )
 
 
 def _apply_process(

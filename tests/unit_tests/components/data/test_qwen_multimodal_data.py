@@ -15,7 +15,7 @@ from torchtitan.components.data.dataset import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.hf_datasets.multimodal.mm_datasets import QwenMultimodalPackingConfig
+from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 
 
 class _Tokenizer:
@@ -41,23 +41,25 @@ RUNTIME = DataRuntime(
 )
 
 
-def _row(value: int, image: torch.Tensor | None = None) -> dict:
+def _row(
+    value: int,
+    image: torch.Tensor | None = None,
+    length: int = 2,
+) -> dict:
+    tokens = torch.arange(value, value + length)
     return {
-        "input_ids": torch.tensor([value, value + 1]),
-        "labels": torch.tensor([value, value + 1]),
-        "positions": torch.tensor([0, 1]),
+        "input_ids": tokens,
+        "labels": tokens.clone(),
+        "positions": torch.arange(length),
         "pixel_values": [] if image is None else [image],
         "pixel_values_videos": [],
     }
 
 
-def _dataset(rows, *, max_images_per_batch=8):
-    return QwenMultimodalPackingConfig(
+def _dataset(rows):
+    return MMSamplePackingConfig(
         dataset=SingleDatasetConfig(source=_RowsSourceConfig(rows=tuple(rows))),
-        max_images_per_batch=max_images_per_batch,
-        max_patches_per_batch=100,
-        patch_size=16,
-        temporal_patch_size=2,
+        buffer_size=2,
     ).build(
         runtime=RUNTIME,
         options=BuildOptions(
@@ -102,16 +104,13 @@ def test_packing_preserves_ordered_images_when_merging_rows():
     assert torch.equal(row["pixel_values"][1], second_image)
 
 
-def test_admission_lookahead_is_checkpointed_exactly():
-    first_image = torch.zeros(1, 16, 16, 3)
-    second_image = torch.ones(1, 16, 16, 3)
+def test_buffered_packing_is_checkpointed_exactly():
     dataset = _dataset(
         [
-            _row(1, first_image),
-            _row(3, second_image),
-            _row(5),
-        ],
-        max_images_per_batch=1,
+            _row(1, length=6),
+            _row(10, length=4),
+            _row(20, length=2),
+        ]
     )
     iterator = iter(dataset)
     first = next(iterator)
@@ -122,8 +121,5 @@ def test_admission_lookahead_is_checkpointed_exactly():
     restored.set_state(state)
     actual = next(restored)
 
-    assert len(first["pixel_values"]) == 1
-    assert torch.equal(first["pixel_values"][0], first_image)
-    assert len(actual["pixel_values"]) == 1
-    assert torch.equal(actual["pixel_values"][0], second_image)
+    assert torch.equal(first["input_ids"], torch.tensor([1, 2, 3, 4, 5, 6, 20, 21]))
     assert torch.equal(expected["input_ids"], actual["input_ids"])
