@@ -6,13 +6,11 @@
 
 from __future__ import annotations
 
-import dataclasses
 import math
 import os
 from functools import partial
-from xx.common.basedir import XX_BASEDIR
-from xx.datasets.constants import BASE_DIR_GT_10M
-from xx.datasets.helpers import DEFAULT_BIG_TRAIN_LIST
+from xx.datasets.constants import BASE_DIR_GT
+from xx.datasets.helpers import DEFAULT_TRAIN_LIST
 from xx.ml_tools.constants.model import (
     frame_constants_from_fps,
     FRAME_TYPE,
@@ -26,14 +24,14 @@ from xx.training.path.config import DatasetConfig as XXPathDatasetConfig
 from xx.training.path.hydra_configs import (
     DRIVING_HEADS,
     META_HEADS,
-    PLAN_HEAD_SIZE,
     POSE_HEADS,
     TEMPORAL_META_HEADS,
 )
 
+import torch
 import torch.nn as nn
+from torch.distributed.tensor import distribute_tensor, DTensor
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
@@ -71,7 +69,6 @@ from .model import (
 from .onnx_checkpoint import PathOnnxCheckpointManager
 from .trainer import PathTrainer
 from .validate import PathValidator
-from .vit import parallelize_vit, PatchEmbed, PlanHead, PlanViT, PlanViTLoss
 
 
 _LINEAR_INIT = {
@@ -79,39 +76,26 @@ _LINEAR_INIT = {
     "bias": nn.init.zeros_,
 }
 _NORM_INIT = {"weight": nn.init.ones_, "bias": nn.init.zeros_}
+_PLAN_HEAD_INIT_STD = 1e-3
+_PLAN_HEAD_INIT_LOG_SIGMA_SCALE = 5.0
 
-VIT_HEAD_DIM = 64
-VIT_NUM_LAYERS = 8
-VIT_INPUT_SIZE = (1, 128, 256)
-VIT_PATCH_SIZE = (1, 16, 8)
-VIT_IN_CHANNELS = 24
-VIT_BASE_WIDTH = 256
-VIT_WIDTHS = {
-    f"w{d}": d
-    for d in (
-        64,
-        128,
-        192,
-        256,
-        320,
-        384,
-        448,
-        512,
-        640,
-        896,
-        1024,
-        1280,
-        1536,
-        1792,
-        2048,
-        3072,
+# init is called after sharding, need to handle DTensor properly for the half point
+# bias init structure
+def _init_plan_head_bias(bias: nn.Parameter) -> None:
+    value = torch.zeros(bias.shape, dtype=bias.dtype, device=bias.device)
+    value[bias.shape[0] // 2 :].fill_(
+        math.log(_PLAN_HEAD_INIT_LOG_SIGMA_SCALE)
     )
+    if isinstance(bias, DTensor):
+        value = distribute_tensor(value, bias.device_mesh, bias.placements)
+    with torch.no_grad():
+        bias.copy_(value)
+
+
+_PLAN_HEAD_INIT = {
+    "weight": partial(nn.init.normal_, mean=0.0, std=_PLAN_HEAD_INIT_STD),
+    "bias": _init_plan_head_bias,
 }
-VIT_STEPS = 512
-MUP_PATTERN = (
-    r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
-    r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj)\.weight$"
-)
 
 
 def model_registry(flavor: str) -> ModelSpec:
@@ -126,22 +110,6 @@ def model_registry(flavor: str) -> ModelSpec:
     )
 
 
-def convnext_tiny() -> PathTrainer.Config:
-    return _path("convnext_tiny")
-
-
-def convnext_small() -> PathTrainer.Config:
-    return _path("convnext_small")
-
-
-def convnext_base() -> PathTrainer.Config:
-    return _path("convnext_base")
-
-
-def convnext_xxlarge() -> PathTrainer.Config:
-    return _path("convnext_xxlarge")
-
-
 def _dp_degrees() -> tuple[int, int]:
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
@@ -149,9 +117,6 @@ def _dp_degrees() -> tuple[int, int]:
         os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size))
     )
     return num_nodes, local_world_size
-
-
-dp_degrees = _dp_degrees
 
 
 def _path(flavor: str) -> PathTrainer.Config:
@@ -182,14 +147,14 @@ def _path(flavor: str) -> PathTrainer.Config:
         loss=PathLoss.Config(),
         model_spec=model_registry(flavor),
         tokenizer=NoOpTokenizer.Config(),
-        dataloader=_dataloader_config(split="train", fps=fps, plan_only=plan_only),
+        dataloader=_dataloader_config(dataset=DEFAULT_TRAIN_LIST, split="train", fps=fps, plan_only=plan_only, limit=None, pipeline_dir=BASE_DIR_GT),
         optimizer=_optimizer_config(),
         lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=round(steps * 0.01),
+            warmup_steps=1024,
             total_steps=steps,
-            decay_ratio=0.2,
-            decay_type="cosine",
-            min_lr_factor=0.0,
+            decay_ratio=0.,
+            decay_type="linear",
+            min_lr_factor=0.,
         ),
         training=TrainingConfig(
             local_batch_size=16,
@@ -225,7 +190,7 @@ def _path(flavor: str) -> PathTrainer.Config:
             enable=True,
             freq=validation_freq,
             steps=32,
-            dataloader=_dataloader_config(split="val", fps=fps, plan_only=plan_only),
+            dataloader=_dataloader_config(split="val", fps=fps, plan_only=plan_only, dataset=DEFAULT_TRAIN_LIST, limit=None, pipeline_dir=BASE_DIR_GT),
             mixed_precision_param=mixed_precision_param,
             reports=reports,
         ),
@@ -306,11 +271,11 @@ def _model_config(flavor: str) -> PathModel.Config:
 
 
 def _dataloader_config(
-    *, split: str, fps: int, plan_only: bool
+    *, dataset:str, split: str, fps: int, plan_only: bool, limit:int|None, pipeline_dir:str,
 ) -> PathDataLoader.Config:
-    base = XXPathDatasetConfig(fps=fps, plan_only=plan_only)
+    base = XXPathDatasetConfig(fps=fps, plan_only=plan_only, limit=limit, pipeline_dir=pipeline_dir)
     return PathDataLoader.Config(
-        dataset=DEFAULT_BIG_TRAIN_LIST,
+        dataset=dataset,
         split=split,
         shuffle_size=_si_int(base.shuffle_size),
         min_mixing=base.min_mixing,
@@ -392,7 +357,7 @@ def _optimizer_config() -> OptimizersContainer.Config:
             ParamGroupConfig(
                 pattern=r".*",
                 optimizer_name="AdamW",
-                optimizer_kwargs={**common, "weight_decay": 3e-2},
+                optimizer_kwargs={**common, "weight_decay": 1e-3},
             ),
         ],
     )
@@ -472,7 +437,9 @@ def _hydra(
                 in_features=in_features,
                 out_features=head.output_size,
                 bias=True,
-                param_init=_LINEAR_INIT,
+                param_init=(
+                    _PLAN_HEAD_INIT if head.name == "plan" else _LINEAR_INIT
+                ),
             )
             for head in heads
         },
@@ -484,270 +451,12 @@ def _hydra(
     )
 
 
-def _lin(in_f: int, out_f: int, *, std: float, bias: bool = True) -> Linear.Config:
-    return Linear.Config(
-        in_features=in_f,
-        out_features=out_f,
-        bias=bias,
-        param_init={
-            "weight": partial(nn.init.normal_, mean=0.0, std=std),
-            "bias": nn.init.zeros_,
-        },
-    )
-
-
-def _hidden_std(fan_in: int, *, mup: bool) -> float:
-    return fan_in**-0.5 if mup else VIT_BASE_WIDTH**-0.5
-
-
-def _vit_attention(dim: int, *, n_head: int, mup: bool) -> PathSelfAttention.Config:
-    head_dim = dim // n_head
-    return PathSelfAttention.Config(
-        norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        q_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT),
-        k_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT),
-        c_attn=_lin(dim, 3 * dim, std=_hidden_std(dim, mup=mup)),
-        c_proj=_lin(
-            dim, dim, std=_hidden_std(dim, mup=mup) / math.sqrt(2 * VIT_NUM_LAYERS)
-        ),
-        inner_attention=ScaledDotProductAttention.Config(),
-        n_head=n_head,
-        head_dim=head_dim,
-        dropout=0.0,
-        is_causal=False,
-    )
-
-
-def _vit_mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PathMLP.Config:
-    hidden = _hidden_dim(dim, mult)
-    return PathMLP.Config(
-        norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        c_fc=_lin(dim, hidden, std=_hidden_std(dim, mup=mup)),
-        c_proj=_lin(
-            hidden,
-            dim,
-            std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * VIT_NUM_LAYERS),
-        ),
-        act="gelu_tanh",
-        dropout=0.0,
-    )
-
-
-def _vit_model_config(flavor: str, *, mup: bool) -> PlanViT.Config:
-    dim = VIT_WIDTHS[flavor]
-    if dim % VIT_HEAD_DIM != 0:
-        raise ValueError(
-            f"vit width {dim} must be a multiple of head_dim {VIT_HEAD_DIM}"
-        )
-    n_head = dim // VIT_HEAD_DIM
-    pt, ph, pw = VIT_PATCH_SIZE
-    patch_dim = pt * VIT_IN_CHANNELS * ph * pw
-    t, h, w = VIT_INPUT_SIZE
-    num_patches = (t // pt) * (h // ph) * (w // pw)
-    return PlanViT.Config(
-        mean=255 / 2,
-        std=255 / 4,
-        patch_embed=PatchEmbed.Config(
-            proj=_lin(patch_dim, dim, std=patch_dim**-0.5),
-            patch_size=VIT_PATCH_SIZE,
-        ),
-        pos_embedding=Embedding.Config(
-            num_embeddings=num_patches, embedding_dim=dim, param_init=_LINEAR_INIT
-        ),
-        blocks=[
-            PathTransformerBlock.Config(
-                attention=_vit_attention(dim, n_head=n_head, mup=mup),
-                mlp=_vit_mlp(dim, mup=mup),
-            )
-            for _ in range(VIT_NUM_LAYERS)
-        ],
-        norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        plan_head=PlanHead.Config(
-            norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-            head=_lin(dim, PLAN_HEAD_SIZE, std=VIT_BASE_WIDTH**-0.5),
-            output_mult=(VIT_BASE_WIDTH / dim) if mup else 1.0,
-        ),
-    )
-
-
-vit_model_config = _vit_model_config
-
-
-def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
-    return ModelSpec(
-        name="path",
-        flavor=flavor,
-        model=_vit_model_config(flavor, mup=mup),
-        parallelize_fn=parallelize_vit,
-        pipelining_fn=None,
-        post_optimizer_build_fn=None,
-        state_dict_adapter=None,
-    )
-
-
-def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
-    dataset = (
-        "datasets/lists/prune10m_val.txt"
-        if split == "val"
-        else "datasets/lists/prune10m_random100k_seed0.txt"
-    )
-    return dataclasses.replace(
-        _dataloader_config(split=split, fps=SUPERCOMBO_FPS, plan_only=True),
-        dataset=os.path.join(XX_BASEDIR, dataset),
-        pipeline_dir=BASE_DIR_GT_10M,
-    )
-
-
-vit_dataloader_config = _vit_dataloader_config
-
-
-def _vit_optimizer_config(
-    flavor: str, *, mup: bool, lr: float, wd: float
-) -> OptimizersContainer.Config:
-    m = VIT_WIDTHS[flavor] / VIT_BASE_WIDTH
-    common = {"betas": (0.9, 0.95), "eps": 1e-8, "weight_decay": wd}
-    catch_all = ParamGroupConfig(
-        pattern=r".*",
-        optimizer_name="AdamW",
-        optimizer_kwargs=common,
-    )
-    mup_group = ParamGroupConfig(
-        pattern=MUP_PATTERN,
-        optimizer_name="AdamW",
-        lr_mult=1.0 / m,
-        optimizer_kwargs={**common, "weight_decay": wd * m},
-    )
-    groups = [mup_group, catch_all] if mup else [catch_all]
-    return OptimizersContainer.Config(
-        implementation="fused_opt_states_bf16", lr=lr, param_groups=groups
-    )
-
-
-def _vit(
-    flavor: str, *, mup: bool, lr: float = 3e-4, wd: float = 0.0125
-) -> PathTrainer.Config:
-    num_nodes, local_world_size = _dp_degrees()
-    return PathTrainer.Config(
-        loss=PlanViTLoss.Config(),
-        model_spec=vit_model_registry(flavor, mup=mup),
-        tokenizer=NoOpTokenizer.Config(),
-        dataloader=_vit_dataloader_config(split="train"),
-        optimizer=_vit_optimizer_config(flavor, mup=mup, lr=lr, wd=wd),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=round(VIT_STEPS * 0.1),
-            total_steps=None,
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.0,
-        ),
-        training=TrainingConfig(
-            local_batch_size=16,
-            global_batch_size=-1,
-            seq_len=1,
-            steps=VIT_STEPS,
-            max_norm=1.0,
-            dtype="float32",
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
-        ),
-        parallelism=ParallelismConfig(
-            data_parallel_replicate_degree=num_nodes,
-            data_parallel_shard_degree=local_world_size,
-        ),
-        checkpoint=CheckpointManager.Config(enable=False),
-        metrics=MetricsProcessor.Config(
-            log_freq=10, enable_reporterv2=True, save_freq=VIT_STEPS
-        ),
-        validator=PathValidator.Config(
-            enable=True,
-            freq=1024,
-            steps=32,
-            dataloader=_vit_dataloader_config(split="val"),
-            mixed_precision_param="bfloat16",
-        ),
-        fps=SUPERCOMBO_FPS,
-        debug=DebugConfig(seed=0),
-    )
-
-
-vit = _vit
-
-
-def vit_standard_w256() -> PathTrainer.Config:
-    return _vit("w256", mup=False)
-
-
-def vit_standard_w512() -> PathTrainer.Config:
-    return _vit("w512", mup=False)
-
-
-def vit_standard_w1024() -> PathTrainer.Config:
-    return _vit("w1024", mup=False)
-
-
-def vit_standard_w2048() -> PathTrainer.Config:
-    return _vit("w2048", mup=False)
-
-
-def vit_mup_w256() -> PathTrainer.Config:
-    return _vit("w256", mup=True)
-
-
-def vit_mup_w512() -> PathTrainer.Config:
-    return _vit("w512", mup=True)
-
-
-def vit_mup_w1024() -> PathTrainer.Config:
-    return _vit("w1024", mup=True)
-
-
-def vit_mup_w2048() -> PathTrainer.Config:
-    return _vit("w2048", mup=True)
-
-
-def vit_mup_w64() -> PathTrainer.Config:
-    return _vit("w64", mup=True)
-
-
-def vit_mup_w128() -> PathTrainer.Config:
-    return _vit("w128", mup=True)
-
-
-def vit_mup_w192() -> PathTrainer.Config:
-    return _vit("w192", mup=True)
-
-
-def vit_mup_w320() -> PathTrainer.Config:
-    return _vit("w320", mup=True)
-
-
-def vit_mup_w384() -> PathTrainer.Config:
-    return _vit("w384", mup=True)
-
-
-def vit_mup_w448() -> PathTrainer.Config:
-    return _vit("w448", mup=True)
-
-
-def vit_mup_w640() -> PathTrainer.Config:
-    return _vit("w640", mup=True)
-
-
-def vit_mup_w896() -> PathTrainer.Config:
-    return _vit("w896", mup=True)
-
-
-def vit_mup_w1280() -> PathTrainer.Config:
-    return _vit("w1280", mup=True)
-
-
-def vit_mup_w1536() -> PathTrainer.Config:
-    return _vit("w1536", mup=True)
-
-
-def vit_mup_w1792() -> PathTrainer.Config:
-    return _vit("w1792", mup=True)
-
-
-def vit_mup_w3072() -> PathTrainer.Config:
-    return _vit("w3072", mup=True)
+convnext_atto = partial(_path, "convnext_atto")
+convnext_femto = partial(_path, "convnext_femto")
+convnext_pico = partial(_path, "convnext_pico")
+convnext_tiny = partial(_path, "convnext_tiny")
+convnext_small = partial(_path, "convnext_small")
+convnext_quarterxxl = partial(_path, "convnext_quarterxxl")
+convnext_thirdxxl = partial(_path, "convnext_thirdxxl")
+convnext_base = partial(_path, "convnext_base")
+convnext_xxlarge = partial(_path, "convnext_xxlarge")

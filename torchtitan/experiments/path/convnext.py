@@ -37,6 +37,21 @@ __all__ = [
 
 
 CONVNEXT_FLAVORS = {
+    "convnext_atto": {
+        "depths": (2, 2, 6, 2),
+        "dims": (40, 80, 160, 320),
+        "pretrained": "convnext_atto.d2_in1k",
+    },
+    "convnext_femto": {
+        "depths": (2, 2, 6, 2),
+        "dims": (48, 96, 192, 384),
+        "pretrained": "convnext_femto.d1_in1k",
+    },
+    "convnext_pico": {
+        "depths": (2, 2, 6, 2),
+        "dims": (64, 128, 256, 512),
+        "pretrained": "convnext_pico.d1_in1k",
+    },
     "convnext_tiny": {
         "depths": (3, 3, 9, 3),
         "dims": (96, 192, 384, 768),
@@ -45,7 +60,17 @@ CONVNEXT_FLAVORS = {
     "convnext_small": {
         "depths": (3, 3, 27, 3),
         "dims": (96, 192, 384, 768),
+        "pretrained": "convnext_small.dinov3_lvd1689m",
+    },
+    "convnext_quarterxxl": {
+        "depths": (3, 4, 30, 3),
+        "dims": (96, 192, 384, 768),
         "pretrained": "convnext_small.in12k_ft_in1k",
+    },
+    "convnext_thirdxxl": {
+        "depths": (3, 4, 30, 3),
+        "dims": (128, 256, 512, 1024),
+        "pretrained": "convnext_base.clip_laion2b_augreg_ft_in1k",
     },
     "convnext_base": {
         "depths": (3, 3, 27, 3),
