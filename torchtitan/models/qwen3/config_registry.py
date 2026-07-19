@@ -122,6 +122,35 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
         activation_checkpoint=SelectiveAC.Config(),
     )
 
+def qwen3_4b() -> Trainer.Config:
+    model_spec = model_registry("4B")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./assets/hf/Qwen3-4B-Base",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_spec,
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4"
+        ),
+        optimizer=default_adamw(lr=3e-4),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
+        training=TrainingConfig(
+            local_batch_size=4,
+            seq_len=4096,
+            steps=10
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=500,
+            last_save_model_only=False,
+            export_dtype="float16"
+        ),
+        activation_checkpoint=SelectiveAC.Config()
+    )
+
 
 def qwen3_0_6b() -> Trainer.Config:
     model_spec = model_registry("0.6B")
