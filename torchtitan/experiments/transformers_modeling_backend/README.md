@@ -4,7 +4,7 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 
 ## Quick start
 
-- Requirements `transformers==5.3.0`
+- Requirements `transformers==5.9.0`
 
 - Config: `torchtitan/experiments/transformers_modeling_backend/config_registry.py`
 ```diff
@@ -46,15 +46,17 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 
 ### Attention
 
-Attention runs on **FlexAttention**. The MoE block is swapped to TorchTitan's
-grouped-experts MoE to enable expert parallelism and the `grouped_mm` fast path.
-`attn_mask_type` selects the flex mask: `causal` (plain causal) or `block_causal`
-(causal + same-document, for packed / SFT sequences).
+Attention runs on **FlexAttention**. `attn_mask_type` selects the flex mask:
+`causal` (plain causal) or `block_causal` (causal + same-document, for packed /
+SFT sequences).
 
-### MoE parallelism support
+### MoE
 
-Validated at debug scale (2-step loss decreasing) across the combinations below.
-FSDP composes with every listed axis.
+The MoE block is swapped to TorchTitan's grouped-experts MoE to enable expert
+parallelism and the `grouped_mm` fast path.
+
+Parallelism support, validated at debug scale (2-step loss decreasing) across the
+combinations below. FSDP composes with every listed axis.
 
 | Model(s) | attn | TP | EP | CP | notes |
 |---|---|---|---|---|---|
@@ -76,3 +78,5 @@ PP is not yet wired for the MoE path (see Further work).
 - Missing PP support for MoE
 - Load HF weights
 - Add LORA support
+- `spmd_types` backend support (move off the DTensor sharding path)
+- Support for Titan RL
