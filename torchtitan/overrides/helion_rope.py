@@ -11,7 +11,7 @@ This swaps :class:`CosSinRoPE` and :class:`ComplexRoPE` for versions that fuse
 the cache gather and rotation into a single Helion kernel (forward and
 backward), without touching core.
 
-    torchtitan_train ... --override.imports torchtitan.overrides.helion_rope
+    torchtitan_train ... --override.imports torchtitan.overrides.helion_rope.helion_rope
 
 Scope and fallbacks (the kernel is opt-in and never changes default behavior):
 

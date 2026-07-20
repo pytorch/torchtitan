@@ -12,9 +12,9 @@ for an alternative implementation — without modifying config_registry function
 or any other in-repo code.
 
 An override author writes a Python module that registers a factory via the
-``@override`` decorator, then the user activates it by listing that module (or
-the exact ``module.function``) in ``--override.imports``. Overrides are applied
-to the config tree(s) after config construction and before any ``build()``.
+``@override`` decorator, then the user activates it by listing that factory as
+``module.function`` in ``--override.imports``. Overrides are applied to the
+config tree(s) after config construction and before any ``build()``.
 
 Per-instance targeting is first-class: ``@override(..., fqns=[...])`` selects
 *which* matched nodes to replace by FQN glob, and conflict detection is per-node
@@ -49,11 +49,11 @@ if TYPE_CHECKING:
 _ConfigT = TypeVar("_ConfigT", bound="Configurable.Config")
 
 # One ``override.imports`` entry: a target string, or a ``(target, kwargs)``
-# tuple whose ``kwargs`` are forwarded to the override(s) the target names. A
-# target is a module path (``pkg.mod``, every override defined in that module) or
-# ``pkg.mod.func`` (the single override registered by that function). Kept as a
-# runtime object (not just an annotation) so the CLI parser can register a tyro
-# rule keyed on ``list[OverrideImport]``.
+# tuple whose ``kwargs`` are forwarded to the override the target names. A target
+# is a ``module.function`` path -- the module plus the ``@override`` factory's
+# function name -- naming exactly one override. Kept as a runtime object (not
+# just an annotation) so the CLI parser can register a tyro rule keyed on
+# ``list[OverrideImport]``.
 OverrideImport = str | tuple[str, dict[str, Any]]
 
 
@@ -63,24 +63,24 @@ class OverrideConfig:
     """
     Override targets to activate, each optionally carrying kwargs.
 
-    An entry is either:
+    A target is a ``module.function`` path -- the module plus the ``@override``
+    factory's function name -- naming exactly one override. A module defining
+    several overrides is activated by listing each function (there is no
+    whole-module form). An entry is either:
 
-    - a target string -- a module path
-      (``"torchtitan.overrides.fused_swiglu"``, every override defined in that
-      module) or ``module.function``
-      (``"torchtitan.overrides.moe_dispatch_override.hybridep_override"``, the
-      single override that function registers); or
+    - a target string, e.g.
+      ``"torchtitan.overrides.moe_dispatch_override.hybridep_override"``; or
     - a ``(target, kwargs)`` tuple, e.g.
       ``("my_pkg.triton_rope.triton_rope", {"block_size": 256})``. The ``kwargs``
-      are passed to the override(s) the target names, so two config trees can
-      share one override yet configure it differently (e.g. the RL trainer and
+      are passed to the override the target names, so two config trees can share
+      one override yet configure it differently (e.g. the RL trainer and
       generator activate one HybridEP dispatch override with opposite capacity
       factors).
 
-    Matching is exact -- a module target does not reach into sub-packages -- so
-    only the named overrides are applied (not the entire global registry) and no
-    override is claimed by two entries. A target's module is imported once at
-    startup, triggering the ``@override`` decorators it defines.
+    Each target names exactly one override, so only the named overrides are
+    applied (not the entire global registry) and no override is claimed twice. A
+    target's module is imported once at startup, triggering the ``@override``
+    decorators it defines.
 
     On the CLI, ``--override.imports`` takes space- or comma-separated targets;
     attach kwargs to a target with ``target=<json-object>`` (see
@@ -94,18 +94,17 @@ class OverrideConfig:
 def parse_cli_imports(tokens: list[str]) -> list[OverrideImport]:
     """Parse ``--override.imports`` CLI tokens into ``imports`` entries.
 
-    A target is a module path or ``module.function`` (see
-    :class:`OverrideConfig`). Each token is one of:
+    A target is a ``module.function`` path (see :class:`OverrideConfig`). Each
+    token is one of:
 
     - ``target=<json-object>`` -- a target whose kwargs follow it directly (one
       token), e.g. ``my_pkg.triton_rope.triton_rope={"block_size": 256}``; or
-    - a plain target, or a comma-separated group of them (``a.b,c.d.f``), for
+    - a plain target, or a comma-separated group of them (``a.b.f,c.d.g``), for
       entries without kwargs.
 
-    So ``["fused_swiglu", 'my_pkg.triton_rope.triton_rope={"block_size": 256}']``
-    parses to ``["fused_swiglu", ("my_pkg.triton_rope.triton_rope",
-    {"block_size": 256})]``. A token with kwargs must be a single shell token, so
-    quote it.
+    So ``["a.b.f", 'my_pkg.triton_rope.triton_rope={"block_size": 256}']`` parses
+    to ``["a.b.f", ("my_pkg.triton_rope.triton_rope", {"block_size": 256})]``. A
+    token with kwargs must be a single shell token, so quote it.
     """
     entries: list[OverrideImport] = []
     for token in tokens:
@@ -304,94 +303,71 @@ def derive(
     return cast(_ConfigT, target_cls(**kwargs))
 
 
-def _resolve_target(target: str) -> tuple[str, str | None]:
-    """Resolve an ``override.imports`` target to ``(module, function | None)``.
+def _resolve_target(target: str) -> tuple[str, str]:
+    """Split a ``module.function`` override target and import its module.
 
-    A target is a dotted path naming either a module -- ``pkg.mod``, which
-    activates every override defined in that module -- or ``pkg.mod.func``, the
-    single override that function registers. A bare dotted path cannot say where
-    the module ends, so resolve by import: the longest importable prefix is the
-    module, and a single trailing component (if any) is the function. Importing
-    the module here also triggers its ``@override`` decorators.
+    Every ``override.imports`` entry names exactly one override as
+    ``module.function`` -- the module path plus the ``@override`` factory's
+    function name (e.g. ``"torchtitan.overrides.fused_swiglu.fused_swiglu"``).
+    The last dotted component is the function; the rest is the module, which is
+    imported here to trigger its ``@override`` decorators.
     """
-    try:
-        # Whole target importable as a module -> a module target (no function).
-        importlib.import_module(target)
-        return target, None
-    except ModuleNotFoundError:
-        # Not a module; treat the last component as a function on its parent
-        # module. Only ModuleNotFoundError falls through -- a real module that
-        # raises ImportError internally must surface, not be misread as
-        # ``module.function``.
-        pass
-
-    module, _, func = target.rpartition(".")
-    if not module or not func:
-        raise ImportError(
-            f"Failed to import override target '{target}': it is neither an "
-            "importable module nor a 'module.function' path."
+    module, sep, func = target.rpartition(".")
+    if not sep or not module or not func:
+        raise ValueError(
+            f"override.imports target '{target}' must be a 'module.function' "
+            "path naming an @override factory (e.g. "
+            "'torchtitan.overrides.fused_swiglu.fused_swiglu')."
         )
     try:
         importlib.import_module(module)
     except ImportError as e:
         raise ImportError(
-            f"Failed to import override target '{target}': neither it nor its "
-            f"module '{module}' could be imported: {e}"
+            f"Failed to import override target '{target}': module '{module}' "
+            f"could not be imported: {e}"
         ) from e
     return module, func
 
 
 def _resolve_active(
-    targets: list[tuple[str, str | None, dict[str, Any]]]
+    targets: list[tuple[str, str, dict[str, Any]]]
 ) -> list[tuple[Override, dict[str, Any]]]:
     """Pair each activated override with the kwargs of the target that named it.
 
-    Each target (see :func:`_resolve_target`) names its override(s) exactly: a
-    module claims every override *defined in that module*, and ``module.function``
-    claims the single override that function registers. Matching is exact -- the
-    factory's defining module (``fn.__module__``) must equal the target's module,
-    with no sub-package reach -- so application stays limited to the user's
-    ``override.imports`` even when unrelated modules have registered overrides,
-    and no override is claimed by more than one target by accident.
+    Each target names exactly one override as ``module.function`` (see
+    :func:`_resolve_target`): the override whose factory is ``function`` defined
+    in ``module`` (matched on the factory's defining module ``fn.__module__`` and
+    its ``__name__``). This keeps application limited to the user's
+    ``override.imports`` even when unrelated modules have registered overrides.
 
-    Two targets claiming the same override, a ``module.function`` target naming
-    no registered override, or a kwargs-bearing target that matches nothing, are
-    all mistakes and raise rather than resolving silently.
+    A target naming no registered override, or two targets naming the same one,
+    is a mistake and raises rather than resolving silently.
     """
     resolved: list[tuple[Override, dict[str, Any]]] = []
     claimed_by: dict[str, str] = {}  # override name -> the target that claimed it
     for module, func, kwargs in targets:
-        display = module if func is None else f"{module}.{func}"
-        matched = [
-            ov
-            for ov in _REGISTRY.values()
-            if ov.origin_module == module
-            and (func is None or ov.factory.__name__ == func)
-        ]
-        if not matched:
-            if func is not None:
-                raise ValueError(
-                    f"override.imports target '{display}' names function "
-                    f"'{func}' but no @override is registered by it in module "
-                    f"'{module}'."
-                )
-            if kwargs:
-                raise ValueError(
-                    f"override.imports target '{display}' passed kwargs "
-                    f"{sorted(kwargs)} but matched no override. Check the path "
-                    "and that the module registers an @override."
-                )
-            continue
-        for ov in matched:
-            prior = claimed_by.get(ov.name)
-            if prior is not None:
-                raise ValueError(
-                    f"Override '{ov.name}' is claimed by both '{prior}' and "
-                    f"'{display}'. A module target already includes all its "
-                    "functions; name the override once."
-                )
-            claimed_by[ov.name] = display
-            resolved.append((ov, kwargs))
+        target = f"{module}.{func}"
+        ov = next(
+            (
+                o
+                for o in _REGISTRY.values()
+                if o.origin_module == module and o.factory.__name__ == func
+            ),
+            None,
+        )
+        if ov is None:
+            raise ValueError(
+                f"override.imports target '{target}' names no registered "
+                f"@override (no factory '{func}' in module '{module}')."
+            )
+        prior = claimed_by.get(ov.name)
+        if prior is not None:
+            raise ValueError(
+                f"Override '{ov.name}' is claimed by both '{prior}' and "
+                f"'{target}'. Name it once."
+            )
+        claimed_by[ov.name] = target
+        resolved.append((ov, kwargs))
     return resolved
 
 
@@ -488,13 +464,13 @@ def apply_overrides(
     Returns a list of human-readable log lines describing each replacement.
     """
     # Each entry is a bare target string or a (target, kwargs) tuple; a target is
-    # a module path or module.function (see OverrideConfig.imports). Resolve each
-    # to (module, function|None) -- importing its module, which triggers that
-    # module's @override decorators -- and forward the kwargs to what it names.
+    # a module.function path (see OverrideConfig.imports). Resolve each to
+    # (module, function) -- importing its module, which triggers that module's
+    # @override decorators -- and forward the kwargs to the override it names.
     entries: list[tuple[str, dict[str, Any]]] = [
         (e, {}) if isinstance(e, str) else (e[0], e[1]) for e in override_config.imports
     ]
-    targets: list[tuple[str, str | None, dict[str, Any]]] = [
+    targets: list[tuple[str, str, dict[str, Any]]] = [
         (*_resolve_target(target), kwargs) for target, kwargs in entries
     ]
 

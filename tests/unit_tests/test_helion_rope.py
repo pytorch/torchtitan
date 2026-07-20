@@ -122,14 +122,20 @@ class TestHelionRoPEOverride(unittest.TestCase):
         with patch.object(helion_rope_module, "_HELION_IMPORT_ERROR", import_error):
             with self.assertRaisesRegex(ImportError, "helion.*not installed"):
                 apply_overrides(
-                    OverrideConfig(imports=["torchtitan.overrides.helion_rope"]), root
+                    OverrideConfig(
+                        imports=["torchtitan.overrides.helion_rope.helion_rope"]
+                    ),
+                    root,
                 )
 
     def test_override_claims_cossin_and_complex(self):
         root = _RoPEHolder.Config()
         with patch.object(helion_rope_module, "_HELION_IMPORT_ERROR", None):
             replacements = apply_overrides(
-                OverrideConfig(imports=["torchtitan.overrides.helion_rope"]), root
+                OverrideConfig(
+                    imports=["torchtitan.overrides.helion_rope.helion_rope"]
+                ),
+                root,
             )
         self.assertEqual(len(replacements), 2)
         self.assertIsInstance(root.cos_rope, HelionCosSinRoPE.Config)
@@ -138,7 +144,8 @@ class TestHelionRoPEOverride(unittest.TestCase):
     def test_override_does_not_claim_cossin_subclass(self):
         root = _SubclassRoPEHolder.Config()
         replacements = apply_overrides(
-            OverrideConfig(imports=["torchtitan.overrides.helion_rope"]), root
+            OverrideConfig(imports=["torchtitan.overrides.helion_rope.helion_rope"]),
+            root,
         )
         self.assertEqual(replacements, [])
         self.assertIs(type(root.rope), _ContractSubclassRoPE.Config)

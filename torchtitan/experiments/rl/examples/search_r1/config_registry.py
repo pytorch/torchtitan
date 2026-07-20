@@ -170,8 +170,9 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     # Same opt-in throughput overrides as rl_grpo_qwen3_30b_a3b_varlen_perf, applied
     # independently to the trainer and generator actors.
     perf_imports = [
-        "torchtitan.overrides.fused_swiglu",
-        "torchtitan.overrides.helion_rope",
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        "torchtitan.overrides.helion_rope.helion_rope",
     ]
 
     config = Controller.Config(

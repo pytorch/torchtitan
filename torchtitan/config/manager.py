@@ -249,8 +249,8 @@ class ConfigManager:
 
             Needed because ``OverrideConfig.imports`` is a ``str | tuple`` union,
             which tyro cannot render as a CLI flag on its own. Tokens are space-
-            or comma-separated targets (a module or ``module.function``); attach
-            kwargs to a target with ``target=<json>`` (see ``parse_cli_imports``),
+            or comma-separated ``module.function`` targets; attach kwargs to a
+            target with ``target=<json>`` (see ``parse_cli_imports``),
             e.g. ``--override.imports
             'my_pkg.triton_rope.triton_rope={"block_size": 256}'``.
             """

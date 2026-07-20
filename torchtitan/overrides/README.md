@@ -60,13 +60,12 @@ tree and replaces matching nodes with the factory's output.
 
 ### Core principles
 
-- **Explicit opt-in.** Nothing happens unless the user lists modules in
+- **Explicit opt-in.** Nothing happens unless the user lists targets in
   `override.imports`. No auto-detection from hardware or installed packages.
-- **Strictly scoped to the request.** Only the overrides a listed target *names*
-  are applied — a module target claims every override defined in that module, a
-  `module.function` target claims just that one — never the whole global table.
-  Matching is exact on the factory's defining module, with no sub-package reach,
-  so no override is claimed by two targets.
+- **Strictly scoped to the request.** Each target names exactly one override as
+  `module.function` (the module plus the `@override` factory's function name), so
+  only the named overrides are applied — never the whole global table. A module
+  that defines several overrides is activated by listing each function.
 - **Per-instance targeting, per-node conflicts.** An override selects *which*
   matched nodes it claims via `fqns` (FQN globs). Two overrides conflict only
   when they claim the *same node* (or one claims an ancestor of the other's
@@ -164,7 +163,7 @@ so a bare `override.imports` entry needs no other input.
 **Optional per-entry kwargs.** When two config trees need the *same* override
 configured *differently*, a factory can expose keyword parameters and each
 `override.imports` entry can supply them as a `(target, kwargs)` tuple instead of
-a bare string; the `kwargs` are forwarded to the override(s) the target names.
+a bare string; the `kwargs` are forwarded to the override the target names.
 For `triton_rope` above, two trees can pick different block sizes without a
 second module:
 
@@ -197,10 +196,10 @@ the override package and defeat the no-touch goal.
 ### Activation
 
 ```bash
-# One or more targets (a module, or module.function), space- or comma-separated.
-# A module target activates every override defined in that module:
+# One or more module.function targets, space- or comma-separated. A module that
+# defines several overrides is activated by listing each function:
 torchtitan_train --module llama3 --config llama3_8b \
-    --override.imports torchtitan.overrides.fused_swiglu
+    --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
 
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
 # shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
@@ -213,10 +212,10 @@ torchtitan_train --module llama3 --config llama3_8b \
 In `Trainer.__init__`, after `model_config.update_from_config()` (which sets
 sharding config on the pre-override modules) and before any component is built:
 
-1. Import the listed modules — this triggers their `@override` decorators.
-2. Resolve the *active* set: for each target, the override(s) it names — a module
-   target's whole module or a single `module.function` — matched exactly by the
-   factory's defining module (no sub-package reach).
+1. Import each target's module — this triggers its `@override` decorators.
+2. Resolve the *active* set: for each `module.function` target, the single
+   override that function registers (matched by the factory's defining module and
+   its name).
 3. Collect claims: traverse the original tree and record every `(override,
    node)` pair, filtered by each override's `fqns` selector.
 4. Check for per-node conflicts (two overrides claiming the same node, or one
@@ -259,7 +258,7 @@ def vendor_x_moe(cfg: MoE.Config) -> "VendorXFusedMoE.Config":
 ```bash
 pip install torchtitan-vendor-x
 torchtitan_train --module deepseek_v3 --config dsv3_671B \
-    --override.imports vendor_x.overrides
+    --override.imports vendor_x.overrides.vendor_x_moe
 ```
 
 ### Version compatibility

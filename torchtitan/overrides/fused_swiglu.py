@@ -24,9 +24,11 @@ override mechanism, *without touching core*:
 This module also defines the ``torchtitan::silu_and_mul`` custom CUDA op (a fused
 SiLU-and-mul Triton kernel) and :class:`FusedGroupedExperts`, which applies the
 same gate+up fusion to MoE experts. Both the ``fused_swiglu`` (``FeedForward``)
-and ``fused_grouped_experts`` (``GroupedExperts``) overrides are registered here,
-so ``--override.imports torchtitan.overrides.fused_swiglu`` activates both. For the
-DeepEP inference path, pair it with the sibling ``deepep_inference`` dispatcher override.
+and ``fused_grouped_experts`` (``GroupedExperts``) overrides are registered here;
+activate each by naming its factory, e.g. ``--override.imports
+torchtitan.overrides.fused_swiglu.fused_swiglu,torchtitan.overrides.fused_swiglu.fused_grouped_experts``.
+For the DeepEP inference path, pair it with the sibling ``deepep_override`` dispatcher
+override (``torchtitan.overrides.moe_dispatch_override``).
 
 Tensor parallelism — the ``(hidden_dim, 2, dim)`` layout is what makes TP work.
 ``w13`` is sharded ``Shard(0)`` on the ``hidden_dim`` axis, so each TP rank holds

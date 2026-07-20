@@ -18,7 +18,7 @@ from torchtitan.config import (
 from torchtitan.config.override import _REGISTRY, Override
 
 # Overrides registered in this module have ``origin_module == __name__``; tests
-# pass ``imports=[__name__]`` so the provenance filter activates them.
+# activate them by ``module.function`` target (see ``TestOverride._imports``).
 
 
 class ComponentA(Configurable):
@@ -108,8 +108,15 @@ class TestOverride(unittest.TestCase):
         clear_overrides()
 
     def _imports(self) -> OverrideConfig:
-        """OverrideConfig that activates overrides defined in this module."""
-        return OverrideConfig(imports=[__name__])
+        """OverrideConfig naming (as ``module.function``) every override this
+        module registers -- i.e. the test's local factories."""
+        return OverrideConfig(
+            imports=[
+                f"{__name__}.{ov.factory.__name__}"
+                for ov in _REGISTRY.values()
+                if ov.origin_module == __name__
+            ]
+        )
 
     def test_register_and_apply(self):
         @override("test_swap", target=ComponentA.Config, description="test swap")
@@ -324,16 +331,15 @@ class TestOverride(unittest.TestCase):
         for child_cfg in parent_cfg.children:  # sibling override not applied
             self.assertIsInstance(child_cfg, ComponentA.Config)
 
-    def test_module_and_function_target_double_claim_raises(self):
-        # A module target already includes all its functions, so also naming one
-        # by ``module.function`` claims the same override twice.
+    def test_duplicate_target_raises(self):
+        # Naming the same override twice claims it twice.
         @override("only", target=ComponentA.Config)
         def only(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
         with self.assertRaisesRegex(ValueError, "claimed by both"):
             apply_overrides(
-                OverrideConfig(imports=[__name__, f"{__name__}.only"]),
+                OverrideConfig(imports=[f"{__name__}.only", f"{__name__}.only"]),
                 ParentComponent.Config(),
             )
 
@@ -344,7 +350,7 @@ class TestOverride(unittest.TestCase):
         def present(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
-        with self.assertRaisesRegex(ValueError, "no @override is registered"):
+        with self.assertRaisesRegex(ValueError, "names no registered"):
             apply_overrides(
                 OverrideConfig(imports=[f"{__name__}.absent"]),
                 ParentComponent.Config(),
@@ -415,31 +421,30 @@ class TestOverrideKwargs(unittest.TestCase):
     def tearDown(self):
         clear_overrides()
 
-    def test_same_module_different_kwargs_per_actor(self):
-        # The motivating case: two config trees share one override module but
-        # pass different kwargs (e.g. RL trainer vs. generator capacity factor).
+    def test_same_override_different_kwargs_per_actor(self):
+        # The motivating case: two config trees share one override but pass
+        # different kwargs (e.g. RL trainer vs. generator capacity factor).
         @override("per_actor", target=ComponentA.Config, fqns=["child"])
         def per_actor(cfg: ComponentA.Config, *, extra: int) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=extra)
 
+        target = f"{__name__}.per_actor"
         trainer_cfg = ParentComponent.Config()
         generator_cfg = ParentComponent.Config()
-        apply_overrides(OverrideConfig(imports=[(__name__, {"extra": 1})]), trainer_cfg)
-        apply_overrides(
-            OverrideConfig(imports=[(__name__, {"extra": 2})]), generator_cfg
-        )
+        apply_overrides(OverrideConfig(imports=[(target, {"extra": 1})]), trainer_cfg)
+        apply_overrides(OverrideConfig(imports=[(target, {"extra": 2})]), generator_cfg)
 
         self.assertEqual(trainer_cfg.child.extra, 1)
         self.assertEqual(generator_cfg.child.extra, 2)
 
     def test_bare_string_entry_calls_factory_without_kwargs(self):
-        # A bare-string entry keeps the pre-kwargs contract: no kwargs passed.
+        # A bare-string target (no kwargs) calls the factory with none passed.
         @override("no_kw", target=ComponentA.Config, fqns=["child"])
         def no_kw(cfg: ComponentA.Config, *, extra: int = 9) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=extra)
 
         parent_cfg = ParentComponent.Config()
-        apply_overrides(OverrideConfig(imports=[__name__]), parent_cfg)
+        apply_overrides(OverrideConfig(imports=[f"{__name__}.no_kw"]), parent_cfg)
         self.assertEqual(parent_cfg.child.extra, 9)
 
     def test_unknown_kwarg_raises(self):
@@ -450,16 +455,16 @@ class TestOverrideKwargs(unittest.TestCase):
         # A kwarg the factory does not accept is a plain TypeError from the call.
         with self.assertRaisesRegex(TypeError, "unexpected keyword argument"):
             apply_overrides(
-                OverrideConfig(imports=[(__name__, {"typo": 1})]),
+                OverrideConfig(imports=[(f"{__name__}.strict_kw", {"typo": 1})]),
                 ParentComponent.Config(),
             )
 
     def test_kwargs_for_no_matching_override_raises(self):
-        # kwargs on a target that matches no override is a misconfiguration, not
-        # a silent no-op (torchtitan.config.override registers no @override).
-        with self.assertRaisesRegex(ValueError, "matched no override"):
+        # kwargs on a target naming no registered override is a misconfiguration,
+        # not a silent no-op (there is no factory 'nope' in that module).
+        with self.assertRaisesRegex(ValueError, "names no registered"):
             apply_overrides(
-                OverrideConfig(imports=[("torchtitan.config.override", {"x": 1})]),
+                OverrideConfig(imports=[("torchtitan.config.override.nope", {"x": 1})]),
                 ParentComponent.Config(),
             )
 
@@ -581,7 +586,9 @@ class TestModelSpecTraversal(unittest.TestCase):
 
         spec = _make_spec()
         root = _TrainerCfgHolder.Config(model_spec=spec)
-        replacements = apply_overrides(OverrideConfig(imports=[__name__]), root)
+        replacements = apply_overrides(
+            OverrideConfig(imports=[f"{__name__}.blk"]), root
+        )
         self.assertEqual(len(replacements), 1)
         self.assertIsInstance(spec.model.block, ComponentB.Config)
 
@@ -599,7 +606,10 @@ class TestModelSpecTraversal(unittest.TestCase):
 
         root = _TrainerCfgHolder.Config(model_spec=_make_spec())
         with self.assertRaisesRegex(ValueError, "ancestor"):
-            apply_overrides(OverrideConfig(imports=[__name__]), root)
+            apply_overrides(
+                OverrideConfig(imports=[f"{__name__}.whole", f"{__name__}.blk"]),
+                root,
+            )
 
 
 if __name__ == "__main__":

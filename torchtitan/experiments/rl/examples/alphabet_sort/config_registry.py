@@ -866,8 +866,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # OverrideConfig instances keep the trainer and generator overrides
     # independent (they run in different actors).
     perf_imports = [
-        "torchtitan.overrides.fused_swiglu",
-        "torchtitan.overrides.helion_rope",
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        "torchtitan.overrides.helion_rope.helion_rope",
     ]
     config.trainer = dataclasses.replace(
         config.trainer, override=OverrideConfig(imports=list(perf_imports))
