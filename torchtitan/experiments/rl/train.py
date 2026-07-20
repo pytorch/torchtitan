@@ -78,6 +78,7 @@ def _bootstrap_generator() -> None:
     """``bootstrap`` setup callable for VLLMGenerator."""
     import os
 
+    # TODO: this can be removed if it is addressed upstream in: https://github.com/tile-ai/tvm/issues/55
     # VLLMGenerator encounters the following issue:
     # 1. vLLM's jit_monitor transitively imports readline through the following chain:
     #      vLLM -> tilelang  -> tvm  -> tvm's base.py -> import readline
