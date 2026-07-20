@@ -209,13 +209,7 @@ class Controller(Configurable):
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
         dump_folder: str = "outputs/rl"
-        """Base output folder for RL artifacts (temp weights, logs, etc.).
-
-        When not overridden on the CLI, ``train.py`` appends a per-run
-        ``{config_name}-{timestamp}`` subfolder so each launch writes to a unique
-        location and never resumes from / collides with a previous run's
-        checkpoints. Pass ``--dump_folder`` to set an exact path (e.g. to resume a
-        specific run)."""
+        """Base output folder for RL artifacts (temp weights, logs, etc.)."""
 
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
