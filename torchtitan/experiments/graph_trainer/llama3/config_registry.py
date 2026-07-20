@@ -4,20 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.data import (
-    ConcatThenSplitPackingConfig,
-    GrainDataLoader,
-    HuggingFaceRandomAccessSource,
-    SingleDatasetConfig,
-    TextCollator,
-)
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3.config_registry import (
     llama3_405b,
@@ -83,20 +77,8 @@ def graph_trainer_llama3_8b() -> GraphTrainer.Config:
 
 def graph_trainer_llama3_8b_c4_test() -> GraphTrainer.Config:
     config = graph_trainer_llama3_8b()
-    dataset = DATASETS["c4_test"]
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(
-            dataset=SingleDatasetConfig(
-                source=HuggingFaceRandomAccessSource.Config(
-                    path=dataset.path,
-                    loader=dataset.loader,
-                ),
-                process=HuggingFaceTextProcessor.Config(
-                    text_processor=dataset.sample_processor,
-                ),
-            ),
-        ),
-        collator=TextCollator.Config(),
+        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
     return config
 

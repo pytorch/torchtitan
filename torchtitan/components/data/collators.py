@@ -14,8 +14,7 @@ from typing import Any, TypeAlias
 import torch
 from torch.utils.data import default_collate
 
-from torchtitan.components.data.dataset import DataRuntime
-from torchtitan.components.data.packing import TextTrainingRow
+from torchtitan.components.data.dataset import DatasetBuildContext
 from torchtitan.config import Configurable
 
 
@@ -34,16 +33,15 @@ class Collator(Configurable, ABC):
         ...
 
 
-class TextCollator(Collator):
-    """Stacks fixed text rows into a trainer batch."""
+class DefaultCollator(Collator):
+    """Stacks rows with PyTorch default collation."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
         pass
 
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
-        del config, runtime
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        del config, context
 
-    def __call__(self, rows: Sequence[TextTrainingRow]) -> TrainerBatch:
-        inputs, labels = default_collate(list(rows))
-        return inputs, labels
+    def __call__(self, rows: Sequence[Any]) -> TrainerBatch:
+        return default_collate(list(rows))

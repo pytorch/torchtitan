@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -14,18 +14,15 @@ import numpy as np
 import PIL.Image
 import torch
 import tyro
-from datasets import load_dataset
-from torch.utils.data import default_collate
 
-from torchtitan.components.data.collators import Collator, TrainerBatch
 from torchtitan.components.data.dataset import (
-    BuildOptions,
-    DataRuntime,
+    DatasetBuildContext,
     DatasetConfig as GrainDatasetConfig,
+    DatasetIterationPolicy,
     SampleProcessor,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.tools.logging import logger
 
@@ -137,34 +134,13 @@ def _coco_data_processor(
     }
 
 
-DATASETS = {
-    "cc12m-wds": DatasetConfig(
-        path="pixparse/cc12m-wds",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
-        sample_processor=_cc12m_wds_data_processor,
-    ),
-    "cc12m-test": DatasetConfig(
-        path="tests/assets/cc12m_test",
-        loader=lambda path: load_dataset(
-            path, split="train", data_files={"train": "*.tar"}, streaming=True
-        ),
-        sample_processor=_cc12m_wds_data_processor,
-    ),
-    "coco-validation": DatasetConfig(
-        path="howard-hou/COCO-Text",
-        loader=lambda path: load_dataset(path, split="validation", streaming=True),
-        sample_processor=_coco_data_processor,
-    ),
-}
-
-
 class FluxSampleProcessor(SampleProcessor):
     """Applies an existing Flux processor and classifier-free prompt dropout."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
         data_processor: Annotated[Callable, tyro.conf.Suppress]
-        prompt_dropout_prob: float = 0.0
+        prompt_dropout_prob: float
         img_size: int = 256
 
         def __post_init__(self) -> None:
@@ -174,13 +150,13 @@ class FluxSampleProcessor(SampleProcessor):
                     f"got {self.prompt_dropout_prob}"
                 )
 
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
-        if not isinstance(runtime.tokenizer, FluxTokenizerContainer):
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        if not isinstance(context.tokenizer, FluxTokenizerContainer):
             raise ValueError(
                 "Flux dataloader requires a FluxTokenizerContainer as tokenizer. "
                 "Set tokenizer=FluxTokenizerContainer.Config(...) in your trainer config."
             )
-        self._tokenizer = runtime.tokenizer
+        self._tokenizer = context.tokenizer
         empty_tokens = self._tokenizer.encode("")
         self._t5_empty_token = empty_tokens["t5"]
         self._clip_empty_token = empty_tokens["clip"]
@@ -221,21 +197,58 @@ class FluxSampleProcessor(SampleProcessor):
         return sample_dict, labels
 
 
-class FluxCollator(Collator):
-    """Uses PyTorch's default collation for Flux rows."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Collator.Config):
-        pass
-
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
-        del config, runtime
-
-    def __call__(
-        self,
-        rows: Sequence[tuple[dict[str, Any], torch.Tensor]],
-    ) -> TrainerBatch:
-        return default_collate(list(rows))
+DATASETS: dict[str, SingleDatasetConfig] = {
+    "cc12m-test": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="tests/assets/cc12m_test",
+            load_dataset_kwargs={
+                "split": "train",
+                "data_files": {"train": "*.tar"},
+            },
+        ),
+        processor=FluxSampleProcessor.Config(
+            data_processor=_cc12m_wds_data_processor,
+            prompt_dropout_prob=0.447,
+        ),
+        filters=(lambda sample: sample is not None,),
+    ),
+    "cc12m-test-validation": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="tests/assets/cc12m_test",
+            load_dataset_kwargs={
+                "split": "train",
+                "data_files": {"train": "*.tar"},
+            },
+        ),
+        processor=FluxSampleProcessor.Config(
+            data_processor=_cc12m_wds_data_processor,
+            prompt_dropout_prob=0.0,
+        ),
+        filters=(lambda sample: sample is not None,),
+    ),
+    "cc12m-wds": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="pixparse/cc12m-wds",
+            load_dataset_kwargs={"split": "train"},
+        ),
+        processor=FluxSampleProcessor.Config(
+            data_processor=_cc12m_wds_data_processor,
+            prompt_dropout_prob=0.447,
+        ),
+        filters=(lambda sample: sample is not None,),
+    ),
+    "coco-validation": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="howard-hou/COCO-Text",
+            load_dataset_kwargs={"split": "validation"},
+        ),
+        processor=FluxSampleProcessor.Config(
+            data_processor=_coco_data_processor,
+            prompt_dropout_prob=0.0,
+        ),
+        filters=(lambda sample: sample is not None,),
+    ),
+}
 
 
 _VALIDATION_TIMESTEPS = tuple((index + 0.5) / 8 for index in range(8))
@@ -256,29 +269,26 @@ class FluxValidationDatasetConfig:
     """Adds checkpointable round-robin validation timesteps to Flux rows."""
 
     dataset: GrainDatasetConfig
-    generate_timesteps: bool = True
 
     def build(
         self,
         *,
-        runtime: DataRuntime,
-        options: BuildOptions,
+        context: DatasetBuildContext,
+        iteration: DatasetIterationPolicy,
     ) -> grain.MapDataset | grain.IterDataset:
-        dataset = self.dataset.build(runtime=runtime, options=options)
-        if not self.generate_timesteps:
-            return dataset
+        dataset = self.dataset.build(context=context, iteration=iteration)
         if isinstance(dataset, grain.MapDataset):
-            dataset = dataset.to_iter_dataset(read_options=runtime.read_options)
+            dataset = dataset.to_iter_dataset(read_options=context.read_options)
         return dataset.map_with_index(_add_validation_timestep)
 
 
-def flux_image_size(dataset: GrainDatasetConfig) -> int:
+def get_flux_image_size(dataset: GrainDatasetConfig) -> int:
     """Return the image size configured by a Flux dataset processor."""
     if isinstance(dataset, FluxValidationDatasetConfig):
         dataset = dataset.dataset
     if not isinstance(dataset, SingleDatasetConfig):
         raise ValueError("Flux dataloader dataset must be a SingleDatasetConfig")
-    process = dataset.process
-    if not isinstance(process, FluxSampleProcessor.Config):
+    processor = dataset.processor
+    if not isinstance(processor, FluxSampleProcessor.Config):
         raise ValueError("Flux dataloader dataset must use FluxSampleProcessor.Config")
-    return process.img_size
+    return processor.img_size

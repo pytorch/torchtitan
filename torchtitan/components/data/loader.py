@@ -6,65 +6,21 @@
 
 """Grain-backed TorchTitan dataloader."""
 
-import dataclasses
-import inspect
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any
 
 import grain.python as grain
 from grain import experimental as grain_experimental
 
-from torchtitan.components.data.collators import Collator, TrainerBatch
-from torchtitan.components.data.dataset import BuildOptions, DataRuntime, DatasetConfig
+from torchtitan.components.data.collators import Collator, DefaultCollator, TrainerBatch
+from torchtitan.components.data.dataset import (
+    DatasetBuildContext,
+    DatasetConfig,
+    DatasetIterationPolicy,
+)
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.tokenizer import BaseTokenizer
-
-
-def _type_name(value: Any) -> str:
-    value_type = value if isinstance(value, type) else type(value)
-    return f"{value_type.__module__}.{value_type.__qualname__}"
-
-
-def _normalize_config(value: Any) -> Any:
-    """Represent a config tree with type identity for resume compatibility."""
-    if dataclasses.is_dataclass(value):
-        return {
-            "type": _type_name(value),
-            "fields": {
-                config_field.name: _normalize_config(getattr(value, config_field.name))
-                for config_field in dataclasses.fields(value)
-                if not config_field.name.startswith("_")
-            },
-        }
-    if isinstance(value, dict):
-        return {str(key): _normalize_config(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_normalize_config(item) for item in value]
-    if isinstance(value, (str, int, float, bool, type(None))):
-        return value
-    if isinstance(value, partial):
-        return {
-            "partial": _normalize_config(value.func),
-            "args": _normalize_config(value.args),
-            "keywords": _normalize_config(value.keywords),
-        }
-    if inspect.isfunction(value):
-        if value.__closure__:
-            raise TypeError(
-                f"capturing callable {value.__qualname__} cannot be checkpointed; "
-                "use a configured processor with explicit fields"
-            )
-        identity = f"{value.__module__}.{value.__qualname__}"
-        if value.__name__ == "<lambda>":
-            identity = f"{identity}:{value.__code__.co_firstlineno}"
-        return {"callable": identity}
-    if callable(value):
-        raise TypeError(
-            f"callable {_type_name(value)} must be a dataclass config or top-level function"
-        )
-    return {"type": _type_name(value), "repr": repr(value)}
 
 
 class GrainDataLoader(BaseDataLoader):
@@ -73,15 +29,16 @@ class GrainDataLoader(BaseDataLoader):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
         dataset: DatasetConfig
-        collator: Collator.Config
+        collator: Collator.Config = field(default_factory=DefaultCollator.Config)
         seed: int = 42
         shuffle: bool = True
         repeat: bool = True
+        streaming_shuffle_window_size: int = 1_000
+        """Raw stream rows held for shuffling; lower it for large media rows."""
         read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
+        """Grain map-to-iter reader threads and row buffer."""
         batch_prefetch_buffer_size: int = 8
-
-        def to_dict(self) -> dict[str, Any]:
-            return _normalize_config(self)
+        """Completed trainer batches prefetched ahead of training."""
 
     def __init__(
         self,
@@ -94,44 +51,38 @@ class GrainDataLoader(BaseDataLoader):
         local_batch_size: int,
         **_: Any,
     ) -> None:
+        if dp_world_size > 1 and not config.repeat:
+            raise ValueError(
+                "repeat=False with data parallelism can exhaust ranks at different "
+                "steps and hang collectives; use repeat=True with a trainer-"
+                "controlled step count"
+            )
         self._dp_world_size = dp_world_size
         self._rank_id = f"dp_rank_{dp_rank}"
-        runtime = DataRuntime(
+        context = DatasetBuildContext(
             tokenizer=tokenizer,
             seq_len=seq_len,
             local_batch_size=local_batch_size,
             read_options=config.read_options,
         )
-        options = BuildOptions(
+        iteration = DatasetIterationPolicy(
             seed=config.seed,
             shuffle=config.shuffle,
             repeat=config.repeat,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
+            streaming_shuffle_window_size=config.streaming_shuffle_window_size,
         )
-        self._pipeline = {
-            "dataset": _normalize_config(config.dataset),
-            "collator": _normalize_config(config.collator),
-            "seed": config.seed,
-            "shuffle": config.shuffle,
-            "repeat": config.repeat,
-            "seq_len": seq_len,
-            "local_batch_size": local_batch_size,
-            "tokenizer": _type_name(tokenizer),
-        }
 
-        dataset = config.dataset.build(runtime=runtime, options=options)
-        collator = config.collator.build(runtime=runtime)
+        dataset = config.dataset.build(context=context, iteration=iteration)
+        collator = config.collator.build(context=context)
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=config.read_options)
         dataset = dataset.batch(
-            local_batch_size,
-            drop_remainder=True,
-            batch_fn=collator,
+            local_batch_size, drop_remainder=True, batch_fn=collator
         )
         dataset = grain_experimental.ThreadPrefetchIterDataset(
-            dataset,
-            prefetch_buffer_size=config.batch_prefetch_buffer_size,
+            dataset, prefetch_buffer_size=config.batch_prefetch_buffer_size
         )
         self._iterator = iter(dataset)
 
@@ -142,7 +93,6 @@ class GrainDataLoader(BaseDataLoader):
         return {
             "version": 1,
             "dp_world_size": self._dp_world_size,
-            "pipeline": self._pipeline,
             self._rank_id: self._iterator.get_state(),
         }
 
@@ -157,8 +107,6 @@ class GrainDataLoader(BaseDataLoader):
             raise ValueError(
                 "cannot resume after changing the effective data-parallel degree"
             )
-        if state_dict["pipeline"] != self._pipeline:
-            raise ValueError("cannot resume after changing the data pipeline")
         if self._rank_id not in state_dict:
             raise ValueError(
                 f"checkpoint is missing dataloader state for {self._rank_id}"

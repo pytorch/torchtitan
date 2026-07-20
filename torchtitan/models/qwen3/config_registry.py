@@ -4,19 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from functools import partial
-
-from datasets import load_dataset
-
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     FirstFitPackingConfig,
     GrainDataLoader,
     HuggingFaceRandomAccessSource,
-    HuggingFaceStreamingSource,
     SingleDatasetConfig,
-    TextCollator,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -28,11 +22,7 @@ from torchtitan.components.optimizer import (
 )
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import (
-    ChatProcessor,
-    DATASETS,
-    HuggingFaceTextProcessor,
-)
+from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
@@ -41,7 +31,6 @@ from . import model_registry
 
 def qwen3_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
-    dataset = DATASETS["c4_test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -52,18 +41,7 @@ def qwen3_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceRandomAccessSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -121,7 +99,6 @@ def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
 
 def qwen3_debugmodel_flex_flash() -> Trainer.Config:
     model_spec = model_registry("debugmodel", attn_backend="flex_flash")
-    dataset = DATASETS["c4_test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -132,18 +109,7 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceRandomAccessSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -167,7 +133,6 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
 
 def qwen3_0_6b() -> Trainer.Config:
     model_spec = model_registry("0.6B")
-    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -178,18 +143,7 @@ def qwen3_0_6b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceStreamingSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -209,7 +163,6 @@ def qwen3_0_6b() -> Trainer.Config:
 
 def qwen3_1_7b() -> Trainer.Config:
     model_spec = model_registry("1.7B")
-    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -219,18 +172,7 @@ def qwen3_1_7b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-1.7B",
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceStreamingSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -250,7 +192,6 @@ def qwen3_1_7b() -> Trainer.Config:
 
 def qwen3_14b() -> Trainer.Config:
     model_spec = model_registry("14B")
-    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -260,18 +201,7 @@ def qwen3_14b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-14B",
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceStreamingSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -297,7 +227,6 @@ def qwen3_14b() -> Trainer.Config:
 
 def qwen3_30b_a3b() -> Trainer.Config:
     model_spec = model_registry("30B-A3B")
-    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -307,18 +236,7 @@ def qwen3_30b_a3b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceStreamingSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -344,7 +262,6 @@ def qwen3_30b_a3b() -> Trainer.Config:
 
 def qwen3_32b() -> Trainer.Config:
     model_spec = model_registry("32B")
-    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -354,18 +271,7 @@ def qwen3_32b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-32B",
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceStreamingSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -399,7 +305,6 @@ def qwen3_debugmodel_non_fused_qkv() -> Trainer.Config:
 
 def qwen3_moe_debug() -> Trainer.Config:
     model_spec = model_registry("debugmodel_moe")
-    dataset = DATASETS["c4_test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -410,18 +315,7 @@ def qwen3_moe_debug() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceRandomAccessSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -459,7 +353,6 @@ def qwen3_moe_deepep() -> Trainer.Config:
     Then launch with NGPU=4 ./run_train.sh (none of this is needed on RDMA/RoCE hosts).
     """
     model_spec = model_registry("debugmodel_moe", moe_comm_backend="deepep")
-    dataset = DATASETS["c4_test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -470,18 +363,7 @@ def qwen3_moe_deepep() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceRandomAccessSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -535,17 +417,12 @@ def sft_qwen3_8b_math() -> Trainer.Config:
                 dataset=SingleDatasetConfig(
                     source=HuggingFaceRandomAccessSource.Config(
                         path="openai/gsm8k",
-                        loader=partial(
-                            load_dataset,
-                            name="main",
-                            split="train",
-                        ),
+                        load_dataset_kwargs={"name": "main", "split": "train"},
                     ),
-                    process=ChatProcessor.Config(sample_processor=process_sample),
+                    processor=ChatProcessor.Config(messages_fn=process_sample),
                     filters=(lambda sample: sample is not None,),
                 ),
             ),
-            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,

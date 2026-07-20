@@ -16,30 +16,15 @@ Compose the built-in C4 dataset directly:
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
-    HuggingFaceRandomAccessSource,
-    SingleDatasetConfig,
-    TextCollator,
 )
-from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
+from torchtitan.hf_datasets.text_datasets import DATASETS
 
-dataset = DATASETS["c4_test"]
 config.dataloader = GrainDataLoader.Config(
-    dataset=ConcatThenSplitPackingConfig(
-        dataset=SingleDatasetConfig(
-            source=HuggingFaceRandomAccessSource.Config(
-                path=dataset.path,
-                loader=dataset.loader,
-            ),
-            process=HuggingFaceTextProcessor.Config(
-                text_processor=dataset.sample_processor,
-            ),
-        ),
-    ),
-    collator=TextCollator.Config(),
+    dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
 )
 ```
 
-Use `HuggingFaceStreamingSource` with `DATASETS["c4"]` or `DATASETS["c4_validation"]` for the streamed splits.
+Use `DATASETS["c4"]` or `DATASETS["c4_validation"]` for the streamed splits.
 
 Pretraining uses concat-then-split packing:
 
@@ -62,9 +47,8 @@ from torchtitan.components.data import (
     GrainDataLoader,
     IndexedJsonlSource,
     SingleDatasetConfig,
-    TextCollator,
 )
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextProcessor
+from torchtitan.hf_datasets.text_datasets import TextProcessor
 
 
 def row_to_text(row):
@@ -80,12 +64,11 @@ config.dataloader = GrainDataLoader.Config(
                     "/datasets/code/*.jsonl",
                 ),
             ),
-            process=HuggingFaceTextProcessor.Config(
-                text_processor=row_to_text,
+            processor=TextProcessor.Config(
+                text_fn=row_to_text,
             ),
         ),
     ),
-    collator=TextCollator.Config(),
 )
 ```
 
@@ -100,22 +83,18 @@ Patterns are expanded in sorted order. Missing patterns and duplicate resolved f
 
 ## Hugging Face sources
 
-A source receives a callable that loads its path. Use random access for a materialized dataset:
+Use random access for a materialized dataset:
 
 ```python
-from functools import partial
-
-from datasets import load_dataset
 from torchtitan.components.data import HuggingFaceRandomAccessSource
 
 source = HuggingFaceRandomAccessSource.Config(
     path="openai/gsm8k",
-    loader=partial(
-        load_dataset,
-        name="main",
-        split="train",
-        revision="<immutable-revision>",
-    ),
+    load_dataset_kwargs={
+        "name": "main",
+        "split": "train",
+        "revision": "<immutable-revision>",
+    },
 )
 ```
 
@@ -126,17 +105,15 @@ from torchtitan.components.data import HuggingFaceStreamingSource
 
 source = HuggingFaceStreamingSource.Config(
     path="allenai/c4",
-    loader=partial(
-        load_dataset,
-        name="en",
-        split="train",
-        streaming=True,
-        revision="<immutable-revision>",
-    ),
+    load_dataset_kwargs={
+        "name": "en",
+        "split": "train",
+        "revision": "<immutable-revision>",
+    },
 )
 ```
 
-Hugging Face owns Hub access, caching, decoding, and the streaming cursor. Grain owns processing, shuffle, repeat, mixing, packing, batching, and recursive iterator state.
+TorchTitan sets `streaming=True` or `False` from the source class. Hugging Face owns Hub access, caching, decoding, and the streaming cursor. Grain owns processing, shuffle, repeat, mixing, packing, batching, and recursive iterator state.
 
 ## Mixing datasets
 
@@ -202,15 +179,11 @@ documents = DatasetConcatConfig(datasets=(books, code, math))
 SFT uses the same source, loader, batching, distributed, and checkpoint path. It changes row processing and uses whole-example first-fit packing.
 
 ```python
-from functools import partial
-
-from datasets import load_dataset
 from torchtitan.components.data import (
     FirstFitPackingConfig,
     GrainDataLoader,
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
-    TextCollator,
 )
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
@@ -227,20 +200,18 @@ config.dataloader = GrainDataLoader.Config(
         dataset=SingleDatasetConfig(
             source=HuggingFaceRandomAccessSource.Config(
                 path="openai/gsm8k",
-                loader=partial(
-                    load_dataset,
-                    name="main",
-                    split="train",
-                    revision="<immutable-revision>",
-                ),
+                load_dataset_kwargs={
+                    "name": "main",
+                    "split": "train",
+                    "revision": "<immutable-revision>",
+                },
             ),
-            process=ChatProcessor.Config(
-                sample_processor=question_answer_to_messages,
+            processor=ChatProcessor.Config(
+                messages_fn=question_answer_to_messages,
             ),
             filters=(lambda sample: sample is not None,),
         ),
     ),
-    collator=TextCollator.Config(),
 )
 ```
 
@@ -266,6 +237,8 @@ import numpy as np
 
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
+    DatasetBuildContext,
+    SampleProcessor,
     SingleDatasetConfig,
     TokenSequence,
 )
@@ -278,7 +251,8 @@ class MemmapTokenSource(Configurable):
         tokens_path: str
         document_offsets_path: str
 
-    def __init__(self, config: Config, **_):
+    def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int):
+        del dp_rank, dp_world_size
         self.tokens = np.memmap(config.tokens_path, dtype=np.uint32, mode="r")
         self.offsets = np.load(config.document_offsets_path)
 
@@ -290,11 +264,20 @@ class MemmapTokenSource(Configurable):
         return np.asarray(self.tokens[start:end], dtype=np.int64)
 
 
-def tokens_to_sequence(token_ids):
-    return TokenSequence(
-        token_ids=token_ids,
-        loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
-    )
+class TokensToSequence(SampleProcessor):
+    @dataclass(kw_only=True, slots=True)
+    class Config(SampleProcessor.Config):
+        pass
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext):
+        del config, context
+
+    def __call__(self, token_ids, rng):
+        del rng
+        return TokenSequence(
+            token_ids=token_ids,
+            loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
+        )
 
 
 packed_rows = ConcatThenSplitPackingConfig(
@@ -303,7 +286,7 @@ packed_rows = ConcatThenSplitPackingConfig(
             tokens_path="tokens.bin",
             document_offsets_path="document_offsets.npy",
         ),
-        process=tokens_to_sequence,
+        processor=TokensToSequence.Config(),
     ),
 )
 ```
@@ -317,7 +300,6 @@ config.dataloader = GrainDataLoader.Config(
     dataset=SingleDatasetConfig(
         source=MyFixedTrainingRows.Config(...),
     ),
-    collator=TextCollator.Config(),
 )
 ```
 
@@ -330,80 +312,40 @@ Images use the same loader and source contracts. Their processors and collators 
 Flux:
 
 ```python
-from torchtitan.components.data import (
-    GrainDataLoader,
-    HuggingFaceStreamingSource,
-    SingleDatasetConfig,
-)
-from torchtitan.models.flux.flux_datasets import (
-    DATASETS,
-    FluxCollator,
-    FluxSampleProcessor,
-)
+from torchtitan.components.data import GrainDataLoader
+from torchtitan.models.flux.flux_datasets import DATASETS
 
-dataset = DATASETS["cc12m-wds"]
 config.dataloader = GrainDataLoader.Config(
-    dataset=SingleDatasetConfig(
-        source=HuggingFaceStreamingSource.Config(
-            path=dataset.path,
-            loader=dataset.loader,
-        ),
-        process=FluxSampleProcessor.Config(
-            data_processor=dataset.sample_processor,
-            prompt_dropout_prob=0.447,
-            img_size=256,
-        ),
-        filters=(lambda sample: sample is not None,),
-    ),
-    collator=FluxCollator.Config(),
-    shuffle=False,
+    dataset=DATASETS["cc12m-wds"],
+    streaming_shuffle_window_size=128,
 )
 ```
 
 Qwen:
 
 ```python
-from torchtitan.components.data import (
-    GrainDataLoader,
-    HuggingFaceStreamingSource,
-    SingleDatasetConfig,
-)
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MMSamplePackingConfig,
-    MultiModalProcessor,
 )
 
-dataset = MM_DATASETS["cc12m"]
 config.dataloader = GrainDataLoader.Config(
-    dataset=MMSamplePackingConfig(
-        dataset=SingleDatasetConfig(
-            source=HuggingFaceStreamingSource.Config(
-                path=dataset.path,
-                loader=dataset.loader,
-            ),
-            process=MultiModalProcessor.Config(
-                sample_processor=dataset.sample_processor,
-                patch_size=16,
-                temporal_patch_size=2,
-                spatial_merge_size=2,
-                min_pixels=65_536,
-                max_pixels=16_777_216,
-                image_mean=(0.5, 0.5, 0.5),
-                image_std=(0.5, 0.5, 0.5),
-            ),
-            filters=(lambda sample: sample is not None,),
-        ),
-        buffer_size=128,
-    ),
+    dataset=MM_DATASETS["cc12m"],
     collator=MultiModalCollator.Config(
-        max_images_per_batch=128,
-        patch_size=16,
-        temporal_patch_size=2,
-        spatial_merge_size=2,
         build_mrope_positions=True,
     ),
+    streaming_shuffle_window_size=128,
+)
+```
+
+Multimodal packing is opt-in:
+
+```python
+config.dataloader.dataset = MMSamplePackingConfig(
+    dataset=MM_DATASETS["cc12m"],
+    buffer_size=128,
 )
 ```
 
@@ -418,10 +360,10 @@ import grain.python as grain
 
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_rows,
-    collator=TextCollator.Config(),
     seed=42,
     shuffle=True,
     repeat=True,
+    streaming_shuffle_window_size=1_000,
     read_options=grain.ReadOptions(
         num_threads=16,
         prefetch_buffer_size=32,
@@ -430,7 +372,15 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-`shuffle`, `repeat`, and prefetch do not need to be repeated on every leaf dataset.
+The three buffers have different jobs:
+
+```text
+streaming_shuffle_window_size -> raw streaming rows available to shuffle
+read_options                  -> parallel map-source reads and their row buffer
+batch_prefetch_buffer_size    -> completed trainer batches ready for training
+```
+
+`shuffle`, `repeat`, and these buffering controls are configured once on the loader, not on every leaf dataset.
 
 ## Distributed behavior
 
@@ -445,20 +395,15 @@ TP/PP/CP peers              -> the same rows for their effective-DP coordinate
 
 Random-access data is shuffled globally, then stride-sharded. Hugging Face streams are split by effective DP rank at the source. Packing currently happens after that split and is rank-local.
 
-Finite filtered datasets with DP greater than one are rejected because ranks can produce different row counts and hang. Repeated training datasets are supported.
+With effective DP greater than one, `repeat=False` is rejected because finite ranks can exhaust at different steps and hang collectives. Use `repeat=True` and a trainer-controlled step count.
 
 ## Checkpointing
 
 `GrainDataLoader.state_dict()` records:
 
 ```text
-pipeline identity:
-  dataset and collator config types + public fields
-  seed, shuffle, repeat
-  seq_len, local_batch_size
-  tokenizer type
-
-iterator state:
+version and effective DP degree
+per-rank iterator state:
   source cursor/index
   repeat and shuffle state
   mix schedule and child cursors
@@ -466,11 +411,9 @@ iterator state:
   batch and prefetch state
 ```
 
-Resume is exact when code, config, source contents, tokenizer, and effective DP degree stay the same. Changing the composed pipeline or effective DP degree is rejected.
+Resume is exact when code, config, source contents, tokenizer, and effective DP degree stay the same. Changing the effective DP degree is rejected. The loader does not store a duplicate fingerprint of the pipeline config.
 
 Packing is rank-local, so changing the effective DP topology is not supported. The packing implementations carry a TODO for a future global pack plan that could make topology-independent resume possible.
-
-Use top-level functions or configured `SampleProcessor` classes in checkpointed recipes. Capturing closures do not have a stable pipeline identity and are rejected.
 
 Custom dataset graph nodes are frozen dataclasses with an explicit `build()`:
 
@@ -479,8 +422,13 @@ Custom dataset graph nodes are frozen dataclasses with an explicit `build()`:
 class MyDatasetConfig:
     dataset: DatasetConfig
 
-    def build(self, *, runtime: DataRuntime, options: BuildOptions):
-        dataset = self.dataset.build(runtime=runtime, options=options)
+    def build(
+        self,
+        *,
+        context: DatasetBuildContext,
+        iteration: DatasetIterationPolicy,
+    ):
+        dataset = self.dataset.build(context=context, iteration=iteration)
         return MyCheckpointableGrainDataset(dataset)
 ```
 

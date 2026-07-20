@@ -6,6 +6,7 @@
 
 import os
 from dataclasses import dataclass, field, replace
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -21,7 +22,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools.logging import logger
 
 from .configs import SamplingConfig
-from .flux_datasets import flux_image_size, FluxValidationDatasetConfig
+from .flux_datasets import FluxValidationDatasetConfig, get_flux_image_size
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
@@ -47,7 +48,7 @@ class FluxValidator(Validator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Validator.Config):
-        dataloader: GrainDataLoader.Config
+        dataloader: GrainDataLoader.Config  # pyrefly: ignore [bad-override]
         """DataLoader configuration for Flux validation"""
 
         all_timesteps: bool = False
@@ -95,9 +96,10 @@ class FluxValidator(Validator):
             dataset = dataset.dataset
         self.dl_config = replace(
             config.dataloader,
-            dataset=FluxValidationDatasetConfig(
-                dataset=dataset,
-                generate_timesteps=not config.all_timesteps,
+            dataset=(
+                dataset
+                if config.all_timesteps
+                else FluxValidationDatasetConfig(dataset=dataset)
             ),
             repeat=config.steps != -1,
         )
@@ -171,7 +173,8 @@ class FluxValidator(Validator):
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
-                img_size = flux_image_size(self.dl_config.dataset)
+                dataloader = cast(GrainDataLoader.Config, self.dl_config)
+                img_size = get_flux_image_size(dataloader.dataset)
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,

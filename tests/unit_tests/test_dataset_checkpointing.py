@@ -8,9 +8,7 @@ import unittest
 
 import grain.python as grain
 import torch
-from datasets import load_dataset
 
-from torchtitan.components.data.collators import TextCollator
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
@@ -19,23 +17,15 @@ from torchtitan.components.data.sources import (
     HuggingFaceStreamingSource,
 )
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextProcessor
+from torchtitan.hf_datasets.text_datasets import TextProcessor
 
 
-_DATA_PATH = "tests/assets/c4_test"
+_DATA_PATH = "tests/assets/sft_test/data.json"
 _TOKENIZER_PATH = "tests/assets/tokenizer"
 
 
-def _load_c4_map(path):
-    return load_dataset(path, split="train").select(range(8))
-
-
-def _load_c4_stream(path):
-    return _load_c4_map(path).to_iterable_dataset(num_shards=2)
-
-
 def _process_text(sample):
-    return sample["text"]
+    return f"{sample['question']} {sample['answer']}"
 
 
 class TestDatasetCheckpointing(unittest.TestCase):
@@ -76,24 +66,21 @@ class TestDatasetCheckpointing(unittest.TestCase):
                         self.assertTrue(torch.equal(actual_labels, expected_labels))
 
     def _build_dataloader(self, source_type, rank):
-        loader = (
-            _load_c4_map
-            if source_type is HuggingFaceRandomAccessSource
-            else _load_c4_stream
-        )
         config = GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(
                 dataset=SingleDatasetConfig(
                     source=source_type.Config(
-                        path=_DATA_PATH,
-                        loader=loader,
+                        path="json",
+                        load_dataset_kwargs={
+                            "data_files": _DATA_PATH,
+                            "split": "train",
+                        },
                     ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=_process_text,
+                    processor=TextProcessor.Config(
+                        text_fn=_process_text,
                     ),
                 ),
             ),
-            collator=TextCollator.Config(),
             seed=42,
             shuffle=True,
             repeat=True,

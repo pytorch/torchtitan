@@ -8,24 +8,22 @@ import os
 import unittest
 
 from copy import deepcopy
-from functools import partial
 
 import grain.python as grain
 import numpy as np
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.data.collators import TextCollator
 from torchtitan.components.data.dataset import (
-    BuildOptions,
-    DataRuntime,
+    DatasetBuildContext,
+    DatasetIterationPolicy,
     SingleDatasetConfig,
 )
 from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.data.packing import (
+    _token_sequence_to_input_ids_and_labels,
     FirstFitPackingConfig,
-    token_sequence_to_shifted_features,
 )
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.loss import IGNORE_INDEX
@@ -64,7 +62,7 @@ def _load_dataset():
 
 
 def _runtime(seq_len):
-    return DataRuntime(
+    return DatasetBuildContext(
         tokenizer=_load_tokenizer(),
         seq_len=seq_len,
         local_batch_size=1,
@@ -72,9 +70,9 @@ def _runtime(seq_len):
     )
 
 
-def _build_processor(seq_len=2048, sample_processor=_process_sample):
-    return ChatProcessor.Config(sample_processor=sample_processor).build(
-        runtime=_runtime(seq_len)
+def _build_processor(seq_len=2048, messages_fn=_process_sample):
+    return ChatProcessor.Config(messages_fn=messages_fn).build(
+        context=_runtime(seq_len)
     )
 
 
@@ -83,19 +81,25 @@ def _build_rows(seq_len):
         dataset=SingleDatasetConfig(
             source=HuggingFaceRandomAccessSource.Config(
                 path="json",
-                loader=partial(
-                    load_dataset,
-                    data_files=_DATA_PATH,
-                    split="train",
-                ),
+                load_dataset_kwargs={
+                    "data_files": _DATA_PATH,
+                    "split": "train",
+                },
             ),
-            process=ChatProcessor.Config(sample_processor=_process_sample),
+            processor=ChatProcessor.Config(messages_fn=_process_sample),
             filters=(lambda sample: sample is not None,),
         )
     )
     return dataset.build(
-        runtime=_runtime(seq_len),
-        options=BuildOptions(shuffle=False, repeat=False),
+        context=_runtime(seq_len),
+        iteration=DatasetIterationPolicy(
+            seed=42,
+            shuffle=False,
+            repeat=False,
+            dp_rank=0,
+            dp_world_size=1,
+            streaming_shuffle_window_size=1_000,
+        ),
     )
 
 
@@ -105,17 +109,15 @@ def _build_dataloader(seq_len=128, world_size=1, rank=0):
             dataset=SingleDatasetConfig(
                 source=HuggingFaceRandomAccessSource.Config(
                     path="json",
-                    loader=partial(
-                        load_dataset,
-                        data_files=_DATA_PATH,
-                        split="train",
-                    ),
+                    load_dataset_kwargs={
+                        "data_files": _DATA_PATH,
+                        "split": "train",
+                    },
                 ),
-                process=ChatProcessor.Config(sample_processor=_process_sample),
+                processor=ChatProcessor.Config(messages_fn=_process_sample),
                 filters=(lambda sample: sample is not None,),
             )
         ),
-        collator=TextCollator.Config(),
         seed=42,
         shuffle=True,
         repeat=True,
@@ -135,7 +137,7 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
     """Prompt tokens should be masked (IGNORE_INDEX), assistant tokens should not."""
 
     def test_prompt_masked_response_unmasked(self):
-        features = token_sequence_to_shifted_features(
+        features = _token_sequence_to_input_ids_and_labels(
             _build_processor()(_load_dataset()[0], np.random.default_rng(0))
         )
         label_ids = torch.from_numpy(features["labels"])
@@ -155,7 +157,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         sample = _load_dataset()[0]
         messages = _process_sample(sample)
         token_sequence = _build_processor()(sample, np.random.default_rng(0))
-        features = token_sequence_to_shifted_features(token_sequence)
+        features = _token_sequence_to_input_ids_and_labels(token_sequence)
 
         full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
         full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
@@ -252,7 +254,7 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
         for messages in invalid_messages:
             with self.subTest(messages=messages), self.assertRaises(ValueError):
                 processor = _build_processor(
-                    sample_processor=lambda _sample, value=messages: value
+                    messages_fn=lambda _sample, value=messages: value
                 )
                 processor({}, np.random.default_rng(0))
 

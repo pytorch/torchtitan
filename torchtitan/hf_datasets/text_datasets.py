@@ -6,70 +6,48 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from typing import Annotated, Any
 
 import numpy as np
 import tyro
-from datasets import load_dataset
 
 from torchtitan.components.data.dataset import (
-    DataRuntime,
+    DatasetBuildContext,
     SampleProcessor,
+    SingleDatasetConfig,
     TokenSequence,
 )
+from torchtitan.components.data.sources import (
+    HuggingFaceRandomAccessSource,
+    HuggingFaceStreamingSource,
+)
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
 
-def _load_c4_dataset(dataset_path: str, split: str):
-    """Load C4 dataset with default configuration."""
-    return load_dataset(dataset_path, name="en", split=split, streaming=True)
-
-
-def _process_c4_text(sample: dict[str, Any]) -> str:
-    """Process C4 dataset sample text."""
+def _read_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
 
-# Add your dataset here - more information at docs/datasets.md
-DATASETS = {
-    "c4": DatasetConfig(
-        path="allenai/c4",
-        loader=partial(_load_c4_dataset, split="train"),
-        sample_processor=_process_c4_text,
-    ),
-    "c4_test": DatasetConfig(
-        path="tests/assets/c4_test",
-        loader=lambda path: load_dataset(path, split="train"),
-        sample_processor=_process_c4_text,
-    ),
-    "c4_validation": DatasetConfig(
-        path="allenai/c4",
-        loader=partial(_load_c4_dataset, split="validation"),
-        sample_processor=_process_c4_text,
-    ),
-}
-
-
-class HuggingFaceTextProcessor(SampleProcessor):
+class TextProcessor(SampleProcessor):
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        text_processor: Annotated[Callable, tyro.conf.Suppress]
+        text_fn: Annotated[
+            Callable[[dict[str, Any]], str], tyro.conf.Suppress
+        ] = _read_text
 
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
-        self._tokenizer = runtime.tokenizer
-        self._text_processor = config.text_processor
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        self._tokenizer = context.tokenizer
+        self._text_fn = config.text_fn
 
     def __call__(
         self, sample: dict[str, Any], rng: np.random.Generator
     ) -> TokenSequence:
         del rng
-        # Use the dataset-specific text processor
-        sample_text = self._text_processor(sample)
-        sample_tokens = self._tokenizer.encode(sample_text, add_bos=True, add_eos=True)
-        token_ids = np.asarray(sample_tokens, dtype=np.int64)
+        token_ids = np.asarray(
+            self._tokenizer.encode(self._text_fn(sample), add_bos=True, add_eos=True),
+            dtype=np.int64,
+        )
         return TokenSequence(
             token_ids=token_ids,
             loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
@@ -81,18 +59,20 @@ class ChatProcessor(SampleProcessor):
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        sample_processor: Annotated[Callable, tyro.conf.Suppress]
+        messages_fn: Annotated[
+            Callable[[dict[str, Any]], list[dict[str, str]]], tyro.conf.Suppress
+        ]
 
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
-        if runtime.tokenizer.eos_id is None:
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        if context.tokenizer.eos_id is None:
             raise ValueError(
                 "Tokenizer does not have an eos_id set. "
                 "ChatProcessor requires a tokenizer with a valid EOS token."
             )
-        self._tokenizer = runtime.tokenizer
-        self._eos_id = runtime.tokenizer.eos_id
-        self.seq_len = runtime.seq_len
-        self._sample_processor = config.sample_processor
+        self._tokenizer = context.tokenizer
+        self._eos_id = context.tokenizer.eos_id
+        self.seq_len = context.seq_len
+        self._messages_fn = config.messages_fn
         self._logged_first_sample = False
 
     @staticmethod
@@ -122,7 +102,7 @@ class ChatProcessor(SampleProcessor):
         Uses incremental prefix re-tokenization to find the prompt/response
         token boundary, avoiding BPE merge errors.
         """
-        messages = self._sample_processor(sample)
+        messages = self._messages_fn(sample)
         self._validate_messages(messages)
 
         full_text = self._tokenizer.apply_chat_template(messages)
@@ -169,3 +149,32 @@ class ChatProcessor(SampleProcessor):
     ) -> TokenSequence | None:
         del rng
         return self._tokenize_sample(sample)
+
+
+# Add your dataset here - more information at docs/datasets.md
+DATASETS: dict[str, SingleDatasetConfig] = {
+    "c4": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="allenai/c4",
+            load_dataset_kwargs={"name": "en", "split": "train"},
+        ),
+        processor=TextProcessor.Config(),
+    ),
+    "c4_test": SingleDatasetConfig(
+        source=HuggingFaceRandomAccessSource.Config(
+            path="json",
+            load_dataset_kwargs={
+                "data_files": "tests/assets/c4_test/data.json",
+                "split": "train",
+            },
+        ),
+        processor=TextProcessor.Config(),
+    ),
+    "c4_validation": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="allenai/c4",
+            load_dataset_kwargs={"name": "en", "split": "validation"},
+        ),
+        processor=TextProcessor.Config(),
+    ),
+}

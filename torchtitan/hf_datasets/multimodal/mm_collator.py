@@ -14,7 +14,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from torchtitan.components.data.collators import Collator, TrainerBatch
-from torchtitan.components.data.dataset import DataRuntime
+from torchtitan.components.data.dataset import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.tools.logging import logger
 from .utils.image import vision_to_patches
@@ -30,20 +30,20 @@ class MultiModalCollator(Collator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
-        max_images_per_batch: int
-        patch_size: int
-        temporal_patch_size: int
-        spatial_merge_size: int
+        max_images_per_batch: int = 128
+        patch_size: int = 16
+        temporal_patch_size: int = 2
+        spatial_merge_size: int = 2
         build_mrope_positions: bool = False
 
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
-        self.batch_size = runtime.local_batch_size
-        self.seq_len = runtime.seq_len
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        self.batch_size = context.local_batch_size
+        self.seq_len = context.seq_len
         self.max_images_per_batch = config.max_images_per_batch
         self.patch_size = config.patch_size
         self.temporal_patch_size = config.temporal_patch_size
         self.spatial_merge_size = config.spatial_merge_size
-        self.tokenizer = runtime.tokenizer
+        self.tokenizer = context.tokenizer
         self.build_mrope_positions = config.build_mrope_positions
 
     def collate_images(

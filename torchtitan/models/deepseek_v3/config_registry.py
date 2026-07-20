@@ -5,14 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.data import (
-    ConcatThenSplitPackingConfig,
-    GrainDataLoader,
-    HuggingFaceRandomAccessSource,
-    HuggingFaceStreamingSource,
-    SingleDatasetConfig,
-    TextCollator,
-)
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -23,7 +16,7 @@ from torchtitan.components.quantization import (
 )
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
@@ -38,7 +31,6 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
-    dataset = DATASETS["c4_test"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -49,18 +41,7 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceRandomAccessSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -116,7 +97,6 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
 
 def deepseek_v3_16b() -> Trainer.Config:
     model_spec = model_registry("16B", attn_backend="flex")
-    dataset = DATASETS["c4"]
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -126,18 +106,7 @@ def deepseek_v3_16b() -> Trainer.Config:
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceStreamingSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -193,7 +162,6 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
 
 def deepseek_v3_671b() -> Trainer.Config:
     compile_config = CompileConfig(enable=True, components=["loss"])
-    dataset = DATASETS["c4"]
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -219,18 +187,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=SingleDatasetConfig(
-                    source=HuggingFaceStreamingSource.Config(
-                        path=dataset.path,
-                        loader=dataset.loader,
-                    ),
-                    process=HuggingFaceTextProcessor.Config(
-                        text_processor=dataset.sample_processor,
-                    ),
-                ),
-            ),
-            collator=TextCollator.Config(),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(

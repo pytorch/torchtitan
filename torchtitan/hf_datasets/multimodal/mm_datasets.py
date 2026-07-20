@@ -70,18 +70,18 @@ import grain.python as grain
 import numpy as np
 import torch
 import tyro
-from datasets import load_dataset
 
 from torchtitan.components.data.dataset import (
-    BuildOptions,
-    DataRuntime,
+    DatasetBuildContext,
     DatasetConfig as GrainDatasetConfig,
+    DatasetIterationPolicy,
     SampleProcessor,
+    SingleDatasetConfig,
 )
+from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
-from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 from .utils.image import calculate_vision_tokens, process_image
 from .utils.packing import MMSamplePacker
@@ -262,49 +262,28 @@ def _process_cc12_wd_sample(
     )
 
 
-MM_DATASETS = {
-    "obelics": DatasetConfig(
-        path="HuggingFaceM4/OBELICS",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
-        sample_processor=_process_obelics_sample,
-    ),
-    "cc12m": DatasetConfig(
-        path="pixparse/cc12m-wds",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
-        sample_processor=_process_cc12_wd_sample,
-    ),
-    "cc12m-test": DatasetConfig(
-        path="tests/assets/cc12m_test",
-        loader=lambda path: load_dataset(
-            path, split="train", data_files={"train": "*.tar"}, streaming=True
-        ),
-        sample_processor=_process_cc12_wd_sample,
-    ),
-}
-
-
 class MultiModalProcessor(SampleProcessor):
     """Binds an existing multimodal sample processor to the Grain map contract."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
         sample_processor: Annotated[Callable, tyro.conf.Suppress]
-        patch_size: int
-        temporal_patch_size: int
-        spatial_merge_size: int
-        min_pixels: int
-        max_pixels: int
-        image_mean: tuple[float, ...]
-        image_std: tuple[float, ...]
+        patch_size: int = 16
+        temporal_patch_size: int = 2
+        spatial_merge_size: int = 2
+        min_pixels: int = 65_536
+        max_pixels: int = 16_777_216
+        image_mean: tuple[float, ...] = (0.5, 0.5, 0.5)
+        image_std: tuple[float, ...] = (0.5, 0.5, 0.5)
         video_dir: str = ""
         video_fps: float = 2.0
         video_min_frames: int = 4
         video_max_frames: int = 768
 
-    def __init__(self, config: Config, *, runtime: DataRuntime) -> None:
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         self._config = config
-        self._tokenizer = runtime.tokenizer
-        self._seq_len = runtime.seq_len
+        self._tokenizer = context.tokenizer
+        self._seq_len = context.seq_len
 
     def __call__(
         self,
@@ -335,6 +314,43 @@ class MultiModalProcessor(SampleProcessor):
             )
             return None
         return processed
+
+
+MM_DATASETS: dict[str, SingleDatasetConfig] = {
+    "obelics": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="HuggingFaceM4/OBELICS",
+            load_dataset_kwargs={"split": "train"},
+        ),
+        processor=MultiModalProcessor.Config(
+            sample_processor=_process_obelics_sample,
+        ),
+        filters=(lambda sample: sample is not None,),
+    ),
+    "cc12m": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="pixparse/cc12m-wds",
+            load_dataset_kwargs={"split": "train"},
+        ),
+        processor=MultiModalProcessor.Config(
+            sample_processor=_process_cc12_wd_sample,
+        ),
+        filters=(lambda sample: sample is not None,),
+    ),
+    "cc12m-test": SingleDatasetConfig(
+        source=HuggingFaceStreamingSource.Config(
+            path="tests/assets/cc12m_test",
+            load_dataset_kwargs={
+                "split": "train",
+                "data_files": {"train": "*.tar"},
+            },
+        ),
+        processor=MultiModalProcessor.Config(
+            sample_processor=_process_cc12_wd_sample,
+        ),
+        filters=(lambda sample: sample is not None,),
+    ),
+}
 
 
 class _MMSamplePackingDataset(grain.IterDataset[dict[str, Any]]):
@@ -369,7 +385,6 @@ class _MMSamplePackingIterator(grain.DatasetIterator[dict[str, Any]]):
         self._packer = MMSamplePacker(
             max_seq_length=max_seq_length,
             buffer_size=buffer_size,
-            batch_size=1,
         )
         self._parent_exhausted = False
         self._flushed = False
@@ -417,22 +432,18 @@ class MMSamplePackingConfig:
     def build(
         self,
         *,
-        runtime: DataRuntime,
-        options: BuildOptions,
+        context: DatasetBuildContext,
+        iteration: DatasetIterationPolicy,
     ) -> grain.IterDataset[dict[str, Any]]:
-        if not options.repeat and options.dp_world_size > 1:
-            raise ValueError(
-                "finite packed datasets are not supported with data parallelism"
-            )
-        parent = self.dataset.build(runtime=runtime, options=options)
+        parent = self.dataset.build(context=context, iteration=iteration)
         if isinstance(parent, grain.MapDataset):
-            parent = parent.to_iter_dataset(read_options=runtime.read_options)
+            parent = parent.to_iter_dataset(read_options=context.read_options)
         if not isinstance(parent, grain.IterDataset):
             raise TypeError("multimodal packing requires a Grain dataset")
         # TODO(data-global-pack-plan): Plan packed rows before effective-DP sharding
         # to support topology-independent resume.
         return _MMSamplePackingDataset(
             parent,
-            max_seq_length=runtime.seq_len,
+            max_seq_length=context.seq_len,
             buffer_size=self.buffer_size,
         )

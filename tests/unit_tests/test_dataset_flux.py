@@ -7,49 +7,22 @@
 import unittest
 
 import torch
-from datasets import load_dataset
-from torchtitan.components.data import (
-    GrainDataLoader,
-    HuggingFaceStreamingSource,
-    SingleDatasetConfig,
-)
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.config import ConfigManager
-from torchtitan.hf_datasets import DatasetConfig
 
 
 class TestFluxDataLoader(unittest.TestCase):
     def setUp(self):
         # Import here to avoid circular import during test collection
-        from torchtitan.models.flux.flux_datasets import (
-            _cc12m_wds_data_processor,
-            DATASETS,
-            FluxCollator,
-            FluxSampleProcessor,
-        )
+        from torchtitan.models.flux.flux_datasets import DATASETS
 
-        # Store reference for use in tearDown
-        self._DATASETS = DATASETS
-        self._cc12m_wds_data_processor = _cc12m_wds_data_processor
-        self._FluxCollator = FluxCollator
-        self._FluxSampleProcessor = FluxSampleProcessor
-
-        self._DATASETS["cc12m-test-iterable"] = DatasetConfig(
-            path="tests/assets/cc12m_test",
-            loader=lambda path: load_dataset(
-                path, split="train", data_files={"train": "*tar"}
-            ).to_iterable_dataset(num_shards=4),
-            sample_processor=self._cc12m_wds_data_processor,
-        )
-
-    def tearDown(self):
-        del self._DATASETS["cc12m-test-iterable"]
+        self._dataset = DATASETS["cc12m-test"]
 
     def test_load_dataset(self):
         # The test checks for the correct tensor shapes during the first num_steps
         # The next num_steps ensure the loaded from checkpoint dataloader generates tokens and labels correctly
         for world_size in [2]:
             for rank in range(world_size):
-                dataset_name = "cc12m-test-iterable"
                 batch_size = 1
 
                 num_steps = 15
@@ -76,22 +49,10 @@ class TestFluxDataLoader(unittest.TestCase):
                         "tests/assets/flux_test_encoders/clip-vit-large-patch14",
                     ]
                 )
-                dataset = self._DATASETS[dataset_name]
                 config.dataloader = GrainDataLoader.Config(
-                    dataset=SingleDatasetConfig(
-                        source=HuggingFaceStreamingSource.Config(
-                            path=dataset.path,
-                            loader=dataset.loader,
-                        ),
-                        process=self._FluxSampleProcessor.Config(
-                            data_processor=dataset.sample_processor,
-                            img_size=256,
-                            prompt_dropout_prob=0.447,
-                        ),
-                        filters=(lambda sample: sample is not None,),
-                    ),
-                    collator=self._FluxCollator.Config(),
+                    dataset=self._dataset,
                     shuffle=False,
+                    streaming_shuffle_window_size=128,
                 )
 
                 # Build the tokenizer container from config

@@ -10,12 +10,15 @@ import grain.python as grain
 import torch
 
 from torchtitan.components.data.dataset import (
-    BuildOptions,
-    DataRuntime,
+    DatasetBuildContext,
+    DatasetIterationPolicy,
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    MM_DATASETS,
+    MMSamplePackingConfig,
+)
 
 
 class _Tokenizer:
@@ -33,7 +36,7 @@ class _RowsSource:
         return self.rows[index]
 
 
-RUNTIME = DataRuntime(
+CONTEXT = DatasetBuildContext(
     tokenizer=_Tokenizer(),
     seq_len=8,
     local_batch_size=1,
@@ -61,13 +64,14 @@ def _dataset(rows):
         dataset=SingleDatasetConfig(source=_RowsSourceConfig(rows=tuple(rows))),
         buffer_size=2,
     ).build(
-        runtime=RUNTIME,
-        options=BuildOptions(
+        context=CONTEXT,
+        iteration=DatasetIterationPolicy(
             seed=0,
             shuffle=False,
             repeat=False,
             dp_rank=0,
             dp_world_size=1,
+            streaming_shuffle_window_size=128,
         ),
     )
 
@@ -76,8 +80,13 @@ def _dataset(rows):
 class _RowsSourceConfig:
     rows: tuple[dict, ...]
 
-    def build(self, **_):
+    def build(self, *, dp_rank: int, dp_world_size: int):
+        del dp_rank, dp_world_size
         return _RowsSource(self.rows)
+
+
+def test_multimodal_registry_does_not_enable_packing():
+    assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
 
 
 def test_packing_preserves_ordered_images_when_merging_rows():

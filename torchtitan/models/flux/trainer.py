@@ -31,7 +31,7 @@ from torchtitan.models.flux.utils import (
 )
 from torchtitan.trainer import Trainer
 
-from .flux_datasets import flux_image_size
+from .flux_datasets import get_flux_image_size
 
 
 class FluxTrainer(Trainer):
@@ -53,7 +53,7 @@ class FluxTrainer(Trainer):
             raise ValueError(
                 "FluxTrainer requires GrainDataLoader.Config for dataloader"
             )
-        img_size = flux_image_size(config.dataloader.dataset)
+        img_size = get_flux_image_size(config.dataloader.dataset)
         ae_downscale = IMAGE_LATENT_SIZE_RATIO
         latent_side_width = img_size // ae_downscale // PATCH_WIDTH
         latent_side_height = img_size // ae_downscale // PATCH_HEIGHT
