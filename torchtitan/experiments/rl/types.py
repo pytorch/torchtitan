@@ -26,7 +26,7 @@ class RolloutTurnID:
     group_id: int
     """Globally-unique GRPO group id; siblings share it (the sticky-routing key, sans turn)."""
     rollout_id: int
-    """Sibling index within the group (0..num_samples_per_prompt-1)."""
+    """Sibling index within the group (0..group_size-1)."""
     turn_id: int
     """Turn index within the rollout; for a TrainingSample, the turn where begins.
     This is not 0 when a single rollout is split into multiple training samples."""
