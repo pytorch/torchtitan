@@ -208,13 +208,7 @@ class Controller(Configurable):
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
         dump_folder: str = "outputs/rl"
-        """Base output folder for RL artifacts (temp weights, logs, etc.).
-
-        When not overridden on the CLI, ``train.py`` appends a per-run
-        ``{config_name}-{timestamp}`` subfolder so each launch writes to a unique
-        location and never resumes from / collides with a previous run's
-        checkpoints. Pass ``--dump_folder`` to set an exact path (e.g. to resume a
-        specific run)."""
+        """Base output folder for RL artifacts (temp weights, logs, etc.)."""
 
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
@@ -609,7 +603,7 @@ class Controller(Configurable):
         self, *, num_groups: int, sampling: SamplingConfig, step: int
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
-        # TODO: num_samples_per_prompt=1 (best-of-1) only. Support best-of-N.
+        # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         samples = [self._rollouter.get_validation_sample() for _ in range(num_groups)]
@@ -621,7 +615,7 @@ class Controller(Configurable):
                     # Negative ids keep validation disjoint from training group ids, so their
                     # request_ids can't collide in the shared engine (e.g. post-validation).
                     group_id=-(i + 1),
-                    num_samples_per_prompt=1,
+                    group_size=1,
                     sampling=sampling,
                     renderer=self.renderer,
                 )
@@ -892,7 +886,7 @@ class Controller(Configurable):
                         generate_fn=generate_fn,
                         sample=work.sample,
                         group_id=work.group_id,
-                        num_samples_per_prompt=self.config.async_loop.num_samples_per_prompt,
+                        group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                         renderer=self.renderer,
                     )
