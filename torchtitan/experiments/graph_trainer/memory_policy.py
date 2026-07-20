@@ -15,6 +15,7 @@ entry point selects a tagging strategy via ``--compile.memory_policy``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import operator
 from collections import defaultdict
 from collections.abc import Callable
@@ -44,6 +45,13 @@ from torchtitan.experiments.graph_trainer.registry import (
     register_memory_policy,
 )
 from torchtitan.tools.logging import logger
+
+
+@dataclass(frozen=True)
+class NodePolicyKey:
+    target: object
+    module_fqn: str
+    occurrence: int
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -121,6 +129,38 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
         if node.target in save_ops:
             return CheckpointPolicy.MUST_SAVE
         return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return policy_fn
+
+
+def _make_node_override_memory_policy(
+    base_policy: Callable[[torch.fx.Node], CheckpointPolicy],
+    overrides: dict[NodePolicyKey, CheckpointPolicy],
+) -> Callable[[torch.fx.Node], CheckpointPolicy]:
+    """Override memory policy for selected node occurrences.
+
+    Occurrence is 1-based and counted independently for each
+    ``(node.target, module_fqn)`` pair.
+    """
+    node_counts: defaultdict[tuple[object, str], int] = defaultdict(int)
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+        count_key = (node.target, fqn)
+
+        node_counts[count_key] += 1
+        occurrence = node_counts[count_key]
+
+        override_key = NodePolicyKey(
+            target=node.target,
+            module_fqn=fqn,
+            occurrence=occurrence,
+        )
+
+        if override_key in overrides:
+            return overrides[override_key]
+
+        return base_policy(node)
 
     return policy_fn
 
