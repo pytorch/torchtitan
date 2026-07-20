@@ -159,7 +159,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     a HybridEP generator (whose all-to-all is intra-node only) this generator may span
     nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
     keeps the compact (host-synced, backward-able) DeepEP path; the generator applies the
-    ``deepep_inference`` override to switch its dispatchers to the cudagraph-able EXPAND
+    ``deepep_override`` to switch its dispatchers to the cudagraph-able EXPAND
     layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
     as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
     """
@@ -230,7 +230,10 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             override=OverrideConfig(
                 imports=[
                     *perf_imports,
-                    "torchtitan.overrides.deepep_inference",
+                    (
+                        "torchtitan.overrides.moe_dispatch_override.deepep_override",
+                        {"cudagraphable": True},
+                    ),
                 ]
             ),
         ),
@@ -239,7 +242,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     #  * max_num_batched_tokens: vLLM's per-step token budget (default None -> vLLM's own
     #    default of 2048). Decide it from your input/rollout sequence length.
     #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
-    #    deepep_inference override. For a dropless model (highest memory) set it to
+    #    deepep_override. For a dropless model (highest memory) set it to
     #    max_num_batched_tokens // ep; lower it gradually to save memory (trading off
     #    dropped tokens).
     config.generator.max_num_batched_tokens = 2048  # TODO: TBD

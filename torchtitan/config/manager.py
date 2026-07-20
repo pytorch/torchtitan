@@ -245,13 +245,14 @@ class ConfigManager:
 
         @registry.primitive_rule
         def override_imports_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
-            """Parse ``--override.imports`` module paths, each with optional kwargs.
+            """Parse ``--override.imports`` targets, each with optional kwargs.
 
             Needed because ``OverrideConfig.imports`` is a ``str | tuple`` union,
             which tyro cannot render as a CLI flag on its own. Tokens are space-
-            or comma-separated module paths; attach kwargs to a module with
-            ``module=<json>`` (see ``parse_cli_imports``), e.g.
-            ``--override.imports 'my_pkg.triton_rope={"block_size": 256}'``.
+            or comma-separated targets (a module or ``module.function``); attach
+            kwargs to a target with ``target=<json>`` (see ``parse_cli_imports``),
+            e.g. ``--override.imports
+            'my_pkg.triton_rope.triton_rope={"block_size": 256}'``.
             """
             from torchtitan.config.override import (
                 format_cli_imports,
@@ -263,7 +264,7 @@ class ConfigManager:
                 return None
             return tyro.constructors.PrimitiveConstructorSpec(
                 nargs="*",
-                metavar="MODULE[='{\"k\": v}'] ...",
+                metavar="TARGET[='{\"k\": v}'] ...",
                 instance_from_str=lambda args: parse_cli_imports(args),
                 is_instance=lambda instance: isinstance(instance, list)
                 and all(

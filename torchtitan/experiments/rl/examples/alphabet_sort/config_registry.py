@@ -609,9 +609,9 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
     host-synced, backward-able DeepEP path), while the generator applies per-actor
     overrides (``generator.override``) to its own copy (``fused_swiglu`` +
-    ``deepep_inference``) to switch its dispatchers to the cudagraph-able EXPAND layout.
-    The overrides touch only the generator's spec, so the trainer and weight sync are
-    unaffected.
+    ``deepep_override`` with ``cudagraphable=True``) to switch its dispatchers to the
+    cudagraph-able EXPAND layout. The overrides touch only the generator's spec, so the
+    trainer and weight sync are unaffected.
     """
     config = rl_grpo_qwen3_moe_debug_varlen()
     config.model_spec = model_registry(
@@ -621,8 +621,12 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
     config.generator.override = OverrideConfig(
         imports=[
-            "torchtitan.overrides.fused_swiglu",
-            "torchtitan.overrides.deepep_inference",
+            "torchtitan.overrides.fused_swiglu.fused_swiglu",
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+            (
+                "torchtitan.overrides.moe_dispatch_override.deepep_override",
+                {"cudagraphable": True},
+            ),
         ]
     )
     config.generator.cudagraph = VLLMCudagraphConfig(
@@ -634,7 +638,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     #    length -- it is effectively the longest input sequence length the engine batches
     #    (vLLM's 2048 default is just a stand-in for knowing that).
     #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
-    #    deepep_inference override. For a dropless model (highest memory) set it to
+    #    deepep_override. For a dropless model (highest memory) set it to
     #    longest_sequence_length // sp == max_num_batched_tokens // sp; lower it gradually to
     #    save memory (trading off dropped tokens).
     config.generator.max_num_batched_tokens = 2048
@@ -668,7 +672,7 @@ def rl_grpo_qwen3_moe_debug_hybridep() -> Controller.Config:
       sets it via a per-entry ``capacity_factor`` kwarg, so the two actors
       diverge from one shared spec without a hardcoded per-actor branch. (This mirrors
       how the ``deepep`` recipe above flips only the generator's dispatch via
-      ``deepep_inference``.)
+      ``deepep_override``.)
 
     ``capacity_factor`` in (0, 1] tunes the non-blocking sizing: 1.0 is worst-case /
     dropless; lower saves memory but may drop tokens.
@@ -678,12 +682,12 @@ def rl_grpo_qwen3_moe_debug_hybridep() -> Controller.Config:
         "debugmodel_moe", attn_backend="varlen", moe_comm_backend="hybridep"
     )
     # Generator-only: switch HybridEP dispatch to the non-blocking, cudagraph-safe path
-    # by passing a float capacity_factor as a kwarg to the shared override module. The
-    # trainer keeps the shared spec's default (None -> blocking, dropless, backward-able).
+    # by passing a float capacity_factor as a kwarg to the shared override. The trainer
+    # keeps the shared spec's default (None -> blocking, dropless, backward-able).
     config.generator.override = OverrideConfig(
         imports=[
             (
-                "torchtitan.distributed.deepep.hybridep_override",
+                "torchtitan.overrides.moe_dispatch_override.hybridep_override",
                 {"capacity_factor": 0.0325},
             )
         ]

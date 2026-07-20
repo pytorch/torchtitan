@@ -302,6 +302,54 @@ class TestOverride(unittest.TestCase):
         self.assertTrue(all("foreign" not in line for line in replacements))
         self.assertTrue(all("local" in line for line in replacements))
 
+    def test_function_target_activates_single_override(self):
+        # ``module.function`` activates only that override; a sibling override in
+        # the same module is registered but not applied.
+        @override("swap_child", target=ComponentA.Config, fqns=["child"])
+        def swap_child(cfg: ComponentA.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=1)
+
+        @override("swap_children", target=ComponentA.Config, fqns=["children.*"])
+        def swap_children(cfg: ComponentA.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=2)
+
+        parent_cfg = ParentComponent.Config()
+        replacements = apply_overrides(
+            OverrideConfig(imports=[f"{__name__}.swap_child"]), parent_cfg
+        )
+
+        self.assertEqual(len(replacements), 1)
+        self.assertIsInstance(parent_cfg.child, ComponentB.Config)
+        self.assertEqual(parent_cfg.child.extra, 1)
+        for child_cfg in parent_cfg.children:  # sibling override not applied
+            self.assertIsInstance(child_cfg, ComponentA.Config)
+
+    def test_module_and_function_target_double_claim_raises(self):
+        # A module target already includes all its functions, so also naming one
+        # by ``module.function`` claims the same override twice.
+        @override("only", target=ComponentA.Config)
+        def only(cfg: ComponentA.Config) -> ComponentB.Config:
+            return _to_b(cfg)
+
+        with self.assertRaisesRegex(ValueError, "claimed by both"):
+            apply_overrides(
+                OverrideConfig(imports=[__name__, f"{__name__}.only"]),
+                ParentComponent.Config(),
+            )
+
+    def test_unknown_function_target_raises(self):
+        # A ``module.function`` target that names no registered override is a
+        # mistake, even without kwargs.
+        @override("present", target=ComponentA.Config)
+        def present(cfg: ComponentA.Config) -> ComponentB.Config:
+            return _to_b(cfg)
+
+        with self.assertRaisesRegex(ValueError, "no @override is registered"):
+            apply_overrides(
+                OverrideConfig(imports=[f"{__name__}.absent"]),
+                ParentComponent.Config(),
+            )
+
     def test_duplicate_name_raises(self):
         @override("dup", target=ComponentA.Config)
         def first(cfg):
@@ -407,9 +455,9 @@ class TestOverrideKwargs(unittest.TestCase):
             )
 
     def test_kwargs_for_no_matching_override_raises(self):
-        # kwargs that activate no override is a misconfiguration, not a silent
-        # no-op (the registry is empty here after setUp's clear_overrides).
-        with self.assertRaisesRegex(ValueError, "activated no override"):
+        # kwargs on a target that matches no override is a misconfiguration, not
+        # a silent no-op (torchtitan.config.override registers no @override).
+        with self.assertRaisesRegex(ValueError, "matched no override"):
             apply_overrides(
                 OverrideConfig(imports=[("torchtitan.config.override", {"x": 1})]),
                 ParentComponent.Config(),

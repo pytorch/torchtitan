@@ -62,9 +62,11 @@ tree and replaces matching nodes with the factory's output.
 
 - **Explicit opt-in.** Nothing happens unless the user lists modules in
   `override.imports`. No auto-detection from hardware or installed packages.
-- **Strictly scoped to the request.** Only overrides *registered by the listed
-  modules* (or their submodules) are applied — not the whole global table. This
-  is enforced by provenance (the module a factory is defined in).
+- **Strictly scoped to the request.** Only the overrides a listed target *names*
+  are applied — a module target claims every override defined in that module, a
+  `module.function` target claims just that one — never the whole global table.
+  Matching is exact on the factory's defining module, with no sub-package reach,
+  so no override is claimed by two targets.
 - **Per-instance targeting, per-node conflicts.** An override selects *which*
   matched nodes it claims via `fqns` (FQN globs). Two overrides conflict only
   when they claim the *same node* (or one claims an ancestor of the other's
@@ -160,31 +162,31 @@ configuration: the factory bakes in sensible defaults (above, `block_size=128`),
 so a bare `override.imports` entry needs no other input.
 
 **Optional per-entry kwargs.** When two config trees need the *same* override
-module configured *differently*, a factory can expose keyword parameters and each
-`override.imports` entry can supply them as a `(module_path, kwargs)` tuple
-instead of a bare string; the `kwargs` are forwarded to that module's factories.
+configured *differently*, a factory can expose keyword parameters and each
+`override.imports` entry can supply them as a `(target, kwargs)` tuple instead of
+a bare string; the `kwargs` are forwarded to the override(s) the target names.
 For `triton_rope` above, two trees can pick different block sizes without a
 second module:
 
 ```python
 # one tree tunes block_size=128 (the default), another 256:
-OverrideConfig(imports=["my_pkg.triton_rope"])                      # -> 128
-OverrideConfig(imports=[("my_pkg.triton_rope", {"block_size": 256})])
+OverrideConfig(imports=["my_pkg.triton_rope.triton_rope"])                       # -> 128
+OverrideConfig(imports=[("my_pkg.triton_rope.triton_rope", {"block_size": 256})])
 ```
 
-(The RL trainer and generator use this to activate one HybridEP dispatch module
+(The RL trainer and generator use this to activate one HybridEP dispatch override
 with opposite `capacity_factor` values — blocking `None` for the trainer, a float
 for the cudagraph-capturing generator — instead of two modules or a hardcoded
 per-actor branch.)
 
 The factory declares the keyword parameters it accepts (or `**kwargs`); a kwarg
 it does not accept raises rather than silently no-op'ing. On the CLI, attach
-kwargs to the module name as `module=<json-object>` (quote it as a single shell
-token; `my_pkg.triton_rope` is a placeholder for your own module):
+kwargs to the target as `target=<json-object>` (quote it as a single shell token;
+`my_pkg.triton_rope.triton_rope` is a placeholder for your own override):
 
 ```bash
 torchtitan_train --module llama3 --config llama3_8b \
-    --override.imports 'my_pkg.triton_rope={"block_size": 256}'
+    --override.imports 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
 JSON keeps the values typed (numbers, `null`, strings, nesting), so the same
@@ -195,14 +197,15 @@ the override package and defeat the no-touch goal.
 ### Activation
 
 ```bash
-# One or more modules, space- or comma-separated:
+# One or more targets (a module, or module.function), space- or comma-separated.
+# A module target activates every override defined in that module:
 torchtitan_train --module llama3 --config llama3_8b \
     --override.imports torchtitan.overrides.fused_swiglu
 
-# A module with per-entry kwargs -- attached to the name as module=<json>,
-# quoted as one shell token (my_pkg.triton_rope is a placeholder for your module):
+# A target with per-entry kwargs -- attached as target=<json>, quoted as one
+# shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
 torchtitan_train --module llama3 --config llama3_8b \
-    --override.imports 'my_pkg.triton_rope={"block_size": 256}'
+    --override.imports 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
 ### Application
@@ -211,8 +214,9 @@ In `Trainer.__init__`, after `model_config.update_from_config()` (which sets
 sharding config on the pre-override modules) and before any component is built:
 
 1. Import the listed modules — this triggers their `@override` decorators.
-2. Resolve the *active* set: overrides whose defining module is one of the
-   listed imports (or a submodule of one).
+2. Resolve the *active* set: for each target, the override(s) it names — a module
+   target's whole module or a single `module.function` — matched exactly by the
+   factory's defining module (no sub-package reach).
 3. Collect claims: traverse the original tree and record every `(override,
    node)` pair, filtered by each override's `fqns` selector.
 4. Check for per-node conflicts (two overrides claiming the same node, or one
