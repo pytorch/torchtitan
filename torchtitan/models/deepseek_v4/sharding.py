@@ -72,7 +72,7 @@ def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
         query_states,
         dense_activation_placement(tp=spmd.P),
         _attn_sink_placement,
-        replicated_activation,
+        None,
     ]
 
     returns_lse = getattr(inner_attention_cfg, "return_lse", False)
@@ -113,7 +113,7 @@ def set_dsa_indexer_aux_loss_sharding(indexer_aux_loss_cfg) -> None:
                 query_states,
                 query_states,
                 replicated_activation,
-                replicated_activation,
+                None,
                 partial_activation,
                 query_states,
             )
@@ -271,6 +271,9 @@ def set_deepseek_v4_layer_sharding(
         layer_cfg.moe.sharding_config.in_dst_shardings["input_ids"] = (
             input_ids_dst_placement
         )
+        router_sharding = layer_cfg.moe.router.sharding_config or ShardingConfig()
+        router_sharding.state_shardings["tid2eid"] = _replicated_layout
+        layer_cfg.moe.router.sharding_config = router_sharding
 
 
 def set_deepseek_v4_sharding_config(

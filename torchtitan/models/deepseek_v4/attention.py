@@ -209,16 +209,17 @@ class DSAFlexAttention(FlexAttention):
             is_sink = kv_idx == sink_idx
             return selected | is_sink
 
-        return create_attention_mask(
-            v4_sparse_mask_mod,
-            bsz,
-            None,
-            seqlen,
-            kv_len + 1,
-            device=device,
-            BLOCK_SIZE=self.block_size,
-            separate_full_blocks=False,
-        )
+        with spmd.no_typecheck():
+            return create_attention_mask(
+                v4_sparse_mask_mod,
+                bsz,
+                None,
+                seqlen,
+                kv_len + 1,
+                device=device,
+                BLOCK_SIZE=self.block_size,
+                separate_full_blocks=False,
+            )
 
     def forward(
         self,
@@ -378,6 +379,16 @@ class Attention(BaseAttention):
             seqlen,
             x.device,
         )
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            # Window top-k indices are local metadata generated from arange, so
+            # they start as R. They still index the local [B, S] token shard and
+            # must match indexer-produced compressed top-k metadata before cat.
+            for axis in ("dp", "cp"):
+                spmd.mutate_type(topk_idxs, axis, src=spmd.R, dst=spmd.V)
+            spmd.assert_type(
+                topk_idxs,
+                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},
+            )
 
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
             compress_topk_idxs, index_score = self.indexer(
@@ -393,6 +404,15 @@ class Attention(BaseAttention):
                 x.device,
                 offset=kv.size(1),
             )
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                for axis in ("dp", "cp"):
+                    spmd.mutate_type(
+                        compress_topk_idxs, axis, src=spmd.R, dst=spmd.V
+                    )
+                spmd.assert_type(
+                    compress_topk_idxs,
+                    {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},
+                )
 
         if self.compress_ratio == 4:
             kv_compress = self.compressor(x, positions=positions)
@@ -442,6 +462,11 @@ class Attention(BaseAttention):
             # wo_a is a Linear module; access its weight directly for the grouped
             # einsum (not a standard Linear forward).
             wo_a = self.wo_a.weight.view(n_local_groups, self.o_lora_rank, -1)
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                spmd.assert_type(
+                    wo_a,
+                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.S(0)},
+                )
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
         with spmd.local():
             o = o.reshape(bsz, seqlen, -1)
