@@ -52,9 +52,9 @@ def parallelize_deepseekv3(
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.batch.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.batch.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
@@ -96,7 +96,7 @@ def parallelize_deepseekv3(
         moe_config = next(l.moe for l in model.config.layers if l.moe is not None)
         num_local_experts = moe_config.num_experts // parallel_dims.ep
         hidden_dim = model.config.dim
-        num_tokens = training.local_batch_size * training.seq_len
+        num_tokens = training.batch.local_batch_size * training.batch.seq_len
         get_buffer(
             group=ep_group,
             hidden_dim=hidden_dim,

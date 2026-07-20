@@ -160,14 +160,14 @@ def parallelize_autoparallel_deepseekv3(
         )
 
     def input_fn():
-        global_batch_size = training.global_batch_size
+        global_batch_size = training.batch.global_batch_size
         if global_batch_size < 0:
             dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
-            global_batch_size = training.local_batch_size * dp_degree
+            global_batch_size = training.batch.local_batch_size * dp_degree
         tokens = torch.randint(
             0,
             ap_model.model_args.vocab_size,
-            (global_batch_size, training.seq_len),
+            (global_batch_size, training.batch.seq_len),
             device=torch.device("cuda"),
         )
         return tokens

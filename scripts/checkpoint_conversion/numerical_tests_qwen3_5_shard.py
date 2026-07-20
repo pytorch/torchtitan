@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import BatchConfig, CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.models.qwen3_5 import Qwen35Model, qwen3_5_configs
@@ -75,8 +75,7 @@ def run_worker(args):
         expert_parallel_degree=args.ep,
     )
     training = TrainingConfig(
-        local_batch_size=1,
-        seq_len=128,
+        batch=BatchConfig(local_batch_size=1, seq_len=128),
         steps=1,
         mixed_precision_param="bfloat16",
         mixed_precision_reduce="float32",

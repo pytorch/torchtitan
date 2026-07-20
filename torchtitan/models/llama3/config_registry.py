@@ -11,7 +11,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.validate import Validator
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import BatchConfig, CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
@@ -42,8 +42,7 @@ def llama3_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            batch=BatchConfig(local_batch_size=8, seq_len=2048),
             steps=10,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -131,8 +130,7 @@ def llama3_8b() -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            batch=BatchConfig(local_batch_size=1, seq_len=8192),
             steps=1000,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -166,8 +164,7 @@ def llama3_70b() -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=1.5e-4),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=8192,
+            batch=BatchConfig(local_batch_size=8, seq_len=8192),
             steps=1000,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -216,8 +213,7 @@ def llama3_405b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-5),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=8192,
+            batch=BatchConfig(local_batch_size=2, seq_len=8192),
             steps=3000,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -264,8 +260,7 @@ def sft_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            batch=BatchConfig(local_batch_size=8, seq_len=2048),
             steps=10,
         ),
         dataloader=ChatDataLoader.Config(

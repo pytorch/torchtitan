@@ -10,7 +10,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.validate import Validator
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import BatchConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -41,8 +41,7 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            batch=BatchConfig(local_batch_size=8, seq_len=2048),
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -89,8 +88,7 @@ def gpt_oss_20b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            batch=BatchConfig(local_batch_size=1, seq_len=8192),
             steps=10000,
         ),
         parallelism=ParallelismConfig(
@@ -120,8 +118,7 @@ def gpt_oss_120b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            batch=BatchConfig(local_batch_size=1, seq_len=8192),
             steps=10000,
         ),
         parallelism=ParallelismConfig(

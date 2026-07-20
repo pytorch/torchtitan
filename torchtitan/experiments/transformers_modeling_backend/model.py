@@ -344,7 +344,7 @@ class HFTransformerModel(BaseModel):
                 if hasattr(self, key) and value is not None:
                     setattr(self, key, value)
 
-            self.max_seq_len = training.seq_len
+            self.max_seq_len = training.batch.seq_len
 
             self.deterministic = debug.deterministic
 
