@@ -5,20 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 
 import torch
 
-from torchtitan.components.data import (
-    GrainDataLoader,
-    HuggingFaceStreamingSource,
-    SingleDatasetConfig,
-)
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
-    MM_DATASETS,
-    MultiModalProcessor,
-)
+from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS
 
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
@@ -40,30 +34,19 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
 
     def _build_dataloader(self, batch_size, seq_len, world_size, rank):
         dataset = MM_DATASETS["cc12m-test"]
+        assert dataset.processor is not None
+        dataset = replace(
+            dataset,
+            processor=replace(
+                dataset.processor,
+                min_pixels=784,
+                max_pixels=200000,
+            ),
+        )
         dl_config = GrainDataLoader.Config(
-            dataset=SingleDatasetConfig(
-                source=HuggingFaceStreamingSource.Config(
-                    path=dataset.path,
-                    loader=dataset.loader,
-                ),
-                process=MultiModalProcessor.Config(
-                    sample_processor=dataset.sample_processor,
-                    patch_size=16,
-                    temporal_patch_size=2,
-                    spatial_merge_size=2,
-                    min_pixels=784,
-                    max_pixels=200000,
-                    image_mean=(0.5, 0.5, 0.5),
-                    image_std=(0.5, 0.5, 0.5),
-                ),
-                filters=(lambda sample: sample is not None,),
-            ),
-            collator=MultiModalCollator.Config(
-                max_images_per_batch=128,
-                patch_size=16,
-                temporal_patch_size=2,
-                spatial_merge_size=2,
-            ),
+            dataset=dataset,
+            collator=MultiModalCollator.Config(),
+            streaming_shuffle_window_size=128,
         )
 
         return dl_config.build(
@@ -118,6 +101,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
                                 f"{key} shape mismatch: {exp_v.shape} vs {res_v.shape} "
                                 f"(world_size={world_size}, rank={rank})"
                             )
+                            assert torch.equal(exp_v, res_v)
 
 
 if __name__ == "__main__":

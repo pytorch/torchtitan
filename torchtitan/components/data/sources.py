@@ -9,11 +9,11 @@
 import glob
 import json
 from array import array
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+import datasets
 import grain.python as grain
 from datasets.distributed import split_dataset_by_node
 
@@ -34,7 +34,9 @@ class RandomAccessSource(Protocol):
 class SourceConfig(Protocol):
     """Builds a random-access or streaming source."""
 
-    def build(self, **kwargs: Any) -> RandomAccessSource | grain.IterDataset:
+    def build(
+        self, *, dp_rank: int, dp_world_size: int
+    ) -> RandomAccessSource | grain.IterDataset:
         ...
 
 
@@ -57,7 +59,8 @@ class IndexedJsonlSource(Configurable):
     class Config(Configurable.Config):
         patterns: tuple[str, ...]
 
-    def __init__(self, config: Config, **_: Any) -> None:
+    def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int) -> None:
+        del dp_rank, dp_world_size
         self._paths = _expand_patterns(config.patterns)
         self._path_ids = array("I")
         self._byte_offsets = array("Q")
@@ -92,10 +95,13 @@ class HuggingFaceRandomAccessSource(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         path: str
-        loader: Callable[[str], Any]
+        load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
 
-    def __init__(self, config: Config, **_: Any) -> None:
-        self._dataset = config.loader(config.path)
+    def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int) -> None:
+        del dp_rank, dp_world_size
+        self._dataset = datasets.load_dataset(
+            config.path, streaming=False, **config.load_dataset_kwargs
+        )
 
     def __len__(self) -> int:
         return len(self._dataset)
@@ -105,6 +111,8 @@ class HuggingFaceRandomAccessSource(Configurable):
 
 
 class _HuggingFaceCursorIterator(grain.DatasetIterator):
+    """Exposes a Hugging Face streaming cursor to Grain checkpoint recursion."""
+
     def __init__(self, dataset: Any) -> None:
         super().__init__()
         self._dataset = dataset
@@ -127,10 +135,13 @@ class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         path: str
-        loader: Callable[[str], Any]
+        load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
 
-    def __init__(self, config: Config, *, options: Any, **_: Any) -> None:
-        dataset = config.loader(config.path)
+    def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int) -> None:
+        super().__init__()
+        dataset = datasets.load_dataset(
+            config.path, streaming=True, **config.load_dataset_kwargs
+        )
         if not hasattr(dataset, "state_dict") or not hasattr(
             dataset, "load_state_dict"
         ):
@@ -139,8 +150,8 @@ class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
             )
         self._dataset = split_dataset_by_node(
             dataset,
-            rank=options.dp_rank,
-            world_size=options.dp_world_size,
+            rank=dp_rank,
+            world_size=dp_world_size,
         )
 
     def __iter__(self) -> grain.DatasetIterator:

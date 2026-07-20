@@ -9,7 +9,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, TypeAlias
+from typing import Any, cast, Protocol, TypeAlias
 
 import grain.python as grain
 import numpy as np
@@ -23,8 +23,8 @@ GrainDataset: TypeAlias = grain.MapDataset | grain.IterDataset
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class DataRuntime:
-    """Objects and sizes available while a dataset recipe is built."""
+class DatasetBuildContext:
+    """Values needed while constructing a dataset graph."""
 
     tokenizer: BaseTokenizer
     seq_len: int
@@ -33,20 +33,23 @@ class DataRuntime:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class BuildOptions:
-    """Run policy supplied once by the loader."""
+class DatasetIterationPolicy:
+    """Controls dataset order, repetition, and data-parallel ownership."""
 
-    seed: int = 0
-    shuffle: bool = True
-    repeat: bool = True
-    dp_rank: int = 0
-    dp_world_size: int = 1
+    seed: int
+    shuffle: bool
+    repeat: bool
+    dp_rank: int
+    dp_world_size: int
+    streaming_shuffle_window_size: int
 
 
 class DatasetConfig(Protocol):
     """Builds one node of a Grain dataset graph."""
 
-    def build(self, *, runtime: DataRuntime, options: BuildOptions) -> GrainDataset:
+    def build(
+        self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
+    ) -> GrainDataset:
         ...
 
 
@@ -74,98 +77,61 @@ class SampleProcessor(Configurable, ABC):
         ...
 
 
-def _apply_process(
-    dataset: GrainDataset,
-    process: SampleProcessor.Config | Callable[[Any], Any] | None,
-    *,
-    runtime: DataRuntime,
-    seed: int,
-) -> GrainDataset:
-    if process is None:
-        return dataset
-    if isinstance(process, SampleProcessor.Config):
-        processor = process.build(runtime=runtime)
-        return dataset.random_map(processor, seed=seed)
-    return dataset.map(process)
-
-
-def _finish_random_access(
-    dataset: grain.MapDataset,
-    *,
-    options: BuildOptions,
-) -> grain.MapDataset:
-    if options.shuffle:
-        dataset = dataset.shuffle(seed=options.seed)
-    if len(dataset) < options.dp_world_size:
-        raise ValueError(
-            f"dataset has {len(dataset)} rows, fewer than "
-            f"dp_world_size={options.dp_world_size}"
-        )
-    dataset = dataset[options.dp_rank :: options.dp_world_size]
-    if options.repeat:
-        dataset = dataset.repeat()
-    return dataset
-
-
-def _finish_streaming(
-    dataset: grain.IterDataset,
-    *,
-    options: BuildOptions,
-    shuffle_window_size: int,
-) -> grain.IterDataset:
-    if options.repeat:
-        dataset = grain.experimental.RepeatIterDataset(dataset)
-    if options.shuffle:
-        dataset = grain.experimental.WindowShuffleIterDataset(
-            dataset,
-            window_size=shuffle_window_size,
-            seed=options.seed,
-        )
-    return dataset
-
-
 @dataclass(frozen=True, kw_only=True, slots=True)
 class SingleDatasetConfig:
-    """One source with row processing, filtering, and run policy."""
+    """One source with row processing and filtering."""
 
     source: SourceConfig
-    process: SampleProcessor.Config | Callable[[Any], Any] | None = None
+    processor: SampleProcessor.Config | None = None
     filters: tuple[Callable[[Any], bool], ...] = ()
-    shuffle_window_size: int = 10_000
 
-    def build(self, *, runtime: DataRuntime, options: BuildOptions) -> GrainDataset:
-        if self.filters and not options.repeat and options.dp_world_size > 1:
-            raise ValueError(
-                "finite filtered datasets are not supported with data parallelism"
-            )
-        source = self.source.build(runtime=runtime, options=options)
+    def build(
+        self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
+    ) -> GrainDataset:
+        source = self.source.build(
+            dp_rank=iteration.dp_rank, dp_world_size=iteration.dp_world_size
+        )
         if isinstance(source, grain.IterDataset):
-            dataset = _apply_process(
-                source,
-                self.process,
-                runtime=runtime,
-                seed=options.seed + options.dp_rank,
-            )
+            # Streaming sources own their DP split, so shuffle raw rows before processing.
+            dataset = source
+            if iteration.repeat:
+                dataset = grain.experimental.RepeatIterDataset(dataset)
+                # TODO(data-hf-set-epoch): Reshuffle HF shards across repeats.
+            if iteration.shuffle:
+                dataset = grain.experimental.WindowShuffleIterDataset(
+                    dataset,
+                    window_size=iteration.streaming_shuffle_window_size,
+                    seed=iteration.seed,
+                )
+            if self.processor is not None:
+                dataset = dataset.random_map(
+                    self.processor.build(context=context),
+                    seed=iteration.seed + iteration.dp_rank,
+                )
             for filter_fn in self.filters:
                 dataset = dataset.filter(filter_fn)
-            return _finish_streaming(
-                dataset,
-                options=options,
-                shuffle_window_size=self.shuffle_window_size,
-            )
+            return dataset
 
         if not isinstance(source, RandomAccessSource):
             raise TypeError("source must support len/getitem or be a Grain IterDataset")
         dataset = grain.MapDataset.source(source)
-        dataset = _apply_process(
-            dataset,
-            self.process,
-            runtime=runtime,
-            seed=options.seed,
-        )
+        if self.processor is not None:
+            dataset = dataset.random_map(
+                self.processor.build(context=context), seed=iteration.seed
+            )
         for filter_fn in self.filters:
             dataset = dataset.filter(filter_fn)
-        return _finish_random_access(dataset, options=options)
+        if iteration.shuffle:
+            dataset = dataset.shuffle(seed=iteration.seed)
+        if len(dataset) < iteration.dp_world_size:
+            raise ValueError(
+                f"dataset has {len(dataset)} rows, fewer than "
+                f"dp_world_size={iteration.dp_world_size}"
+            )
+        dataset = dataset[iteration.dp_rank :: iteration.dp_world_size]
+        if iteration.repeat:
+            dataset = dataset.repeat()
+        return dataset
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -182,21 +148,27 @@ class DatasetMixConfig:
 
     datasets: tuple[WeightedDataset, ...]
 
-    def build(self, *, runtime: DataRuntime, options: BuildOptions) -> GrainDataset:
+    def build(
+        self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
+    ) -> GrainDataset:
         if not self.datasets or any(item.weight <= 0 for item in self.datasets):
             raise ValueError("DatasetMixConfig requires positive-weight datasets")
         children = [
             item.dataset.build(
-                runtime=runtime,
-                options=replace(options, seed=options.seed + index),
+                context=context,
+                iteration=replace(iteration, seed=iteration.seed + index),
             )
             for index, item in enumerate(self.datasets)
         ]
         weights = [item.weight for item in self.datasets]
         if all(isinstance(child, grain.MapDataset) for child in children):
-            return grain.MapDataset.mix(children, weights=weights)
+            return grain.MapDataset.mix(
+                cast(list[grain.MapDataset], children), weights=weights
+            )
         if all(isinstance(child, grain.IterDataset) for child in children):
-            return grain.IterDataset.mix(children, weights=weights)
+            return grain.IterDataset.mix(
+                cast(list[grain.IterDataset], children), weights=weights
+            )
         raise TypeError("a mix cannot combine map and iterable child datasets")
 
 
@@ -209,23 +181,34 @@ class DatasetConcatConfig:
     def build(
         self,
         *,
-        runtime: DataRuntime,
-        options: BuildOptions,
+        context: DatasetBuildContext,
+        iteration: DatasetIterationPolicy,
     ) -> grain.MapDataset:
-        finite_options = replace(
-            options,
+        finite = replace(
+            iteration,
             shuffle=False,
             repeat=False,
             dp_rank=0,
             dp_world_size=1,
         )
         children = [
-            dataset.build(runtime=runtime, options=finite_options)
+            dataset.build(context=context, iteration=finite)
             for dataset in self.datasets
         ]
         if not children or not all(
             isinstance(child, grain.MapDataset) for child in children
         ):
             raise TypeError("DatasetConcatConfig requires map-style children")
-        combined = grain.MapDataset.concatenate(children)
-        return _finish_random_access(combined, options=options)
+
+        dataset = grain.MapDataset.concatenate(cast(list[grain.MapDataset], children))
+        if iteration.shuffle:
+            dataset = dataset.shuffle(seed=iteration.seed)
+        if len(dataset) < iteration.dp_world_size:
+            raise ValueError(
+                f"dataset has {len(dataset)} rows, fewer than "
+                f"dp_world_size={iteration.dp_world_size}"
+            )
+        dataset = dataset[iteration.dp_rank :: iteration.dp_world_size]
+        if iteration.repeat:
+            dataset = dataset.repeat()
+        return dataset

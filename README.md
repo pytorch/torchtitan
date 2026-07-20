@@ -108,10 +108,7 @@ This method requires the nightly build of PyTorch, or the latest PyTorch built [
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
-pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly/cpu
 ```
-
-> **Note:** The nightly build of `torchdata` is required when using a PyTorch nightly. Install it from the nightly index as shown above.
 
 > **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `pip install -e . --no-deps`.
 

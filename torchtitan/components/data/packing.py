@@ -7,29 +7,23 @@
 """Stateful packing recipes for tokenized documents."""
 
 from dataclasses import dataclass
-from functools import partial
-from typing import Any, TypeAlias
 
 import grain.python as grain
 import numpy as np
 import torch
-from grain import experimental as grain_experimental
 
 from torchtitan.components.data.dataset import (
-    BuildOptions,
-    DataRuntime,
+    DatasetBuildContext,
     DatasetConfig,
+    DatasetIterationPolicy,
     TokenSequence,
 )
 from torchtitan.components.loss import IGNORE_INDEX
 
 
-TextTrainingRow: TypeAlias = tuple[dict[str, torch.Tensor], torch.Tensor]
-
-
-def token_sequence_to_shifted_features(
+def _token_sequence_to_input_ids_and_labels(
     sample: TokenSequence,
-) -> dict[str, np.ndarray] | None:
+) -> dict[str, np.ndarray]:
     """Shift one document before packing so labels never cross documents.
 
     Example:
@@ -41,51 +35,22 @@ def token_sequence_to_shifted_features(
     loss_mask = np.asarray(sample.loss_mask, dtype=np.bool_)
     if token_ids.ndim != 1 or loss_mask.shape != token_ids.shape:
         raise ValueError("token_ids and loss_mask must be aligned 1-D arrays")
-    if len(token_ids) < 2:
-        return None
     return {
         "input_ids": token_ids[:-1],
-        "labels": np.where(
-            loss_mask[1:],
-            token_ids[1:],
-            np.int64(IGNORE_INDEX),
-        ),
+        "labels": np.where(loss_mask[1:], token_ids[1:], np.int64(IGNORE_INDEX)),
     }
 
 
-def _is_not_none(value: Any) -> bool:
-    return value is not None
-
-
-def token_rows_to_iter_dataset(
-    dataset: grain.MapDataset | grain.IterDataset,
-    *,
-    runtime: DataRuntime,
-) -> grain.IterDataset:
-    dataset = dataset.map(token_sequence_to_shifted_features).filter(_is_not_none)
-    if isinstance(dataset, grain.MapDataset):
-        dataset = dataset.to_iter_dataset(read_options=runtime.read_options)
-    return dataset
-
-
-def packed_features_to_training_row(
-    features: dict[str, np.ndarray],
-) -> TextTrainingRow:
-    """Convert one packed feature row to TorchTitan's trainer-row contract."""
-    padding = np.asarray(features["input_ids_segment_ids"]) == 0
-    labels = np.where(
-        padding,
-        np.int64(IGNORE_INDEX),
-        np.asarray(features["labels"]),
-    )
+def _packed_to_input_and_labels(
+    packed: dict[str, np.ndarray],
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    """Convert one packed row to the trainer contract; padding is loss-masked."""
+    padding = np.asarray(packed["input_ids_segment_ids"]) == 0
+    labels = np.where(padding, np.int64(IGNORE_INDEX), np.asarray(packed["labels"]))
     inputs = {
-        "input": torch.as_tensor(
-            np.asarray(features["input_ids"]),
-            dtype=torch.long,
-        ),
+        "input": torch.as_tensor(np.asarray(packed["input_ids"]), dtype=torch.long),
         "positions": torch.as_tensor(
-            np.asarray(features["input_ids_positions"]),
-            dtype=torch.long,
+            np.asarray(packed["input_ids_positions"]), dtype=torch.long
         ),
     }
     return inputs, torch.as_tensor(labels, dtype=torch.long)
@@ -98,25 +63,21 @@ class ConcatThenSplitPackingConfig:
     dataset: DatasetConfig
 
     def build(
-        self,
-        *,
-        runtime: DataRuntime,
-        options: BuildOptions,
+        self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
     ) -> grain.IterDataset:
-        _validate_packing_options(options)
-        dataset = self.dataset.build(runtime=runtime, options=options)
+        dataset = self.dataset.build(context=context, iteration=iteration)
+        dataset = dataset.filter(lambda sample: len(sample.token_ids) >= 2)
+        dataset = dataset.map(_token_sequence_to_input_ids_and_labels)
+        if isinstance(dataset, grain.MapDataset):
+            dataset = dataset.to_iter_dataset(read_options=context.read_options)
         # TODO(data-global-pack-plan): Plan packed rows before effective-DP sharding
         # when measurements justify shared length metadata and a cached plan.
-        dataset = token_rows_to_iter_dataset(dataset, runtime=runtime)
-        dataset = grain_experimental.ConcatThenSplitIterDataset(
+        dataset = grain.experimental.ConcatThenSplitIterDataset(
             dataset,
-            length_struct={
-                "input_ids": runtime.seq_len,
-                "labels": runtime.seq_len,
-            },
+            length_struct={"input_ids": context.seq_len, "labels": context.seq_len},
             meta_features=(),
         )
-        return dataset.map(packed_features_to_training_row)
+        return dataset.map(_packed_to_input_and_labels)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -131,43 +92,24 @@ class FirstFitPackingConfig:
             raise ValueError("num_packing_bins must be positive")
 
     def build(
-        self,
-        *,
-        runtime: DataRuntime,
-        options: BuildOptions,
+        self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
     ) -> grain.IterDataset:
-        _validate_packing_options(options)
-        dataset = self.dataset.build(runtime=runtime, options=options)
+        dataset = self.dataset.build(context=context, iteration=iteration)
+        dataset = dataset.filter(lambda sample: len(sample.token_ids) >= 2)
+        dataset = dataset.map(_token_sequence_to_input_ids_and_labels)
+        if isinstance(dataset, grain.MapDataset):
+            dataset = dataset.to_iter_dataset(read_options=context.read_options)
+        dataset = dataset.filter(
+            lambda packed: len(packed["input_ids"]) <= context.seq_len
+        )
         # TODO(data-global-pack-plan): Plan packed rows before effective-DP sharding
         # when measurements justify shared length metadata and a cached plan.
-        dataset = token_rows_to_iter_dataset(dataset, runtime=runtime)
-        dataset = dataset.filter(
-            partial(_fits_packed_row, sequence_length=runtime.seq_len)
-        )
-        dataset = grain_experimental.FirstFitPackIterDataset(
+        dataset = grain.experimental.FirstFitPackIterDataset(
             dataset,
-            length_struct={
-                "input_ids": runtime.seq_len,
-                "labels": runtime.seq_len,
-            },
-            num_packing_bins=(self.num_packing_bins or runtime.local_batch_size),
+            length_struct={"input_ids": context.seq_len, "labels": context.seq_len},
+            num_packing_bins=(self.num_packing_bins or context.local_batch_size),
             meta_features=("labels",),
-            seed=options.seed,
-            shuffle_bins=options.shuffle,
+            seed=iteration.seed,
+            shuffle_bins=iteration.shuffle,
         )
-        return dataset.map(packed_features_to_training_row)
-
-
-def _fits_packed_row(
-    features: dict[str, np.ndarray],
-    *,
-    sequence_length: int,
-) -> bool:
-    return len(features["input_ids"]) <= sequence_length
-
-
-def _validate_packing_options(options: BuildOptions) -> None:
-    if not options.repeat and options.dp_world_size > 1:
-        raise ValueError(
-            "finite packed datasets are not supported with data parallelism"
-        )
+        return dataset.map(_packed_to_input_and_labels)

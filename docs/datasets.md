@@ -22,25 +22,10 @@ The shortest built-in recipe is:
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
-    HuggingFaceRandomAccessSource,
-    SingleDatasetConfig,
-    TextCollator,
 )
-from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextProcessor
+from torchtitan.hf_datasets.text_datasets import DATASETS
 
-dataset = DATASETS["c4_test"]
 config.dataloader = GrainDataLoader.Config(
-    dataset=ConcatThenSplitPackingConfig(
-        dataset=SingleDatasetConfig(
-            source=HuggingFaceRandomAccessSource.Config(
-                path=dataset.path,
-                loader=dataset.loader,
-            ),
-            process=HuggingFaceTextProcessor.Config(
-                text_processor=dataset.sample_processor,
-            ),
-        ),
-    ),
-    collator=TextCollator.Config(),
+    dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
 )
 ```
