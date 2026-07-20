@@ -58,8 +58,8 @@ class Trainer(ForgeEngine):
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
+            seq_len=config.training.batch.seq_len,
+            local_batch_size=config.training.batch.local_batch_size,
         )
 
         model_args = self.model_config
@@ -121,8 +121,8 @@ class Trainer(ForgeEngine):
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.seq_len,
-                local_batch_size=config.training.local_batch_size,
+                seq_len=config.training.batch.seq_len,
+                local_batch_size=config.training.batch.local_batch_size,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -132,10 +132,10 @@ class Trainer(ForgeEngine):
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {config.training.local_batch_size}, "
+            f"local batch size {config.training.batch.local_batch_size}, "
             f"global batch size {self.global_batch_size}, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"sequence length {config.training.seq_len}, "
+            f"sequence length {config.training.batch.seq_len}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})."
         )

@@ -23,6 +23,7 @@ from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
+    BatchConfig,
     CompileConfig,
     OverrideConfig,
     ParallelismConfig,
@@ -34,7 +35,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -65,7 +66,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=1, seq_len=4096),
+                batch=BatchConfig(local_batch_size=1, seq_len=4096),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -184,8 +185,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_samples_per_prompt=8,  # TODO: TBD
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(
-                # TODO: TBD microbatch_size, seq_len
-                batch=BatchConfig(microbatch_size=1, seq_len=4096),
+                # TODO: TBD local_batch_size, seq_len
+                batch=BatchConfig(local_batch_size=1, seq_len=4096),
             ),
         ),
         compile=CompileConfig(enable=False),

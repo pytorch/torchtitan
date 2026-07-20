@@ -123,7 +123,7 @@ def pipeline_llm(
 
     pp_schedule = _build_pipeline_schedule(
         parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
+        local_batch_size=training.batch.local_batch_size,
         stages=stages,
         loss_fn=loss_fn,
     )

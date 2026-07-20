@@ -9,7 +9,7 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
-from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import BatchConfig, DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
@@ -41,8 +41,7 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            batch=BatchConfig(local_batch_size=2, seq_len=2048),
             steps=10,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
@@ -72,8 +71,7 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            batch=BatchConfig(local_batch_size=2, seq_len=2048),
             steps=10,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
@@ -110,8 +108,7 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            batch=BatchConfig(local_batch_size=2, seq_len=2048),
             steps=10,
         ),
         dataloader=ChatDataLoader.Config(
@@ -161,8 +158,7 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
             # (~152k), so cross-entropy materializes a
             # local_batch_size * seq_len * vocab logits tensor. batch=8,
             # seq=2048 is ~9GB in fp32 and OOMs the 22GB CI GPUs.
-            local_batch_size=1,
-            seq_len=1024,
+            batch=BatchConfig(local_batch_size=1, seq_len=1024),
             steps=10,
         ),
         dataloader=ChatDataLoader.Config(

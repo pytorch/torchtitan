@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import BatchConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     validate_autoparallel_config,
@@ -85,8 +85,7 @@ class _FakeAutoParallelGraph:
 
 def _training_config():
     return TrainingConfig(
-        local_batch_size=2,
-        seq_len=8,
+        batch=BatchConfig(local_batch_size=2, seq_len=8),
         mixed_precision_param="bfloat16",
         mixed_precision_reduce="float32",
     )

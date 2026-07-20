@@ -202,8 +202,8 @@ def _precompile_aot_fx_trace(
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
-    seq_len = config.training.seq_len
-    local_batch_size = config.training.local_batch_size
+    seq_len = config.training.batch.seq_len
+    local_batch_size = config.training.batch.local_batch_size
     vocab_size = model_config.vocab_size
 
     dummy_inputs = torch.randint(

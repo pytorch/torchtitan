@@ -165,7 +165,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (
             self.model_param_count,
             self.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(model, config.training.batch.seq_len)
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
         if config.training.enable_cpu_offload:
@@ -180,24 +180,24 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # verify batch sizes
-        global_batch_size = config.training.global_batch_size
+        global_batch_size = config.training.batch.global_batch_size
         if global_batch_size < 0:
             # This global batch size results in 1 gradient accumulation
             # step.
-            global_batch_size = config.training.local_batch_size * dp_degree
+            global_batch_size = config.training.batch.local_batch_size * dp_degree
         assert global_batch_size > 0
         assert (
-            global_batch_size % (config.training.local_batch_size * dp_degree) == 0
+            global_batch_size % (config.training.batch.local_batch_size * dp_degree) == 0
         ), (
             f"global batch size must be multiple of local batch size times "
             f"data-parallel degree ({global_batch_size} "
-            f"% ({config.training.local_batch_size} * {dp_degree}) != 0)"
+            f"% ({config.training.batch.local_batch_size} * {dp_degree}) != 0)"
         )
         self.global_batch_size = global_batch_size
 
         # calculate gradient accumulation steps
         self.gradient_accumulation_steps = global_batch_size // (
-            config.training.local_batch_size * dp_degree
+            config.training.batch.local_batch_size * dp_degree
         )
         assert self.gradient_accumulation_steps > 0
 

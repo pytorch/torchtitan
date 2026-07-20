@@ -18,6 +18,7 @@ from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
+    BatchConfig,
     CompileConfig,
     DebugConfig,
     OverrideConfig,
@@ -31,7 +32,7 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
@@ -90,7 +91,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -149,7 +150,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -245,7 +246,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -304,7 +305,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
@@ -368,7 +369,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
@@ -431,7 +432,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -485,7 +486,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -544,7 +545,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
@@ -677,7 +678,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
@@ -749,7 +750,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=False),
@@ -854,7 +855,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
-                batch=BatchConfig(microbatch_size=2, seq_len=2048),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),

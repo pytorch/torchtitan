@@ -2047,8 +2047,8 @@ class TestTraceContextParallel(FSDPTest):
             with tempfile.TemporaryDirectory() as dump_folder:
                 config = graph_trainer_llama3_debugmodel_sdpa()
                 config.dump_folder = dump_folder
-                config.training.local_batch_size = 2
-                config.training.seq_len = 128
+                config.training.batch.local_batch_size = 2
+                config.training.batch.seq_len = 128
                 config.training.steps = 1
                 config.parallelism.data_parallel_replicate_degree = 1
                 config.parallelism.data_parallel_shard_degree = dp_shard_degree
@@ -2064,25 +2064,25 @@ class TestTraceContextParallel(FSDPTest):
                 tokens = torch.randint(
                     0,
                     trainer.model_config.vocab_size,
-                    (config.training.local_batch_size, config.training.seq_len),
+                    (config.training.batch.local_batch_size, config.training.batch.seq_len),
                     device=trainer.device,
                 )
                 labels = torch.randint(
                     0,
                     trainer.model_config.vocab_size,
-                    (config.training.local_batch_size, config.training.seq_len),
+                    (config.training.batch.local_batch_size, config.training.batch.seq_len),
                     device=trainer.device,
                 )
                 # The dataloader always supplies per-document positions, which
                 # drive RoPE (SDPA itself is maskless and uses is_causal).
                 positions = (
                     torch.arange(
-                        config.training.seq_len,
+                        config.training.batch.seq_len,
                         device=trainer.device,
                         dtype=torch.int32,
                     )
                     .unsqueeze(0)
-                    .expand(config.training.local_batch_size, config.training.seq_len)
+                    .expand(config.training.batch.local_batch_size, config.training.batch.seq_len)
                 )
                 trainer.forward_backward_step(
                     input_dict={"input": tokens, "positions": positions},

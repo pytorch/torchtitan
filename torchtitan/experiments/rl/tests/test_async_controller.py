@@ -11,7 +11,8 @@ import asyncio
 
 import pytest
 
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.config import BatchConfig
+from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -91,9 +92,9 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
 
 
 def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
-    # 5 real rows, microbatch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
+    # 5 real rows, local_batch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
     # Round-robin dealing spreads the pad rows so no (microbatch, rank) cell is all-pad.
-    batcher = Batcher.Config(batch=BatchConfig(microbatch_size=2, seq_len=2)).build(
+    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=2)).build(
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
