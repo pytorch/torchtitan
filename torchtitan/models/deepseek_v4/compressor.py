@@ -4,14 +4,25 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from functools import partial
+from functools import cache
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE, SingleComplexRoPE
 from torchtitan.protocols.module import Module
+
+
+@cache
+def _hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    if dim & (dim - 1) != 0:
+        raise ValueError("Hadamard dim must be a power of two")
+    h = torch.ones((1, 1), dtype=dtype, device=device)
+    while h.shape[0] < dim:
+        h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)], 0)
+    return h
 
 
 class Compressor(Module):
@@ -51,12 +62,16 @@ class Compressor(Module):
         self.ape = cfg.ape.build()
 
     def _overlap_transform(self, tensor, value=0):
-        b, s, _, _ = tensor.size()
         ratio, d = self.compress_ratio, self.head_dim
-        new_tensor = tensor.new_full((b, s, 2 * ratio, d), value)
-        new_tensor[:, :, ratio:] = tensor[:, :, :, d:]
-        new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
-        return new_tensor
+        prev = torch.cat(
+            [
+                torch.full_like(tensor[:, :1, :, :d], value),
+                tensor[:, :-1, :, :d],
+            ],
+            dim=1,
+        )
+        curr = tensor[:, :, :, d:]
+        return torch.cat([prev, curr], dim=2)
 
     def forward(self, x, positions=None):
         _, seqlen, _ = x.size()
@@ -126,9 +141,9 @@ class Indexer(Module):
 
     @staticmethod
     def _rotate_activation(x):
-        from fast_hadamard_transform import hadamard_transform
-
-        return hadamard_transform(x, scale=x.size(-1) ** -0.5)
+        dim = x.size(-1)
+        hadamard_mat = _hadamard(dim, dtype=x.dtype, device=x.device)
+        return F.linear(x, hadamard_mat) * (dim**-0.5)
 
     def forward(
         self,
