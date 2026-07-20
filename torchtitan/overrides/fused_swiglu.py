@@ -484,7 +484,6 @@ class FusedSwiGLU(FeedForward):
 
 
 @override(
-    "fused_swiglu",
     target=FeedForward.Config,
     description="Fuse SwiGLU gate+up into one weight (FSDP + TP).",
 )
@@ -610,7 +609,6 @@ def _fuse_w13_grouped_experts_sharding(base: ShardingConfig) -> ShardingConfig:
 
 
 @override(
-    "fused_grouped_experts",
     target=GroupedExperts.Config,
     description="Fuse routed-experts gate+up into one weight; fused SiLU-and-mul.",
 )

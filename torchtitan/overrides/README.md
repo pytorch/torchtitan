@@ -109,7 +109,7 @@ class TritonRoPE(RoPE):
     def forward(self, query, key, positions=None): ...
 
 
-@override("triton_rope", target=RoPE.Config,
+@override(target=RoPE.Config,
           description="Triton rotary embedding, ~2x faster on A100+")
 def triton_rope(cfg: RoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
     # `derive` copies every field shared with RoPE.Config; the factory states
@@ -249,7 +249,7 @@ from torchtitan.config import override
 from torchtitan.models.common.moe import MoE
 
 
-@override("vendor_x_fused_moe", target=MoE.Config,
+@override(target=MoE.Config,
           description="Vendor X fused MoE for XPU")
 def vendor_x_moe(cfg: MoE.Config) -> "VendorXFusedMoE.Config":
     return VendorXFusedMoE.Config(num_experts=cfg.num_experts, ...)
@@ -299,13 +299,13 @@ Globs with `*` (which crosses `.`) keep selectors readable.
 ```python
 # NVFP4 on every in-layer linear, leaving the top-level LM head ("...output")
 # untouched (required for NVFP4; useful for MXFP8)
-@override("nvfp4_linear", target=Linear.Config,
+@override(target=Linear.Config,
           fqns=["*.layers.*.attention.*", "*.layers.*.feed_forward.*"])
 def nvfp4_linear(cfg: Linear.Config) -> "NVFP4Linear.Config":
     return NVFP4Linear.Config(in_features=cfg.in_features, ...)
 
 # Fused MoE only on the later layers
-@override("vendor_moe", target=MoE.Config, fqns=["*.layers.1[0-9].moe"])
+@override(target=MoE.Config, fqns=["*.layers.1[0-9].moe"])
 def vendor_moe(cfg: MoE.Config) -> "VendorMoE.Config":
     return VendorMoE.Config(num_experts=cfg.num_experts, ...)
 ```

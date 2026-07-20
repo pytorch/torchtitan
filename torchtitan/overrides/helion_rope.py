@@ -985,7 +985,6 @@ class HelionComplexRoPE(ComplexRoPE):
 
 
 @override(
-    "helion_rope",
     target=CosSinRoPE.Config,
     exact=True,
     description="Fused Helion cos/sin rotary embedding (CUDA).",
@@ -1000,7 +999,6 @@ def helion_rope(cfg: CosSinRoPE.Config) -> HelionCosSinRoPE.Config:
 
 
 @override(
-    "helion_complex_rope",
     target=ComplexRoPE.Config,
     exact=True,
     description="Fused Helion complex rotary embedding (CUDA).",

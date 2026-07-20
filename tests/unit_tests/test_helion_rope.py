@@ -23,11 +23,15 @@ from torchtitan.overrides.helion_rope import (
     HelionCosSinRoPE,
 )
 
+# Overrides are keyed in the registry by their factory's import path.
+_HELION_KEY = "torchtitan.overrides.helion_rope.helion_rope"
+_HELION_COMPLEX_KEY = "torchtitan.overrides.helion_rope.helion_complex_rope"
+
 # The override registers at import time. Capture it now so the registry-dependent
 # tests below stay robust if a sibling test (e.g. test_override.py) calls
 # clear_overrides() first; setUp restores it.
-_HELION_OVERRIDE = _REGISTRY.get("helion_rope")
-_HELION_COMPLEX_OVERRIDE = _REGISTRY.get("helion_complex_rope")
+_HELION_OVERRIDE = _REGISTRY.get(_HELION_KEY)
+_HELION_COMPLEX_OVERRIDE = _REGISTRY.get(_HELION_COMPLEX_KEY)
 
 
 class _RoPEHolder(Configurable):
@@ -75,19 +79,19 @@ class TestHelionRoPEOverride(unittest.TestCase):
     def setUp(self):
         # Restore the override if a previously run test cleared the registry.
         if _HELION_OVERRIDE is not None:
-            _REGISTRY.setdefault("helion_rope", _HELION_OVERRIDE)
+            _REGISTRY.setdefault(_HELION_KEY, _HELION_OVERRIDE)
         if _HELION_COMPLEX_OVERRIDE is not None:
-            _REGISTRY.setdefault("helion_complex_rope", _HELION_COMPLEX_OVERRIDE)
+            _REGISTRY.setdefault(_HELION_COMPLEX_KEY, _HELION_COMPLEX_OVERRIDE)
 
     def test_registered_against_cossin(self):
-        self.assertIn("helion_rope", _REGISTRY)
-        self.assertIs(_REGISTRY["helion_rope"].target_cls, CosSinRoPE.Config)
-        self.assertTrue(_REGISTRY["helion_rope"].exact)
+        self.assertIn(_HELION_KEY, _REGISTRY)
+        self.assertIs(_REGISTRY[_HELION_KEY].target_cls, CosSinRoPE.Config)
+        self.assertTrue(_REGISTRY[_HELION_KEY].exact)
 
     def test_registered_against_complex(self):
-        self.assertIn("helion_complex_rope", _REGISTRY)
-        self.assertIs(_REGISTRY["helion_complex_rope"].target_cls, ComplexRoPE.Config)
-        self.assertTrue(_REGISTRY["helion_complex_rope"].exact)
+        self.assertIn(_HELION_COMPLEX_KEY, _REGISTRY)
+        self.assertIs(_REGISTRY[_HELION_COMPLEX_KEY].target_cls, ComplexRoPE.Config)
+        self.assertTrue(_REGISTRY[_HELION_COMPLEX_KEY].exact)
 
     def test_cossin_factory_preserves_fields(self):
         cfg = CosSinRoPE.Config(dim=64, max_seq_len=128, theta=5000.0, scaling="yarn")
@@ -123,7 +127,10 @@ class TestHelionRoPEOverride(unittest.TestCase):
             with self.assertRaisesRegex(ImportError, "helion.*not installed"):
                 apply_overrides(
                     OverrideConfig(
-                        imports=["torchtitan.overrides.helion_rope.helion_rope"]
+                        imports=[
+                            "torchtitan.overrides.helion_rope.helion_rope",
+                            "torchtitan.overrides.helion_rope.helion_complex_rope",
+                        ]
                     ),
                     root,
                 )
@@ -133,7 +140,10 @@ class TestHelionRoPEOverride(unittest.TestCase):
         with patch.object(helion_rope_module, "_HELION_IMPORT_ERROR", None):
             replacements = apply_overrides(
                 OverrideConfig(
-                    imports=["torchtitan.overrides.helion_rope.helion_rope"]
+                    imports=[
+                        "torchtitan.overrides.helion_rope.helion_rope",
+                        "torchtitan.overrides.helion_rope.helion_complex_rope",
+                    ]
                 ),
                 root,
             )
@@ -144,7 +154,12 @@ class TestHelionRoPEOverride(unittest.TestCase):
     def test_override_does_not_claim_cossin_subclass(self):
         root = _SubclassRoPEHolder.Config()
         replacements = apply_overrides(
-            OverrideConfig(imports=["torchtitan.overrides.helion_rope.helion_rope"]),
+            OverrideConfig(
+                imports=[
+                    "torchtitan.overrides.helion_rope.helion_rope",
+                    "torchtitan.overrides.helion_rope.helion_complex_rope",
+                ]
+            ),
             root,
         )
         self.assertEqual(replacements, [])

@@ -145,13 +145,17 @@ class Override:
     ``target_cls`` rather than subclasses.
     """
 
-    name: str
     target_cls: type[Configurable.Config]
     factory: Callable[Concatenate[Configurable.Config, ...], Configurable.Config]
     fqns: list[str] | None
     description: str
     origin_module: str
     exact: bool = False
+
+    @property
+    def name(self) -> str:
+        """Unique identifier: the factory's import path (``module.function``)."""
+        return f"{self.origin_module}.{self.factory.__name__}"
 
     def matches(self, fqn: str) -> bool:
         """Whether this override claims the node at ``fqn``.
@@ -169,7 +173,6 @@ _REGISTRY: dict[str, Override] = {}
 
 
 def override(
-    name: str,
     *,
     target: type[Configurable.Config],
     fqns: list[str] | None = None,
@@ -178,8 +181,11 @@ def override(
 ) -> Callable:
     """Decorator to register an override factory.
 
+    The override is identified by the decorated factory's import path
+    (``module.function``) -- that is what users list in ``override.imports`` --
+    so there is no separate name.
+
     Args:
-        name: Unique identifier for this override (e.g. ``"triton_rope"``).
         target: The ``Configurable.Config`` class to replace. Instances of this
             class (and its subclasses) are candidates; ``fqns`` narrows them.
         fqns: Per-instance selector. ``None`` (default) claims every instance; a
@@ -194,17 +200,17 @@ def override(
 
     The decorated function takes the matched config as its first positional
     argument and returns its replacement. It may also declare keyword parameters
-    (or ``**kwargs``); those are filled from the ``(module_path, kwargs)`` entry
-    that activated the override, letting one override module be configured per
-    actor (e.g. trainer vs. generator). A kwarg the factory does not accept
-    raises ``TypeError`` at apply time (normal Python argument binding).
+    (or ``**kwargs``); those are filled from the ``(target, kwargs)`` entry
+    that activated the override, letting one override be configured per actor
+    (e.g. trainer vs. generator). A kwarg the factory does not accept raises
+    ``TypeError`` at apply time (normal Python argument binding).
 
     Example — fuse MoE only on the later layers::
 
-        @override("vendor_moe", target=MoE.Config,
+        @override(target=MoE.Config,
                   fqns=["layers.1[0-9].moe"],
                   description="Vendor fused MoE")
-        def _vendor_moe(cfg: MoE.Config) -> VendorMoE.Config:
+        def vendor_moe(cfg: MoE.Config) -> VendorMoE.Config:
             return VendorMoE.Config(num_experts=cfg.num_experts, ...)
     """
     # Lazy import avoids a config-package import cycle; safe because override
@@ -213,20 +219,21 @@ def override(
 
     if not (isinstance(target, type) and issubclass(target, Configurable.Config)):
         raise TypeError(
-            f"override('{name}', target=...) must be a Configurable.Config "
-            f"subclass, got {target!r}. Targets like ModelSpec or a plain class "
-            f"are not overridable; pick the component's `.Config`."
+            f"override(target=...) must be a Configurable.Config subclass, got "
+            f"{target!r}. Targets like ModelSpec or a plain class are not "
+            f"overridable; pick the component's `.Config`."
         )
 
     def decorator(fn: Callable) -> Callable:
-        if name in _REGISTRY:
+        # Key by the factory's import path -- the same ``module.function`` a user
+        # lists in ``override.imports``.
+        key = f"{fn.__module__}.{fn.__name__}"
+        if key in _REGISTRY:
             raise ValueError(
-                f"Override '{name}' is already registered (by module "
-                f"'{_REGISTRY[name].origin_module}'). Each override name must be "
-                f"unique across all imported modules."
+                f"Override '{key}' is already registered; a function may carry "
+                "only one @override."
             )
-        _REGISTRY[name] = Override(
-            name=name,
+        _REGISTRY[key] = Override(
             target_cls=target,
             factory=fn,
             fqns=fqns,
@@ -272,7 +279,7 @@ def derive(
 
     Example::
 
-        @override("triton_rope", target=RoPE.Config)
+        @override(target=RoPE.Config)
         def triton_rope(cfg: RoPE.Config) -> TritonRoPE.Config:
             return derive(cfg, TritonRoPE.Config, block_size=128)
     """
@@ -334,39 +341,28 @@ def _resolve_active(
 ) -> list[tuple[Override, dict[str, Any]]]:
     """Pair each activated override with the kwargs of the target that named it.
 
-    Each target names exactly one override as ``module.function`` (see
-    :func:`_resolve_target`): the override whose factory is ``function`` defined
-    in ``module`` (matched on the factory's defining module ``fn.__module__`` and
-    its ``__name__``). This keeps application limited to the user's
+    Each target is a ``module.function`` path (see :func:`_resolve_target`), which
+    is exactly the key the override is registered under, so resolution is a direct
+    registry lookup. This keeps application limited to the user's
     ``override.imports`` even when unrelated modules have registered overrides.
 
     A target naming no registered override, or two targets naming the same one,
     is a mistake and raises rather than resolving silently.
     """
     resolved: list[tuple[Override, dict[str, Any]]] = []
-    claimed_by: dict[str, str] = {}  # override name -> the target that claimed it
+    claimed: set[str] = set()
     for module, func, kwargs in targets:
         target = f"{module}.{func}"
-        ov = next(
-            (
-                o
-                for o in _REGISTRY.values()
-                if o.origin_module == module and o.factory.__name__ == func
-            ),
-            None,
-        )
+        ov = _REGISTRY.get(target)
         if ov is None:
             raise ValueError(
-                f"override.imports target '{target}' names no registered "
-                f"@override (no factory '{func}' in module '{module}')."
+                f"override.imports target '{target}' names no registered @override."
             )
-        prior = claimed_by.get(ov.name)
-        if prior is not None:
+        if target in claimed:
             raise ValueError(
-                f"Override '{ov.name}' is claimed by both '{prior}' and "
-                f"'{target}'. Name it once."
+                f"Override '{target}' is named by two entries. List it once."
             )
-        claimed_by[ov.name] = target
+        claimed.add(target)
         resolved.append((ov, kwargs))
     return resolved
 

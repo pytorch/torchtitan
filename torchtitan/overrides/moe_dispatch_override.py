@@ -52,7 +52,6 @@ from torchtitan.models.common.token_dispatcher import (
 
 
 @override(
-    "deepep_override",
     target=DeepEPTokenDispatcher.Config,
     description="DeepEP cudagraph-able expand dispatch for inference.",
 )
@@ -70,7 +69,6 @@ def deepep_override(
 
 
 @override(
-    "hybridep_override",
     target=HybridEPTokenDispatcher.Config,
     description="Set the HybridEP non-blocking capacity factor per actor.",
 )
