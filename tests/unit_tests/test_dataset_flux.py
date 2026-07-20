@@ -59,7 +59,7 @@ class TestFluxDataLoader(unittest.TestCase):
                         "flux",
                         "--config",
                         "flux_debugmodel",
-                        "--training.local_batch_size",
+                        "--training.batch.local_batch_size",
                         str(batch_size),
                         "--dataloader.img_size",
                         str(256),

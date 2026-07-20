@@ -243,9 +243,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         seq_len_divisor = (
             parallel_dims.tp if config.parallelism.enable_sequence_parallel else 1
         ) * (2 * parallel_dims.cp if parallel_dims.cp > 1 else 1)
-        if config.training.seq_len % seq_len_divisor != 0:
+        if config.training.batch.seq_len % seq_len_divisor != 0:
             raise ValueError(
-                f"Training sequence length ({config.training.seq_len}) must be "
+                f"Training sequence length ({config.training.batch.seq_len}) must be "
                 f"divisible by {seq_len_divisor} for the configured "
                 "sequence/context parallelism."
             )
@@ -323,7 +323,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(model, config.training.batch.seq_len)
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
@@ -347,23 +347,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # verify batch sizes
-        global_batch_size = config.training.global_batch_size
+        global_batch_size = config.training.batch.global_batch_size
         if global_batch_size < 0:
             # This global batch size results in 1 gradient accumulation
             # step.
-            global_batch_size = config.training.local_batch_size * batch_degree
+            global_batch_size = config.training.batch.local_batch_size * batch_degree
         assert global_batch_size > 0
         assert (
-            global_batch_size % (config.training.local_batch_size * batch_degree) == 0
+            global_batch_size % (config.training.batch.local_batch_size * batch_degree) == 0
         ), (
             f"global batch size must be multiple of local batch size times "
             f"data-parallel degree ({global_batch_size} "
-            f"% ({config.training.local_batch_size} * {batch_degree}) != 0)"
+            f"% ({config.training.batch.local_batch_size} * {batch_degree}) != 0)"
         )
 
         # calculate gradient accumulation steps
         self.gradient_accumulation_steps = global_batch_size // (
-            config.training.local_batch_size * batch_degree
+            config.training.batch.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
 
@@ -500,8 +500,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
+            seq_len=config.training.batch.seq_len,
+            local_batch_size=config.training.batch.local_batch_size,
             snapshot_every_n_steps=(
                 config.checkpoint.interval * self.gradient_accumulation_steps
                 if config.checkpoint.enable
@@ -553,8 +553,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.seq_len,
-                local_batch_size=config.training.local_batch_size,
+                seq_len=config.training.batch.seq_len,
+                local_batch_size=config.training.batch.local_batch_size,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -562,10 +562,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {config.training.local_batch_size}, "
+            f"local batch size {config.training.batch.local_batch_size}, "
             f"global batch size {global_batch_size}, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"sequence length {config.training.seq_len}, "
+            f"sequence length {config.training.batch.seq_len}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )

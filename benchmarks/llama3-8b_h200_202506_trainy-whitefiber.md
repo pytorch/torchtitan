@@ -27,7 +27,7 @@ Runs were invoked with the following, where `NUM_NODES` was `4` and `8`.
     torchtitan/train.py \
     --job.config-file torchtitan/models/llama3/train_configs/llama3_8b.toml \
     --metrics.enable_wandb \
-    --training.local_batch_size=2 \
+    --training.batch.local_batch_size=2 \
     --training.compile \
     --model.converters="quantize.linear.float8" \
     --quantize.linear.float8.enable_fsdp_float8_all_gather \

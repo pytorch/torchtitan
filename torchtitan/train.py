@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import datetime
 import os
+import sys
 
 import torch
 
@@ -27,6 +29,20 @@ def main() -> None:
 
     config_manager = ConfigManager()
     config = config_manager.parse_args()
+
+    # Give each run its own dump folder so it never resumes from / collides with a
+    # previous run's checkpoints. Skip when --dump_folder is set explicitly (then
+    # the user's exact path is honored, e.g. to resume a specific run).
+    dump_folder_overridden = any(
+        a == "--dump_folder" or a.startswith("--dump_folder=") for a in sys.argv[1:]
+    )
+    if not dump_folder_overridden:
+        run_name = config_manager.config_name or "run"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        # pyrefly: ignore [missing-attribute]
+        config.dump_folder = os.path.join(config.dump_folder, f"{run_name}-{timestamp}")
+    # pyrefly: ignore [missing-attribute]
+    logger.info(f"Dumping run artifacts to: {config.dump_folder}")
 
     # NOTE: internal meta tooling relies on source="training".
     sl.init_structured_logger(

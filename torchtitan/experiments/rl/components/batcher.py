@@ -13,7 +13,8 @@ import math
 from dataclasses import dataclass, field, replace
 
 import torch
-from torchtitan.config import Configurable
+
+from torchtitan.config import BatchConfig, Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import (
     TrainingBatch,
@@ -41,33 +42,14 @@ _DTYPES: dict[str, torch.dtype] = {
 }
 
 
-@dataclass(kw_only=True, slots=True)
-class BatchConfig:
-    """Batch shape parameters for the RL batcher.
-
-    TODO: Refactor the pre-training trainer to use an owned batch config
-    instead of keeping batch shape fields directly on TrainingConfig.
-    NOTE: in pretraining we would have global_batch_size. But now we have
-    num_prompts_per_train_step. This will need to be addressed.
-    """
-
-    microbatch_size: int = 8
-    """Per-DP-rank microbatch size (rows per forward pass). If the number of tokens in the
-    rollouts exceed the number of rows*seq_len, a new microbatch is started.
-    If it is less, the remaining rows are padded to this size."""
-
-    seq_len: int = 2048
-    """Tokens per row (packed sequence length)."""
-
-
 class Batcher(Configurable):
     """Accumulate `num_prompts_per_train_step` groups and packs
-    `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[microbatch_size, seq_len]`.
+    `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[local_batch_size, seq_len]`.
 
     Example:
-        # num_prompts_per_train_step=2, dp_degree=2, microbatch_size=2
+        # num_prompts_per_train_step=2, dp_degree=2, local_batch_size=2
         # The trigger is 2 trainable GROUPS, regardless of how many samples/tokens each contains.
-        batcher = Batcher.Config(batch=BatchConfig(microbatch_size=2, seq_len=128)).build(
+        batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
             num_prompts_per_train_step=2, dp_degree=2, pad_id=0,
         )
         _ = batcher.add_training_samples(training_sample_group=group0)  # -> None (only 1 trainable group)
@@ -91,7 +73,7 @@ class Batcher(Configurable):
         dp_degree: int,
         pad_id: int,
     ) -> None:
-        self.microbatch_size = config.batch.microbatch_size
+        self.local_batch_size = config.batch.local_batch_size
         self.seq_len = config.batch.seq_len
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
@@ -274,10 +256,10 @@ class Batcher(Configurable):
         spreads them across microbatches/ranks instead of all landing on the last one.
 
         Example:
-            # microbatch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
+            # local_batch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
             # The 3 pad rows land on 3 different (microbatch, rank) pairs; none is all padding.
         """
-        rows_per_microbatch = self.microbatch_size * self._dp_degree
+        rows_per_microbatch = self.local_batch_size * self._dp_degree
         num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
 
         # Pad up to a full grid
@@ -397,7 +379,7 @@ class Batcher(Configurable):
             m.Metric(
                 "train_batch/num_microbatches",
                 m.NoReduce(
-                    float(len(packed_rows) // (self.microbatch_size * self._dp_degree))
+                    float(len(packed_rows) // (self.local_batch_size * self._dp_degree))
                 ),
             ),
             m.Metric(

@@ -274,7 +274,7 @@ class PolicyTrainer(Actor, Configurable):
 
         # Check if seq_length passed the max_seq_len
         max_seq_len = model_spec.model.max_seq_len
-        seq_len = config.training.seq_len
+        seq_len = config.training.batch.seq_len
         if seq_len > max_seq_len:
             raise ValueError(
                 f"Training sequence length {seq_len} exceeds "

@@ -13,7 +13,7 @@ from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
 )
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import BatchConfig, CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -48,8 +48,7 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            batch=BatchConfig(local_batch_size=8, seq_len=2048),
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -112,8 +111,7 @@ def deepseek_v3_16b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            batch=BatchConfig(local_batch_size=4, seq_len=4096),
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -194,8 +192,7 @@ def deepseek_v3_671b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            batch=BatchConfig(local_batch_size=4, seq_len=4096),
             steps=10000,
         ),
         parallelism=ParallelismConfig(
