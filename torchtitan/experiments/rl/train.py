@@ -25,6 +25,7 @@ python3 -m torchtitan.experiments.rl.train \
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # must run before torch import. Set it as early as possible to avoid other
@@ -169,6 +170,7 @@ def _spawn_proc_mesh(
     role_world_size: int,
     gpus_per_node: int,
     *,
+    bootstrap: Callable[[], None],
     role: str,
     extra_env: dict[str, str] | None = None,
 ) -> ProcMesh:
@@ -183,7 +185,6 @@ def _spawn_proc_mesh(
     role_gpus_per_node = role_world_size // nodes
     provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
     env = provisioner.allocate(role_gpus_per_node, extra_env=extra_env)
-    bootstrap = _bootstrap_generator if role == "generator" else _preimport_torch
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
         bootstrap=bootstrap,
@@ -231,13 +232,18 @@ def spawn_proc_mesh(
         )
 
         trainer_mesh = _spawn_proc_mesh(
-            trainer_host_mesh, trainer_world_size, gpus_per_node, role="trainer"
+            trainer_host_mesh,
+            trainer_world_size,
+            gpus_per_node,
+            bootstrap=_preimport_torch,
+            role="trainer",
         )
         generator_meshes = [
             _spawn_proc_mesh(
                 gen_host_mesh,
                 per_generator_world_size,
                 gpus_per_node,
+                bootstrap=_bootstrap_generator,
                 role="generator",
                 extra_env=generator_env,
             )
