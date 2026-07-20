@@ -167,7 +167,7 @@ def test_take_finalized_does_not_release_active_slot() -> None:
             raise RuntimeError("buffer closed unexpectedly")
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
         await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[]))
-        await buffer.take_finalized(pending_trainable_count=0)
+        await buffer.take_finalized(partial_batch_trainable_count=0)
 
         waiter = asyncio.create_task(buffer.wait_for_slot())
         await asyncio.sleep(0)
@@ -264,7 +264,7 @@ def test_strict_fifo_blocks_on_unfinalized_head() -> None:
         await buffer.claim_next()  # g0 -> INFLIGHT (head stuck)
         await _finalize(buffer, 1)  # only g1 finalized
 
-        taker = asyncio.create_task(buffer.take_finalized(pending_trainable_count=0))
+        taker = asyncio.create_task(buffer.take_finalized(partial_batch_trainable_count=0))
         await asyncio.sleep(0)
         assert not taker.done()  # strict FIFO: g1 finalized but head g0 is not -> stall
 
@@ -288,19 +288,19 @@ def test_windowed_fifo_greedy_within_window_and_anchored_at_head() -> None:
             await _finalize(buffer, group_id)
 
         # Greedy within the window [g0, g3]: g1, g2, g3 fetched ahead of the stuck head.
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 1
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 2
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 3
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 1
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 2
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 3
 
         # Anchored: consuming g1/g2/g3 does NOT move the head, so g4 stays outside [g0, g3].
-        taker = asyncio.create_task(buffer.take_finalized(pending_trainable_count=0))
+        taker = asyncio.create_task(buffer.take_finalized(partial_batch_trainable_count=0))
         await asyncio.sleep(0)
         assert not taker.done()  # g4 finalized but beyond the window -> blocked
 
         # Consuming the head slides the window; g4 becomes eligible.
         await _finalize(buffer, 0)
         assert (await taker).group_id == 0
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 4
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 4
 
     asyncio.run(run())
 
@@ -323,7 +323,7 @@ def test_window_lookahead_is_phase_exact_across_r0() -> None:
         taken = 0
         while True:
             taker = asyncio.create_task(
-                buffer.take_finalized(pending_trainable_count=r0)
+                buffer.take_finalized(partial_batch_trainable_count=r0)
             )
             await asyncio.sleep(0)
             if not taker.done():
@@ -361,18 +361,18 @@ def test_window_anchored_until_head_consumed() -> None:
             await _finalize(buffer, group_id)
 
         # g1..g3 consumable; g4, g5 outside [g0, g3].
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 1
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 2
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 3
-        taker = asyncio.create_task(buffer.take_finalized(pending_trainable_count=0))
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 1
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 2
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 3
+        taker = asyncio.create_task(buffer.take_finalized(partial_batch_trainable_count=0))
         await asyncio.sleep(0)
         assert not taker.done()  # window did not slide despite 3 holes
 
         # Now consume the head; window slides to g4 and g4/g5 become eligible.
         await _finalize(buffer, 0)
         assert (await taker).group_id == 0
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 4
-        assert (await buffer.take_finalized(pending_trainable_count=0)).group_id == 5
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 4
+        assert (await buffer.take_finalized(partial_batch_trainable_count=0)).group_id == 5
 
     asyncio.run(run())
 

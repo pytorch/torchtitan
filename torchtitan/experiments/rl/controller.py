@@ -930,7 +930,7 @@ class Controller(Configurable):
         """
         while True:
             rollout_group = await group_buffer.take_finalized(
-                pending_trainable_count=batcher.pending_trainable_count
+                partial_batch_trainable_count=batcher.partial_batch_trainable_count
             )
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")

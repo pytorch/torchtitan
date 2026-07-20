@@ -11,6 +11,90 @@ The integration consists of the following components:
 2. **RL Training Loop** (`train.py`): GRPO-based RL training with Monarch actors (single-turn only for now)
 
 
+### Rollout work buffer (`components/work_buffer.py`)
+
+`RolloutGroupWorkBuffer` is a run-ahead FIFO (ordered by `group_id`) shared by the data-input,
+rollout, and batcher loops. Each entry (`RolloutGroupWork`) moves through a lifecycle:
+
+`WAITING` (admitted) -> `INFLIGHT` (a rollout worker is generating) -> `FINALIZED` (rollouts done,
+result stored) -> removed when the batcher takes it.
+
+**"active" is not the same as `INFLIGHT`.** `INFLIGHT` is an entry *state* (currently generating).
+"active" is a *slot* accounting concept: a slot is charged at `add_work` and freed only by
+`release_active_groups` (trainer after its weight pull, or batcher on an untrainable group) -- so
+an active slot may be in any state, including already taken by the batcher but not yet released.
+Active slots count against the off-policy window across the whole pipeline (buffer + queue +
+training), capped at `max_active_rollout_groups = (max_offpolicy_steps + 1) * num_prompts_per_train_step`.
+
+Two independent knobs, both counted in optimizer steps where **1 step = P groups**
+(`P = num_prompts_per_train_step`):
+- `K = max_offpolicy_steps` -> **capacity** `(K+1)*P` active slots (how far generation runs ahead).
+- `s = window_lookahead_steps` -> **extra off-policy steps** a stuck straggler head may incur, so
+  `max policy age = K + s`.
+
+**Capacity: active slots = (K+1)*P** (example `K=2, P=2` -> 6, shown full; `g8/g9` were taken by the
+batcher but still hold a slot until released):
+
+```mermaid
+flowchart TB
+    subgraph ACTIVE["active slots 6 / 6  (cap = (K+1)*P)"]
+      direction TB
+      t8["g8 taken (not released)"]:::taken
+      t9["g9 taken (not released)"]:::taken
+      g10["g10 INFLIGHT (head)"]:::inflight
+      g11["g11 FINALIZED"]:::fin
+      g12["g12 WAITING"]:::wait
+      g13["g13 WAITING"]:::wait
+      t8 --> t9 --> g10 --> g11 --> g12 --> g13
+    end
+    g14["g14 blocked in wait_for_slot()"]:::pending
+    ACTIVE -. full .-> g14
+    classDef taken fill:#e6d7f0,stroke:#84a,stroke-dasharray:4 3;
+    classDef inflight fill:#fde7c7,stroke:#c80;
+    classDef fin fill:#d7f0d7,stroke:#3a3;
+    classDef wait fill:#eee,stroke:#888;
+    classDef pending fill:#fff,stroke:#bbb,stroke-dasharray:4 3,color:#999;
+```
+
+**Windowed FIFO: `s` = extra off-policy steps tolerated.** Head `g10` is a stuck straggler; strict
+FIFO (`s=0`) blocks on it. With `s=1` the batcher may bypass it far enough to complete 1 extra
+batch (= 1 step), no more. `window_end = h + (s+1)*P - r0 - 1`, where `r0` is the head's phase
+(`partial_batch_trainable_count` snapshotted when it became head). Here `s=1, P=2, r0=0` -> `g13`:
+
+```mermaid
+flowchart TB
+    subgraph ACTIVE2["active slots (cap = (K+1)*P)"]
+      direction TB
+      a8["g8 taken (not released)"]:::taken
+      a9["g9 taken (not released)"]:::taken
+      subgraph WIN["window [g10 .. g13] -> up to s=1 extra step"]
+        direction TB
+        w10["g10 INFLIGHT (head, stuck)"]:::inflight
+        w11["g11 FINALIZED -> takeable"]:::fin
+        w12["g12 FINALIZED -> takeable"]:::fin
+        w13["g13 WAITING"]:::wait
+        w10 --> w11 --> w12 --> w13
+      end
+      a8 --> a9 --> w10
+    end
+    w14["g14 blocked: full AND outside window"]:::blocked
+    ACTIVE2 -. full / window_end .-> w14
+    note["take g11 + g12 = P groups = 1 batch = 1 step\n=> head g10 ages by at most +1 => max age = K + s"]:::note
+    classDef taken fill:#e6d7f0,stroke:#84a,stroke-dasharray:4 3;
+    classDef inflight fill:#fde7c7,stroke:#c80;
+    classDef fin fill:#d7f0d7,stroke:#3a3;
+    classDef wait fill:#eee,stroke:#888;
+    classDef blocked fill:#f7f7f7,stroke:#bbb,stroke-dasharray:4 3,color:#999;
+    classDef note fill:#eef,stroke:#557;
+```
+
+- Take-ability = `FINALIZED` **and** within `[head, window_end]` (position-based, not version-based).
+- The window is sized in *groups* (`(s+1)*P - r0`) because `1 step = P groups`; `r0` =
+  `partial_batch_trainable_count` = trainable groups already accumulated toward the in-progress batch
+  when the head became head. It is snapshotted per head, so the window slides right only when the head
+  itself is consumed.
+
+
 ## Key features available
 
 1. **Unified model definition**: Canonical TorchTitan model definition shared by both trainer (TorchTitan) and generator (vLLM), enabling fast iteration, shared optimizations, and straightforward bitwise parity verification

@@ -82,7 +82,7 @@ class Batcher(Configurable):
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
 
     @property
-    def pending_trainable_count(self) -> int:
+    def partial_batch_trainable_count(self) -> int:
         """Trainable groups accumulated toward the next (not-yet-packed) batch (`0 <= r < P`).
 
         This is the head-phase `r` the work buffer snapshots to size its r-aware look-ahead window
