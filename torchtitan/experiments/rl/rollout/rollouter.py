@@ -52,7 +52,7 @@ class Rollouter(Configurable):
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
             generate_fn=generate_fn, sample=sample,
             group_id=group_index,  # assigned by the data input loop (a monotonic int)
-            num_samples_per_prompt=N, sampling=sampling, renderer=renderer)
+            group_size=N, sampling=sampling, renderer=renderer)
 
     `MessageEnv` works in messages; `TokenEnv` (what `make_env_group` returns)
     adds the message <-> token plumbing.
@@ -114,25 +114,25 @@ class Rollouter(Configurable):
         self,
         *,
         sample: object,
-        num_samples_per_prompt: int,
+        group_size: int,
         renderer: Renderer,
     ) -> list[TokenEnv]:
-        """Construct `num_samples_per_prompt` single-use envs from one dataset sample.
+        """Construct `group_size` single-use envs from one dataset sample.
 
         Args:
             sample: the dataset sample (the env input) from `get_training_sample` / `get_validation_sample`.
-            num_samples_per_prompt: number of sibling envs for this prompt group.
+            group_size: number of sibling envs for this prompt group.
             renderer: Renderer shared by the rollout controller.
 
         Returns:
-            `TokenEnv` * `num_samples_per_prompt` instances, each ready for one rollout.
+            `TokenEnv` * `group_size` instances, each ready for one rollout.
         """
         return [
             self._token_env_config.build(
                 message_env=self._message_env_config.build(env_input=sample),
                 renderer=renderer,
             )
-            for _ in range(num_samples_per_prompt)
+            for _ in range(group_size)
         ]
 
     async def score_group(
@@ -161,13 +161,13 @@ class Rollouter(Configurable):
         generate_fn: GenerateFn,
         sample: object,
         group_id: int,
-        num_samples_per_prompt: int,
+        group_size: int,
         sampling: SamplingConfig,
         renderer: Renderer,
     ) -> RolloutGroup:
         """Roll out and score one prompt group.
 
-        Builds `num_samples_per_prompt` sibling envs from one sample and drives them concurrently;
+        Builds `group_size` sibling envs from one sample and drives them concurrently;
         each sibling drives its own `generate_fn` calls, so the generator runs a whole
         group's calls together in one continuous batch. Then `score_group` fills each reward.
 
@@ -177,20 +177,20 @@ class Rollouter(Configurable):
             generate_fn: Async callable that returns a Completion given a prompt.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
-            num_samples_per_prompt: Number of sibling rollouts.
+            group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
             renderer: Renderer shared by the group's envs.
 
         Returns:
             One scored `RolloutGroup`.
         """
-        # One prompt becomes [env] * num_samples_per_prompt.
+        # One prompt becomes [env] * group_size.
         envs = self.make_env_group(
-            sample=sample, num_samples_per_prompt=num_samples_per_prompt, renderer=renderer
+            sample=sample, group_size=group_size, renderer=renderer
         )
 
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
-        # reuse across the num_samples_per_prompt rollouts (truest spot is the rollouter's first-turn render).
+        # reuse across the group_size rollouts (truest spot is the rollouter's first-turn render).
         try:
             # produce the rollouts
             rollouts = await asyncio.gather(

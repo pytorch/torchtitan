@@ -371,7 +371,7 @@ def test_rollouter_builds_one_env_per_group_member(
     _patch_names(monkeypatch)
     rollouter = AlphabetSortRollouter(AlphabetSortRollouter.Config())
     sample = rollouter.get_training_sample()
-    envs = rollouter.make_env_group(sample=sample, num_samples_per_prompt=3, renderer=None)
+    envs = rollouter.make_env_group(sample=sample, group_size=3, renderer=None)
     assert len(envs) == 3
 
 
