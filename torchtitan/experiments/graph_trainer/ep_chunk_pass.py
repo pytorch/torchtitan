@@ -83,6 +83,7 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     chunk_symbol_hints_for_mode,
     CHUNK_SYMBOL_HINTS_META,
     depends_on_chunk_symbol,
+    ep_token_exchange_launch_phase,
     expr_key,
     free_symbols,
     is_c10d_functional_node,
@@ -2316,12 +2317,12 @@ def _static_placeholders(gm: fx.GraphModule, num_static_inputs: int) -> set[fx.N
 
 
 def _ep_roots(gm: fx.GraphModule, module_pattern: str) -> list[str]:
-    """Find selected roots that contain real all-to-all collectives."""
+    """Find selected roots that contain graph-visible token exchanges."""
     roots = set()
     for node in gm.graph.nodes:
-        if (
-            node.op != "call_function"
-            or node.target != torch.ops._c10d_functional.all_to_all_single.default
+        if node.op != "call_function" or (
+            node.target != torch.ops._c10d_functional.all_to_all_single.default
+            and ep_token_exchange_launch_phase(node) is None
         ):
             continue
         fqn = _get_module_fqn(node)
@@ -2429,13 +2430,15 @@ def ep_overlap_chunk_pass(
     module_pattern: str,
     num_static_inputs: int = 0,
     optimize_grad_live_out: bool = True,
-    require_all_to_all: bool = True,
+    require_token_exchange: bool = True,
 ) -> fx.GraphModule:
     """Resolve EP roots from one pattern, then run graph chunking."""
     roots = _ep_roots(gm, module_pattern)
     if not roots:
-        if require_all_to_all:
-            raise ValueError(f"No EP all-to-all regions matched {module_pattern!r}.")
+        if require_token_exchange:
+            raise ValueError(
+                f"No EP token-exchange regions matched {module_pattern!r}."
+            )
         roots = _ep_annotated_roots(gm, module_pattern)
     if not roots:
         raise ValueError(f"No EP regions matched {module_pattern!r}.")
