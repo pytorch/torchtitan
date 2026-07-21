@@ -12,12 +12,18 @@ user math problem -> one assistant solution -> binary Math-Verify reward
 
 The prompt asks for step-by-step reasoning followed by a final `Answer:` expression. [Math-Verify](https://github.com/huggingface/Math-Verify) parses that expression and assigns a reward of one when it is mathematically equivalent to the reference answer, or zero otherwise.
 
-An abridged episode from the reference run looks like this:
+An episode from the reference run is shown below. The prompt is reproduced in full; the response is abridged.
 
 ```text
-Question:
-Let r_1, r_2, ..., r_47 be the roots of x^47 - 1 = 0. Compute
-the sum of r_i^2020 over all 47 roots.
+Prompt:
+Solve the following math problem step by step. The last line of your response
+should be of the form Answer: $Answer (without quotes) where $Answer is the
+answer to the problem.
+
+Let $r_1, r_2, \ldots, r_{47}$ be the roots of $x^{47} - 1 = 0$. Compute
+\( \sum_{i=1}^{47} r_i^{2020} \).
+
+Remember to put your answer on its own line after "Answer:".
 
 Response:
 The roots are the 47th roots of unity. Since 2020 is congruent to -1
@@ -33,7 +39,7 @@ Reward: 1
 
 Training uses the 12,643-row [filtered DAPO-Math dataset](https://huggingface.co/datasets/hamishivi/DAPO-Math-17k-Processed_filtered). Each row contains one user prompt and its verifiable final answer.
 
-Validation uses all 30 problems from [AIME 2025](https://huggingface.co/datasets/opencompass/AIME2025). The same single-turn environment and Math-Verify reward are used for training and validation.
+Validation uses all 30 problems from [AIME 2025](https://huggingface.co/datasets/opencompass/AIME2025). Validation does not shuffle, and each pass consumes exactly 30 rows, so the pre- and post-training evaluations use the same problems in the same order. The same single-turn environment and Math-Verify reward are used for training and validation.
 
 ## Reference configurations
 

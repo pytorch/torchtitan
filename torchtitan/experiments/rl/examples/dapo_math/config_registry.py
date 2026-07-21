@@ -45,7 +45,7 @@ def _qwen3_4b_dapo_math_config(
     max_total_tokens: int,
     dump_folder: str,
 ) -> Controller.Config:
-    """Build a single-node DAPO-Math recipe for one response budget."""
+    """Build the shared Qwen3-4B DAPO-Math configuration."""
     return Controller.Config(
         model_spec=model_registry(
             "4B",
@@ -60,6 +60,7 @@ def _qwen3_4b_dapo_math_config(
             num_groups_per_train_step=8,
             group_size=16,
             max_offpolicy_steps=4,
+            # AIME 2025 has 30 rows, so both validation passes cover the full set.
             validation=ValidationConfig(num_samples=30),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=max_total_tokens),
