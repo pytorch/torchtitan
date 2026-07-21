@@ -76,7 +76,7 @@ def _minimal_async_ep_moe_fqns(config: "GraphTrainer.Config") -> set[str]:
         moe_cfg = getattr(layer_cfg, "moe", None)
         if moe_cfg is None:
             continue
-        token_dispatcher = moe_cfg.experts.token_dispatcher
+        token_dispatcher = moe_cfg.routed_experts.token_dispatcher
         if isinstance(token_dispatcher, MinimalAsyncEPTokenDispatcher.Config):
             fqn_set.add(f"layers.{layer_id}.moe")
     return fqn_set
