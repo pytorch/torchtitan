@@ -68,6 +68,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     enable_xpugraph: bool = False
     """Whether to apply XPUGraph capture on XPU"""
 
+    enable_cudagraph: bool = False
+    """Whether to apply CUDAGraph capture."""
+
     mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:

@@ -25,7 +25,15 @@ _CP_DISABLED = True
 _FLEX_CP_INDUCTOR_DISABLED = True
 
 
-def _build_llama3_tests() -> list[OverrideDefinitions]:
+def _graph_capture_args(gpu_arch_type: str) -> list[str]:
+    """Return the explicit graph-capture option for the accelerator."""
+    if gpu_arch_type == "cuda":
+        return ["--compile.enable_cudagraph"]
+    if gpu_arch_type == "xpu":
+        return ["--compile.enable_xpugraph"]
+    return []
+
+def _build_llama3_tests(gpu_arch_type: str = "cuda",) -> list[OverrideDefinitions]:
     """Llama3-based integration tests (run on default A10 machines)."""
     return [
         # === JIT mode tests ===
@@ -219,6 +227,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
+                    *_graph_capture_args(gpu_arch_type),
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
