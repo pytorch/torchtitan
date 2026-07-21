@@ -260,9 +260,6 @@ class CompileConfig:
 
     backend: str = "inductor"
 
-    enable_cudagraph: bool = False
-    """Whether to apply CUDAGraph capture."""
-
 @dataclass(kw_only=True, slots=True)
 class CommConfig:
     init_timeout_seconds: int = 300
