@@ -85,16 +85,7 @@ Use `rl_dapo_qwen3_4b_math_32k` as the config name to run the 32K variant.
 
 ## 150-step reference result
 
-The single-node trial completed optimizer steps 0 through 149 in 1 hour 46 minutes. This trial used an earlier 7,168-token response limit and 9,216-token packing length; the 8K configuration above uses the intended 8,192-token response budget.
-
-```text
-metric                              first 10 steps    last 10 steps
-rollout reward, mean                0.067             0.401
-rollout total length, mean          988 tokens        3,284 tokens
-rollout truncation rate, mean       1.75%             14.55%
-```
-
-The final recorded step had mean reward `0.302`, mean total length `3,999`, and truncation rate `18.75%`. The maximum observed mean reward was `0.632`; the maximum per-step truncation rate was `30.73%`. Initial AIME validation scored `0/30` before training.
+TODO: add eval results. Add 32k variant.
 
 ![Qwen3-4B DAPO Math-Verify reward](./assets/qwen3_4b_7k_reward.png)
 
