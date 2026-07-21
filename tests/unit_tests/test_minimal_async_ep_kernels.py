@@ -7,6 +7,7 @@
 import operator
 import os
 import unittest
+from contextlib import ExitStack
 from unittest.mock import patch
 
 import torch
@@ -49,10 +50,15 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
             num_valid,
             expert_to_token,
             token_to_expert,
-            _tokens_per_expert,
+            tokens_per_expert,
         ) = minimal_async_ep_api.dispatch_op(x, expert_ids, counts, 16, 2)
-        hidden = minimal_async_ep_api.wait_dispatch_op(hidden, [x])
-        expert_output = hidden * 2
+        hidden, tokens_per_expert = minimal_async_ep_api.wait_dispatch_op(
+            hidden,
+            tokens_per_expert,
+            [x, expert_ids, counts],
+        )
+        expert_offsets = torch.cumsum(tokens_per_expert, 0)
+        expert_output = hidden * 2 + expert_offsets[-1] * 0
         routed = minimal_async_ep_api.combine_op(
             expert_output,
             dispatch_ranks,
@@ -97,22 +103,64 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
         for user in dispatch.users
         if user.target is operator.getitem and user.args[1] == 0
     )
+    dispatch_counts = next(
+        user
+        for user in dispatch.users
+        if user.target is operator.getitem and user.args[1] == 8
+    )
+    dispatch_ranks = next(
+        user
+        for user in dispatch.users
+        if user.target is operator.getitem and user.args[1] == 1
+    )
+    wait_hidden = next(
+        user
+        for user in wait_dispatch.users
+        if user.target is operator.getitem and user.args[1] == 0
+    )
+    wait_counts = next(
+        user
+        for user in wait_dispatch.users
+        if user.target is operator.getitem and user.args[1] == 1
+    )
+    counts_cumsum = one(torch.ops.aten.cumsum.default)
 
-    assert wait_dispatch.args == (dispatch_hidden, [dispatch.args[0]])
+    def depends_on(node, dependency):
+        return dependency in node.all_input_nodes or any(
+            depends_on(input_node, dependency) for input_node in node.all_input_nodes
+        )
+
+    assert wait_dispatch.args == (
+        dispatch_hidden,
+        dispatch_counts,
+        [dispatch.args[0], dispatch.args[1], dispatch.args[2]],
+    )
     assert list(dispatch_hidden.users) == [wait_dispatch]
+    assert list(dispatch_counts.users) == [wait_dispatch]
+    assert depends_on(counts_cumsum, wait_counts)
+    assert wait_dispatch not in dispatch_ranks.users
+    assert wait_hidden not in dispatch.users
     assert wait_combine.args[0] is combine
     assert wait_combine.args[1][0] is combine.args[0]
     assert list(combine.users) == [wait_combine]
 
 
 def test_minimal_async_ep_wait_schemas_are_nonmutating_aliases():
-    for op in (
-        torch.ops.minimal_async_ep.wait_dispatch.default,
-        torch.ops.minimal_async_ep.wait_combine.default,
-    ):
-        schema = str(op._schema)
-        assert "Tensor(a) pending" in schema
-        assert "Tensor(a!)" not in schema
+    dispatch_schema = str(torch.ops.minimal_async_ep.wait_dispatch.default._schema)
+    assert "Tensor(a) pending" in dispatch_schema
+    assert "Tensor(b) pending_counts" in dispatch_schema
+    assert "-> (Tensor(a), Tensor(b))" in dispatch_schema
+
+    dispatch_data_schema = str(
+        torch.ops.minimal_async_ep.wait_dispatch_data.default._schema
+    )
+    assert "Tensor(a) pending" in dispatch_data_schema
+    assert "-> Tensor(a)" in dispatch_data_schema
+
+    combine_schema = str(torch.ops.minimal_async_ep.wait_combine.default._schema)
+    assert "Tensor(a) pending" in combine_schema
+    assert "-> Tensor(a)" in combine_schema
+    assert "Tensor(a!)" not in dispatch_schema + combine_schema
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -150,11 +198,15 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                     num_valid,
                     expert_to_token,
                     token_to_expert,
-                    _tokens_per_expert,
+                    tokens_per_expert,
                 ) = minimal_async_ep_api.dispatch_op(
                     chunk_x, chunk_ids, counts, 8, 2, buffer_set
                 )
-                hidden = minimal_async_ep_api.wait_dispatch_op(hidden, [chunk_x])
+                hidden, tokens_per_expert = minimal_async_ep_api.wait_dispatch_op(
+                    hidden,
+                    tokens_per_expert,
+                    [chunk_x, chunk_ids, counts],
+                )
                 expert_output = hidden * 1.25
                 routed = minimal_async_ep_api.combine_op(
                     expert_output,
@@ -209,9 +261,46 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
 
             actual_x = x.clone().requires_grad_()
             actual_scores = scores.clone().requires_grad_()
-            actual, buffer_ptrs = run_exchange(actual_x, actual_scores, expert_ids)
-            actual_grads = torch.autograd.grad(
-                actual.square().sum(), (actual_x, actual_scores)
+            launch_streams = []
+
+            def record_launch(name, fn):
+                def wrapped(*args, **kwargs):
+                    launch_streams.append(
+                        (name, torch.cuda.current_stream().cuda_stream)
+                    )
+                    return fn(*args, **kwargs)
+
+                return wrapped
+
+            launch_functions = (
+                "copy_full_counts_to_peers_kernel",
+                "fill_dispatch_metadata_kernel",
+                "fill_combine_metadata_kernel",
+                "invert_flat_indices_kernel",
+                "copy_rows_to_peers_kernel",
+                "_wait_ready",
+            )
+            with ExitStack() as stack:
+                for name in launch_functions:
+                    fn = getattr(minimal_async_ep_api, name)
+                    stack.enter_context(
+                        patch.object(
+                            minimal_async_ep_api,
+                            name,
+                            side_effect=record_launch(name, fn),
+                        )
+                    )
+                actual, buffer_ptrs = run_exchange(actual_x, actual_scores, expert_ids)
+                actual_grads = torch.autograd.grad(
+                    actual.square().sum(), (actual_x, actual_scores)
+                )
+
+            buffer_state = minimal_async_ep_api._buffer_state
+            assert buffer_state is not None
+            comm_stream = buffer_state.comm_stream.cuda_stream
+            self.assertEqual({stream for _, stream in launch_streams}, {comm_stream})
+            self.assertEqual(
+                {name for name, _ in launch_streams}, set(launch_functions)
             )
 
             ref_x = x.clone().requires_grad_()
@@ -236,23 +325,39 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 dist.destroy_process_group()
 
     def test_wait_ops_compile_with_inductor(self):
-        for wait_op in (
-            minimal_async_ep_api.wait_dispatch_op,
-            minimal_async_ep_api.wait_combine_op,
-        ):
-            with self.subTest(wait_op=wait_op):
+        def dispatch_fn(x):
+            pending = x * 2
+            counts = x * 3
+            pending, counts = minimal_async_ep_api.wait_dispatch_op(
+                pending, counts, [x]
+            )
+            return pending.sin() + counts.cos()
 
-                def fn(x):
-                    pending = x * 2
-                    return wait_op(pending, [x]).sin()
+        def dispatch_data_fn(x):
+            pending = minimal_async_ep_api._wait_dispatch_data_op(x * 2, [x])
+            return pending.sin()
 
+        def combine_fn(x):
+            pending = minimal_async_ep_api.wait_combine_op(x * 2, [x])
+            return pending.sin()
+
+        cases = (
+            (
+                dispatch_fn,
+                lambda x: (x * 2).sin() + (x * 3).cos(),
+                lambda x: 2 * (x * 2).cos() - 3 * (x * 3).sin(),
+            ),
+            (dispatch_data_fn, lambda x: (x * 2).sin(), lambda x: 2 * (x * 2).cos()),
+            (combine_fn, lambda x: (x * 2).sin(), lambda x: 2 * (x * 2).cos()),
+        )
+        for fn, expected_fn, expected_grad_fn in cases:
+            with self.subTest(fn=fn):
                 x = torch.randn(16, device="cuda", requires_grad=True)
                 with patch.object(minimal_async_ep_api, "_wait_pending_event"):
                     actual = torch.compile(fn, backend="inductor", fullgraph=True)(x)
-                expected = (x * 2).sin()
-                torch.testing.assert_close(actual, expected)
+                torch.testing.assert_close(actual, expected_fn(x))
                 actual.sum().backward()
-                torch.testing.assert_close(x.grad, 2 * (x * 2).cos())
+                torch.testing.assert_close(x.grad, expected_grad_fn(x))
 
     def test_topk_index_kernels_match_reference(self):
         flat_indices = torch.tensor([2, 0, 3, 1], device="cuda", dtype=torch.int64)

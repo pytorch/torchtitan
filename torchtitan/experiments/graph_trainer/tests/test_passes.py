@@ -1482,7 +1482,7 @@ class TestApplySACPass(TestCase):
                     layers=[
                         SimpleNamespace(
                             moe=SimpleNamespace(
-                                experts=SimpleNamespace(
+                                routed_experts=SimpleNamespace(
                                     token_dispatcher=(
                                         MinimalAsyncEPTokenDispatcher.Config(
                                             num_experts=2,
@@ -4194,12 +4194,20 @@ class TestChunkPasses(TestCase):
                 operator.getitem,
                 args=(dispatch, 0),
             )
+            dispatch_counts = graph.call_function(
+                operator.getitem,
+                args=(dispatch, 8),
+            )
             dispatch_wait = graph.call_function(
                 ops.wait_dispatch.default,
-                args=(dispatch_hidden, [pre]),
+                args=(dispatch_hidden, dispatch_counts, [pre, ranks, rows]),
+            )
+            dispatch_wait_hidden = graph.call_function(
+                operator.getitem,
+                args=(dispatch_wait, 0),
             )
             compute = graph.call_function(
-                torch.ops.aten.neg.default, args=(dispatch_wait,)
+                torch.ops.aten.neg.default, args=(dispatch_wait_hidden,)
             )
             combine = graph.call_function(
                 ops.combine_data.default,
@@ -4215,14 +4223,23 @@ class TestChunkPasses(TestCase):
             refs[chunk_id] = {
                 "dispatch": dispatch,
                 "dispatch_hidden": dispatch_hidden,
+                "dispatch_counts": dispatch_counts,
                 "dispatch_wait": dispatch_wait,
+                "dispatch_wait_hidden": dispatch_wait_hidden,
                 "compute": compute,
                 "combine": combine,
                 "combine_wait": combine_wait,
                 "tail": tail,
             }
 
-            for node in (pre, dispatch, dispatch_hidden, dispatch_wait):
+            for node in (
+                pre,
+                dispatch,
+                dispatch_hidden,
+                dispatch_counts,
+                dispatch_wait,
+                dispatch_wait_hidden,
+            ):
                 self._mark_chunk_body(
                     node,
                     chunk_id=chunk_id,

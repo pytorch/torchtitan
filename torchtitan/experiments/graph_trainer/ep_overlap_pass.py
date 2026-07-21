@@ -84,8 +84,8 @@ from torchtitan.tools.logging import logger
 
 _GRAPH_BOUNDARY_OPS = {"placeholder", "get_attr"}
 _MINIMAL_ASYNC_EP_WAITS = {
-    "dispatch": "wait_dispatch",
-    "combine": "wait_combine",
+    "dispatch": frozenset({"wait_dispatch", "wait_dispatch_data"}),
+    "combine": frozenset({"wait_combine"}),
 }
 
 
@@ -126,14 +126,15 @@ def _minimal_async_ep_op_name(node: fx.Node) -> str | None:
 
 
 def _is_minimal_async_ep_wait(node: fx.Node) -> bool:
-    return _minimal_async_ep_op_name(node) in _MINIMAL_ASYNC_EP_WAITS.values()
+    name = _minimal_async_ep_op_name(node)
+    return any(name in waits for waits in _MINIMAL_ASYNC_EP_WAITS.values())
 
 
 def _is_matching_minimal_async_ep_wait(wait: fx.Node, launch: fx.Node) -> bool:
     phase = ep_token_exchange_launch_phase(launch)
-    return phase is not None and _minimal_async_ep_op_name(
-        wait
-    ) == _MINIMAL_ASYNC_EP_WAITS.get(phase)
+    return phase is not None and _minimal_async_ep_op_name(wait) in (
+        _MINIMAL_ASYNC_EP_WAITS.get(phase) or ()
+    )
 
 
 def _token_exchange_launch_for_wait(node: fx.Node) -> fx.Node | None:

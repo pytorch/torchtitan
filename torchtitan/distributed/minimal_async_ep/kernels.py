@@ -436,16 +436,20 @@ def fill_dispatch_metadata_kernel(
     num_routed_tokens: int,
     num_local_experts: int,
     max_tokens_per_segment: int,
+    dst_ranks: torch.Tensor | None = None,
+    dst_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     counts = counts.contiguous()
     local_dest_offsets = local_dest_offsets.contiguous()
     local_count_starts = local_count_starts.contiguous()
-    dst_ranks = torch.empty(
-        num_routed_tokens,
-        device=counts.device,
-        dtype=torch.int64,
-    )
-    dst_rows = torch.empty_like(dst_ranks)
+    if dst_ranks is None:
+        dst_ranks = torch.empty(
+            num_routed_tokens,
+            device=counts.device,
+            dtype=torch.int64,
+        )
+    if dst_rows is None:
+        dst_rows = torch.empty_like(dst_ranks)
     block_size = _METADATA_BLOCK_SIZE
     grid = (
         counts.numel(),
@@ -475,16 +479,23 @@ def fill_combine_metadata_kernel(
     num_local_experts: int,
     receive_capacity: int,
     max_tokens_per_segment: int,
+    dst_ranks: torch.Tensor | None = None,
+    dst_rows: torch.Tensor | None = None,
+    num_valid_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     segment_lens = segment_lens.contiguous()
     output_starts = output_starts.contiguous()
     source_input_starts = source_input_starts.contiguous()
-    dst_ranks = torch.empty(
-        receive_capacity,
-        device=segment_lens.device,
-        dtype=torch.int64,
-    )
-    dst_rows = torch.empty_like(dst_ranks)
+    if dst_ranks is None:
+        dst_ranks = torch.empty(
+            receive_capacity,
+            device=segment_lens.device,
+            dtype=torch.int64,
+        )
+    if dst_rows is None:
+        dst_rows = torch.empty_like(dst_ranks)
+    if num_valid_rows is None:
+        num_valid_rows = torch.empty(1, device=segment_lens.device, dtype=torch.int64)
     block_size = _METADATA_BLOCK_SIZE
     grid = (
         segment_lens.numel(),
@@ -503,19 +514,17 @@ def fill_combine_metadata_kernel(
         BLOCK_SIZE=block_size,
         num_warps=4,
     )
-    return (
-        dst_ranks,
-        dst_rows,
-        (output_starts[-1:] + segment_lens[-1:]).to(torch.int64),
-    )
+    torch.add(output_starts[-1:], segment_lens[-1:], out=num_valid_rows)
+    return dst_ranks, dst_rows, num_valid_rows
 
 
 def invert_flat_indices_kernel(
     flat_indices: torch.Tensor,
     *,
     num_rows: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    slot_to_row = flat_indices.new_empty(num_rows)
+    slot_to_row = flat_indices.new_empty(num_rows) if out is None else out
 
     block_size = _COUNT_COPY_BLOCK_SIZE
     _invert_flat_indices_kernel[(triton.cdiv(num_rows, block_size),)](
