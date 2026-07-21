@@ -39,7 +39,7 @@ Reward: 1
 
 Training uses the 12,643-row [filtered DAPO-Math dataset](https://huggingface.co/datasets/hamishivi/DAPO-Math-17k-Processed_filtered). Each row contains one user prompt and its verifiable final answer.
 
-Validation uses all 30 problems from [AIME 2025](https://huggingface.co/datasets/opencompass/AIME2025). Validation does not shuffle, and each pass consumes exactly 30 rows, so the pre- and post-training evaluations use the same problems in the same order. The same single-turn environment and Math-Verify reward are used for training and validation.
+Validation uses all 30 problems from [AIME 2025](https://huggingface.co/datasets/opencompass/AIME2025). The same single-turn environment and Math-Verify reward are used for training and validation.
 
 ## Reference configurations
 
@@ -67,9 +67,11 @@ Both configurations use a constant learning rate of `1e-6`, DAPO clipping of `[0
 
 ## Setup
 
-Follow the [RL environment setup](../../README.md), then download the base checkpoint:
+Follow the [RL environment setup](../../README.md), install this recipe's verifier, and download the base checkpoint:
 
 ```bash
+pip install -r torchtitan/experiments/rl/examples/dapo_math/requirements.txt
+
 python scripts/download_hf_assets.py \
   --repo_id Qwen/Qwen3-4B-Base \
   --local_dir torchtitan/experiments/rl/example_checkpoint \
@@ -92,6 +94,8 @@ Use `rl_dapo_qwen3_4b_math_32k` as the config name to run the 32K variant.
 ## 150-step reference result
 
 TODO: add eval results. Add 32k variant.
+
+The plots below were generated on July 20, 2026 from commit [`fec3e196`](https://github.com/felipemello1/torchtitan/commit/fec3e196a4ceb87bfc87fb4f1a36a538d7e98ee4).
 
 ![Qwen3-4B DAPO Math-Verify reward](./assets/qwen3_4b_7k_reward.png)
 
