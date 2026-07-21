@@ -13,6 +13,11 @@ backend the context selected:
   * ``"p2p"`` -- portable ``batch_isend_irecv`` baseline. Fallback (AMD / no-GIN
     / no-CuTeDSL / pre-Hopper).
 
+The ``"gin"`` inter-node backend is auto-selected for capable multi-node CP
+groups but is not yet wired into this differentiable API (the gin_kernel is
+driven directly for now); ``selective_gather`` warns and falls back to ``"p2p"``
+for a ``"gin"`` context -- correct over an inter-node group, just slower.
+
 The backend is chosen once at ``SelectiveGatherContext`` construction (see
 ``backend.select_backend`` for the capability check); callers do not pick it.
 Backend-specific modules (CuTeDSL / nccl4py for LSA) are imported lazily inside
@@ -27,6 +32,8 @@ Usage (set up once when the plan is known, then call every forward)::
 
 One tensor (K or V) per call; gather K and V with separate contexts.
 """
+
+import warnings
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -127,5 +134,17 @@ def selective_gather(kv_local, sg_ctx, meta):
             "backwards read that whole output region, so a plan built with "
             "include_own=False measures transport only and has no gradient."
         )
-    fn = _LSAGatherFn if sg_ctx.backend == "lsa" else _P2PGatherFn
+    backend = sg_ctx.backend
+    if backend == "gin":
+        # GIN is not yet wired into the differentiable API (gin_kernel is driven
+        # directly for now). Don't silently run a different transport: warn and
+        # fall back to p2p, which is correct on an inter-node group too.
+        warnings.warn(
+            "selective_gather: the 'gin' backend is not yet wired into the "
+            "autograd API; falling back to 'p2p' (correct but slower "
+            "inter-node). Drive gin_kernel directly for the GIN path.",
+            stacklevel=2,
+        )
+        backend = "p2p"
+    fn = _LSAGatherFn if backend == "lsa" else _P2PGatherFn
     return fn.apply(kv_local, sg_ctx, meta)
