@@ -1,24 +1,63 @@
-# Qwen3-4B-Base on DAPO-Math
+# DAPO Math
 
-This example trains Qwen3-4B-Base on verifiable math problems using DAPO loss. It fits one eight-GPU node by assigning two GPUs to the trainer and one GPU to each of six independent generators.
+[DAPO-Math-17k](https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k) is the verifiable math dataset released with [DAPO](https://arxiv.org/abs/2503.14476). This environment trains Qwen3-4B-Base with DAPO loss on a filtered version of that dataset.
 
-## Configuration
+## Environment
+
+Each episode is single-turn:
 
 ```text
-model:             Qwen3-4B-Base
-trainer:           TP=2, fp32 language-model head
-generators:        6 replicas, TP=1
-rollouts:          8 prompts x 16 completions per optimizer step
-prompt budget:     2,048 tokens
-response budget:   8,192 tokens
-packing length:    10,240 tokens
-off-policy limit:  4 trainer versions
-learning rate:     1e-6, constant
+user math problem -> one assistant solution -> binary Math-Verify reward
 ```
 
-Training uses the 12,643-row [filtered DAPO-Math dataset](https://huggingface.co/datasets/hamishivi/DAPO-Math-17k-Processed_filtered). Validation uses all 30 problems from [AIME 2025](https://huggingface.co/datasets/opencompass/AIME2025). Math-Verify assigns a binary reward from the final `Answer:` expression.
+The prompt asks for step-by-step reasoning followed by a final `Answer:` expression. [Math-Verify](https://github.com/huggingface/Math-Verify) parses that expression and assigns a reward of one when it is mathematically equivalent to the reference answer, or zero otherwise.
 
-The default configuration runs 1,000 optimizer steps, or 128,000 sampled completions. `max_offpolicy_steps=4` bounds policy lag and permits 40 prompt groups in the active rollout buffer.
+An abridged episode from the reference run looks like this:
+
+```text
+Question:
+Let r_1, r_2, ..., r_47 be the roots of x^47 - 1 = 0. Compute
+the sum of r_i^2020 over all 47 roots.
+
+Response:
+The roots are the 47th roots of unity. Since 2020 is congruent to -1
+modulo 47, raising every root to the 2020th power permutes the roots.
+Their sum is therefore zero.
+
+Answer: \boxed{0}
+
+Reward: 1
+```
+
+## Datasets
+
+Training uses the 12,643-row [filtered DAPO-Math dataset](https://huggingface.co/datasets/hamishivi/DAPO-Math-17k-Processed_filtered). Each row contains one user prompt and its verifiable final answer.
+
+Validation uses all 30 problems from [AIME 2025](https://huggingface.co/datasets/opencompass/AIME2025). The same single-turn environment and Math-Verify reward are used for training and validation.
+
+## Reference configurations
+
+Both configurations run 150 optimizer steps on one eight-GPU node. One TP=2 trainer uses two GPUs, and six independent TP=1 generators use the remaining GPUs. Each optimizer step consumes 8 prompt groups with 16 completions per group. `max_offpolicy_steps=4` bounds policy lag.
+
+The 8K configuration is the default reference recipe:
+
+```text
+config:             rl_dapo_qwen3_4b_math_8k
+prompt budget:      2,048 tokens
+response budget:    8,192 tokens
+packing length:     10,240 tokens
+```
+
+The 32K configuration extends the response and packing budgets while keeping the same model, optimizer, and GPU topology:
+
+```text
+config:             rl_dapo_qwen3_4b_math_32k
+prompt budget:      2,048 tokens
+response budget:    32,768 tokens
+packing length:     34,816 tokens
+```
+
+Both configurations use a constant learning rate of `1e-6`, DAPO clipping of `[0.2, 0.28]`, and an fp32 language-model head with a bf16 model forward. The 32K configuration has not been benchmarked.
 
 ## Setup
 
@@ -33,31 +72,20 @@ python scripts/download_hf_assets.py \
 
 ## Run
 
-The launcher uses the TP=2 trainer configuration and defaults to 150 steps:
-
-```bash
-./torchtitan/experiments/rl/examples/dapo_math/run_train.sh
-```
-
-Override the duration or output directory with environment variables:
-
-```bash
-TRAINING_STEPS=10 \
-DUMP_FOLDER=outputs/rl/qwen3_4b_dapo_math_smoke \
-./torchtitan/experiments/rl/examples/dapo_math/run_train.sh
-```
-
-The replicated DP=2 trainer configuration is also available:
+Run the 150-step 8K reference configuration from the repository root. CLI arguments override fields from the config registry; this example selects an explicit output directory:
 
 ```bash
 python -m torchtitan.experiments.rl.train \
   --module dapo_math \
-  --config rl_dapo_qwen3_4b_math_8k
+  --config rl_dapo_qwen3_4b_math_8k \
+  --dump-folder outputs/rl/qwen3_4b_dapo_math_8k_150
 ```
 
-## 150-step result
+Use `rl_dapo_qwen3_4b_math_32k` as the config name to run the 32K variant.
 
-The single-node TP=2 trial completed optimizer steps 0 through 149 in 1 hour 46 minutes. This trial used the earlier 7,168-token response and 9,216-token packing limits; the runnable configuration above restores the full 8,192-token response budget.
+## 150-step reference result
+
+The single-node trial completed optimizer steps 0 through 149 in 1 hour 46 minutes. This trial used an earlier 7,168-token response limit and 9,216-token packing length; the 8K configuration above uses the intended 8,192-token response budget.
 
 ```text
 metric                              first 10 steps    last 10 steps

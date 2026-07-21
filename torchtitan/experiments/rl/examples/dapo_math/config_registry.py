@@ -25,6 +25,7 @@ from torchtitan.experiments.rl.controller import (
     Controller,
     ValidationConfig,
 )
+from torchtitan.experiments.rl.environment import TokenEnv
 from torchtitan.experiments.rl.examples.dapo_math.rollouter import DapoMathRollouter
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
@@ -38,13 +39,13 @@ from torchtitan.experiments.rl.routing.strategies import LeastLoadedRoutingStrat
 from torchtitan.models.qwen3 import model_registry
 
 
-_NUM_TRAINING_STEPS = 1000
-
-
-def _qwen3_4b_dapo_math_8k_config(
-    *, trainer_parallelism: ParallelismConfig
+def _qwen3_4b_dapo_math_config(
+    *,
+    max_response_tokens: int,
+    max_total_tokens: int,
+    dump_folder: str,
 ) -> Controller.Config:
-    """Build the 8K DAPO-Math recipe for one trainer parallelism layout."""
+    """Build a single-node DAPO-Math recipe for one response budget."""
     return Controller.Config(
         model_spec=model_registry(
             "4B",
@@ -53,21 +54,24 @@ def _qwen3_4b_dapo_math_8k_config(
             converters=[LMHeadCastConverter.Config()],
         ),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-4B-Base",
-        dump_folder="outputs/rl/qwen3_4b_dapo_math_8k",
+        dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
-            num_training_steps=_NUM_TRAINING_STEPS,
+            num_training_steps=150,
             num_groups_per_train_step=8,
             group_size=16,
-            # Four versions of policy lag plus the current version allow 40 active groups.
             max_offpolicy_steps=4,
             validation=ValidationConfig(num_samples=30),
             batcher=Batcher.Config(
-                # The dataset is filtered to 2K prompts; generation contributes up to 8K.
-                batch=BatchConfig(local_batch_size=1, seq_len=10240),
+                batch=BatchConfig(local_batch_size=1, seq_len=max_total_tokens),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        rollouter=DapoMathRollouter.Config(),
+        rollouter=DapoMathRollouter.Config(
+            token_env=TokenEnv.Config(
+                max_rollout_tokens=max_total_tokens,
+                max_num_turns=1,
+            )
+        ),
         renderer=RendererConfig(name="qwen3", enable_thinking=True),
         num_generators=6,
         generator_router=InterGeneratorRouter.Config(
@@ -88,14 +92,17 @@ def _qwen3_4b_dapo_math_8k_config(
                 betas=(0.9, 0.98),
                 weight_decay=0.1,
             ),
+            # A minimum factor of 1 keeps the learning rate constant.
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=0,
-                total_steps=_NUM_TRAINING_STEPS,
-                decay_type="linear",
                 min_lr_factor=1.0,
             ),
             training=TrainingConfig(),
-            parallelism=trainer_parallelism,
+            parallelism=ParallelismConfig(
+                data_parallel_replicate_degree=1,
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+            ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
                 initial_load_in_hf=True,
@@ -122,29 +129,25 @@ def _qwen3_4b_dapo_math_8k_config(
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=1.0,
-                max_tokens=8192,
+                max_tokens=max_response_tokens,
             ),
         ),
     )
 
 
 def rl_dapo_qwen3_4b_math_8k() -> Controller.Config:
-    """Use two replicated trainer ranks and six single-GPU generators."""
-    return _qwen3_4b_dapo_math_8k_config(
-        trainer_parallelism=ParallelismConfig(
-            data_parallel_replicate_degree=2,
-            data_parallel_shard_degree=1,
-            tensor_parallel_degree=1,
-        )
+    """Run 8K responses on one node: one TP=2 trainer and six TP=1 generators."""
+    return _qwen3_4b_dapo_math_config(
+        max_response_tokens=8192,
+        max_total_tokens=10240,
+        dump_folder="outputs/rl/qwen3_4b_dapo_math_8k",
     )
 
 
-def rl_dapo_qwen3_4b_math_8k_tp2() -> Controller.Config:
-    """Use one TP=2 trainer mesh and six single-GPU generators."""
-    return _qwen3_4b_dapo_math_8k_config(
-        trainer_parallelism=ParallelismConfig(
-            data_parallel_replicate_degree=1,
-            data_parallel_shard_degree=1,
-            tensor_parallel_degree=2,
-        )
+def rl_dapo_qwen3_4b_math_32k() -> Controller.Config:
+    """Run 32K responses on one node: one TP=2 trainer and six TP=1 generators."""
+    return _qwen3_4b_dapo_math_config(
+        max_response_tokens=32768,
+        max_total_tokens=34816,
+        dump_folder="outputs/rl/qwen3_4b_dapo_math_32k",
     )

@@ -21,7 +21,11 @@ from torchtitan.experiments.rl.rubrics import Rubric
 
 
 class DapoMathRollouter(Rollouter):
-    """Provides DAPO-Math training with AIME 2025 validation and math rewards."""
+    """Single-turn math reasoning with a binary Math-Verify reward.
+
+    Each sample produces one assistant solution; training uses DAPO-Math and
+    validation uses AIME 2025.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rollouter.Config):

@@ -16,6 +16,7 @@ from torchtitan.experiments.rl.rollout import Rollout
 from torchtitan.experiments.rl.rubrics import RewardFn
 
 
+# Require an `Answer:` or `\boxed{}` marker so intermediate math is ignored.
 _FINAL_ANSWER_EXTRACTION = [
     LatexExtractionConfig(
         normalization_config=LatexNormalizationConfig(units=True),

@@ -32,8 +32,10 @@ class DapoMathSample:
     ground_truth: str
 
 
-class _ShuffledMathDataset(Configurable):
-    """Provides math problems in shuffled row order."""
+# TODO: Share this cycling iterator with other RL datasets instead of keeping
+# per-environment implementations.
+class _CyclingDataset(Configurable):
+    """Provides an endless, resumable stream over a finite sample list."""
 
     def __init__(
         self,
@@ -57,6 +59,8 @@ class _ShuffledMathDataset(Configurable):
 
     def __next__(self) -> DapoMathSample:
         if self._position == len(self._order):
+            # Rollout production consumes an endless stream; crossing the dataset
+            # boundary starts a new epoch. Training reshuffles; validation does not.
             if self._shuffle:
                 self._rng.shuffle(self._order)
             self._position = 0
@@ -79,7 +83,7 @@ class _ShuffledMathDataset(Configurable):
         self._position = state_dict["position"]
 
 
-class DapoMathDataset(_ShuffledMathDataset):
+class DapoMathDataset(_CyclingDataset):
     """Provides filtered DAPO-Math problems in the original `Answer:` format."""
 
     @dataclass(kw_only=True, slots=True)
@@ -105,7 +109,7 @@ class DapoMathDataset(_ShuffledMathDataset):
         super().__init__(samples, seed=config.seed, shuffle=config.shuffle)
 
 
-class AIME2025Dataset(_ShuffledMathDataset):
+class AIME2025Dataset(_CyclingDataset):
     """Provides AIME 2025 I+II problems using the DAPO answer format."""
 
     @dataclass(kw_only=True, slots=True)
