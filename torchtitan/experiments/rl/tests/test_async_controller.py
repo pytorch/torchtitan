@@ -16,7 +16,6 @@ from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
-from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.controller_metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
@@ -156,42 +155,6 @@ def test_rollout_id_to_string_is_callable_and_uses_int_group_id() -> None:
     rollout_id = RolloutTurnID(group_id=5, rollout_id=2, turn_id=0)
     assert rollout_id.to_string() == "group=5/rollout=2/turn=0"
     assert rollout_id.to_string(include_turn=False) == "group=5/rollout=2"
-
-
-def test_validation_reuses_the_initial_held_out_samples() -> None:
-    class ValidationRollouter:
-        def __init__(self) -> None:
-            self.next_sample = 0
-            self.seen_samples: list[int] = []
-
-        def get_validation_sample(self) -> int:
-            sample = self.next_sample
-            self.next_sample += 1
-            return sample
-
-        async def run_group_rollouts(self, *, sample: int, group_id: int, **kwargs):
-            self.seen_samples.append(sample)
-            return RolloutGroup(group_id=group_id, rollouts=[])
-
-    async def run() -> None:
-        rollouter = ValidationRollouter()
-        controller = Controller.__new__(Controller)
-        controller._rollouter = rollouter
-        controller._validation_samples = None
-        controller.renderer = object()
-        controller._make_generate_fn = lambda metrics_prefix: object()
-
-        for step in range(2):
-            await controller._collect_validation_rollouts(
-                num_groups=2,
-                sampling=object(),
-                step=step,
-            )
-
-        assert rollouter.next_sample == 2
-        assert rollouter.seen_samples == [0, 1, 0, 1]
-
-    asyncio.run(run())
 
 
 def test_take_finalized_does_not_release_active_slot() -> None:

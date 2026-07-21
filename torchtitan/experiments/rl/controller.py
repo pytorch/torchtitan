@@ -374,7 +374,6 @@ class Controller(Configurable):
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
         # Until then, reach into the renderer's tokenizer for the pad id (eos doubles as pad).
         self._rollouter: Rollouter = config.rollouter.build()
-        self._validation_samples: list[object] | None = None
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
         )
@@ -607,13 +606,8 @@ class Controller(Configurable):
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
-        if self._validation_samples is None:
-            # Reuse the same held-out subset for every validation pass.
-            self._validation_samples = [
-                self._rollouter.get_validation_sample() for _ in range(num_groups)
-            ]
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
-        samples = self._validation_samples
+        samples = [self._rollouter.get_validation_sample() for _ in range(num_groups)]
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(

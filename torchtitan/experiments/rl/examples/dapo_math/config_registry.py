@@ -26,6 +26,7 @@ from torchtitan.experiments.rl.controller import (
     ValidationConfig,
 )
 from torchtitan.experiments.rl.environment import TokenEnv
+from torchtitan.experiments.rl.examples.dapo_math.data import AIME2025Dataset
 from torchtitan.experiments.rl.examples.dapo_math.rollouter import DapoMathRollouter
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
@@ -46,6 +47,10 @@ def _qwen3_4b_dapo_math_config(
     dump_folder: str,
 ) -> Controller.Config:
     """Build the shared Qwen3-4B DAPO-Math configuration."""
+    num_validation_samples = 30
+    validation_dataset = AIME2025Dataset.Config(
+        num_samples=num_validation_samples,
+    )
     return Controller.Config(
         model_spec=model_registry(
             "4B",
@@ -60,18 +65,20 @@ def _qwen3_4b_dapo_math_config(
             num_groups_per_train_step=8,
             group_size=16,
             max_offpolicy_steps=4,
-            # Evaluate all 15 AIME I and 15 AIME II problems.
-            validation=ValidationConfig(num_samples=30),
+            validation=ValidationConfig(
+                num_samples=num_validation_samples,
+            ),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=max_total_tokens),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=DapoMathRollouter.Config(
+            validation_dataset=validation_dataset,
             token_env=TokenEnv.Config(
                 max_rollout_tokens=max_total_tokens,
                 max_num_turns=1,
-            )
+            ),
         ),
         renderer=RendererConfig(name="qwen3", enable_thinking=True),
         num_generators=6,

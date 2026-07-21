@@ -61,11 +61,22 @@ def test_aime_dataset_combines_both_subsets(monkeypatch) -> None:
         return [{"question": f"{subset} question", "answer": answer}]
 
     monkeypatch.setattr(math_data, "load_dataset", load_dataset)
-    dataset = AIME2025Dataset.Config().build()
+    dataset = AIME2025Dataset.Config(num_samples=2).build()
     samples = [next(dataset), next(dataset)]
     assert [sample.ground_truth for sample in samples] == [r"42^\circ", r"\boxed{42}"]
     assert "AIME2025-I question" in samples[0].prompt
     assert "AIME2025-II question" in samples[1].prompt
+
+
+def test_aime_dataset_restarts_after_configured_num_samples(monkeypatch) -> None:
+    def load_dataset(repo_id, subset, *, split):
+        del repo_id, split
+        return [{"question": f"{subset} question", "answer": "42"}]
+
+    monkeypatch.setattr(math_data, "load_dataset", load_dataset)
+    dataset = AIME2025Dataset.Config(num_samples=1).build()
+    first = next(dataset)
+    assert next(dataset) == first
 
 
 def test_env_is_single_turn() -> None:
