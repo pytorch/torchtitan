@@ -13,7 +13,6 @@ admit/pull/shutdown branching is tested without a GPU.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 from torchtitan.experiments.rl.actors.generator import (
     CloseRequest,
