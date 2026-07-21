@@ -403,10 +403,14 @@ class TestCudagraphPass(unittest.TestCase):
             ),
             (
                 torch.ops.minimal_async_ep.wait_dispatch.default,
-                cuda_f32(16, 8),
+                (cuda_f32(16, 8), cuda_i64(4)),
             ),
             (
                 torch.ops.minimal_async_ep.dispatch_data.default,
+                cuda_f32(16, 8),
+            ),
+            (
+                torch.ops.minimal_async_ep.wait_dispatch_data.default,
                 cuda_f32(16, 8),
             ),
             (
