@@ -7,14 +7,133 @@
 import unittest
 
 import torch
+from torch import nn
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
+
+# Tensor shape suffixes: B batch, L seq len, N heads, K key head dim,
+# V value head dim.
+
+
+def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
+    """L2 norm using rsqrt(sum(x^2) + eps), not x/max(norm, eps) like F.normalize, to match FLA kernel."""
+    return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
+
+
+def _torch_native_gated_delta(
+    q_BLNK: torch.Tensor,
+    k_BLNK: torch.Tensor,
+    v_BLNV: torch.Tensor,
+    g_BLN: torch.Tensor,
+    beta_BLN: torch.Tensor,
+) -> torch.Tensor:
+    """Standalone math reference for the gated delta rule recurrence.
+
+    Sequential O(seqlen) loop -- far too slow for training; kept here as the
+    numerical baseline for the FLA kernels.
+
+    Args:
+        q_BLNK, k_BLNK: (batch, seq, n_heads, key_head_dim)
+        v_BLNV: (batch, seq, n_heads, value_head_dim)
+        g_BLN: (batch, seq, n_heads) -- log-space decay, always negative
+        beta_BLN: (batch, seq, n_heads) -- update gate in (0, 1)
+
+    Returns:
+        output: (batch, seq, n_heads, value_head_dim)
+    """
+    B, L, N, K = q_BLNK.shape
+    V = v_BLNV.shape[-1]
+    dtype = q_BLNK.dtype
+
+    # Upcast to float32 -- recurrence accumulates over seqlen steps
+    q_BLNK = _l2norm(q_BLNK.float(), dim=-1) * (K**-0.5)
+    k_BLNK = _l2norm(k_BLNK.float(), dim=-1)
+    v_BLNV, g_BLN, beta_BLN = v_BLNV.float(), g_BLN.float(), beta_BLN.float()
+
+    out_BLNV = torch.zeros(B, L, N, V, dtype=torch.float32, device=q_BLNK.device)
+    state_BNKV = torch.zeros(B, N, K, V, dtype=torch.float32, device=q_BLNK.device)
+
+    for t in range(L):
+        q_BNK = q_BLNK[:, t]
+        k_BNK = k_BLNK[:, t]
+        v_BNV = v_BLNV[:, t]
+        g_BN11 = g_BLN[:, t].exp().unsqueeze(-1).unsqueeze(-1)
+        beta_BN1 = beta_BLN[:, t].unsqueeze(-1)
+
+        state_BNKV = state_BNKV * g_BN11
+        kv_mem_BNV = torch.einsum("bnkv,bnk->bnv", state_BNKV, k_BNK)
+        delta_BNV = (v_BNV - kv_mem_BNV) * beta_BN1
+        state_BNKV = state_BNKV + torch.einsum("bnk,bnv->bnkv", k_BNK, delta_BNV)
+        out_BLNV[:, t] = torch.einsum("bnkv,bnk->bnv", state_BNKV, q_BNK)
+
+    return out_BLNV.to(dtype)
+
+
+def _torch_native_gated_delta_varlen(
+    q_BLNK: torch.Tensor,
+    k_BLNK: torch.Tensor,
+    v_BLNV: torch.Tensor,
+    g_BLN: torch.Tensor,
+    beta_BLN: torch.Tensor,
+    cu_seqlens_cpu: torch.Tensor,
+) -> torch.Tensor:
+    """Varlen reference: run each packed document through the batched reference."""
+    out_segments_BLNV: list[torch.Tensor] = []
+    cu_seqlens_list = cu_seqlens_cpu.tolist()
+    for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
+        out_segments_BLNV.append(
+            _torch_native_gated_delta(
+                q_BLNK[:, start:end],
+                k_BLNK[:, start:end],
+                v_BLNV[:, start:end],
+                g_BLN[:, start:end],
+                beta_BLN[:, start:end],
+            )
+        )
+    return torch.cat(out_segments_BLNV, dim=1)
+
+
+class ReferenceGatedDeltaKernel(nn.Module):
+    """Drop-in replacement for GatedDeltaKernel backed by the reference math.
+
+    Mirrors GatedDeltaKernel.forward's interface, including the grouped-query
+    Q/K head expansion, so tests can swap it onto a built GatedDeltaNet and
+    exercise the full varlen plumbing (flattening, conv resets, host-offset
+    contract) on CPU.
+    """
+
+    def forward(
+        self,
+        xq_BLNK: torch.Tensor,
+        xk_BLNK: torch.Tensor,
+        xv_BLNV: torch.Tensor,
+        g_BLN: torch.Tensor,
+        beta_BLN: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens_cpu: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if xq_BLNK.shape[2] != xv_BLNV.shape[2]:
+            assert xv_BLNV.shape[2] % xq_BLNK.shape[2] == 0
+            repeat = xv_BLNV.shape[2] // xq_BLNK.shape[2]
+            xq_BLNK = xq_BLNK.repeat_interleave(repeat, dim=2)
+            xk_BLNK = xk_BLNK.repeat_interleave(repeat, dim=2)
+
+        if cu_seqlens is None:
+            return _torch_native_gated_delta(xq_BLNK, xk_BLNK, xv_BLNV, g_BLN, beta_BLN)
+        assert cu_seqlens_cpu is not None
+        return _torch_native_gated_delta_varlen(
+            xq_BLNK, xk_BLNK, xv_BLNV, g_BLN, beta_BLN, cu_seqlens_cpu
+        )
 
 
 class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def _make_deltanet(
         self,
         *,
-        backend: str = "torch_native",
+        # None builds the model with the default FLA kernel config, then swaps
+        # in ReferenceGatedDeltaKernel so the model runs on CPU without FLA
+        # triton kernels.
+        backend: str | None = None,
         dim: int = 4,
         key_head_dim: int = 2,
         value_head_dim: int = 2,
@@ -68,7 +187,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_q=conv(key_dim),
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
-            kernel=GatedDeltaKernel.Config(backend=backend),
+            kernel=(
+                GatedDeltaKernel.Config()
+                if backend is None
+                else GatedDeltaKernel.Config(backend=backend)
+            ),
             norm=RMSNormGated.Config(dim=value_head_dim),
             out_proj=Linear.Config(
                 in_features=value_dim,
@@ -76,6 +199,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 bias=False,
             ),
         ).build()
+        if backend is None:
+            model.kernel = ReferenceGatedDeltaKernel()
 
         model = model.to(device=device, dtype=dtype)
         with torch.no_grad():
