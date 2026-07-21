@@ -38,8 +38,11 @@ from torch.distributed.device_mesh import DeviceMesh
 from .backend import select_backend, SUPPORTED_BACKENDS
 from .topology import PlanMetadata
 
-# nccl4py (nccl.core) is imported lazily inside __init__ only for the "lsa"
-# backend, so the package stays importable on hosts without nccl4py/CuTeDSL
+# GIN signal slots reserved in the dev-comm: 0 = forward gather, 1 = backward.
+_GIN_SIGNAL_COUNT = 2
+
+# nccl4py (nccl.core) is imported lazily inside __init__ only for the "lsa"/"gin"
+# backends, so the package stays importable on hosts without nccl4py/CuTeDSL
 # (which fall back to the portable "p2p" backend).
 
 
@@ -149,6 +152,18 @@ def check_ctx_meta(
         )
 
 
+def _devcomm_to_device(dev_comm, device):
+    """Copy the host-allocated ncclDevComm struct into device memory.
+
+    nccl4py calloc's the struct on the host, but the kernel dereferences it on
+    the GPU, so ``dev_comm.ptr`` is not usable from device code. The embedded
+    handles already point at device resources, so a byte copy suffices. The
+    returned tensor must outlive every kernel launch that uses it.
+    """
+    raw = memoryview(dev_comm.dev_comm).tobytes()
+    return torch.frombuffer(bytearray(raw), dtype=torch.uint8).to(device)
+
+
 class SelectiveGatherContext:
     """NCCL resources + windows for a selective K/V gather over a CP group.
 
@@ -165,6 +180,11 @@ class SelectiveGatherContext:
             ``backward_staging_map``); unused by the p2p backend.
         backend: force one of ``SUPPORTED_BACKENDS``; ``None`` auto-selects via
             ``select_backend``.
+        enable_gin: reserve GIN connections/signals in the dev-comm so the
+            inter-node branch works. Leave False on NVLink-only / no-RDMA hosts
+            (GIN dev-comm creation fails there); the LSA branch is unaffected.
+            Must be passed identically on every rank -- ``create_dev_comm`` is
+            collective, so an inconsistent value hangs the group.
     """
 
     def __init__(
@@ -179,6 +199,7 @@ class SelectiveGatherContext:
         max_consumers: int = 1,
         backend: str | None = None,
         mesh_axis: str | None = None,
+        enable_gin: bool = False,
     ):
         # shard_numel is the TOTAL per-rank shard (batch_size * per-batch shard).
         if shard_numel % (batch_size * block_numel) != 0:
@@ -212,6 +233,13 @@ class SelectiveGatherContext:
             self.device, self.pg, dtype=dtype, block_numel=block_numel
         )
         if self.backend == "p2p":
+            if enable_gin:
+                warnings.warn(
+                    "enable_gin=True is ignored on the p2p backend (it uses no "
+                    "GIN resources).",
+                    stacklevel=2,
+                )
+            self.enable_gin = False
             return
         import nccl.core as nccl
 
@@ -295,6 +323,24 @@ class SelectiveGatherContext:
             self.comm, self.grad_stage, "grad staging"
         )
 
+        # GIN needs a device communicator (FULL connections + signal slots + the
+        # world-GIN barrier that backs the source-reuse drain); the LSA path uses
+        # the signal pad and needs none. Reserve it only for the "gin" backend,
+        # or for an "lsa" context explicitly asked to also drive GIN. A CP group
+        # is never a mix of the two.
+        self.enable_gin = enable_gin or self.backend == "gin"
+        if self.enable_gin:
+            self.dev_comm = self.comm.create_dev_comm(
+                requirements=nccl.NCCLDevCommRequirements(
+                    gin_connection_type=nccl.NcclGinConnectionType.FULL,
+                    gin_signal_count=_GIN_SIGNAL_COUNT,
+                    world_gin_barrier_count=1,
+                )
+            )
+            if not (self.dev_comm.is_valid and self.dev_comm.ptr != 0):
+                raise RuntimeError("GIN device communicator creation failed.")
+            self.dev_comm_gpu = _devcomm_to_device(self.dev_comm, device)
+
         # One-time: make the zeroed signal pad globally visible before any gather
         # reads a peer's epoch. This barrier is NOT on the per-gather path.
         torch.cuda.synchronize()
@@ -324,6 +370,8 @@ class SelectiveGatherContext:
         """Release the resources we created; the ncclComm_t belongs to PyTorch."""
         if self.backend == "p2p":
             return  # no nccl4py resources were created
+        if self.enable_gin:
+            self.dev_comm.close()
         self.shard_window.close()
         self.gathered_window.close()
         self.signal_window.close()

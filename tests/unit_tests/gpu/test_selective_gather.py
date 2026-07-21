@@ -30,6 +30,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.context_parallel.selective_gather import (
     backend as backend_mod,
     BlockGatherPlan,
+    build_gin_metadata,
     build_plan_metadata,
     full_plan,
     run_p2p_gather,
@@ -626,12 +627,27 @@ class TestBackendSelection(DTensorTestBase):
 
     @unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
     @with_comms
-    def test_p2p_when_the_ranks_are_on_different_hosts(self):
+    def test_gin_when_the_ranks_are_on_different_hosts(self):
+        # LSA cannot read peers over NVLink across nodes; GIN pushes over the
+        # network instead.
         device = torch.device(self.device_type)
         pg = self._group()
         with mock.patch("socket.gethostname", return_value=f"host{pg.rank()}"):
             chosen = select_backend(
                 device, pg, dtype=torch.bfloat16, block_numel=LSA_BLOCK_NUMEL
+            )
+        self.assertEqual(chosen, "gin")
+
+    @unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
+    @with_comms
+    def test_p2p_when_an_inter_node_group_cannot_run_gin(self):
+        # BLOCK_NUMEL is under one reduce tile, so GIN cannot run it either and
+        # the group has no CuTeDSL option left.
+        device = torch.device(self.device_type)
+        pg = self._group()
+        with mock.patch("socket.gethostname", return_value=f"host{pg.rank()}"):
+            chosen = select_backend(
+                device, pg, dtype=torch.bfloat16, block_numel=BLOCK_NUMEL
             )
         self.assertEqual(chosen, "p2p")
 
@@ -703,6 +719,43 @@ class TestBackendSelection(DTensorTestBase):
         )
         self.assertEqual(ctx.backend, "p2p")
         ctx.close()
+
+
+class TestGINMetadata(DTensorTestBase):
+    """The GIN plan-transpose (build_gin_metadata) on the multi-process harness.
+
+    full_plan on cp=2: every rank pushes both its blocks to the other rank and
+    receives both of the other rank's blocks; each block has a single consumer.
+    """
+
+    @property
+    def world_size(self):
+        return 2
+
+    @with_comms
+    def test_full_plan_transpose(self):
+        device = torch.device(self.device_type)
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("cp",)
+        )
+        pg = mesh.get_group("cp")
+        other = 1 - pg.rank()
+        plan = full_plan(1, self.world_size, BLOCKS_PER_RANK, BLOCK_NUMEL, device)
+        gin = build_gin_metadata(plan, pg)
+
+        # Forward: push my two blocks to the other rank; own = my two blocks.
+        self.assertEqual(gin.send_peer.tolist(), [other, other])
+        self.assertEqual(sorted(gin.send_src_block.tolist()), [0, 1])
+        self.assertEqual(sorted(gin.own_src_block.tolist()), [0, 1])
+        # Receive the other rank's two blocks.
+        self.assertEqual(gin.num_recv, 2)
+        # Backward: push grads for those two remote blocks back to the other
+        # rank, into staging slot 0 (each producer has a single consumer here).
+        self.assertEqual(gin.grad_send_peer.tolist(), [other, other])
+        self.assertEqual(gin.grad_send_slot.tolist(), [0, 0])
+        self.assertEqual(gin.max_consumers, 1)
+        # Copy-in stages exactly the two unique pushed blocks.
+        self.assertEqual(sorted(gin.copyin_src_block.tolist()), [0, 1])
 
 
 if __name__ == "__main__":

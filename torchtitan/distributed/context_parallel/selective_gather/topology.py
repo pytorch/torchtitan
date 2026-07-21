@@ -408,3 +408,145 @@ def build_plan_metadata(
         max_consumers,
         consumers,
     )
+
+
+@dataclass(frozen=True, eq=False)
+class GINMetadata:
+    """Per-rank push/own lists for the GIN (push) gather -- the plan transpose.
+
+    GIN's device API is push-only, so a producer must know which of its blocks
+    each consumer needs. That is the transpose of the plan, computed once from
+    every rank's all-gathered ``(src_rank, src_block)``.
+
+    All tensors are 1-D CUDA tensors on the plan's device -- int32, except the
+    ``own_`` and ``copyin_`` fields, which are int64 (used for torch indexing).
+
+    Forward gather:
+        send_peer: consumer cp-rank for each remote block this rank pushes.
+        send_src_block: this rank's local block id for each push (same length).
+        send_batch: batch index for each push (same length).
+        own_src_block / own_batch: this rank's own blocks (``src_rank == self``),
+            copied locally into the gathered buffer (no network). int64 for
+            torch indexing.
+        copyin_src_block / copyin_batch: the UNIQUE local blocks this rank pushes
+            (the only ones copy-in must stage into the registered window; a
+            sliding-window plan pushes a few, so this avoids copying the whole
+            shard). int64 for torch indexing.
+        num_recv: remote blocks this rank receives per gather (the per-step
+            increment of its forward GIN signal; the wait threshold accumulates).
+
+    Backward gather (the transpose of the forward transpose):
+        grad_send_peer: producer cp-rank this rank pushes a grad block to (one
+            per remote entry in this rank's own plan), i.e. ``src_rank``.
+        grad_send_src_block: the producer's local block id for that grad push.
+        grad_send_batch: batch index for that grad push.
+        grad_send_slot: this rank's staging slot on that producer (its index in
+            the producer's sorted consumer list; from ``backward_staging_map``).
+        max_consumers: global max consumers over all producers -- sizes the
+            context's staging buffer (build the context with this).
+
+    The forward ``send_peer`` count equals this rank's backward RECEIVE count
+    (its consumers push grads back), so the backward wait accumulates that count.
+    """
+
+    send_peer: torch.Tensor
+    send_src_block: torch.Tensor
+    send_batch: torch.Tensor
+    own_src_block: torch.Tensor
+    own_batch: torch.Tensor
+    num_recv: int
+    grad_send_peer: torch.Tensor
+    grad_send_src_block: torch.Tensor
+    grad_send_batch: torch.Tensor
+    grad_send_slot: torch.Tensor
+    max_consumers: int
+    copyin_src_block: torch.Tensor
+    copyin_batch: torch.Tensor
+
+
+def build_gin_metadata(plan: BlockGatherPlan, group) -> GINMetadata:
+    """Setup-once transpose of the plan for the GIN push gather (fwd + bwd).
+
+    All-gathers every rank's plan, then builds THIS rank's forward push list
+    (blocks its consumers named from it), its own-block list, its receive count,
+    and its backward grad-push list (grads for the remote blocks it read, with
+    the staging slot on each producer). Host-side loops over the gathered plans,
+    like ``p2p.all_gather_plans`` -- run at setup, not per step.
+    """
+    cp = group.size()
+    me = group.rank()
+    device = plan.src_rank.device
+    all_sr = _all_gather_int(plan.src_rank.to(torch.int32), group)
+    all_sb = _all_gather_int(plan.src_block.to(torch.int32), group)
+    dst_slot, max_consumers, _ = _consumer_slot_map(all_sr, group, plan)
+    dst_slot = dst_slot.tolist()
+    B, cap = plan.batch_size, plan.capacity
+
+    send_peer, send_src_block, send_batch = [], [], []
+    for consumer in range(cp):
+        if consumer == me:
+            continue
+        c_sr = all_sr[consumer].tolist()
+        c_sb = all_sb[consumer].tolist()
+        for b in range(B):
+            for e in range(cap):
+                if c_sr[b][e] == me:  # this consumer needs my block c_sb[b][e]
+                    send_peer.append(consumer)
+                    send_src_block.append(c_sb[b][e])
+                    send_batch.append(b)
+
+    own_src_block, own_batch = [], []
+    grad_send_peer, grad_send_src_block, grad_send_batch, grad_send_slot = (
+        [],
+        [],
+        [],
+        [],
+    )
+    num_recv = 0
+    my_sr = all_sr[me].tolist()
+    my_sb = all_sb[me].tolist()
+    for b in range(B):
+        for e in range(cap):
+            sr = my_sr[b][e]
+            if sr == me:
+                own_src_block.append(my_sb[b][e])
+                own_batch.append(b)
+            elif sr >= 0:
+                num_recv += 1
+                # Backward: push the grad for this remote block back to producer
+                # sr, into this rank's staging slot dst_slot on that producer.
+                grad_send_peer.append(sr)
+                grad_send_src_block.append(my_sb[b][e])
+                grad_send_batch.append(b)
+                grad_send_slot.append(dst_slot[b][e])
+
+    # Unique local blocks this rank pushes -- the only ones copy-in must stage.
+    seen = set()
+    copyin_batch, copyin_src_block = [], []
+    for b, sb in zip(send_batch, send_src_block, strict=True):
+        if (b, sb) not in seen:
+            seen.add((b, sb))
+            copyin_batch.append(b)
+            copyin_src_block.append(sb)
+
+    def _i32(xs):
+        return torch.tensor(xs, dtype=torch.int32, device=device)
+
+    def _i64(xs):
+        return torch.tensor(xs, dtype=torch.int64, device=device)
+
+    return GINMetadata(
+        send_peer=_i32(send_peer),
+        send_src_block=_i32(send_src_block),
+        send_batch=_i32(send_batch),
+        own_src_block=_i64(own_src_block),
+        own_batch=_i64(own_batch),
+        num_recv=num_recv,
+        grad_send_peer=_i32(grad_send_peer),
+        grad_send_src_block=_i32(grad_send_src_block),
+        grad_send_batch=_i32(grad_send_batch),
+        grad_send_slot=_i32(grad_send_slot),
+        max_consumers=max_consumers,
+        copyin_src_block=_i64(copyin_src_block),
+        copyin_batch=_i64(copyin_batch),
+    )
