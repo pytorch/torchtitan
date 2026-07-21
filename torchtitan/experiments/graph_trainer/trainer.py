@@ -276,6 +276,8 @@ class GraphTrainer(Trainer):
         grads = outputs[1:]
 
         accumulate_param_grads_(params, grads)
+        # Accumulation is complete; drop the graph-output gradient references.
+        del grads, outputs
         return loss
 
     def _prepare_trace_inputs(

@@ -4,9 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
+import gc
+import sys
 import unittest
+import weakref
 from collections import Counter
 from copy import deepcopy
+from typing import cast
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -575,6 +581,61 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
                 run_traced(traced)(x_other, y_other),
             )
         )
+
+
+class TestGraphTrainerGradientLifetime(unittest.TestCase):
+    def test_graph_output_gradients_are_not_retained_by_returned_frame(self):
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+        parameter = nn.Parameter(torch.ones(2, 2))
+        model = nn.Linear(2, 2, bias=False)
+        returned_grad_refs = []
+        returned_frames = []
+
+        class TrainerStub:
+            _traced_step = object()
+
+            @staticmethod
+            def train_context():
+                return contextlib.nullcontext()
+
+        def runner(*args, **kwargs):
+            grad = torch.ones_like(parameter)
+            returned_grad_refs.append(weakref.ref(grad))
+            return [torch.ones(()), grad]
+
+        target_code = GraphTrainer._make_fx_forward_backward_step.__code__
+
+        def capture_returned_frame(frame, event, arg):
+            if event == "return" and frame.f_code is target_code:
+                returned_frames.append(frame)
+
+        previous_profile = sys.getprofile()
+        sys.setprofile(capture_returned_frame)
+        try:
+            with mock.patch(
+                "torchtitan.experiments.graph_trainer.trainer.run_traced",
+                return_value=runner,
+            ):
+                GraphTrainer._make_fx_forward_backward_step(
+                    cast(GraphTrainer, TrainerStub()),
+                    model,
+                    torch.empty(0),
+                    torch.empty(0),
+                    1.0,
+                    [parameter],
+                    {},
+                )
+        finally:
+            sys.setprofile(previous_profile)
+
+        self.assertEqual(len(returned_frames), 1)
+        self.assertNotIn("grads", returned_frames[0].f_locals)
+        self.assertNotIn("outputs", returned_frames[0].f_locals)
+
+        parameter.grad = None
+        gc.collect()
+        self.assertIsNone(returned_grad_refs[0]())
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
