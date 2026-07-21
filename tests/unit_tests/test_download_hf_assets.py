@@ -6,7 +6,7 @@
 
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from scripts.download_hf_assets import download_hf_assets
 

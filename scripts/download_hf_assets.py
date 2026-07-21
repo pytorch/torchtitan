@@ -6,7 +6,11 @@
 
 from fnmatch import fnmatch
 
-from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, LocalEntryNotFoundError
+from huggingface_hub.errors import (
+    EntryNotFoundError,
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+)
 from tqdm import tqdm
 
 

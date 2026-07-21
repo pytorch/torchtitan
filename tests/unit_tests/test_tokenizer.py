@@ -10,7 +10,11 @@ import shutil
 import tempfile
 import unittest
 
-from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, LocalEntryNotFoundError
+from huggingface_hub.errors import (
+    GatedRepoError,
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+)
 from scripts.download_hf_assets import download_hf_assets
 from tokenizers import Tokenizer
 from torch.testing._internal.common_utils import (
