@@ -75,6 +75,7 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     ChunkedRegion,
     ChunkOwner,
     collect_chunked_regions,
+    ep_token_exchange_launch_phase,
     is_c10d_functional_node,
     ordered_nodes,
 )
@@ -82,13 +83,6 @@ from torchtitan.tools.logging import logger
 
 
 _GRAPH_BOUNDARY_OPS = {"placeholder", "get_attr"}
-_EP_PHASES = {"dispatch", "combine"}
-_MINIMAL_ASYNC_EP_PHASES = {
-    "dispatch": "dispatch",
-    "dispatch_data": "dispatch",
-    "combine": "combine",
-    "combine_data": "combine",
-}
 _MINIMAL_ASYNC_EP_WAITS = {
     "dispatch": "wait_dispatch",
     "combine": "wait_combine",
@@ -131,17 +125,12 @@ def _minimal_async_ep_op_name(node: fx.Node) -> str | None:
     return target._schema.name.rsplit("::", 1)[-1]
 
 
-def _minimal_async_ep_phase(node: fx.Node) -> str | None:
-    name = _minimal_async_ep_op_name(node)
-    return _MINIMAL_ASYNC_EP_PHASES.get(name) if name is not None else None
-
-
 def _is_minimal_async_ep_wait(node: fx.Node) -> bool:
     return _minimal_async_ep_op_name(node) in _MINIMAL_ASYNC_EP_WAITS.values()
 
 
 def _is_matching_minimal_async_ep_wait(wait: fx.Node, launch: fx.Node) -> bool:
-    phase = _minimal_async_ep_phase(launch)
+    phase = ep_token_exchange_launch_phase(launch)
     return phase is not None and _minimal_async_ep_op_name(
         wait
     ) == _MINIMAL_ASYNC_EP_WAITS.get(phase)
@@ -174,10 +163,7 @@ def _is_token_exchange_projection(node: fx.Node, node_set: set[fx.Node]) -> bool
 
 def _ep_label(node: fx.Node) -> str:
     """Return the optional EP phase label for logs/wait metadata."""
-    phase = _custom_meta(node).get(_EP_TOKEN_EXCHANGE)
-    if phase in _EP_PHASES:
-        return phase
-    phase = _minimal_async_ep_phase(node)
+    phase = ep_token_exchange_launch_phase(node)
     return phase if phase is not None else "token_exchange"
 
 
@@ -189,13 +175,7 @@ def _is_token_exchange_launch(node: fx.Node) -> bool:
     token-count all-to-all only carries ``EP: dispatch`` and intentionally is
     not a marker. MinimalAsyncEP has no separate token-count scheduling marker.
     """
-    return node.op == "call_function" and (
-        (
-            node.target == torch.ops._c10d_functional.all_to_all_single.default
-            and _custom_meta(node).get(_EP_TOKEN_EXCHANGE) in _EP_PHASES
-        )
-        or _minimal_async_ep_phase(node) is not None
-    )
+    return ep_token_exchange_launch_phase(node) is not None
 
 
 def _is_c10d_functional_node(node: fx.Node) -> bool:
@@ -987,7 +967,7 @@ def _schedule_ep_overlap_regions(
     gm: fx.GraphModule,
     *,
     module_pattern: str,
-    require_all_to_all: bool,
+    require_token_exchange: bool,
     reorder: bool = True,
     pair_first_token_exchange: bool = False,
 ) -> int:
@@ -1023,7 +1003,7 @@ def _schedule_ep_overlap_regions(
 
     if scheduled_regions and reorder:
         _apply_schedule(gm, scheduled_regions)
-    elif require_all_to_all:
+    elif require_token_exchange:
         raise ValueError(
             f"ep_overlap did not find any chunked EP token-exchange regions for "
             f"pattern {module_pattern}."
@@ -1036,7 +1016,7 @@ def ep_overlap_validate_pass(
     example_inputs: tuple[Any, ...] | None = None,
     *,
     module_pattern: str,
-    require_all_to_all: bool = False,
+    require_token_exchange: bool = False,
     pair_first_token_exchange: bool = False,
 ) -> fx.GraphModule:
     """Validate the already chunked graph without changing node order."""
@@ -1044,7 +1024,7 @@ def ep_overlap_validate_pass(
     validated = _schedule_ep_overlap_regions(
         gm,
         module_pattern=module_pattern,
-        require_all_to_all=require_all_to_all,
+        require_token_exchange=require_token_exchange,
         reorder=False,
         pair_first_token_exchange=pair_first_token_exchange,
     )
@@ -1061,7 +1041,7 @@ def ep_overlap_schedule_pass(
     example_inputs: tuple[Any, ...] | None = None,
     *,
     module_pattern: str,
-    require_all_to_all: bool = True,
+    require_token_exchange: bool = True,
     pair_first_token_exchange: bool = False,
 ) -> fx.GraphModule:
     """Reorder already chunked regions around EP token exchanges."""
@@ -1069,7 +1049,7 @@ def ep_overlap_schedule_pass(
     scheduled = _schedule_ep_overlap_regions(
         gm,
         module_pattern=module_pattern,
-        require_all_to_all=require_all_to_all,
+        require_token_exchange=require_token_exchange,
         pair_first_token_exchange=pair_first_token_exchange,
     )
     logger.info(
