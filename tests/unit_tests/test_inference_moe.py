@@ -21,7 +21,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.overrides.fused_swiglu import fused_grouped_experts, FusedGroupedExperts
-from torchtitan.overrides.moe_dispatch_override import deepep_override
+from torchtitan.overrides.moe_token_dispatcher import deepep_override
 
 _DIM = 16
 _HIDDEN = 32
@@ -34,7 +34,7 @@ _FUSED_SWIGLU = (
     "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
 )
 _DEEPEP_OVERRIDE = (
-    "torchtitan.overrides.moe_dispatch_override.deepep_override",
+    "torchtitan.overrides.moe_token_dispatcher.deepep_override",
     {"cudagraphable": True},
 )
 
@@ -46,7 +46,7 @@ _OVERRIDES = {
     for key in (
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
         "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-        "torchtitan.overrides.moe_dispatch_override.deepep_override",
+        "torchtitan.overrides.moe_token_dispatcher.deepep_override",
     )
     if key in _REGISTRY
 }

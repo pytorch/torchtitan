@@ -14,23 +14,23 @@ from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.config.override import _REGISTRY
 from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
 
-# Importing the override module registers the "helion_rope" override. The import
-# is safe without helion, but explicitly applying the override requires helion.
+# Importing the override module registers the helion overrides. The import is
+# safe without helion, but explicitly applying an override requires helion.
 from torchtitan.overrides.helion_rope import (
     helion_complex_rope,
-    helion_rope,
+    helion_cos_sin_rope,
     HelionComplexRoPE,
     HelionCosSinRoPE,
 )
 
 # Overrides are keyed in the registry by their factory's import path.
-_HELION_KEY = "torchtitan.overrides.helion_rope.helion_rope"
+_HELION_COS_SIN_KEY = "torchtitan.overrides.helion_rope.helion_cos_sin_rope"
 _HELION_COMPLEX_KEY = "torchtitan.overrides.helion_rope.helion_complex_rope"
 
 # The override registers at import time. Capture it now so the registry-dependent
 # tests below stay robust if a sibling test (e.g. test_override.py) calls
 # clear_overrides() first; setUp restores it.
-_HELION_OVERRIDE = _REGISTRY.get(_HELION_KEY)
+_HELION_COS_SIN_OVERRIDE = _REGISTRY.get(_HELION_COS_SIN_KEY)
 _HELION_COMPLEX_OVERRIDE = _REGISTRY.get(_HELION_COMPLEX_KEY)
 
 
@@ -78,15 +78,15 @@ class TestHelionRoPEOverride(unittest.TestCase):
 
     def setUp(self):
         # Restore the override if a previously run test cleared the registry.
-        if _HELION_OVERRIDE is not None:
-            _REGISTRY.setdefault(_HELION_KEY, _HELION_OVERRIDE)
+        if _HELION_COS_SIN_OVERRIDE is not None:
+            _REGISTRY.setdefault(_HELION_COS_SIN_KEY, _HELION_COS_SIN_OVERRIDE)
         if _HELION_COMPLEX_OVERRIDE is not None:
             _REGISTRY.setdefault(_HELION_COMPLEX_KEY, _HELION_COMPLEX_OVERRIDE)
 
     def test_registered_against_cossin(self):
-        self.assertIn(_HELION_KEY, _REGISTRY)
-        self.assertIs(_REGISTRY[_HELION_KEY].target_cls, CosSinRoPE.Config)
-        self.assertTrue(_REGISTRY[_HELION_KEY].exact)
+        self.assertIn(_HELION_COS_SIN_KEY, _REGISTRY)
+        self.assertIs(_REGISTRY[_HELION_COS_SIN_KEY].target_cls, CosSinRoPE.Config)
+        self.assertTrue(_REGISTRY[_HELION_COS_SIN_KEY].exact)
 
     def test_registered_against_complex(self):
         self.assertIn(_HELION_COMPLEX_KEY, _REGISTRY)
@@ -96,7 +96,7 @@ class TestHelionRoPEOverride(unittest.TestCase):
     def test_cossin_factory_preserves_fields(self):
         cfg = CosSinRoPE.Config(dim=64, max_seq_len=128, theta=5000.0, scaling="yarn")
         with patch.object(helion_rope_module, "_HELION_IMPORT_ERROR", None):
-            replacement = helion_rope(cfg)
+            replacement = helion_cos_sin_rope(cfg)
         self.assertIsInstance(replacement, HelionCosSinRoPE.Config)
         self.assertEqual(replacement.dim, 64)
         self.assertEqual(replacement.max_seq_len, 128)
@@ -128,7 +128,7 @@ class TestHelionRoPEOverride(unittest.TestCase):
                 apply_overrides(
                     OverrideConfig(
                         imports=[
-                            "torchtitan.overrides.helion_rope.helion_rope",
+                            "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
                             "torchtitan.overrides.helion_rope.helion_complex_rope",
                         ]
                     ),
@@ -141,7 +141,7 @@ class TestHelionRoPEOverride(unittest.TestCase):
             replacements = apply_overrides(
                 OverrideConfig(
                     imports=[
-                        "torchtitan.overrides.helion_rope.helion_rope",
+                        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
                         "torchtitan.overrides.helion_rope.helion_complex_rope",
                     ]
                 ),
@@ -156,7 +156,7 @@ class TestHelionRoPEOverride(unittest.TestCase):
         replacements = apply_overrides(
             OverrideConfig(
                 imports=[
-                    "torchtitan.overrides.helion_rope.helion_rope",
+                    "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
                     "torchtitan.overrides.helion_rope.helion_complex_rope",
                 ]
             ),

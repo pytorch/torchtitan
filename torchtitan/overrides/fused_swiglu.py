@@ -28,7 +28,7 @@ and ``fused_grouped_experts`` (``GroupedExperts``) overrides are registered here
 activate each by naming its factory, e.g. ``--override.imports
 torchtitan.overrides.fused_swiglu.fused_swiglu,torchtitan.overrides.fused_swiglu.fused_grouped_experts``.
 For the DeepEP inference path, pair it with the sibling ``deepep_override`` dispatcher
-override (``torchtitan.overrides.moe_dispatch_override``).
+override (``torchtitan.overrides.moe_token_dispatcher``).
 
 Tensor parallelism — the ``(hidden_dim, 2, dim)`` layout is what makes TP work.
 ``w13`` is sharded ``Shard(0)`` on the ``hidden_dim`` axis, so each TP rank holds

@@ -14,12 +14,12 @@ keeps the shared spec's default. Activate per-actor via the ``module.function`` 
 
     # generator.override -- DeepEP cudagraph-able EXPAND dispatch:
     OverrideConfig(imports=[(
-        "torchtitan.overrides.moe_dispatch_override.deepep_override",
+        "torchtitan.overrides.moe_token_dispatcher.deepep_override",
         {"cudagraphable": True},
     )])
     # ...or HybridEP static non-blocking dispatch:
     OverrideConfig(imports=[(
-        "torchtitan.overrides.moe_dispatch_override.hybridep_override",
+        "torchtitan.overrides.moe_token_dispatcher.hybridep_override",
         {"capacity_factor": 0.0325},
     )])
 

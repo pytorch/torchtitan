@@ -147,7 +147,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
                     "--compile.enable",
-                    "--override.imports torchtitan.overrides.helion_rope.helion_rope",
+                    "--override.imports torchtitan.overrides.helion_rope.helion_cos_sin_rope",
                 ],
             ],
             "Qwen3 fused QKV FSDP+TP+CP + compile + Helion RoPE override",

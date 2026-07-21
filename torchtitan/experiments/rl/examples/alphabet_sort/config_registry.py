@@ -624,7 +624,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
             "torchtitan.overrides.fused_swiglu.fused_swiglu",
             "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
             (
-                "torchtitan.overrides.moe_dispatch_override.deepep_override",
+                "torchtitan.overrides.moe_token_dispatcher.deepep_override",
                 {"cudagraphable": True},
             ),
         ]
@@ -653,48 +653,6 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         moe.routed_experts.token_dispatcher.num_max_tokens_per_rank = (
             num_max_tokens_per_rank
         )
-    return config
-
-
-def rl_grpo_qwen3_moe_debug_hybridep() -> Controller.Config:
-    """Debug MoE config on the HybridEP backend with a cudagraph-capturable generator
-    (8 GPUs: 4 gen + 4 train).
-
-    Same EP/TP/DP layout as ``rl_grpo_qwen3_moe_debug_varlen``, but the MoE uses the
-    HybridEP comm backend. The trainer and generator share one ``model_spec`` yet need
-    opposite HybridEP dispatch modes:
-
-    - Trainer: runs eagerly and backprops, so it needs the blocking, dropless path
-      (capacity factor ``None``). That is the shared model_spec's default, so the
-      trainer needs no override.
-    - Generator: captures a CUDA graph, so it needs the static, host-sync-free
-      non-blocking path (a float capacity factor). The generator-only ``hybridep_override``
-      sets it via a per-entry ``capacity_factor`` kwarg, so the two actors
-      diverge from one shared spec without a hardcoded per-actor branch. (This mirrors
-      how the ``deepep`` recipe above flips only the generator's dispatch via
-      ``deepep_override``.)
-
-    ``capacity_factor`` in (0, 1] tunes the non-blocking sizing: 1.0 is worst-case /
-    dropless; lower saves memory but may drop tokens.
-    """
-    config = rl_grpo_qwen3_moe_debug_varlen()
-    config.model_spec = model_registry(
-        "debugmodel_moe", attn_backend="varlen", moe_comm_backend="hybridep"
-    )
-    # Generator-only: switch HybridEP dispatch to the non-blocking, cudagraph-safe path
-    # by passing a float capacity_factor as a kwarg to the shared override. The trainer
-    # keeps the shared spec's default (None -> blocking, dropless, backward-able).
-    config.generator.override = OverrideConfig(
-        imports=[
-            (
-                "torchtitan.overrides.moe_dispatch_override.hybridep_override",
-                {"capacity_factor": 0.0325},
-            )
-        ]
-    )
-    config.generator.cudagraph = VLLMCudagraphConfig(
-        enable=True, mode="FULL_AND_PIECEWISE"
-    )
     return config
 
 
@@ -868,7 +826,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     perf_imports = [
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
         "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-        "torchtitan.overrides.helion_rope.helion_rope",
+        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(
         config.trainer, override=OverrideConfig(imports=list(perf_imports))

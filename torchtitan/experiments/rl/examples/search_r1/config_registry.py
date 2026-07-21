@@ -172,7 +172,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     perf_imports = [
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
         "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-        "torchtitan.overrides.helion_rope.helion_rope",
+        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
 
     config = Controller.Config(
@@ -232,7 +232,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 imports=[
                     *perf_imports,
                     (
-                        "torchtitan.overrides.moe_dispatch_override.deepep_override",
+                        "torchtitan.overrides.moe_token_dispatcher.deepep_override",
                         {"cudagraphable": True},
                     ),
                 ]

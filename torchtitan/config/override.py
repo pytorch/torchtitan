@@ -69,7 +69,7 @@ class OverrideConfig:
     whole-module form). An entry is either:
 
     - a target string, e.g.
-      ``"torchtitan.overrides.moe_dispatch_override.hybridep_override"``; or
+      ``"torchtitan.overrides.moe_token_dispatcher.hybridep_override"``; or
     - a ``(target, kwargs)`` tuple, e.g.
       ``("my_pkg.triton_rope.triton_rope", {"block_size": 256})``. The ``kwargs``
       are passed to the override the target names, so two config trees can share
