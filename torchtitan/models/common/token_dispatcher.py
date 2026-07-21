@@ -1310,9 +1310,13 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             receive_capacity,
             ep_size,
         )
-        hidden_states_RD = minimal_async_ep_wait_dispatch_op(
+        (
             hidden_states_RD,
-            [x_TD],
+            num_tokens_per_local_expert_e,
+        ) = minimal_async_ep_wait_dispatch_op(
+            hidden_states_RD,
+            num_tokens_per_local_expert_e,
+            [x_TD, topk_expert_ids_TK, num_local_tokens_per_expert_E],
         )
 
         state = MinimalAsyncEPDispatchMetadata(
