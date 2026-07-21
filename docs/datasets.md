@@ -14,7 +14,7 @@ Start with the [Grain data pipeline README](../torchtitan/components/data/README
 - SFT with assistant-only labels
 - pretokenized and OLMo-style custom sources
 - Flux and Qwen multimodal datasets
-- distributed sharding and exact checkpoint resume
+- distributed sharding and exact dataloader checkpoint resume
 
 The shortest built-in recipe is:
 

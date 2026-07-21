@@ -8,6 +8,7 @@
 
 import json
 from dataclasses import dataclass, replace
+from typing import Any
 
 import grain.python as grain
 import numpy as np
@@ -197,7 +198,7 @@ def test_loader_requires_repeat_with_data_parallelism(tmp_path):
 
 @dataclass(frozen=True)
 class RowsSourceConfig:
-    rows: tuple[dict, ...]
+    rows: tuple[Any, ...]
 
     def build(self, *, dp_rank: int, dp_world_size: int):
         del dp_rank, dp_world_size
@@ -610,9 +611,11 @@ def test_loader_exact_restore_with_nested_weighted_mix():
         seq_len=8,
         local_batch_size=2,
     )
-    next(iter(loader))
+    iterator = iter(loader)
+    for _ in range(40):
+        next(iterator)
     state = loader.state_dict()
-    expected = next(iter(loader))
+    expected = [next(iterator) for _ in range(8)]
 
     restored = config.build(
         dp_world_size=1,
@@ -622,10 +625,13 @@ def test_loader_exact_restore_with_nested_weighted_mix():
         local_batch_size=2,
     )
     restored.load_state_dict(state)
-    actual = next(iter(restored))
+    restored_iterator = iter(restored)
+    actual = [next(restored_iterator) for _ in range(8)]
 
-    assert torch.equal(expected[0]["input"], actual[0]["input"])
-    assert torch.equal(expected[1], actual[1])
+    for expected_batch, actual_batch in zip(expected, actual):
+        assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
+        assert torch.equal(expected_batch[0]["positions"], actual_batch[0]["positions"])
+        assert torch.equal(expected_batch[1], actual_batch[1])
 
 
 def test_empty_shard_rejected():
@@ -687,3 +693,209 @@ def test_loader_rejects_dp_change():
     )
     with pytest.raises(ValueError, match="data-parallel"):
         different_dp.load_state_dict(state)
+
+
+def test_concat_then_split_keeps_long_document_next_token_pairs():
+    recipe = ConcatThenSplitPackingConfig(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(rows=({"tokens": list(range(10))},)),
+            processor=RowToTokens.Config(),
+        )
+    )
+    rows = list(
+        recipe.build(
+            context=replace(CONTEXT, seq_len=4),
+            iteration=iteration(shuffle=False, repeat=False),
+        )
+    )
+
+    assert rows[0][0]["input"].tolist() == [0, 1, 2, 3]
+    assert rows[0][1].tolist() == [1, 2, 3, 4]
+    assert rows[1][0]["input"].tolist() == [4, 5, 6, 7]
+    assert rows[1][1].tolist() == [5, 6, 7, 8]
+    assert rows[2][0]["input"].tolist() == [8, 0, 0, 0]
+    assert rows[2][1].tolist() == [
+        9,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
+    ]
+    assert rows[0][0]["positions"].tolist() == [0, 1, 2, 3]
+    assert rows[1][0]["positions"].tolist() == [0, 1, 2, 3]
+    assert rows[2][0]["positions"].tolist() == [0, 0, 0, 0]
+
+
+def test_map_dataset_reshuffles_deterministically_across_repeats():
+    config = SingleDatasetConfig(
+        source=RowsSourceConfig(rows=tuple({"value": index} for index in range(8)))
+    )
+    policy = iteration(shuffle=True, repeat=True)
+    first = config.build(context=CONTEXT, iteration=policy)
+    peer = config.build(context=CONTEXT, iteration=policy)
+    first_two = [first[index]["value"] for index in range(16)]
+    peer_two = [peer[index]["value"] for index in range(16)]
+
+    assert first_two[:8] != first_two[8:]
+    assert first_two == peer_two
+
+
+def test_concat_then_split_resets_positions_between_documents():
+    recipe = ConcatThenSplitPackingConfig(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(
+                rows=(
+                    {"tokens": [1, 10, 2]},
+                    {"tokens": [1, 20, 21, 2]},
+                )
+            ),
+            processor=RowToTokens.Config(),
+        )
+    )
+    inputs, labels = next(
+        iter(
+            recipe.build(
+                context=replace(CONTEXT, seq_len=8),
+                iteration=iteration(),
+            )
+        )
+    )
+
+    assert inputs["input"].tolist() == [1, 10, 1, 20, 21, 0, 0, 0]
+    assert labels.tolist() == [
+        10,
+        2,
+        20,
+        21,
+        2,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
+    ]
+    assert inputs["positions"].tolist() == [0, 1, 0, 1, 2, 0, 0, 0]
+
+
+@pytest.fixture
+def finite_rows_loader():
+    # Direct trainer rows survive SingleDatasetConfig -> GrainDataLoader unchanged.
+    rows = tuple(
+        (
+            {
+                "input": torch.tensor([index]),
+                "positions": torch.tensor([0]),
+            },
+            torch.tensor([index]),
+        )
+        for index in range(5)
+    )
+    return GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(source=RowsSourceConfig(rows=rows)),
+        shuffle=False,
+        repeat=False,
+        batch_prefetch_buffer_size=1,
+    ).build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        seq_len=1,
+        local_batch_size=2,
+    )
+
+
+def test_mix_rejects_empty_datasets():
+    with pytest.raises(ValueError, match="positive-weight"):
+        DatasetMixConfig(datasets=()).build(
+            context=CONTEXT,
+            iteration=iteration(),
+        )
+
+
+@pytest.mark.parametrize("weight", [0.0, -1.0])
+def test_mix_rejects_nonpositive_weight(weight):
+    dataset = SingleDatasetConfig(source=RowsSourceConfig(rows=({"value": 0},)))
+
+    with pytest.raises(ValueError, match="positive-weight"):
+        DatasetMixConfig(
+            datasets=(WeightedDataset(dataset=dataset, weight=weight),)
+        ).build(
+            context=CONTEXT,
+            iteration=iteration(),
+        )
+
+
+def test_loader_rejects_unknown_checkpoint_version(finite_rows_loader):
+    state = finite_rows_loader.state_dict()
+    state["version"] = 2
+
+    with pytest.raises(ValueError, match="version"):
+        finite_rows_loader.load_state_dict(state)
+
+
+def test_loader_rejects_missing_rank_state(finite_rows_loader):
+    state = finite_rows_loader.state_dict()
+    del state["dp_rank_0"]
+
+    with pytest.raises(ValueError, match="missing dataloader state"):
+        finite_rows_loader.load_state_dict(state)
+
+
+def test_loader_batches_exact_rows_and_drops_remainder(finite_rows_loader):
+    batches = list(finite_rows_loader)
+
+    assert len(batches) == 2
+    assert batches[0][0]["input"].tolist() == [[0], [1]]
+    assert batches[0][1].tolist() == [[0], [1]]
+    assert batches[1][0]["input"].tolist() == [[2], [3]]
+    assert batches[1][1].tolist() == [[2], [3]]
+
+
+def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):
+    path = tmp_path / "rows.jsonl"
+    write_jsonl(
+        path,
+        [{"tokens": [1, index + 10, index + 11, 2]} for index in range(20)],
+    )
+    config = GrainDataLoader.Config(
+        dataset=ConcatThenSplitPackingConfig(
+            dataset=SingleDatasetConfig(
+                source=IndexedJsonlSource.Config(patterns=(str(path),)),
+                processor=RowToTokens.Config(),
+            )
+        ),
+        seed=42,
+        shuffle=True,
+        repeat=True,
+        batch_prefetch_buffer_size=1,
+    )
+
+    for rank in range(2):
+        loader = config.build(
+            dp_world_size=2,
+            dp_rank=rank,
+            tokenizer=FakeTokenizer(),
+            seq_len=8,
+            local_batch_size=2,
+        )
+        iterator = iter(loader)
+        for _ in range(10):
+            next(iterator)
+        state = loader.state_dict()
+        expected = [next(iterator) for _ in range(4)]
+
+        restored = config.build(
+            dp_world_size=2,
+            dp_rank=rank,
+            tokenizer=FakeTokenizer(),
+            seq_len=8,
+            local_batch_size=2,
+        )
+        restored.load_state_dict(state)
+        restored_iterator = iter(restored)
+        actual = [next(restored_iterator) for _ in range(4)]
+
+        for expected_batch, actual_batch in zip(expected, actual):
+            assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
+            assert torch.equal(
+                expected_batch[0]["positions"],
+                actual_batch[0]["positions"],
+            )
+            assert torch.equal(expected_batch[1], actual_batch[1])

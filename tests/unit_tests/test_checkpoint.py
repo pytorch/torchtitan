@@ -6,6 +6,7 @@
 
 import os
 import queue as queue_lib
+import random
 import shutil
 import tempfile
 import time
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import fsspec
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
@@ -27,6 +29,7 @@ from torchtitan.components.checkpoint import (
     purge_thread,
     Terminate,
 )
+from torchtitan.trainer import Trainer
 
 
 class FakeOptimizersContainer:
@@ -1000,6 +1003,56 @@ class TestModelWrapper(unittest.TestCase):
         self.assertEqual(sd2["a"].untyped_storage().data_ptr(), ptr_a)
         # ... and the in-place refresh picked up the updated parameter.
         self.assertTrue(torch.all(sd2["a"] == 1.0))
+
+
+class TestTrainerRNGState(unittest.TestCase):
+    def setUp(self):
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        self.addCleanup(random.setstate, python_state)
+        self.addCleanup(np.random.set_state, numpy_state)
+        self.addCleanup(torch.set_rng_state, torch_state)
+
+    def test_restores_python_numpy_and_torch_rng(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.step = 5
+        trainer.ntokens_seen = 123
+
+        with mock.patch(
+            "torchtitan.trainer.utils.device_module.is_available",
+            return_value=False,
+        ):
+            state = trainer.state_dict()
+            expected_python = random.random()
+            expected_numpy = np.random.random()
+            expected_torch = torch.rand(1)
+
+            random.random()
+            np.random.random()
+            torch.rand(1)
+            trainer.load_state_dict(state)
+
+        self.assertEqual(random.random(), expected_python)
+        self.assertEqual(np.random.random(), expected_numpy)
+        self.assertTrue(torch.equal(torch.rand(1), expected_torch))
+
+    def test_uses_global_rank_in_rng_key(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.step = 5
+        trainer.ntokens_seen = 123
+
+        with (
+            mock.patch("torch.distributed.is_initialized", return_value=True),
+            mock.patch("torch.distributed.get_rank", return_value=3),
+            mock.patch(
+                "torchtitan.trainer.utils.device_module.is_available",
+                return_value=False,
+            ),
+        ):
+            state = trainer.state_dict()
+
+        self.assertIn("rng_state_3", state)
 
 
 if __name__ == "__main__":

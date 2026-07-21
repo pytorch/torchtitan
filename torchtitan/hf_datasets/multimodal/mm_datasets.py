@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multimodal dataset and dataloader for VLM training.
+"""Multimodal dataset processing for VLM training.
 
 Workflow overview::
 
@@ -12,7 +12,7 @@ Workflow overview::
             │
             ▼
     ┌───────────────────────────────────────────────────────┐
-    │  Sample Processor  (per-sample, in Dataset.__iter__)  │
+    │  Sample Processor  (MultiModalProcessor)              │
     │                                                       │
     │  1. Parse raw sample (dataset-specific format)        │
     │     e.g. OBELICS interleaved text/images,             │
@@ -31,14 +31,14 @@ Workflow overview::
     │       masked to ignore_id (-100)                      │
     └───────────────────────────────────────────────────────┘
             │
-            ▼  (optional, if packing_buffer_size > 0)
+            ▼  (optional, if MMSamplePackingConfig is configured)
     ┌───────────────────────────────────────────────────────┐
     │  Sample Packer                                        │
     │  Bin-pack short samples into seq_len-length sequences │
     │  to reduce padding waste                              │
     └───────────────────────────────────────────────────────┘
             │
-            ▼  DataLoader batches samples (batch_size)
+            ▼  GrainDataLoader batches samples (batch_size)
     ┌───────────────────────────────────────────────────────┐
     │  Collator  (MultiModalCollator)                    │
     │                                                       │
@@ -424,7 +424,10 @@ class _MMSamplePackingIterator(grain.DatasetIterator[dict[str, Any]]):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class MMSamplePackingConfig:
-    """Packs multimodal rows with the existing scan-and-pick algorithm."""
+    """Packs multimodal rows with the existing scan-and-pick algorithm.
+
+    With repeated input, packing buffers may span source repeat boundaries.
+    """
 
     dataset: GrainDatasetConfig
     buffer_size: int

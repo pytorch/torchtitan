@@ -72,6 +72,8 @@ class ConcatThenSplitPackingConfig:
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
         # TODO(data-global-pack-plan): Plan packed rows before effective-DP sharding
         # when measurements justify shared length metadata and a cached plan.
+        # TODO(data-overflow-policy): Make long-document handling configurable
+        # (chunk, truncate, or drop); concat-then-split always chunks today.
         dataset = grain.experimental.ConcatThenSplitIterDataset(
             dataset,
             length_struct={"input_ids": context.seq_len, "labels": context.seq_len},

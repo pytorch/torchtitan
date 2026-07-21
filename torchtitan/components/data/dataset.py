@@ -92,7 +92,7 @@ class SingleDatasetConfig:
             dp_rank=iteration.dp_rank, dp_world_size=iteration.dp_world_size
         )
         if isinstance(source, grain.IterDataset):
-            # Streaming sources own their DP split, so shuffle raw rows before processing.
+            # Shuffle raw stream rows before processing them into larger training samples.
             dataset = source
             if iteration.repeat:
                 dataset = grain.experimental.RepeatIterDataset(dataset)
