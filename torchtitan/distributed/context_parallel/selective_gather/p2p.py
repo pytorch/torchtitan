@@ -28,61 +28,7 @@ import torch
 import torch.distributed as dist
 
 from .topology import PlanMetadata
-
-
-def _check_ctx_meta(
-    ctx, meta: PlanMetadata, shard: torch.Tensor, full: torch.Tensor
-) -> None:
-    """Guard the affine reshapes and the buffers the P2P ops are posted on.
-
-    ``shard`` holds one rank's blocks and ``full`` the whole gathered sequence
-    (in the backward, their gradients). A context that disagrees with the plan
-    would silently misalign the gather. In particular ``blocks_per_rank`` bounds
-    what ``build_plan_metadata`` accepted as a block id, so a context with fewer
-    blocks would index past its own shard. A dtype or device disagreement would
-    post receives that do not match what the peers send, which fails or hangs
-    the job somewhere else instead of raising here.
-    """
-    plan = meta.plan
-    if meta.group_ranks != ctx.group_ranks:
-        raise ValueError(
-            f"metadata was gathered on ranks {meta.group_ranks} but ctx runs on "
-            f"{ctx.group_ranks}; its local rank ids name different peers."
-        )
-    if meta.blocks_per_rank != ctx.blocks_per_rank:
-        raise ValueError(
-            f"metadata was validated for {meta.blocks_per_rank} blocks per rank "
-            f"but ctx.blocks_per_rank is {ctx.blocks_per_rank}."
-        )
-    if plan.block_numel != ctx.block_numel:
-        raise ValueError(
-            f"plan.block_numel {plan.block_numel} != ctx.block_numel "
-            f"{ctx.block_numel}."
-        )
-    if plan.batch_size != ctx.batch_size:
-        raise ValueError(
-            f"plan.batch_size {plan.batch_size} != ctx.batch_size " f"{ctx.batch_size}."
-        )
-    if shard.dtype != ctx.dtype or full.dtype != ctx.dtype:
-        raise ValueError(
-            f"buffer dtypes {shard.dtype}/{full.dtype} != ctx.dtype {ctx.dtype}."
-        )
-    if shard.device != ctx.device or full.device != ctx.device:
-        raise ValueError(
-            f"buffers are on {shard.device}/{full.device}, not ctx.device "
-            f"{ctx.device}."
-        )
-    if shard.numel() != ctx.shard_numel:
-        raise ValueError(
-            f"shard has {shard.numel()} elements, not ctx.shard_numel "
-            f"{ctx.shard_numel}."
-        )
-    expected_full = ctx.cp_size * ctx.shard_numel
-    if full.numel() != expected_full:
-        raise ValueError(
-            f"gathered buffer has {full.numel()} elements, not "
-            f"cp_size*shard_numel {expected_full}."
-        )
+from .transport import check_ctx_meta
 
 
 def run_p2p_gather(
@@ -107,7 +53,7 @@ def run_p2p_gather(
     carries the validation ``build_plan_metadata`` ran, which the entries below
     are turned straight into sends and receives on.
     """
-    _check_ctx_meta(ctx, meta, kv_local, out)
+    check_ctx_meta(ctx, meta, kv_local, out)
     if not out.is_contiguous():
         raise ValueError(
             "out must be contiguous: the gather writes through a reshape of it."
@@ -187,7 +133,7 @@ def run_p2p_gather_backward(
     ``build_plan_metadata`` checked: a duplicated block would have its gradient
     sent and summed twice.
     """
-    _check_ctx_meta(ctx, meta, d_kv_local, d_out)
+    check_ctx_meta(ctx, meta, d_kv_local, d_out)
     if not d_kv_local.is_contiguous():
         raise ValueError(
             "d_kv_local must be contiguous: the reduction writes "

@@ -10,9 +10,16 @@ masked out. Selective gather fetches only the blocks attention actually reads.
 
 The package exposes one differentiable API -- ``selective_gather`` over a
 ``SelectiveGatherContext`` -- on top of a transport-agnostic plan/metadata layer
-(``topology``). The ``"p2p"`` backend (``batch_isend_irecv``) needs no
-nccl4py/CuTeDSL and runs anywhere NCCL/RCCL point-to-point works, incl. AMD.
+(``topology``). The context picks a backend: the CuTeDSL LSA kernels (nccl4py +
+CuTeDSL + NCCL windows, Hopper+; intra-node NVLink, fastest) or the portable
+``batch_isend_irecv`` P2P baseline (anywhere NCCL/RCCL point-to-point works,
+incl. AMD). The CuTeDSL/nccl4py imports are lazy, so this package imports on
+P2P-only hosts.
 """
+
+# Apply the cutlass-dsl / nccl4py version shim before any lazy nccl import
+# (transport host API, the lsa device kernels). No-op without cutlass.
+from . import _compat  # noqa: F401
 
 from .autograd import selective_gather
 from .backend import select_backend

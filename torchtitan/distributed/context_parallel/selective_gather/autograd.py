@@ -5,10 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 """Single autograd-aware API for the selective K/V gather.
 
-``selective_gather`` is the one entry point a model calls: a differentiable op
-(forward gather + backward scatter-reduce) that dispatches on whichever backend
-the ``SelectiveGatherContext`` selected. Backend modules are imported lazily
-inside the Functions so the package stays importable where a backend is not.
+``selective_gather`` is the one entry point a model calls. It is a differentiable
+op (forward gather + backward scatter-reduce) that dispatches to whichever
+backend the context selected:
+
+  * ``"lsa"`` -- CuTeDSL LSA kernels. Fast path.
+  * ``"p2p"`` -- portable ``batch_isend_irecv`` baseline. Fallback (AMD / no-GIN
+    / no-CuTeDSL / pre-Hopper).
+
+The backend is chosen once at ``SelectiveGatherContext`` construction (see
+``backend.select_backend`` for the capability check); callers do not pick it.
+Backend-specific modules (CuTeDSL / nccl4py for LSA) are imported lazily inside
+the Functions so the package stays importable on hosts that only support P2P.
 
 Usage (set up once when the plan is known, then call every forward)::
 
@@ -35,6 +43,38 @@ def _empty_out(sg_ctx, ref):
 
 def _empty_grad(sg_ctx, ref):
     return torch.empty(sg_ctx.shard_numel, dtype=sg_ctx.dtype, device=ref.device)
+
+
+class _LSAGatherFn(torch.autograd.Function):
+    """LSA backend: signal-pad forward gather, staging-reduce backward."""
+
+    @staticmethod
+    def forward(actx, kv_local, sg_ctx, meta):  # pyrefly: ignore[bad-override]
+        from .lsa_kernel import run_lsa_gather
+
+        if meta.max_consumers > sg_ctx.max_consumers:
+            raise ValueError(
+                f"ctx.max_consumers ({sg_ctx.max_consumers}) < meta.max_consumers "
+                f"({meta.max_consumers}): the LSA backward staging would overflow "
+                "into a peer's window. Build the context with "
+                "max_consumers=meta.max_consumers."
+            )
+        out = _empty_out(sg_ctx, kv_local)
+        run_lsa_gather(sg_ctx, meta, kv_local.contiguous(), out, synchronize=False)
+        actx.sg_ctx, actx.meta = sg_ctx, meta
+        actx.kv_shape = kv_local.shape
+        return out
+
+    @staticmethod
+    @once_differentiable
+    def backward(actx, grad_out):  # pyrefly: ignore[bad-override]
+        from .lsa_kernel import run_lsa_gather_backward
+
+        d_kv = _empty_grad(actx.sg_ctx, grad_out)
+        run_lsa_gather_backward(
+            actx.sg_ctx, actx.meta, grad_out.contiguous(), d_kv, synchronize=False
+        )
+        return d_kv.view(actx.kv_shape), None, None
 
 
 class _P2PGatherFn(torch.autograd.Function):
@@ -83,9 +123,9 @@ def selective_gather(kv_local, sg_ctx, meta):
     if meta.ranks_missing_own:
         raise ValueError(
             "selective_gather needs every rank's plan to name the blocks that "
-            f"rank owns; ranks {list(meta.ranks_missing_own)} do not. The "
-            "backward reads that whole output region, so a plan built with "
+            f"rank owns; ranks {list(meta.ranks_missing_own)} do not. Both "
+            "backwards read that whole output region, so a plan built with "
             "include_own=False measures transport only and has no gradient."
         )
-    # "p2p" is the only backend a SelectiveGatherContext accepts.
-    return _P2PGatherFn.apply(kv_local, sg_ctx, meta)
+    fn = _LSAGatherFn if sg_ctx.backend == "lsa" else _P2PGatherFn
+    return fn.apply(kv_local, sg_ctx, meta)
