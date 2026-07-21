@@ -4,29 +4,69 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 import torch
 
 from torchtitan.models.common.attention import AttentionMasksType
-from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.protocols.module import Module, ModuleList
 
 
-@dataclass(frozen=True)
-class MTPSequenceSlices:
-    """Aligned main and shifted views for multi-token prediction."""
+def roll_mtp_sequence(
+    sequence: torch.Tensor,
+    *,
+    shift: int,
+    positions: torch.Tensor | None = None,
+    fill_value: int = 0,
+    return_valid_mask: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Left-roll an MTP sequence while preserving packed-document boundaries.
 
-    main: torch.Tensor
-    offsets: tuple[torch.Tensor, ...]
+    Without ``positions``, this is a regular left shift with the tail filled.
+    With reset-style positions, each document slice is shifted independently:
+    ``[A0, A1, A2, B0, B1]`` becomes ``[A1, A2, fill, B1, fill]``.
+    """
+    if shift < 0:
+        raise ValueError(f"MTP roll shift must be non-negative, got {shift}.")
+    if shift == 0:
+        if return_valid_mask:
+            return sequence, torch.ones_like(sequence, dtype=torch.bool)
+        return sequence
 
-    @property
-    def num_offsets(self) -> int:
-        return len(self.offsets)
+    seq_len = sequence.shape[1]
+    rolled = torch.full_like(sequence, fill_value)
+    valid_mask = torch.zeros_like(sequence, dtype=torch.bool)
+    if shift >= seq_len:
+        return (rolled, valid_mask) if return_valid_mask else rolled
+
+    source = sequence[:, shift:]
+    if positions is None:
+        rolled[:, : seq_len - shift] = source
+        valid_mask[:, : seq_len - shift] = True
+        return (rolled, valid_mask) if return_valid_mask else rolled
+
+    if positions.shape[1] < seq_len:
+        raise ValueError(
+            f"MTP positions need at least {seq_len} tokens, got {positions.shape[1]}."
+        )
+    valid_tokens = (
+        positions[:, shift:seq_len]
+        == positions[:, : seq_len - shift] + shift
+    )
+    rolled[:, : seq_len - shift] = torch.where(
+        valid_tokens,
+        source,
+        torch.full_like(source, fill_value),
+    )
+    valid_mask[:, : seq_len - shift] = valid_tokens
+    return (rolled, valid_mask) if return_valid_mask else rolled
 
 
-class MTPTransformerBlock(Module):
+class MTPTransformerBlock(TransformerBlock):
     """Generic MTP block for decoder-only transformer models.
 
     The block implements the DeepSeek-V3 style fusion:
@@ -38,40 +78,10 @@ class MTPTransformerBlock(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        inner_block_config: TransformerBlock.Config
         enorm: RMSNorm.Config
         hnorm: RMSNorm.Config
         eh_proj: Linear.Config
         mtp_norm: RMSNorm.Config
-
-        @classmethod
-        def from_inner_block_config(
-            cls,
-            inner_block_config: TransformerBlock.Config,
-            *,
-            dim: int,
-        ) -> "MTPTransformerBlock.Config":
-            if isinstance(inner_block_config, cls):
-                return inner_block_config
-            # Keep the inner transformer block intact and wrap only the MTP
-            # fusion/projection modules around it. This lets model-specific
-            # block construction stay in the original block config.
-            return cls(
-                attention=inner_block_config.attention,
-                feed_forward=inner_block_config.feed_forward,
-                moe=inner_block_config.moe,
-                attention_norm=inner_block_config.attention_norm,
-                ffn_norm=inner_block_config.ffn_norm,
-                inner_block_config=inner_block_config,
-                enorm=RMSNorm.Config(normalized_shape=dim),
-                hnorm=RMSNorm.Config(normalized_shape=dim),
-                eh_proj=Linear.Config(
-                    in_features=dim * 2,
-                    out_features=dim,
-                    bias=False,
-                ),
-                mtp_norm=RMSNorm.Config(normalized_shape=dim),
-            )
 
     def __init__(
         self,
@@ -81,25 +91,21 @@ class MTPTransformerBlock(Module):
     ):
         super().__init__()
         self.detach_heads = detach_heads
+        self.attention = config.attention.build()
+        self.attention_norm = config.attention_norm.build()
+        self.ffn_norm = config.ffn_norm.build()
         self.enorm = config.enorm.build()
         self.hnorm = config.hnorm.build()
         self.eh_proj = config.eh_proj.build()
-        self.inner = config.inner_block_config.build()
         self.mtp_norm = config.mtp_norm.build()
 
-    @property
-    def moe_enabled(self) -> bool:
-        # FSDP treats each item in model.layers as the MoE owner. MTP wraps the
-        # real transformer block in ``inner``, so proxy the MoE surface here to
-        # keep FSDP's existing MoE branch unchanged.
-        return getattr(self.inner, "moe_enabled", False)
-
-    @property
-    def moe(self):
-        # See ``moe_enabled`` above: this exposes ``inner.moe.experts`` to the
-        # shared FSDP expert-sharding logic while still sharding the outer MTP
-        # block as one unit.
-        return self.inner.moe
+        self.moe_enabled = config.moe is not None
+        if self.moe_enabled:
+            assert config.moe is not None
+            self.moe = config.moe.build()
+        else:
+            assert config.feed_forward is not None
+            self.feed_forward = config.feed_forward.build()
 
     def forward(
         self,
@@ -113,128 +119,134 @@ class MTPTransformerBlock(Module):
         h = self.eh_proj(
             torch.cat([self.enorm(input_offset), self.hnorm(prev_embed)], dim=-1)
         )
-        h = self.inner(h, attention_masks, positions)
+        h = h + self.attention(self.attention_norm(h), attention_masks, positions)
+        if self.moe_enabled:
+            h = h + self.moe(self.ffn_norm(h))
+        else:
+            h = h + self.feed_forward(self.ffn_norm(h))
         return self.mtp_norm(h)
 
 
-class MTPBlock(Module):
-    """Prepared-input MTP block for decoder-only transformer models.
+class MTPDecoder(Decoder):
+    """Decoder variant that owns MTP layers.
 
-    The dataloader provides ``[B, S + K]`` tokens. ``Decoder`` embeds the K
-    shifted token views and this block applies one MTP layer for each depth.
+    MTP is kept as model behavior: the main decoder consumes the normal input
+    sequence, and each MTP layer predicts one extra depth from internally shifted
+    token embeddings.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(Decoder.Config):
         num_mtp_layers: int = 0
-        inner_block_config: TransformerBlock.Config | None = None
+        mtp_layer_config: TransformerBlock.Config | None = None
         detach_heads: bool = False
 
+        def update_from_config(
+            self,
+            *,
+            config,
+            **kwargs,
+        ) -> None:
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            MTPDecoder.materialize_mtp_config(self)
+
+    @staticmethod
+    def materialize_mtp_config(config: "MTPDecoder.Config") -> None:
+        """Materialize MTP layer config before model-specific sharding."""
+        if config.num_mtp_layers <= 0:
+            return
+
+        inner_cfg = (
+            config.mtp_layer_config
+            if config.mtp_layer_config is not None
+            else config.layers[-1]
+        )
+        if isinstance(inner_cfg, MTPTransformerBlock.Config):
+            return
+        config.mtp_layer_config = MTPTransformerBlock.Config(
+            attention=inner_cfg.attention,
+            feed_forward=inner_cfg.feed_forward,
+            moe=inner_cfg.moe,
+            attention_norm=inner_cfg.attention_norm,
+            ffn_norm=inner_cfg.ffn_norm,
+            enorm=RMSNorm.Config(normalized_shape=config.dim),
+            hnorm=RMSNorm.Config(normalized_shape=config.dim),
+            eh_proj=Linear.Config(
+                in_features=config.dim * 2,
+                out_features=config.dim,
+                bias=False,
+            ),
+            mtp_norm=RMSNorm.Config(normalized_shape=config.dim),
+        )
+
     def __init__(self, config: Config):
-        super().__init__()
-        self.mtp_config = config
-        if not isinstance(config.inner_block_config, MTPTransformerBlock.Config):
+        self.materialize_mtp_config(config)
+        super().__init__(config)
+        if config.num_mtp_layers <= 0:
+            self.mtp_layers = None
+            return
+
+        if not isinstance(config.mtp_layer_config, MTPTransformerBlock.Config):
             raise ValueError(
-                "MTPBlock requires MTPBlock.Config.inner_block_config to be "
-                "materialized by Decoder.Config.update_from_config()."
+                "MTPDecoder requires Config.mtp_layer_config to be "
+                "materialized by MTPDecoder.Config.update_from_config()."
             )
-        layer_config = config.inner_block_config
-        self.layers = ModuleList(
+        self.mtp_layers = ModuleList(
             [
                 MTPTransformerBlock(
-                    layer_config,
+                    config.mtp_layer_config,
                     detach_heads=config.detach_heads,
                 )
                 for _ in range(config.num_mtp_layers)
             ]
         )
 
-    @staticmethod
-    def mtp_layer_config(
-        inner_block_config: TransformerBlock.Config,
-        *,
-        dim: int,
-    ) -> MTPTransformerBlock.Config:
-        return MTPTransformerBlock.Config.from_inner_block_config(
-            inner_block_config,
-            dim=dim,
-        )
-
-    @property
-    def num_layers(self) -> int:
-        return len(self.layers)
-
-    @property
-    def num_depths(self) -> int:
-        return len(self.layers)
-
-    def prepare_main_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
-        return split_mtp_sequence(
-            tokens,
-            num_mtp_modules=self.num_depths,
-        ).main
-
     def forward(
         self,
         tokens: torch.Tensor,
-        h: torch.Tensor,
-        tok_embeddings: Module,
-        attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
-    ) -> list[torch.Tensor]:
-        mtp_slices = split_mtp_sequence(
-            tokens,
-            num_mtp_modules=self.num_depths,
-        )
-        input_offsets = tuple(
-            tok_embeddings(offset_tokens)
-            for offset_tokens in mtp_slices.offsets
-        )
+        attention_masks: AttentionMasksType | None = None,
+    ):
+        if self.mtp_layers is None:
+            return super().forward(tokens, positions, attention_masks)
+        if self.tok_embeddings is None:
+            raise ValueError("MTP decoder forward requires token embeddings.")
 
-        outputs = []
-        for layer, input_offset in zip(self.layers, input_offsets, strict=True):
-            h = layer(input_offset, h, attention_masks, positions)
-            outputs.append(h)
-        return outputs
+        # Keep this aligned with Decoder.forward(), but preserve the pre-norm
+        # hidden state because MTP consumes the last decoder-layer output.
+        h = self.tok_embeddings(tokens)
+        for layer in self.layers.values():
+            h = layer(h, attention_masks, positions)
 
+        mtp_prev_embed = h
+        h = self.norm(h) if self.norm is not None else h
 
-def split_mtp_sequence(
-    sequence: torch.Tensor,
-    *,
-    num_mtp_modules: int,
-) -> MTPSequenceSlices:
-    """Split ``[B, S + K]`` into main ``[B, S]`` and K shifted ``[B, S]`` views."""
-    if num_mtp_modules <= 0:
-        return MTPSequenceSlices(main=sequence, offsets=())
+        mtp_outputs = []
+        for depth, layer in enumerate(self.mtp_layers, 1):
+            offset_tokens, valid_offset_tokens = roll_mtp_sequence(
+                tokens,
+                shift=depth,
+                positions=positions,
+                fill_value=0,
+                return_valid_mask=True,
+            )
+            input_offset = self.tok_embeddings(offset_tokens)
+            valid_offset_tokens = valid_offset_tokens.unsqueeze(-1).to(
+                dtype=mtp_prev_embed.dtype
+            )
+            mtp_prev_embed = mtp_prev_embed * valid_offset_tokens
+            mtp_prev_embed = layer(
+                input_offset,
+                mtp_prev_embed,
+                attention_masks,
+                positions,
+            )
+            mtp_outputs.append(mtp_prev_embed)
 
-    seq_len = sequence.shape[1] - num_mtp_modules
-    if seq_len <= 0:
-        raise ValueError(
-            f"Sequence length ({sequence.shape[1]}) must be greater than "
-            f"num_mtp_modules ({num_mtp_modules})."
-        )
-    return MTPSequenceSlices(
-        main=sequence[:, :seq_len],
-        offsets=tuple(
-            sequence[:, offset : offset + seq_len]
-            for offset in range(1, num_mtp_modules + 1)
-        ),
-    )
-
-
-def mtp_labels_for_depth(
-    labels: torch.Tensor,
-    *,
-    depth: int,
-    seq_len: int,
-) -> torch.Tensor:
-    """Return labels aligned to one MTP prediction depth."""
-    if depth < 0:
-        raise ValueError(f"MTP depth must be non-negative, got {depth}.")
-    end = depth + seq_len
-    if labels.shape[1] < end:
-        raise ValueError(
-            f"MTP labels need at least {end} tokens for depth {depth}, "
-            f"got {labels.shape[1]}."
-        )
-    return labels[:, depth:end]
+        outputs = [h] + mtp_outputs
+        if self._skip_lm_head:
+            return outputs
+        return [
+            self.lm_head(item) if self.lm_head is not None else item
+            for item in outputs
+        ]

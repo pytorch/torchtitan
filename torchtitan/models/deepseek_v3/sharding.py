@@ -61,10 +61,9 @@ def set_deepseek_v3_sharding_config(
         _set_deepseek_v3_layer_sharding(
             layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
         )
-    mtp_cfg = getattr(config, "mtp", None)
-    if mtp_cfg is not None and mtp_cfg.num_mtp_layers > 0:
+    if getattr(config, "num_mtp_layers", 0) > 0:
         _set_deepseek_v3_mtp_sharding(
-            mtp_cfg,
+            config,
             enable_sp=enable_sp,
             enable_ep=enable_ep,
         )
@@ -152,7 +151,7 @@ def _set_deepseek_v3_layer_sharding(
 
 
 def _set_deepseek_v3_mtp_sharding(
-    mtp_cfg,
+    config,
     *,
     enable_sp: bool,
     enable_ep: bool,
@@ -164,13 +163,13 @@ def _set_deepseek_v3_mtp_sharding(
     )
     norm = norm_config(enable_sp=enable_sp)
 
-    # Decoder.Config.update_from_config materializes this as an
+    # MTPDecoder.Config.update_from_config materializes this as an
     # MTPTransformerBlock.Config before sharding runs. This function only fills
     # placements, mirroring how the main DeepSeek-V3 layer config is handled.
-    mtp_layer_cfg = mtp_cfg.inner_block_config
+    mtp_layer_cfg = config.mtp_layer_config
 
     _set_deepseek_v3_layer_sharding(
-        mtp_layer_cfg.inner_block_config,
+        mtp_layer_cfg,
         enable_sp=enable_sp,
         enable_ep=enable_ep,
     )
