@@ -304,6 +304,7 @@ def _copy_rows_to_peer_ptrs_kernel(
     DST_DTYPE: tl.constexpr,
     HAS_NUM_VALID_ROWS: tl.constexpr,
     HAS_SRC_ROWS: tl.constexpr,
+    SRC_ROW_DIVISOR: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
@@ -332,6 +333,8 @@ def _copy_rows_to_peer_ptrs_kernel(
     src_row = row
     if HAS_SRC_ROWS:
         src_row = tl.load(src_rows + row, mask=row_mask, other=0).to(tl.int64)
+        if SRC_ROW_DIVISOR != 1:
+            src_row = src_row // SRC_ROW_DIVISOR
     dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
     dst_row = tl.load(dst_rows + row, mask=row_mask, other=0).to(tl.int64)
     dst_rank_mask = row_mask & (dst_rank >= 0)
@@ -392,6 +395,7 @@ def copy_rows_to_peers_kernel(
     block_m: int = 1,
     num_warps: int = 4,
     src_rows: torch.Tensor | None = None,
+    src_row_divisor: int = 1,
     num_valid_rows: torch.Tensor | None = None,
 ) -> None:
     if len(dsts) != ep_size:
@@ -417,6 +421,7 @@ def copy_rows_to_peers_kernel(
         DST_DTYPE=dst_dtype,
         HAS_NUM_VALID_ROWS=num_valid_rows is not None,
         HAS_SRC_ROWS=src_rows is not None,
+        SRC_ROW_DIVISOR=src_row_divisor,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         num_warps=num_warps,

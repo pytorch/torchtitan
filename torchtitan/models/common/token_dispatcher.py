@@ -18,6 +18,9 @@ from torchtitan.distributed.minimal_async_ep import (
     dispatch_op as minimal_async_ep_dispatch_op,
     init_buffer as minimal_async_ep_init_buffer,
     MinimalAsyncEPDispatchMetadata,
+    reduce_topk_op as minimal_async_ep_reduce_topk_op,
+    wait_combine_op as minimal_async_ep_wait_combine_op,
+    wait_dispatch_op as minimal_async_ep_wait_dispatch_op,
 )
 from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_sparse_mesh
 from torchtitan.distributed.utils import get_spmd_backend
@@ -1215,6 +1218,47 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         )
         MinimalAsyncEPTokenDispatcher._global_buffer_key = buffer_key
 
+    def _dispatch_token_exchange(
+        self,
+        x_TD: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+        receive_capacity: int,
+        ep_size: int,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        return minimal_async_ep_dispatch_op(
+            x_TD,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+            receive_capacity,
+            ep_size,
+        )
+
+    def _combine_token_exchange(
+        self,
+        routed_output_RD: torch.Tensor,
+        state: MinimalAsyncEPDispatchMetadata,
+    ) -> torch.Tensor:
+        return minimal_async_ep_combine_op(
+            routed_output_RD,
+            state.dispatch_dst_ranks,
+            state.dispatch_dst_rows,
+            state.combine_dst_ranks,
+            state.combine_dst_rows,
+            state.combine_num_valid_rows,
+            state.num_tokens * state.top_k,
+        )
+
     # pyrefly: ignore [bad-override]
     def dispatch(
         self,
@@ -1259,12 +1303,16 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             E_row_to_T_row_N,  # local E-major row -> local T-major row
             T_row_to_E_row_N,  # local T-major row -> local E-major row
             num_tokens_per_local_expert_e,  # local expert -> active row count
-        ) = minimal_async_ep_dispatch_op(
+        ) = self._dispatch_token_exchange(
             x_TD,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
             receive_capacity,
             ep_size,
+        )
+        hidden_states_RD = minimal_async_ep_wait_dispatch_op(
+            hidden_states_RD,
+            [x_TD],
         )
 
         state = MinimalAsyncEPDispatchMetadata(
@@ -1296,13 +1344,21 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         """Combine tokens via MinimalAsyncEP."""
         del num_local_tokens_after_padding, local_seq_len_after_padding
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
-        combined_TD, _routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
+        routed_output_ND = self._combine_token_exchange(  # noqa: N806
             routed_output_RD,
-            state.dispatch_dst_ranks,
-            state.dispatch_dst_rows,
-            state.combine_dst_ranks,
-            state.combine_dst_rows,
-            state.combine_num_valid_rows,
+            state,
+        )
+        routed_output_ND = minimal_async_ep_wait_combine_op(
+            routed_output_ND,
+            [
+                routed_output_RD,
+                state.combine_dst_ranks,
+                state.combine_dst_rows,
+                state.combine_num_valid_rows,
+            ],
+        )
+        combined_TD = minimal_async_ep_reduce_topk_op(  # noqa: N806
+            routed_output_ND,
             state.T_row_to_E_row,
             state.E_row_to_T_row,
             state.routed_scores,
