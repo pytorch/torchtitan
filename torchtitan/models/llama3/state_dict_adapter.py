@@ -101,6 +101,8 @@ class Llama3StateDictAdapter(StateDictAdapter):
                     self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
                     and key == "lm_head.weight"
                 ):
+                    if self.fqn_to_index_mapping:
+                        self.fqn_to_index_mapping.pop("lm_head.weight", None)
                     continue
                 new_key = to_hf_map[key]
 

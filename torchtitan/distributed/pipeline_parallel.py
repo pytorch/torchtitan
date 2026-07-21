@@ -271,11 +271,17 @@ def _build_pipeline_schedule(
             "PipelineScheduleSingle is an abstract base class. "
             "Use a concrete single-stage schedule such as GPipe or 1F1B."
         )
+
+    # Pipeline schedules expect a bare scalar loss tensor.
+    def _scalar_loss_fn(*args: object, **kwargs: object) -> torch.Tensor:
+        loss, _ = loss_fn(*args, **kwargs)
+        return loss
+
     if looped_schedule:
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
             n_microbatches=n_microbatches,
-            loss_fn=loss_fn,
+            loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
         )
@@ -283,7 +289,7 @@ def _build_pipeline_schedule(
         schedule = schedule_class(
             stages[0],
             n_microbatches=n_microbatches,
-            loss_fn=loss_fn,
+            loss_fn=_scalar_loss_fn,
             scale_grads=False,
         )
     logger.info(

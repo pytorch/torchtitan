@@ -33,6 +33,8 @@ Run each backend in a separate torchrun invocation:
 import gc
 import logging
 import os
+import shutil
+import tempfile
 import unittest
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -52,14 +54,13 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
@@ -357,8 +358,6 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
 
-    if inner_attn.mask_mod is not None:
-        mask_mods.append(inner_attn.mask_mod.build().get_mask_mod())
     attention_masks = create_attention_mask(
         and_masks(*mask_mods),
         1,
@@ -592,6 +591,10 @@ class BitwiseParityTestBase(unittest.TestCase):
     attn_backend: str = "varlen"
     min_world_size: int = 1
     hf_assets_env_var: str = "HF_ASSETS_PATH"
+    # Root dir for run artifacts (NCCL flight-recorder comm_traces). CI sets it
+    # to $RUNNER_TEMP/artifacts-to-be-uploaded so traces are uploaded; when unset
+    # (local runs) a temp dir is used instead.
+    dump_folder_env_var: str = "RL_TEST_DUMP_FOLDER"
     # When True, vLLM skips its own checkpoint load and the trainer model's
     # weights (including attention sinks) are copied into the engine in-process.
     sync_weights_from_trainer: bool = False
@@ -633,7 +636,15 @@ class BitwiseParityTestBase(unittest.TestCase):
         set_batch_invariance(config.trainer.debug.batch_invariant)
 
         if not dist.is_initialized():
-            dist_utils.init_distributed(CommConfig())
+            # Writable base_folder for comm_traces
+            dump_root = os.environ.get(cls.dump_folder_env_var)
+            if dump_root:
+                base_folder = os.path.join(dump_root, cls.__name__)
+                os.makedirs(base_folder, exist_ok=True)
+            else:
+                base_folder = tempfile.mkdtemp(prefix="rl_bitwise_")
+                cls.addClassCleanup(shutil.rmtree, base_folder, ignore_errors=True)
+            dist_utils.init_distributed(CommConfig(), base_folder=base_folder)
 
         if cls.sync_weights_from_trainer:
             generator_checkpoint = CheckpointManager.Config(enable=False)

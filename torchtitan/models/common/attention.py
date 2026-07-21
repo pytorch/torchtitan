@@ -17,10 +17,10 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
 import spmd_types as spmd
-
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
+from spmd_types.runtime import get_partition_spec
+from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
@@ -41,8 +41,8 @@ from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_att
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
-
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
@@ -189,15 +189,22 @@ class VarlenAttention(Module):
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                # exclude CP from typecheck as varlen + CP is not yet supported.
-                spmd.assert_type(result, spmd.V, spmd.PartitionSpec("dp", "tp", None))
+                q_local = spmd.get_local_type(q_TNH)
+                # Varlen + CP is unsupported; packing a CP-sharded L into T is
+                # rejected during q_TNH reshape propagation.
+                q_ps = get_partition_spec(q_TNH)
+                spmd.assert_type(result, q_local, q_ps)
             out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            spmd.assert_type(out_TNH, spmd.V, spmd.PartitionSpec("dp", "tp", None))
-            spmd.assert_type(lse_NT, spmd.V, spmd.PartitionSpec("tp", "dp"))
+            q_local = spmd.get_local_type(q_TNH)
+            q_ps = get_partition_spec(q_TNH)
+            spmd.assert_type(out_TNH, q_local, q_ps)
+            # The current implementation returns LSE as (N, T).
+            lse_ps = None if q_ps is None else spmd.PartitionSpec(q_ps[1], q_ps[0])
+            spmd.assert_type(lse_NT, q_local, lse_ps)
 
         out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
@@ -264,8 +271,12 @@ class FlexAttention(Module):
     ):
         """Run compiled FlexAttention outside SPMD typechecking.
 
-        Compiled regions are not currently compatible with SPMD typechecking,
-        so propagate types at the boundary instead of typechecking into Flex.
+        Compiled regions are not currently compatible with SPMD typechecking, so
+        the opaque kernel output is re-typed at the boundary instead of
+        typechecking into Flex. Attention preserves the query's sharding (output
+        is (B, N, L, H) with the same batch/head/seq layout as ``q``), so ``out``
+        takes ``q``'s full SPMD type (local type + shard-dim PartitionSpec), and
+        ``lse`` takes the same minus the trailing (unsharded) head dim.
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
         """
         with spmd.no_typecheck():
@@ -281,9 +292,13 @@ class FlexAttention(Module):
                 kernel_options=kernel_options,
             )
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "tp", "cp", None))
+            q_local = spmd.get_local_type(q)
+            q_ps = get_partition_spec(q)
+            spmd.assert_type(out, q_local, q_ps)
             if return_aux.lse:
-                spmd.assert_type(aux.lse, spmd.V, spmd.PartitionSpec("dp", "tp", "cp"))
+                # lse is (B, N, L) = q minus the trailing (unsharded) head dim.
+                lse_ps = None if q_ps is None else spmd.PartitionSpec(*q_ps[:-1])
+                spmd.assert_type(aux.lse, q_local, lse_ps)
         return out, aux
 
     def forward(
@@ -832,6 +847,13 @@ class FusedQKVLinear(BaseQKVLinear):
             if key not in state_dict:
                 continue
             tensor = state_dict.pop(key)
+            # Gather to Replicate so the n_kv-leading reshape is local (dim 0
+            # unsharded) when a Shard(0) split would not divide n_kv_heads
+            # (e.g. dp_shard=8, n_kv_heads=4); stays a DTensor for the copy.
+            if isinstance(tensor, DTensor):
+                tensor = tensor.redistribute(
+                    tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
+                )
             n_kv = tensor.shape[0] // (r * hd)
             tail = (tensor.shape[1],) if ndim == 4 else ()
             w = tensor.reshape(n_kv, r, hd, *tail)
@@ -855,6 +877,14 @@ class FusedQKVLinear(BaseQKVLinear):
             if not all(k in state_dict for k in keys):
                 continue
             wq, wk, wv = (state_dict.pop(k) for k in keys)
+            # TODO: check if we could avoid this All-gather
+            # Gather to Replicate so the n_kv reshape is local; stays a DTensor so the
+            # fused result can be copied into the sharded wqkv param.
+            if isinstance(wq, DTensor):
+                wq, wk, wv = (
+                    t.redistribute(t.device_mesh, [Replicate()] * t.device_mesh.ndim)
+                    for t in (wq, wk, wv)
+                )
             n_kv = wk.shape[0] // hd
             tail = (wq.shape[1],) if ndim == 4 else ()
             q = wq.reshape(n_kv, hpk, hd, *tail)

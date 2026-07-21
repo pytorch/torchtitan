@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
@@ -17,6 +17,7 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
 )
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
@@ -24,10 +25,15 @@ from . import model_registry
 
 
 def llama3_debugmodel() -> Trainer.Config:
+    model_spec = model_registry("debugmodel")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -98,16 +104,22 @@ def llama3_debugmodel_float8_emulate_lora() -> Trainer.Config:
 
 def llama3_debugmodel_ce_loss() -> Trainer.Config:
     """Debug model with standard (non-chunked) CrossEntropyLoss."""
-    from torchtitan.components.loss import CrossEntropyLoss
-
     config = llama3_debugmodel()
-    config.loss = CrossEntropyLoss.Config()
+    assert config.model_spec is not None
+    config.loss = CrossEntropyLoss.Config(
+        global_vocab_size=decoder_vocab_size(config.model_spec),
+    )
     return config
 
 
 def llama3_8b() -> Trainer.Config:
+    model_spec = model_registry("8B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -116,7 +128,7 @@ def llama3_8b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             enable_tensorboard=True,
         ),
-        model_spec=model_registry("8B"),
+        model_spec=model_spec,
         optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
             local_batch_size=1,
@@ -136,8 +148,13 @@ def llama3_8b() -> Trainer.Config:
 
 
 def llama3_70b() -> Trainer.Config:
+    model_spec = model_registry("70B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -146,7 +163,7 @@ def llama3_70b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             enable_tensorboard=True,
         ),
-        model_spec=model_registry("70B"),
+        model_spec=model_spec,
         optimizer=default_adamw(lr=1.5e-4),
         training=TrainingConfig(
             local_batch_size=8,
@@ -170,8 +187,23 @@ def llama3_70b() -> Trainer.Config:
 
 def llama3_405b() -> Trainer.Config:
     compile_config = CompileConfig(enable=True)
+    model_spec = model_registry(
+        "405B",
+        converters=[
+            Float8LinearConverter.Config(
+                filter_fqns=["output"],
+                model_compile_enabled=(
+                    compile_config.enable and "model" in compile_config.components
+                ),
+            ),
+        ],
+    )
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Llama-3.1-405B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -180,17 +212,7 @@ def llama3_405b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             enable_tensorboard=True,
         ),
-        model_spec=model_registry(
-            "405B",
-            converters=[
-                Float8LinearConverter.Config(
-                    filter_fqns=["output"],
-                    model_compile_enabled=(
-                        compile_config.enable and "model" in compile_config.components
-                    ),
-                ),
-            ],
-        ),
+        model_spec=model_spec,
         optimizer=default_adamw(lr=8e-5),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
@@ -227,7 +249,11 @@ def sft_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel", attn_backend="flex")
 
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_spec,
         optimizer=default_adamw(lr=8e-4),

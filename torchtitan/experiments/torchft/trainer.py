@@ -297,7 +297,7 @@ class FaultTolerantTrainer(Trainer):
             ft_manager=self.ft_manager,
         )
 
-        self.train_context = dist_utils.get_train_context(
+        self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
         )
 

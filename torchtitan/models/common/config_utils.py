@@ -15,7 +15,9 @@ from collections.abc import Callable
 from typing import Literal
 
 import torch
+from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
@@ -23,9 +25,16 @@ from torchtitan.models.common.attention import (
     QKVLinear,
     VarlenAttention,
 )
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    MoE,
+    RoutedExperts,
+    TokenChoiceTopKRouter,
+)
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
@@ -34,7 +43,15 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+
+
+def decoder_vocab_size(model_spec: ModelSpec) -> int:
+    """Assert Decoder.Config type so lint is not annoyed."""
+    model_config = model_spec.model
+    assert isinstance(model_config, Decoder.Config)
+    return model_config.vocab_size
 
 
 def get_attention_config(
@@ -100,7 +117,6 @@ def _fused_qkv_param_init(
     module and keeps RNG independent of the parallelism.
     """
     heads_per_kv = n_heads // n_kv_heads
-    r_dim = heads_per_kv + 2
 
     def _make_init(base_init: Callable) -> Callable:
         # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
@@ -124,11 +140,25 @@ def _fused_qkv_param_init(
                     v.view(n_kv_heads, 1, head_dim, *tail),
                 ],
                 dim=1,
-            )
+            ).view(-1, *tail)
             with torch.no_grad():
-                # fused is Replicate (cat of Replicates); copy_ scatters it into
-                # t, so each rank writes only its own shard of the fused param.
-                t.view(n_kv_heads, r_dim, head_dim, *tail).copy_(fused)
+                # fused is Replicate (cat of Replicates). Flatten it to t's native
+                # 2D [(n_kv_heads*r_dim*head_dim), *tail] shape and copy_ into t,
+                # which scatters each rank's own shard. Reshaping the Replicate
+                # source (instead of t.view(n_kv_heads, ...) on the sharded t)
+                # avoids the "unflatten unevenly sharded" error when dp_shard*tp
+                # does not divide n_kv_heads (e.g. dp_shard=8, n_kv_heads=4); no
+                # gather, since fused is already replicated.
+                if not isinstance(t, DTensor) and (tp_size := spmd_mesh_size("tp")) > 1:
+                    # RL generator init_weights() only needs non-persistent
+                    # buffers; weights come from trainer state dict. Until it has
+                    # a DTensor static state dict path, copy this TP shard here.
+                    # TODO: Remove once RL can init buffers without weight init.
+                    mesh = current_spmd_mesh()
+                    assert mesh is not None
+                    tp_rank = mesh.get_local_rank("tp")
+                    fused = fused.chunk(tp_size, dim=0)[tp_rank]
+                t.copy_(fused)
 
         return _init
 
@@ -233,7 +263,7 @@ def make_moe_config(
     *,
     num_experts: int = 8,
     router: TokenChoiceTopKRouter.Config,
-    experts: GroupedExperts.Config,
+    routed_experts: RoutedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
@@ -242,7 +272,7 @@ def make_moe_config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
         router=router,
-        experts=experts,
+        routed_experts=routed_experts,
         shared_experts=shared_experts,
     )
 
@@ -284,6 +314,9 @@ def make_token_dispatcher_config(
     top_k: int,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    hidden_dim: int | None = None,
+    num_max_tokens_per_rank: int | None = None,
+    cudagraphable: bool = False,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -301,10 +334,21 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
+    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/cudagraph knobs --
+    # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
     if comm_backend == "deepep":
+        # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
+        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
+        # selects the static no-host-sync expand layout (set on the generator by the
+        # deepep_inference override). ``num_max_tokens_per_rank`` is the per-rank EXPAND
+        # capacity: training infers it (the compact path auto-sizes), inference must set it
+        # >= the largest per-rank token count for droplessness.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            hidden_dim=hidden_dim,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            cudagraphable=cudagraphable,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
@@ -329,7 +373,7 @@ def make_token_dispatcher_config(
         )
 
 
-def make_experts_config(
+def make_routed_experts_config(
     *,
     dim: int,
     hidden_dim: int,
@@ -338,17 +382,24 @@ def make_experts_config(
     param_init: dict[str, Callable],
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-) -> GroupedExperts.Config:
-    """Build a fully-specified GroupedExperts.Config."""
-    return GroupedExperts.Config(
-        dim=dim,
-        hidden_dim=hidden_dim,
-        num_experts=num_experts,
-        param_init=param_init,
+    num_max_tokens_per_rank: int | None = None,
+    cudagraphable: bool = False,
+) -> RoutedExperts.Config:
+    """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
+    return RoutedExperts.Config(
+        inner_experts=GroupedExperts.Config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            num_experts=num_experts,
+            param_init=param_init,
+        ),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+            hidden_dim=dim,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            cudagraphable=cudagraphable,
         ),
     )

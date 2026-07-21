@@ -8,6 +8,7 @@ import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 
+import spmd_types as spmd
 import torch
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
@@ -17,6 +18,7 @@ from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.model import FluxModel
 from torchtitan.models.flux.parallelize import parallelize_encoders
+from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
@@ -58,11 +60,16 @@ class FluxTrainer(Trainer):
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
+        distinct_seed_mesh_dims = (
+            ["cp", "dp_shard", "dp_replicate"]
+            if config.parallelism.spmd_backend in ("full_dtensor", "spmd_types")
+            else ["fsdp", "dp_replicate"]
+        )
         dist_utils.set_determinism(
             self.parallel_dims,
             self.device,
             config.debug,
-            distinct_seed_mesh_dims=["fsdp", "dp_replicate"],
+            distinct_seed_mesh_dims=distinct_seed_mesh_dims,
         )
 
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
@@ -101,6 +108,7 @@ class FluxTrainer(Trainer):
             .build()
             .to(device=self.device, dtype=self._dtype)
         )
+
         self.t5_encoder = (
             replace(
                 t5_encoder_config,
@@ -254,6 +262,15 @@ class FluxTrainer(Trainer):
         self.ntokens_seen += bsz * self.config.training.seq_len // self.parallel_dims.cp
 
         with self.train_context():
+            annotate_flux_forward_inputs(
+                latents=latents,
+                latent_pos_enc=latent_pos_enc,
+                t5_encodings=t5_encodings,
+                text_pos_enc=text_pos_enc,
+                target=target,
+                clip_encodings=clip_encodings,
+                timesteps=timesteps,
+            )
             latent_noise_pred = model(
                 img=latents,
                 img_ids=latent_pos_enc,
@@ -264,12 +281,13 @@ class FluxTrainer(Trainer):
             )
 
             # Scale loss as we used SUM reduction for mse loss function
-            loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
+            loss, _ = self.loss_fn(latent_noise_pred, target, global_valid_tokens)
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[unsupported-delete]
             del (latent_noise_pred, noise, target)
-            loss.backward()
+            with spmd.no_typecheck():
+                loss.backward()
 
         return loss
 

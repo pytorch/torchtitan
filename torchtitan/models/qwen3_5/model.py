@@ -20,7 +20,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
-from torchtitan.models.common import Conv1d, FeedForward, Linear
+from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -176,27 +176,6 @@ def _causal_conv1d_varlen(
         cu_seqlens_cpu=cu_seqlens_cpu,
     )
     return out_BTD
-
-
-class SharedExperts(FeedForward):
-    """Qwen3.5 shared expert: SwiGLU FFN with a per-token sigmoid gate.
-
-    The output is ``sigmoid(gate(x)) * ffn(x)``. Inherits ``w1/w2/w3`` from
-    FeedForward so weight FQNs are unchanged. This gate is specific to
-    Qwen3.5; other models use a plain ``FeedForward`` shared expert.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
-        gate: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.gate = config.gate.build()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = super().forward(x)
-        return torch.sigmoid(self.gate(x)) * out
 
 
 class OffsetRMSNorm(Module):

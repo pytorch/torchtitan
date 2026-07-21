@@ -8,11 +8,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
-    ChunkedCELossWithParamGrads,
+    ChunkedLossWrapperWithParamGrads,
 )
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
@@ -80,7 +80,11 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
 
     enable_passes: bool = True
-    """When False, skip all graph passes (both default and user-configured)."""
+    """When False, skip optional graph passes (both default and user-configured).
+
+    GraphPP still runs mandatory pre-partition normalization passes because its
+    partitioning contracts depend on canonical graph structure.
+    """
 
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
@@ -251,6 +255,7 @@ def to_graph_trainer_config(
     d["model_spec"] = replace(
         base_config.model_spec,
         parallelize_fn=graph_spec.parallelize_fn,
+        pipelining_fn=graph_spec.pipelining_fn,
         model=graph_model,
     )
     d.pop("compile")
@@ -265,8 +270,8 @@ def to_graph_trainer_config(
     # graph_trainer's tracer requires explicit autograd outputs for lm_head
     # params instead of relying on .grad side effects from chunk_loss.backward().
     loss_cfg = d.get("loss")
-    if isinstance(loss_cfg, ChunkedCELoss.Config):
-        d["loss"] = ChunkedCELossWithParamGrads.Config(
+    if isinstance(loss_cfg, ChunkedLossWrapper.Config):
+        d["loss"] = ChunkedLossWrapperWithParamGrads.Config(
             **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
         )
 

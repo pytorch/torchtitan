@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
@@ -14,6 +14,7 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry, QWEN3_5_SPECIAL_TOKENS
@@ -36,12 +37,17 @@ def _dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
 
 
 def qwen35_debugmodel() -> Trainer.Config:
+    model_spec = model_registry("debugmodel")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m-test"),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -70,12 +76,17 @@ def qwen35_debugmodel_varlen_attn() -> Trainer.Config:
 
 
 def qwen35_debugmodel_moe() -> Trainer.Config:
+    model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel_moe", moe_comm_backend="standard"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m-test"),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -99,11 +110,16 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
 
 
 def qwen35_0_8b() -> Trainer.Config:
+    model_spec = model_registry("0.8B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3.5-0.8B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_registry("0.8B"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m"),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -124,11 +140,16 @@ def qwen35_0_8b() -> Trainer.Config:
 
 
 def qwen35_2b() -> Trainer.Config:
+    model_spec = model_registry("2B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3.5-2B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_registry("2B"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m"),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -149,11 +170,16 @@ def qwen35_2b() -> Trainer.Config:
 
 
 def qwen35_4b() -> Trainer.Config:
+    model_spec = model_registry("4B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3.5-4B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_registry("4B"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m"),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -173,11 +199,16 @@ def qwen35_4b() -> Trainer.Config:
 
 
 def qwen35_9b() -> Trainer.Config:
+    model_spec = model_registry("9B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_registry("9B"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m"),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -199,11 +230,16 @@ def qwen35_9b() -> Trainer.Config:
 
 
 def qwen35_27b() -> Trainer.Config:
+    model_spec = model_registry("27B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3.5-27B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_registry("27B"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m"),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -225,11 +261,16 @@ def qwen35_27b() -> Trainer.Config:
 
 
 def qwen35_35b_a3b() -> Trainer.Config:
+    model_spec = model_registry("35B-A3B", moe_comm_backend="standard")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_registry("35B-A3B", moe_comm_backend="standard"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m"),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -252,11 +293,16 @@ def qwen35_35b_a3b() -> Trainer.Config:
 
 
 def qwen35_122b_a10b() -> Trainer.Config:
+    model_spec = model_registry("122B-A10B", moe_comm_backend="standard")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3.5-122B-A10B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_registry("122B-A10B", moe_comm_backend="standard"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m"),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -279,11 +325,16 @@ def qwen35_122b_a10b() -> Trainer.Config:
 
 
 def qwen35_397b_a17b() -> Trainer.Config:
+    model_spec = model_registry("397B-A17B", moe_comm_backend="standard")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3.5-397B-A17B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_registry("397B-A17B", moe_comm_backend="standard"),
+        model_spec=model_spec,
         dataloader=_dataloader("cc12m"),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),

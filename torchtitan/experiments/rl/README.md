@@ -48,10 +48,13 @@ uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/t
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 ```
 
-4. Install PyTorch nightly, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
+4. Install PyTorch and torchvision nightlies, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
+
+`torchvision` is only needed because the current vllm nightly imports it during kernel warmup; TorchTitan RL does not otherwise require it.
+
 ```bash
-# Install vllm with nightly torch
-uv pip install torch vllm torchcomms  --pre \
+# Install vllm with nightly torch and torchvision
+uv pip install torch torchvision vllm torchcomms --pre \
 --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
 --index-strategy unsafe-best-match
 ```
@@ -107,4 +110,4 @@ Example:
 python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grpo_qwen3_0_6b_varlen_batch_invariant
 ```
 
-This config sets `DebugConfig(batch_invariant=True, deterministic=True)` and `training.dtype="bfloat16"` (required so the trainer computes in the same precision as the generator, as a limitation because TP only doesn't naturally support mixed precision training).
+This config sets `DebugConfig(batch_invariant=True, deterministic=True)`. The trainer must compute its forward in bfloat16 to match the generator. This is achieved with FSDP mixed precision: the trainer keeps fp32 master weights and FSDP casts them to bfloat16 (`training.mixed_precision_param="bfloat16"`, the default) for the forward, which is bitwise identical to the generator's bfloat16 forward. The trainer always wraps the model in FSDP, so this cast happens even at `data_parallel_shard_degree=1` (where FSDP acts purely as a mixed-precision boundary) -- no extra GPUs are needed.

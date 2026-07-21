@@ -94,11 +94,13 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from typing import Annotated
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/experiments/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
+import tyro
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
 
@@ -109,6 +111,7 @@ from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
+from torchtitan.experiments.rl.components.weight_sync import WeightSyncManager
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -120,7 +123,6 @@ from torchtitan.experiments.rl.controller_metrics import (
     compute_rollout_metrics,
     MetricsTimer,
 )
-from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
@@ -128,6 +130,10 @@ from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout.types import GenerateFn
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
+from torchtitan.experiments.rl.routing.inter_generator_router import (
+    InterGeneratorRouter,
+)
+from torchtitan.experiments.rl.routing.types import RoutingContext
 from torchtitan.experiments.rl.types import Completion, TrainingBatch
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -195,9 +201,9 @@ class Controller(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model_spec: ModelSpec | None = None
-        """Model specification shared by trainer and generator.
-        Set programmatically via config_registry (not from CLI)."""
+        model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
+        """Model spec for the trainer and the generator. Set programmatically via
+        config_registry (not from CLI)."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
@@ -240,8 +246,8 @@ class Controller(Configurable):
         ``num_generators * generator_world_size``.
         """
 
-        generator_router: GeneratorRouter.Config = field(
-            default_factory=GeneratorRouter.Config
+        generator_router: InterGeneratorRouter.Config = field(
+            default_factory=InterGeneratorRouter.Config
         )
         """Generator routing strategy configuration."""
 
@@ -287,12 +293,20 @@ class Controller(Configurable):
                     )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
-                # TODO: Replace trainer dtype constraint to use mixed
-                #  training enabled by FSDP.
-                if self.trainer.training.dtype != "bfloat16":
+                # The trainer forward must compute in bf16 to match the bf16
+                # generator, via FSDP mixed precision. The trainer always wraps
+                # the model in FSDP (even at data_parallel_shard_degree=1, where
+                # FSDP acts purely as a mixed-precision boundary), so
+                # mixed_precision_param == "bfloat16" casts the fp32 master
+                # weights to bf16 for the forward before any matmul.
+                if self.trainer.training.mixed_precision_param != "bfloat16":
                     raise ValueError(
-                        f"batch_invariant requires bfloat16 training dtype, "
-                        f"got {self.trainer.training.dtype!r}"
+                        "batch_invariant requires the trainer forward to compute "
+                        "in bfloat16 to match the generator. Set "
+                        "training.mixed_precision_param='bfloat16' (fp32 master "
+                        "weights, bf16-cast forward via FSDP mixed precision). "
+                        "Got mixed_precision_param="
+                        f"{self.trainer.training.mixed_precision_param!r}."
                     )
                 if self.generator.model_dtype != "bfloat16":
                     raise ValueError(
@@ -337,7 +351,7 @@ class Controller(Configurable):
     def __init__(self, config: Config):
         self.config = config
         self.trainer: PolicyTrainer | None = None
-        self.generator_router: GeneratorRouter | None = None
+        self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
         self.start_step = 0
         self._proc_meshes = []
@@ -424,18 +438,23 @@ class Controller(Configurable):
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            result = await self.generator_router.route(
+            # Dispatches to the chosen generator's rank-0 intake via call_one, so
+            # it returns the Completion directly (no ValueMesh unwrap).
+            return await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,
+                # VLLMGenerator.generate also requires this field for its
+                # intra-mesh DP routing.
+                routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
+                # Load is measured as in-flight request count (one unit per call).
                 routing_ctx=RoutingContext(
-                    estimated_cost=len(prompt_token_ids),
+                    estimated_cost=1,
                     session_id=routing_session_id,
                 ),
             )
-            return self._get_rank_0_value(result)
 
         return generate
 
@@ -565,6 +584,12 @@ class Controller(Configurable):
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
 
+        # Start each generator's engine loop on all ranks once, before any
+        # rank-0-only generate / pull (rank 0 drives the followers through this
+        # loop, so every rank must be running it first).
+        with sl.log_trace_span("generator_start_engine_loop"):
+            await self.generator_router.fanout("start_engine_loop")
+
         # Initial weight sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
@@ -677,10 +702,8 @@ class Controller(Configurable):
         pre_validation = await self._validate_and_log(step=self.start_step)
         sl.log_trace_instant("training_start")
 
-        # Two policy version pointers, seeded from the resumed step: the trainer advances at the
-        # optimizer step; the generator version advances when a weight pull completes.
+        # Trainer policy version, seeded from the resumed step; advances at each optimizer step.
         self._trainer_policy_version = self.start_step
-        self._generator_policy_version = self.start_step
 
         # Buffer capacity caps how far generation runs ahead of the trainer (bounds off-policy staleness).
         max_active_rollout_groups = (
@@ -689,6 +712,14 @@ class Controller(Configurable):
 
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,
+        )
+
+        # Overlaps each step's weight handoff (push -> pull -> buffer-slot release) with the next step's fwd/bwd
+        self._weight_sync = WeightSyncManager(
+            trainer=self.trainer,
+            generator_router=self.generator_router,
+            group_buffer=self._group_buffer,
+            num_groups_per_train_step=async_loop.num_groups_per_train_step,
         )
 
         # training_sample_builder
@@ -931,14 +962,26 @@ class Controller(Configurable):
         """Run num_training_steps optimizer steps: train one packed batch, publish trainer weights,
         then pull them into generators, log metrics.
 
+        NOTE: Weight sync is overlapped with the training step.
+        Trainer push:
+            - Called after optimizer.step()
+            - Awaited before next optimizer.step (weights changes then)
+        Generator pull:
+            - Called after push completes.
+            - Awaited before next push (weights changes then)
+
+        Impact on off-policiness: The buffer guarantees that no sample will be born stale,
+        as long as we call `self._group_buffer.release_active_groups` after the pull.
+
         consumes: a TrainingBatch (training_batch_queue.get)
             waits for:    a TrainingBatch in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
         """
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
-            await self.trainer.sync_log_step.call(step)
-            await self.generator_router.fanout("sync_log_step", step)
+            with sl.log_trace_span("sync_log_step"):
+                await self.trainer.sync_log_step.call(step)
+                await self.generator_router.fanout("sync_log_step", step)
             step_timer = MetricsTimer()
 
             with sl.log_trace_span("train_step"), step_timer.record(
@@ -984,6 +1027,14 @@ class Controller(Configurable):
                         logger.error("Loss is NaN/Inf; training diverged")
                         break
 
+                # Await trainer weight push to finish before optim step mutates the weights.
+                with sl.log_trace_span(
+                    "blocking_trainer_push_model_state_dict"
+                ), step_timer.record(
+                    "timing/step/blocking_trainer_push_model_state_dict"
+                ):
+                    push_metrics = await self._weight_sync.wait_prev_push()
+
                 with sl.log_trace_span("optim_step"), step_timer.record(
                     "timing/step/optim"
                 ):
@@ -992,52 +1043,48 @@ class Controller(Configurable):
                     )
                 self._trainer_policy_version = optim_result.policy_version
 
-                # Weight sync: publish new weights before the next train step (push then pull, both awaited).
-                # TODO(perf): overlap weight sync (today both are awaited synchronously).
+                # Await generator weight pull to finish before the trainer's next push.
                 with sl.log_trace_span(
-                    "trainer_push_model_state_dict"
-                ), step_timer.record("timing/step/push_model_state_dict"):
-                    await self.trainer.push_model_state_dict.call()
-                with sl.log_trace_span(
-                    "generator_pull_model_state_dict"
-                ), step_timer.record("timing/step/pull_model_state_dict"):
-                    await self.generator_router.pull_model_state_dict(
-                        policy_version=optim_result.policy_version
-                    )
-                self._generator_policy_version = optim_result.policy_version
+                    "blocking_generator_pull_model_state_dict"
+                ), step_timer.record(
+                    "timing/step/blocking_generator_pull_model_state_dict"
+                ):
+                    pull_metrics = await self._weight_sync.wait_prev_pull()
 
-                # Release one train step's group slots after the pull; the batcher packs exactly
-                # num_groups_per_train_step trainable groups per batch.
-                await self._group_buffer.release_active_groups(
-                    self.config.async_loop.num_groups_per_train_step,
-                    reason="trained",
+                # Overlap this step's push -> pull -> buffer-slot release with the next step's fwd/bwd.
+                self._weight_sync.start_async_push_pull(
+                    version=optim_result.policy_version
                 )
 
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
             time_metrics = step_timer.flush()
-            self.metrics_processor.log(
-                step=step,
-                is_validation=False,
-                metrics=[
-                    *packed.metrics,
-                    *[
-                        m.Metric(key, m.NoReduce(value))
-                        for key, value in fwd_bwd_metrics.items()
+            with sl.log_trace_span("metrics_log"):
+                self.metrics_processor.log(
+                    step=step,
+                    is_validation=False,
+                    metrics=[
+                        *packed.metrics,
+                        *[
+                            m.Metric(key, m.NoReduce(value))
+                            for key, value in fwd_bwd_metrics.items()
+                        ],
+                        *[
+                            m.Metric(key, m.NoReduce(value))
+                            for key, value in optim_result.metrics.items()
+                        ],
+                        *self._group_buffer.metrics(),
+                        *time_metrics,
+                        *policy_age_panel,
+                        # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
+                        *push_metrics,
+                        *pull_metrics,
+                        *compute_perf_ratio_metrics(
+                            num_global_valid_tokens=packed.num_global_valid_tokens,
+                            time_metrics=time_metrics,
+                        ),
                     ],
-                    *[
-                        m.Metric(key, m.NoReduce(value))
-                        for key, value in optim_result.metrics.items()
-                    ],
-                    *self._group_buffer.metrics(),
-                    *time_metrics,
-                    *policy_age_panel,
-                    *compute_perf_ratio_metrics(
-                        num_global_valid_tokens=packed.num_global_valid_tokens,
-                        time_metrics=time_metrics,
-                    ),
-                ],
-            )
+                )
 
             # Save full training state for resume; CheckpointManager writes only on its interval
             # and the final step. After the divergence guard so a NaN step isn't checkpointed.
@@ -1045,3 +1092,6 @@ class Controller(Configurable):
                 await self.trainer.save_checkpoint.call(
                     step, last_step=(step == num_training_steps)
                 )
+
+        # Finish the last in-flight sync so generators hold the final weights for post-validation.
+        await self._weight_sync.wait_inflight_push_pull()

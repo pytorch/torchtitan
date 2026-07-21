@@ -14,7 +14,7 @@ dependencies = [
     "torchdata>=0.8.0",
 
     # Hugging Face integrations
-    "datasets>=3.6.0",
+    "datasets>=3.6.0,<4.8.0",
     "tokenizers>=0.15.0",
     "safetensors",
 
@@ -64,5 +64,5 @@ testpaths = ["tests"]
 
 [tool.pyrefly]
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
-replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "fla.*", "helion", "helion.*"]  # optional dependencies
+replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "fla.*", "helion", "helion.*", "batch_invariant_ops", "torchcomms"]  # optional dependencies
 search-path = ["../pytorch"]  # local built pytorch

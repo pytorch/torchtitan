@@ -5,7 +5,48 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import dataclasses
+
 from tests.integration_tests import OverrideDefinitions
+
+
+def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
+    """Inject ``--parallelism.spmd_backend`` into every model test variant."""
+    test_name = f"{t.test_name}_{backend}"
+    new_args = []
+    for variant in t.override_args:
+        variant = tuple(
+            arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
+        )
+        is_qwen3_5 = any("--module qwen3_5" in arg for arg in variant)
+        prefix = []
+        if backend != "spmd_types" or not is_qwen3_5:
+            prefix.append(f"--parallelism.spmd_backend {backend}")
+        suffix = []
+        # Compile, PP, and explicit AC modes are not compatible with SPMD
+        # typechecking yet; keep those as backend-only coverage.
+        if (
+            prefix
+            and backend == "spmd_types"
+            and not any(
+                token in arg
+                for arg in variant
+                for token in (
+                    "compile.enable",
+                    "pipeline_parallel_degree",
+                    "activation-checkpoint:",
+                )
+            )
+        ):
+            prefix.append("--debug.spmd_typechecking")
+            suffix.append("activation-checkpoint:none")
+        new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
+
+    return dataclasses.replace(
+        t,
+        override_args=tuple(new_args),
+        test_name=test_name,
+    )
 
 
 def build_model_tests_list() -> list[OverrideDefinitions]:
@@ -26,11 +67,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
+                    "--override.imports torchtitan.overrides.helion_rope",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP+compile",
+            "DeepSeek V3 FSDP+EP+compile (+ Helion RoPE override)",
             "deepseek_v3_fsdp+ep+compile",
             ngpu=4,
+            # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
+            # H100/GB200; skip on ROCm where they are unvalidated.
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -206,4 +251,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
     ]
 
-    return model_tests
+    return [
+        *model_tests,
+        *[_enable_spmd_backend(t, "spmd_types") for t in model_tests],
+    ]

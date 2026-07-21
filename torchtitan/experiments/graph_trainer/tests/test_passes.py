@@ -77,6 +77,7 @@ from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     _FSDP_BUCKET_META,
+    deduplicate_fsdp_unshard_chains_pass,
     get_transformer_block_bucket_counts,
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
@@ -87,6 +88,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
+    _default_memory_policy_pass,
     _make_default_memory_policy,
     _make_full_memory_policy,
     tag_sac_policy,
@@ -114,13 +116,13 @@ from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # 
 from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (  # noqa: F401
     TestAnnotateRMSNormForRegionalInductorPass,
 )
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
 
 class TestDefaultTransformerBlockBuckets(TestCase):
     def test_compile_time_passes_enable_chunked_loss_bucket_only_when_needed(self):
-        from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
+        from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
         from torchtitan.experiments.graph_trainer.configs import (
             GraphTrainerCompileConfig,
         )
@@ -141,7 +143,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return_value=[],
         ) as mock_bucket_plan:
             compile_time_passes(traced_result, make_config(CrossEntropyLoss.Config()))
-            compile_time_passes(traced_result, make_config(ChunkedCELoss.Config()))
+            compile_time_passes(traced_result, make_config(ChunkedLossWrapper.Config()))
 
         self.assertEqual(
             [
@@ -150,6 +152,67 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             ],
             [False, True],
         )
+
+
+class TestFSDPUnshardDedupPass(TestCase):
+    def _duplicate_unshard_graph(self) -> torch.fx.GraphModule:
+        graph = torch.fx.Graph()
+        sharded_param = graph.placeholder("sharded_param")
+        x = graph.placeholder("x")
+
+        all_gather_0 = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(sharded_param, 1, "fsdp_pg"),
+        )
+        wait_0 = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather_0,),
+        )
+        unsharded_0 = graph.call_function(
+            torch.ops.aten.view.default,
+            args=(wait_0, [4]),
+        )
+
+        all_gather_1 = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(sharded_param, 1, "fsdp_pg"),
+        )
+        wait_1 = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather_1,),
+        )
+        unsharded_1 = graph.call_function(
+            torch.ops.aten.view.default,
+            args=(wait_1, [4]),
+        )
+
+        params = graph.call_function(
+            torch.ops.aten.add.Tensor,
+            args=(unsharded_0, unsharded_1),
+        )
+        out = graph.call_function(torch.ops.aten.add.Tensor, args=(params, x))
+        graph.output(out)
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        gm.graph.lint()
+        gm.recompile()
+        return gm
+
+    def test_duplicate_fsdp_unshard_chains_are_canonicalized(self) -> None:
+        gm = self._duplicate_unshard_graph()
+
+        self.assertEqual(
+            sum(1 for node in gm.graph.nodes if is_all_gather(node)),
+            2,
+        )
+
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        self.assertEqual(
+            sum(1 for node in gm.graph.nodes if is_all_gather(node)),
+            1,
+        )
+        gm.graph.lint()
 
 
 class ToyModel(Module):
@@ -437,7 +500,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                "layers.1.moe.experts",
+                "layers.1.moe.routed_experts.inner_experts",
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -1074,12 +1137,12 @@ class TestFsdpDenseSchedulerPass(TestCase):
                 c10d.all_to_all_single.default,
                 args=(ffn_norm, [], [], "ep_pg"),
             ),
-            "layers.1.moe.experts",
+            "layers.1.moe.routed_experts.inner_experts",
             backward=True,
         )
         moe_dispatch_wait = self._tag_fsdp_schedule_node(
             graph.call_function(c10d.wait_tensor.default, args=(moe_dispatch,)),
-            "layers.1.moe.experts",
+            "layers.1.moe.routed_experts.inner_experts",
             backward=True,
         )
         dense1_attention = self._tag_fsdp_schedule_node(
@@ -1386,6 +1449,64 @@ class TestApplySACPass(TestCase):
         wait_node = nodes[1]
         self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
         self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_default_policy_saves_fsdp_unshard_when_not_resharding(self):
+        """Saves the helper-selected FSDP unshard output only when needed."""
+        cases = (
+            ("never", 1, CheckpointPolicy.MUST_SAVE),
+            # Under PP, the default FSDP policy keeps params unsharded across
+            # forward/backward, so SAC must save the same unshard boundary.
+            ("default", 2, CheckpointPolicy.MUST_SAVE),
+            ("always", 1, CheckpointPolicy.PREFER_RECOMPUTE),
+        )
+
+        for reshard_after_forward, pp_degree, expected_wait_policy in cases:
+            with self.subTest(
+                reshard_after_forward=reshard_after_forward,
+                pp_degree=pp_degree,
+            ):
+                (
+                    gm,
+                    all_gather,
+                    wait,
+                    view,
+                ) = self._fsdp_unshard_test_graph()
+                config = SimpleNamespace(
+                    parallelism=SimpleNamespace(
+                        fsdp_reshard_after_forward=reshard_after_forward,
+                        pipeline_parallel_degree=pp_degree,
+                    )
+                )
+
+                _default_memory_policy_pass(gm, config=config)
+
+                self.assertEqual(
+                    all_gather.meta["recompute"],
+                    CheckpointPolicy.PREFER_RECOMPUTE,
+                )
+                self.assertEqual(wait.meta["recompute"], expected_wait_policy)
+                self.assertEqual(
+                    view.meta["recompute"],
+                    CheckpointPolicy.PREFER_RECOMPUTE,
+                )
+
+    def _fsdp_unshard_test_graph(self):
+        graph = torch.fx.Graph()
+        param = graph.placeholder("param")
+        x = graph.placeholder("x")
+        all_gather = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(param, 1, "0"),
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather,),
+        )
+        view = graph.call_function(torch.ops.aten.view.default, args=(wait, [4]))
+        out = graph.call_function(torch.ops.aten.add.Tensor, args=(view, x))
+        graph.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        return gm, all_gather, wait, view
 
     def test_boundary_nodes_forced_to_must_save(self):
         """Nodes at AC region boundaries should be forced to MUST_SAVE."""
@@ -3308,6 +3429,10 @@ class TestChunkPasses(TestCase):
 
         self.assertLess(
             names.index("canonicalize_graph_pass"),
+            names.index("deduplicate_fsdp_unshard_chains_pass"),
+        )
+        self.assertLess(
+            names.index("deduplicate_fsdp_unshard_chains_pass"),
             names.index("tag_with_memory_policy_pass"),
         )
         self.assertLess(
@@ -3432,7 +3557,7 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn("layers.1.moe.experts", buckets)
+        self.assertIn("layers.1.moe.routed_experts.inner_experts", buckets)
         self.assertNotIn("layers.1", buckets)
 
     def test_prepare_ep_overlap_trace_inputs_marks_batch_dims(self):
@@ -3481,12 +3606,12 @@ class TestChunkPasses(TestCase):
         self.assertEqual(labels._dynamo_unbacked_bounds[1], (16, 32))
 
     def test_seq_chunk_marker_traces_chunked_loss_backward(self):
-        from torchtitan.components.loss import ChunkedCELoss
+        from torchtitan.components.loss import ChunkedLossWrapper
 
         torch.manual_seed(42)
         batch, seq_len, dim, vocab_size = 2, 32, 4, 8
         lm_head = torch.nn.Linear(dim, vocab_size, bias=False)
-        loss_fn = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=8))
+        loss_fn = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=8))
         loss_fn.lm_head = lm_head
 
         hidden_states = torch.randn(batch, seq_len, dim, requires_grad=True)
@@ -6183,7 +6308,48 @@ class TestSelectiveActivationRematPass(TestCase):
             self.assertEqual(inp.name, e_name + "_recomputed")
         self.assertNotIn(e_name, [n.name for n in nodes])
 
-    def test_multiple_backward_regions_recompute_errors(self):
+    def test_loss_region_excluded_from_remat(self):
+        # Two disjoint backward regions, each consuming a must_recompute forward
+        # node: one is a chunked-loss region (module_fqn 'loss') and one is a
+        # model-layer AC region (module_fqn 'layers.0.*'). Only the model-layer
+        # region drives remat; the loss region is left untouched (no error).
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        a = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        b = graph.call_function(torch.ops.aten.clone.default, args=(inp2,))
+        bwd_loss = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
+        sep = graph.call_function(torch.ops.aten.neg.default, args=(inp1,))
+        bwd_layer = graph.call_function(torch.ops.aten.mul.Tensor, args=(b, b))
+        graph.output((bwd_loss, sep, bwd_layer))
+        for node in (a, b):
+            node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        bwd_loss.meta["autograd_backward"] = True
+        bwd_loss.meta["custom"] = {"module_fqn": "loss"}
+        bwd_layer.meta["autograd_backward"] = True
+        bwd_layer.meta["custom"] = {"module_fqn": "layers.0.attention"}
+        a_name, b_name = a.name, b.name
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+        node_names = [n.name for n in nodes]
+        dups = {n.name for n in nodes if n.name.endswith("_recomputed")}
+        # Only the model-layer region's input is rematerialized.
+        self.assertEqual(dups, {b_name + "_recomputed"})
+        for inp in bwd_layer.all_input_nodes:
+            self.assertEqual(inp.name, b_name + "_recomputed")
+        self.assertNotIn(b_name, node_names)
+        # The loss region is untouched: its recompute input stays and is still
+        # read directly (not remat'd, not erased).
+        self.assertIn(a_name, node_names)
+        for inp in bwd_loss.all_input_nodes:
+            self.assertEqual(inp.name, a_name)
+
+    def test_multiple_model_layer_regions_recompute_errors(self):
+        # Two disjoint *model-layer* backward regions that both need remat is
+        # still unsupported and must error (remat handles a single such region).
         graph = torch.fx.Graph()
         inp1 = graph.placeholder("inp1")
         inp2 = graph.placeholder("inp2")
@@ -6195,8 +6361,10 @@ class TestSelectiveActivationRematPass(TestCase):
         graph.output((bwd1, sep, bwd2))
         for node in (a, b):
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
-        for node in (bwd1, bwd2):
-            node.meta["autograd_backward"] = True
+        bwd1.meta["autograd_backward"] = True
+        bwd1.meta["custom"] = {"module_fqn": "layers.0.attention"}
+        bwd2.meta["autograd_backward"] = True
+        bwd2.meta["custom"] = {"module_fqn": "layers.1.attention"}
 
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
         with self.assertRaisesRegex(RuntimeError, "disjoint backward regions"):

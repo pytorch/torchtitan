@@ -5,17 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
+    MXFP8GroupedExpertsConverter,
+    MXFP8LinearConverter,
 )
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -28,11 +31,16 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
 
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
+    model_spec = model_registry("debugmodel")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -55,6 +63,33 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    # Quantize the MoE expert grouped GEMMs to MXFP8, plus the dense Linear
+    # layers in attention, the shared experts, and the dense-layer feed-forward.
+    # fqns is an include-list (substring match), so the MoE router gate
+    # (moe.router.gate) and lm_head (output) are left in bf16.
+    # pad_multiple=128 is required by the CuTeDSL quantization kernel
+    # on sm_100 (e.g. B200)
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                fqns=["attention", "shared_experts", "feed_forward"],
+            ),
+            MXFP8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                pad_multiple=128,
+            ),
+        ],
+    )
+    return config
 
 
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
@@ -87,10 +122,15 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
 
 
 def deepseek_v3_16b() -> Trainer.Config:
+    model_spec = model_registry("16B", attn_backend="flex")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_registry("16B", attn_backend="flex"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -151,22 +191,27 @@ def deepseek_v3_671b() -> Trainer.Config:
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
+    model_spec = model_registry(
+        "671B",
+        attn_backend="flex",
+        converters=[
+            Float8LinearConverter.Config(
+                filter_fqns=["output", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+            Float8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled
+            ),
+        ],
+    )
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
-        hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        model_spec=model_registry(
-            "671B",
-            attn_backend="flex",
-            converters=[
-                Float8LinearConverter.Config(
-                    filter_fqns=["output", "router.gate"],
-                    model_compile_enabled=model_compile_enabled,
-                ),
-                Float8GroupedExpertsConverter.Config(
-                    model_compile_enabled=model_compile_enabled
-                ),
-            ],
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
         ),
+        hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),

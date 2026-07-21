@@ -12,8 +12,10 @@ import pytest
 from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.controller import AsyncLoopConfig
-from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
+from torchtitan.experiments.rl.routing.inter_generator_router import (
+    InterGeneratorRouter,
+)
 
 
 class _FakeController:
@@ -231,6 +233,17 @@ class _StubActor:
     def __init__(self, name, events, raises=False):
         self.close = _StubEndpoint(name, events, raises)
 
+    def flatten(self, *args, **kwargs):
+        # The router builds a rank-0 handle via flatten("rank").slice(rank=0);
+        # a single-rank stub collapses to itself for both.
+        return self
+
+    def slice(self, **kwargs):
+        return self
+
+    def __len__(self):
+        return 1
+
 
 class _StubMesh:
     def __init__(self, name, events):
@@ -242,8 +255,8 @@ class _StubMesh:
 
 
 def _set_generator_router(rl_trainer, generators):
-    rl_trainer.generator_router = GeneratorRouter(
-        GeneratorRouter.Config(),
+    rl_trainer.generator_router = InterGeneratorRouter(
+        InterGeneratorRouter.Config(),
         generators=generators,
     )
 

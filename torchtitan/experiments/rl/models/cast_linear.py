@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.model import ModelConfigConverter
 
 
