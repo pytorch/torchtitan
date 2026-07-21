@@ -182,12 +182,12 @@ def download_hf_assets(
 
             except HfHubHTTPError as e:
                 raise e
-            except LocalEntryNotFoundError as e:
-                # LocalEntry is subclass of EntryNotFoundError, so must be caught
-                # before Entry. After successful list_repo_files, it indicates
-                # gated/private (hub>=1.0 wraps 403 as cause), not a true 404.
-                raise e
             except EntryNotFoundError as e:
+                if isinstance(e, LocalEntryNotFoundError):
+                    # LocalEntry is subclass of Entry, but after successful
+                    # list_repo_files it indicates gated/private (hub>=1.0
+                    # wraps 403 as cause), not a true 404.
+                    raise e
                 print(f"File {filename} not found, skipping...")
                 missed_files.append(filename)
                 pbar.update(1)
