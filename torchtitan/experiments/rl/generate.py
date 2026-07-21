@@ -108,7 +108,20 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    inner_attn = model_spec.model.layers[0].attention.inner_attention
+    # Hybrid models (e.g. Qwen3.5) interleave full-attention and linear-attention
+    # (GatedDeltaNet) layers, so layer 0 may have no ``attention`` (its mixer is
+    # ``delta_net``). Scan for the first full-attention layer to pick the vLLM
+    # attention backend.
+    inner_attn = next(
+        (
+            layer.attention.inner_attention
+            for layer in model_spec.model.layers
+            if getattr(layer, "attention", None) is not None
+        ),
+        None,
+    )
+    if inner_attn is None:
+        raise ValueError("No full-attention layer found in the model spec.")
     if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
         raise ValueError("Only varlen and flex attention backends are supported.")
 

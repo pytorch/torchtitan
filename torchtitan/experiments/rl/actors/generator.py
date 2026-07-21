@@ -844,6 +844,8 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
+            # GDN models auto-promote their paged conv+ssm states to fp32 under
+            # batch-invariant mode inside VLLMGatedDeltaNetCore; no engine args needed.
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION

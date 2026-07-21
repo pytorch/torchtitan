@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -17,9 +16,10 @@ from fla.ops.gated_delta_rule import (
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
 )
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -126,6 +126,67 @@ class RMSNormGated(Module):
         return x.to(input_dtype)
 
 
+class _RecurrentFwdChunkBwd(torch.autograd.Function):
+    """Use recurrent forward values and recompute the chunk kernel in backward."""
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        cu_seqlens,
+        cu_seqlens_cpu,
+    ):
+        ctx.save_for_backward(q, k, v, g, beta)
+        ctx.cu_seqlens = cu_seqlens
+        ctx.cu_seqlens_cpu = cu_seqlens_cpu
+        num_sequences = int(cu_seqlens.numel()) - 1
+        initial_state = q.new_zeros(
+            num_sequences,
+            q.shape[2],
+            q.shape[3],
+            v.shape[3],
+            dtype=torch.float32,
+        )
+        with torch.no_grad():
+            output, _ = _fla_fused_recurrent_gated_delta_rule(
+                q,
+                k,
+                v,
+                g,
+                beta=beta,
+                initial_state=initial_state,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+            )
+        return output.to(q.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):  # pyrefly: ignore[bad-override]
+        q, k, v, g, beta = ctx.saved_tensors
+        with torch.enable_grad():
+            inputs = [
+                tensor.detach().requires_grad_(True)
+                for tensor in (q, k, v, g, beta)
+            ]
+            output = _fla_chunk_gated_delta_rule(
+                inputs[0],
+                inputs[1],
+                inputs[2],
+                inputs[3],
+                inputs[4],
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=ctx.cu_seqlens,
+                cu_seqlens_cpu=ctx.cu_seqlens_cpu,
+            )[0]
+            grads = torch.autograd.grad(output, inputs, grad_output)
+        return (*grads, None, None)
+
+
 class GatedDeltaKernel(Module):
     """Stateless dispatch to the configured FLA gated delta kernel.
 
@@ -171,6 +232,21 @@ class GatedDeltaKernel(Module):
                 f"batch size 1, got batch size {xq_BLNK.shape[0]}."
             )
 
+        if is_in_batch_invariant_mode() and cu_seqlens is not None:
+            if cu_seqlens_cpu is None:
+                raise ValueError(
+                    "Batch-invariant Gated DeltaNet requires CPU cu_seqlens."
+                )
+            return _RecurrentFwdChunkBwd.apply(
+                xq_BLNK,
+                xk_BLNK,
+                xv_BLNV,
+                g_BLN,
+                beta_BLN,
+                cu_seqlens,
+                cu_seqlens_cpu,
+            )
+
         if self.backend == "fla_chunked":
             if cu_seqlens is not None and cu_seqlens_cpu is None:
                 raise ValueError(
@@ -206,6 +282,133 @@ class GatedDeltaKernel(Module):
         return result[0]
 
 
+class GatedDeltaCore(Module):
+    """Dense GDN core shared with the paged vLLM core call boundary.
+
+    The core owns the depthwise convolution and gated-delta recurrence. Varlen
+    execution follows PR #3801 metadata, while batch-invariant execution selects
+    the recurrent-forward/chunk-backward kernel used by the generator.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        key_head_dim: int
+        value_head_dim: int
+        key_dim: int
+        value_dim: int
+        conv_kernel_size: int = 4
+        activation: str = "silu"
+        kernel: GatedDeltaKernel.Config
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.key_head_dim = config.key_head_dim
+        self.value_head_dim = config.value_head_dim
+        self.key_dim = config.key_dim
+        self.value_dim = config.value_dim
+        self.conv_kernel_size = config.conv_kernel_size
+        self.activation = config.activation
+        self.kernel = config.kernel.build()
+
+    def forward(
+        self,
+        mixed_qkv_BLC: torch.Tensor,
+        a_BLN: torch.Tensor,
+        b_BLN: torch.Tensor,
+        conv_weight_CW: torch.Tensor,
+        A_log_N: torch.Tensor,
+        dt_bias_N: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        *,
+        cu_seqlens_host: tuple[int, ...] | None = None,
+    ) -> torch.Tensor:
+        """Run convolution and recurrence on rank-local head shards."""
+        batch_size, seq_len, conv_dim = mixed_qkv_BLC.shape
+        local_key_dim = (
+            conv_dim * self.key_dim // (2 * self.key_dim + self.value_dim)
+        )
+
+        if cu_seqlens_host is not None:
+            num_tokens = batch_size * seq_len
+            cu_seqlens_cpu = torch.tensor(
+                cu_seqlens_host,
+                dtype=cu_seqlens.dtype,
+                device="cpu",
+            )
+            mixed_qkv_1TC = mixed_qkv_BLC.reshape(1, num_tokens, conv_dim)
+            conv_output_1TC = _causal_conv1d_varlen(
+                mixed_qkv_1TC,
+                conv_weight_CW.unsqueeze(1),
+                cu_seqlens,
+                cu_seqlens_cpu,
+            )
+            query_1TNK = conv_output_1TC[..., :local_key_dim].reshape(
+                1, num_tokens, -1, self.key_head_dim
+            )
+            key_1TNK = conv_output_1TC[
+                ..., local_key_dim : 2 * local_key_dim
+            ].reshape(1, num_tokens, -1, self.key_head_dim)
+            value_1TNV = conv_output_1TC[..., 2 * local_key_dim :].reshape(
+                1, num_tokens, -1, self.value_head_dim
+            )
+            decay_1TN = (
+                -torch.exp(A_log_N.float())
+                * F.softplus(a_BLN.reshape(num_tokens, -1).float() + dt_bias_N)
+            ).unsqueeze(0)
+            update_gate_1TN = torch.sigmoid(
+                b_BLN.reshape(num_tokens, -1)
+            ).unsqueeze(0)
+            output_1TNV = self.kernel(
+                query_1TNK,
+                key_1TNK,
+                value_1TNV,
+                decay_1TN,
+                update_gate_1TN,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
+            return output_1TNV.reshape(
+                batch_size, seq_len, -1, self.value_head_dim
+            )
+
+        # Dense unpacked training path. Each batch row owns an independent state.
+        conv_input_BCL = F.pad(
+            mixed_qkv_BLC.transpose(1, 2),
+            [self.conv_kernel_size - 1, 0],
+        )
+        conv_output_BLC = F.silu(
+            F.conv1d(
+                conv_input_BCL,
+                conv_weight_CW.unsqueeze(1),
+                None,
+                groups=conv_dim,
+            )
+        ).transpose(1, 2)
+        query_BLNK = conv_output_BLC[..., :local_key_dim].reshape(
+            batch_size, seq_len, -1, self.key_head_dim
+        )
+        key_BLNK = conv_output_BLC[
+            ..., local_key_dim : 2 * local_key_dim
+        ].reshape(batch_size, seq_len, -1, self.key_head_dim)
+        value_BLNV = conv_output_BLC[..., 2 * local_key_dim :].reshape(
+            batch_size, seq_len, -1, self.value_head_dim
+        )
+        decay_BLN = -torch.exp(A_log_N.float()) * F.softplus(
+            a_BLN.float() + dt_bias_N
+        )
+        update_gate_BLN = torch.sigmoid(b_BLN)
+        output_BLNV = self.kernel(
+            query_BLNK,
+            key_BLNK,
+            value_BLNV,
+            decay_BLN,
+            update_gate_BLN,
+        )
+        return output_BLNV.reshape(
+            batch_size, seq_len, -1, self.value_head_dim
+        )
+
+
 class GatedDeltaNet(Module):
     """Gated DeltaNet linear attention.
 
@@ -234,7 +437,7 @@ class GatedDeltaNet(Module):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        kernel: GatedDeltaKernel.Config
+        core: GatedDeltaCore.Config
         norm: RMSNormGated.Config
         out_proj: Linear.Config
 
@@ -261,97 +464,65 @@ class GatedDeltaNet(Module):
         self.A_log = nn.Parameter(torch.empty(n_value_heads))
         self.dt_bias = nn.Parameter(torch.empty(n_value_heads))
 
-        self.kernel = config.kernel.build()
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
 
-    @staticmethod
-    def _local_map_conv(
-        x: DTensor,
-        conv: Conv1d,
-        conv_fn: Callable[..., torch.Tensor],
-        *extra_args: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run a depthwise, channel-sharded conv on local shards via local_map.
+        self.key_dim = config.in_proj_q.out_features
+        self.value_dim = value_dim
+        # The dense training core is replaced by a paged-cache core inside
+        # vLLM. Both cores share this module boundary and call signature.
+        self.core = config.core.build()
 
-        ``conv_fn`` receives the local (x, weight, *extra_args) tensors. Trailing
-        ``extra_args`` (e.g. ``cu_seqlens``) are plain replicated tensors passed
-        through with a ``None`` placement (unmapped). Input is channel-sharded
-        and the weight is ``Shard(0)``; DTensor-ness and gradient placements are
-        restored explicitly.
-        """
-        x_plc = x.placements
-        w = conv.weight
-        w_plc = w.placements  # pyrefly: ignore [missing-attribute]
-        extra_plc = (None,) * len(extra_args)
-        conv_dt = local_map(
-            conv_fn,
-            out_placements=(x_plc,),
-            in_placements=(x_plc, w_plc, *extra_plc),
-            in_grad_placements=(x_plc, w_plc, *extra_plc),
-            device_mesh=x.device_mesh,
-        )
-        return conv_dt(x, w, *extra_args)  # pyrefly: ignore
-
-    def _causal_conv(
+    def _fused_conv_weight_bias(
         self,
-        x_BLD: torch.Tensor,
-        conv: Conv1d,
-        cu_seqlens: torch.Tensor | None = None,
-        cu_seqlens_cpu: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if cu_seqlens is not None:
-            if isinstance(x_BLD, DTensor):
-
-                def _conv_varlen(
-                    x_local_BLD: torch.Tensor,
-                    w_local: torch.Tensor,
-                    cu_seqlens_local: torch.Tensor,
-                ) -> torch.Tensor:
-                    return _causal_conv1d_varlen(
-                        x_local_BLD,
-                        w_local,
-                        cu_seqlens_local,
-                        cu_seqlens_cpu,
-                    )
-
-                return self._local_map_conv(x_BLD, conv, _conv_varlen, cu_seqlens)
-            return _causal_conv1d_varlen(
-                x_BLD,
-                conv.weight,
-                cu_seqlens,
-                cu_seqlens_cpu,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Fuse the depthwise Q/K/V convolution parameters by channel."""
+        weight_q_C1W = self.conv_q.weight
+        weight_k_C1W = self.conv_k.weight
+        weight_v_C1W = self.conv_v.weight
+        if isinstance(weight_q_C1W, DTensor):
+            placements = weight_q_C1W.placements
+            weight_CW = local_map(
+                lambda q_C1W, k_C1W, v_C1W: torch.cat(
+                    [q_C1W, k_C1W, v_C1W], dim=0
+                ).squeeze(1),
+                out_placements=(placements,),
+                in_placements=(
+                    placements,
+                    weight_k_C1W.placements,
+                    weight_v_C1W.placements,
+                ),
+                in_grad_placements=(
+                    placements,
+                    weight_k_C1W.placements,
+                    weight_v_C1W.placements,
+                ),
+                device_mesh=weight_q_C1W.device_mesh,
+            )(
+                weight_q_C1W,
+                weight_k_C1W,  # pyrefly: ignore[bad-argument-count]
+                weight_v_C1W,
             )
-
-        x_BDL = F.pad(x_BLD.transpose(1, 2), [self.conv_kernel_size - 1, 0])
-        if isinstance(x_BDL, DTensor):
-            # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
-            # groups lands in a released torch.
-            def _conv(x_local_BDL: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
-                # groups == local out-channels (depthwise, channel-sharded)
-                return F.conv1d(
-                    x_local_BDL,
-                    w_local,
-                    None,
-                    conv.stride,
-                    conv.padding,
-                    conv.dilation,
-                    w_local.size(0),
-                )
-
-            x_BDL = self._local_map_conv(x_BDL, conv, _conv)
         else:
-            x_BDL = conv(x_BDL)
-        return F.silu(x_BDL).transpose(1, 2)
+            weight_CW = torch.cat(
+                [weight_q_C1W, weight_k_C1W, weight_v_C1W], dim=0
+            ).squeeze(1)
+
+        biases = [self.conv_q.bias, self.conv_k.bias, self.conv_v.bias]
+        bias_C = (
+            torch.cat(biases, dim=0)  # pyrefly: ignore[bad-argument-type]
+            if all(bias is not None for bias in biases)
+            else None
+        )
+        return weight_CW, bias_C
 
     def forward(
         self,
         x_BLD: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
     ) -> torch.Tensor:
-        B, L, _ = x_BLD.shape
-        cu_seqlens = None
-        cu_seqlens_cpu = None
+        batch_size, seq_len, _ = x_BLD.shape
+        cu_seqlens_host = None
         if isinstance(attention_masks, VarlenMetadata):
             cu_seqlens = attention_masks.cu_seq_q
             cu_seqlens_host = attention_masks.cu_seq_q_host
@@ -360,76 +531,76 @@ class GatedDeltaNet(Module):
                     "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
                     "metadata. Build VarlenMetadata with include_host_offsets=True."
                 )
-            # Keep host metadata as Python values in VarlenMetadata so
-            # SelectiveAC does not treat integer CPU tensors as checkpoint
-            # inputs; build the FLA API tensor at the DeltaNet boundary.
-            cu_seqlens_cpu = torch.tensor(
-                cu_seqlens_host,
-                dtype=cu_seqlens.dtype,
-                device="cpu",
+        else:
+            cu_seqlens = torch.arange(
+                0,
+                (batch_size + 1) * seq_len,
+                seq_len,
+                dtype=torch.int32,
+                device=x_BLD.device,
+            )
+            if is_in_batch_invariant_mode():
+                cu_seqlens_host = tuple(
+                    range(0, (batch_size + 1) * seq_len, seq_len)
+                )
+
+        query_BLC = self.in_proj_q(x_BLD)
+        key_BLC = self.in_proj_k(x_BLD)
+        value_BLC = self.in_proj_v(x_BLD)
+        if isinstance(query_BLC, DTensor):
+            placements = query_BLC.placements
+            mixed_qkv_BLC = local_map(
+                lambda query_LC, key_LC, value_LC: torch.cat(
+                    [query_LC, key_LC, value_LC], dim=-1
+                ),
+                out_placements=(placements,),
+                in_placements=(
+                    placements,
+                    key_BLC.placements,
+                    value_BLC.placements,
+                ),
+                in_grad_placements=(
+                    placements,
+                    key_BLC.placements,
+                    value_BLC.placements,
+                ),
+                device_mesh=query_BLC.device_mesh,
+            )(
+                query_BLC,
+                key_BLC,  # pyrefly: ignore[bad-argument-count]
+                value_BLC,
+            )
+        else:
+            mixed_qkv_BLC = torch.cat(
+                [query_BLC, key_BLC, value_BLC], dim=-1
             )
 
-        if cu_seqlens is None:
-            kernel_B, kernel_L = B, L
-        else:
-            kernel_B, kernel_L = 1, B * L
+        gate_BLC = self.in_proj_z(x_BLD)
+        a_BLN = self.in_proj_a(x_BLD)
+        b_BLN = self.in_proj_b(x_BLD)
+        conv_weight_CW, _ = self._fused_conv_weight_bias()
+        if isinstance(mixed_qkv_BLC, DTensor):
+            cu_seqlens = DTensor.from_local(
+                cu_seqlens,
+                mixed_qkv_BLC.device_mesh,
+                [Replicate()] * mixed_qkv_BLC.device_mesh.ndim,
+            )
 
-        def _maybe_flatten(tensor: torch.Tensor) -> torch.Tensor:
-            if cu_seqlens is None:
-                return tensor
-            return tensor.reshape(1, B * L, *tensor.shape[2:])
-
-        # Shapes:
-        #   xq_BLNK, xk_BLNK: (B, L, n_key_heads, key_head_dim)
-        #   xv_BLNV, xz_BLNV: (B, L, n_value_heads, value_head_dim)
-        #   xa_BLN, xb_BLN: (B, L, n_value_heads)
-        xq_BLNK = self._causal_conv(
-            _maybe_flatten(self.in_proj_q(x_BLD)),
-            self.conv_q,
+        output_BLNV = self.core(
+            mixed_qkv_BLC,
+            a_BLN,
+            b_BLN,
+            conv_weight_CW,
+            self.A_log,
+            self.dt_bias,
             cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.key_head_dim)
-        xk_BLNK = self._causal_conv(
-            _maybe_flatten(self.in_proj_k(x_BLD)),
-            self.conv_k,
-            cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.key_head_dim)
-        xv_BLNV = self._causal_conv(
-            _maybe_flatten(self.in_proj_v(x_BLD)),
-            self.conv_v,
-            cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.value_head_dim)
-        xz_BLNV = _maybe_flatten(self.in_proj_z(x_BLD)).view(
-            kernel_B, kernel_L, -1, self.value_head_dim
+            cu_seqlens_host=cu_seqlens_host,
         )
-        xa_BLN = _maybe_flatten(self.in_proj_a(x_BLD))
-        xb_BLN = _maybe_flatten(self.in_proj_b(x_BLD))
-
-        # Gating signals have shape (B, L, n_value_heads):
-        #   g_BLN:    decay rate per head, always negative
-        #   beta_BLN: update gate in (0, 1)
-        g_BLN = -torch.exp(self.A_log.float()) * F.softplus(
-            xa_BLN.float() + self.dt_bias
+        gate_BLNV = gate_BLC.reshape(
+            batch_size, seq_len, -1, self.value_head_dim
         )
-        beta_BLN = torch.sigmoid(xb_BLN)
-
-        out_BLNV = self.kernel(
-            xq_BLNK,
-            xk_BLNK,
-            xv_BLNV,
-            g_BLN,
-            beta_BLN,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
-        )
-
-        out_BLNV = self.norm(out_BLNV, xz_BLNV)
-
-        # Merge value heads and restore (B, L); under varlen the kernel ran on a
-        # flattened (1, B*L) layout, so this also unpacks the batch.
-        out_BLD = out_BLNV.reshape(B, L, -1)
+        output_BLNV = self.norm(output_BLNV, gate_BLNV)
+        out_BLD = output_BLNV.reshape(batch_size, seq_len, -1)
         return self.out_proj(out_BLD)
 
 

@@ -210,6 +210,62 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_moe_debug_tp4_ep4_batch_invariant",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_5_debug_varlen",
+                    "--async-loop.num-training-steps 5",
+                    "--hf_assets_path tests/assets/tokenizer",
+                    # Hybrid GDN debug model (2 K/V heads, 2 GDN key heads) -> TP<=2.
+                    # trainer FSDP=2 x TP=2 (4 GPUs) + 2 generators TP=2 (4 GPUs) = 8.
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--num_generators 2",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
+                    "--trainer.debug.no_batch_invariant",
+                    "--generator.debug.no_batch_invariant",
+                    "--trainer.checkpoint.no-enable",  # random-init weights
+                    "--generator.checkpoint.no-enable",
+                    "--metrics.no-enable-wandb",
+                ],
+            ],
+            "RL GRPO Qwen3.5 hybrid GDN varlen TP=2 (unified GDN gen path)",
+            "rl_grpo_qwen3_5_debug_tp2",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_5_debug_varlen_batch_invariant",
+                    "--async-loop.num-training-steps 3",
+                    "--hf_assets_path tests/assets/tokenizer",
+                    # On-policy (max-offpolicy-steps 0) + batch-invariant: exercises
+                    # the GDN unified path bitwise end-to-end. TP=2 (debug head cap);
+                    # trainer FSDP=2 x TP=2 + 2 generators TP=2 = 8 GPUs.
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--num_generators 2",
+                    "--async-loop.max-offpolicy-steps 0",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 128",
+                    "--trainer.checkpoint.no-enable",  # random-init weights
+                    "--generator.checkpoint.no-enable",
+                    "--metrics.no-enable-wandb",
+                ],
+            ],
+            "RL GRPO Qwen3.5 hybrid GDN TP=2 batch-invariant",
+            "rl_grpo_qwen3_5_debug_tp2_batch_invariant",
+            ngpu=8,
+        ),
     ]
 
 

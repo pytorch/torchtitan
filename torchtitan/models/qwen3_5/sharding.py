@@ -307,35 +307,55 @@ def _set_deltanet_sharding(
     # RowwiseParallel on output projection (reduce-scatter to SP)
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
 
+    activation_placement = dense_activation_placement(tp=spmd.S(2))
+    parameter_placement = dense_param_placement(tp=spmd.S(0))
+    replicated_placement = dense_param_placement(tp=spmd.R)
+
     # RMSNormGated: per-head norm, weight Replicate, activations Shard(2)
-    _norm_plc = dense_activation_placement(tp=spmd.S(2))
     deltanet_cfg.norm.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"x": _norm_plc, "gate": _norm_plc},
-        in_dst_shardings={"x": _norm_plc, "gate": _norm_plc},
-        out_dst_shardings=_norm_plc,
+        state_shardings={"weight": replicated_placement},
+        in_src_shardings={
+            "x": activation_placement,
+            "gate": activation_placement,
+        },
+        in_dst_shardings={
+            "x": activation_placement,
+            "gate": activation_placement,
+        },
+        out_dst_shardings=activation_placement,
     )
 
-    # GatedDeltaKernel: local_map converts DTensor q/k/v/g/beta to local.
-    _kernel_plc = dense_activation_placement(tp=spmd.S(2))
-    deltanet_cfg.kernel.sharding_config = ShardingConfig(
+    # The core is the single DTensor-to-local boundary for the head-parallel
+    # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
+    # and intentionally remains outside local_map's positional placements.
+    deltanet_cfg.core.sharding_config = ShardingConfig(
         in_dst_shardings={
-            "xq_BLNK": _kernel_plc,
-            "xk_BLNK": _kernel_plc,
-            "xv_BLNV": _kernel_plc,
-            "g_BLN": _kernel_plc,
-            "beta_BLN": _kernel_plc,
+            "mixed_qkv_BLC": activation_placement,
+            "a_BLN": activation_placement,
+            "b_BLN": activation_placement,
+            "conv_weight_CW": parameter_placement,
+            "A_log_N": parameter_placement,
+            "dt_bias_N": parameter_placement,
+            "cu_seqlens": replicated_placement,
         },
-        out_src_shardings=_kernel_plc,
+        out_src_shardings=activation_placement,
         local_map=LocalMapConfig(
-            in_grad_placements=(_kernel_plc,) * 5,
+            in_grad_placements=(
+                activation_placement,
+                activation_placement,
+                activation_placement,
+                parameter_placement,
+                parameter_placement,
+                parameter_placement,
+                replicated_placement,
+            ),
         ),
     )
 
     deltanet_cfg.sharding_config = ShardingConfig(
         state_shardings={
-            "A_log": dense_param_placement(tp=spmd.S(0)),
-            "dt_bias": dense_param_placement(tp=spmd.S(0)),
+            "A_log": parameter_placement,
+            "dt_bias": parameter_placement,
         },
         in_src_shardings={"x_BLD": attention_input_layout},
         in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
