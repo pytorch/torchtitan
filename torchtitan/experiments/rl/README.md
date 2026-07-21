@@ -67,9 +67,9 @@ flowchart TB
       direction TB
       a8["g8 taken (not released)"]:::taken
       a9["g9 taken (not released)"]:::taken
-      subgraph WIN["window [g10 .. g13] -> up to s=1 extra step"]
+      subgraph WIN["window [h .. window_end] = [g10 .. g13] -> up to s=1 extra step"]
         direction TB
-        w10["g10 INFLIGHT (head, stuck)"]:::inflight
+        w10["g10 INFLIGHT (head, stuck) -> h = 10"]:::inflight
         w11["g11 FINALIZED -> takeable"]:::fin
         w12["g12 FINALIZED -> takeable"]:::fin
         w13["g13 WAITING"]:::wait
@@ -79,7 +79,7 @@ flowchart TB
     end
     w14["g14 blocked: full AND outside window"]:::blocked
     ACTIVE2 -. full / window_end .-> w14
-    note["take g11 + g12 = P groups = 1 batch = 1 step\n=> head g10 ages by at most +1 => max age = K + s"]:::note
+    note["h = 10, s = 1, P = 2, r0 = 0\nwindow_end = h + (s+1)*P - r0 - 1 = 10 + 2*2 - 0 - 1 = 13 (g13)\ntake g11 + g12 = P=2 groups = 1 batch = 1 step\n=> head g10 ages by at most +1 => max age = K + s = 2 + 1 = 3"]:::note
     classDef taken fill:#e6d7f0,stroke:#84a,stroke-dasharray:4 3;
     classDef inflight fill:#fde7c7,stroke:#c80;
     classDef fin fill:#d7f0d7,stroke:#3a3;
@@ -93,6 +93,34 @@ flowchart TB
   `partial_batch_trainable_count` = trainable groups already accumulated toward the in-progress batch
   when the head became head. It is snapshotted per head, so the window slides right only when the head
   itself is consumed.
+
+#### The `window_end` formula
+
+```
+window_end = h + (s + 1) * P - r0 - 1
+```
+
+The batcher may take any `FINALIZED` group whose `group_id` lies in `[h, window_end]`. Each term:
+
+| symbol | name | meaning |
+|--------|------|---------|
+| `h` | head `group_id` | Position of the oldest entry still in the buffer (the window's left edge). `group_id` is a contiguous, monotonically increasing position assigned by `_data_input_loop`. |
+| `s` | `window_lookahead_steps` | The knob: extra off-policy optimizer steps a stuck straggler head may be bypassed by. `s = 0` is strict FIFO (window = head only); larger `s` widens the window. Bounds max policy age to `K + s`. |
+| `P` | `num_prompts_per_train_step` | Groups trained per optimizer step, i.e. `1 step = P groups`. Converts the step-denominated knob `s` into a group-denominated window width. |
+| `r0` | head phase snapshot | `partial_batch_trainable_count` captured when the current entry became head: trainable groups already accumulated toward the not-yet-packed batch (`0 <= r0 < P`). Snapshotted per head and held fixed until the head is consumed, so the window doesn't shrink from the right as non-head groups are taken. Shrinks the window because those `r0` groups already count toward the in-progress step. |
+| `-1` | inclusive edge | Makes `window_end` an inclusive `group_id` bound; the window width is `W = (s + 1) * P - r0`. |
+
+Two cases (`take_finalized`, work_buffer.py):
+
+```
+s == 0  ->  window_end = h                             (strict FIFO: head only, W = 1)
+s >= 1  ->  window_end = h + (s + 1) * P - r0 - 1       (W = (s + 1) * P - r0)
+```
+
+**Worked example** (the windowed-FIFO diagram above): `h = g10`, `s = 1`, `P = 2`, `r0 = 0`
+→ `window_end = 10 + (1 + 1) * 2 - 0 - 1 = g13`, window width `W = (1 + 1) * 2 - 0 = 4` (covers
+`g10..g13`). Taking `g11 + g12` completes `P = 2` groups = 1 batch = 1 step, so the stuck head `g10`
+ages by at most `+1` → max policy age `= K + s`.
 
 
 ## Key features available
