@@ -180,8 +180,6 @@ def download_hf_assets(
                 downloaded_files.append(filename)
                 pbar.update(1)
 
-            except HfHubHTTPError as e:
-                raise e
             except EntryNotFoundError as e:
                 if isinstance(e, LocalEntryNotFoundError):
                     # LocalEntry is subclass of Entry, but after successful
