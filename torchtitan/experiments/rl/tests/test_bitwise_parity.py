@@ -679,12 +679,16 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        # Each class runs in its own torchrun process. Synchronize before
+        # releasing local resources, then leave process-group cleanup to exit.
+        # vLLM's internal shutdown destroys every registered process group,
+        # including the trainer's groups, and deadlocks during global teardown.
+        if dist.is_initialized():
+            dist.barrier()
         if hasattr(cls, "engine"):
-            # vLLM shutdown destroys the externally launched process group. Keep
-            # faster ranks from tearing it down while a peer is finishing a call.
-            if dist.is_initialized():
-                dist.barrier()
-            cls.engine.engine_core.shutdown()
+            renderer = getattr(cls.engine, "renderer", None)
+            if renderer is not None:
+                renderer.shutdown()
             del cls.engine
         if hasattr(cls, "model"):
             del cls.model
