@@ -305,9 +305,6 @@ class CompileConfig:
 
     backend: str = "inductor"
 
-    enable_cudagraph: bool = False
-    """Whether to apply CUDAGraph capture."""
-
     def __post_init__(self) -> None:
         if self.enable_async_tensor_parallel and not (
             self.enable and "model" in self.components
