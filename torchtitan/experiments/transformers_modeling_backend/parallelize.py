@@ -137,6 +137,23 @@ def _wrap_moe_experts_contiguous(model: nn.Module) -> None:
         module.forward = _make_contiguous_forward(module.forward)
 
 
+def _wire_flex_kernel_tp(model: nn.Module, tp_mesh: DeviceMesh) -> None:
+    """Give GQA flex core kernels the TP group for the TP-aware flat q/k norm.
+
+    OLMoE-style attention norms the full q/k projection (n_heads*head_dim) before
+    the head reshape; under TP that projection is column-sharded, so
+    ``HFFlexAttnCoreKernel`` must all-reduce the RMSNorm variance across the TP
+    group (see ``_tp_aware_flat_rmsnorm``). Set the TP group on each GQA core
+    kernel here (before ``model.parallelize``). A no-op for per-head-norm (Qwen3)
+    and no-norm (Mixtral) models -- they never enter the flat-norm branch.
+    """
+    tp_group = tp_mesh.get_group()
+    for module in model.modules():
+        core = getattr(module, "_titan_flex_attn_core", None)
+        if core is not None:
+            core._tp_group = tp_group
+
+
 def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
     """Wire the CP k/v all-gather into each attention kernel.
 
@@ -318,6 +335,12 @@ def parallelize_hf_transformers(
         # (already TP-head-sharded, CP-seq-sharded) tensors.
         if parallel_dims.cp_enabled:
             _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
+
+        # 3b'. Under TP, give GQA flex core kernels the TP group so an OLMoE-style
+        # full-projection q/k RMSNorm all-reduces its variance across TP (the
+        # projection is column-sharded). No-op for per-head / no-norm models.
+        if parallel_dims.tp_enabled:
+            _wire_flex_kernel_tp(model, parallel_dims.get_mesh("tp"))
 
         # 3c. Under spmd + combined TP+EP, the experts local_map yields a
         # non-contiguous local shard that native GroupedExperts.forward's .view

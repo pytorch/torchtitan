@@ -120,6 +120,38 @@ def _flex_cp_allgather_kv(key, value, pg_name):
     return flex_cp_allgather(key.contiguous(), value.contiguous(), 2, pg_name)
 
 
+def _tp_aware_flat_rmsnorm(norm, hidden_local, tp_group):
+    """RMSNorm over the FULL projection when that projection is TP column-sharded.
+
+    OLMoE-style q/k RMSNorm normalizes over the full ``n_heads*head_dim``
+    projection, applied before the head reshape. Under TP the projection (and
+    hence ``hidden_local``) is column-sharded to ``1/tp`` of that dim, so the
+    variance must span all TP ranks: all-reduce the local sum-of-squares across
+    the TP group, divide by the full dim, normalize the local shard, then multiply
+    by the local weight slice. The projection is column-sharded contiguously
+    (weight ``S(0)``), so rank ``r`` owns ``weight[r*local : (r+1)*local]``. This
+    reproduces the RMSNorm math DTensor performs on the default backend (which
+    all-reduces the variance and redistributes the replicated weight). Only used
+    when tp>1; the tp=1 path uses the plain ``norm(...)`` and stays bit-identical.
+    """
+    import torch.distributed as dist
+    import torch.distributed._functional_collectives as funcol
+
+    input_dtype = hidden_local.dtype
+    h = hidden_local.float()
+    local_dim = h.shape[-1]
+    tp_size = dist.get_world_size(tp_group)
+    tp_rank = dist.get_rank(tp_group)
+    local_sumsq = h.pow(2).sum(-1, keepdim=True)
+    global_sumsq = funcol.all_reduce(
+        local_sumsq, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
+    )
+    variance = global_sumsq / (local_dim * tp_size)
+    h = h * torch.rsqrt(variance + norm.variance_epsilon)
+    weight_local = norm.weight.narrow(0, tp_rank * local_dim, local_dim)
+    return weight_local * h.to(input_dtype)
+
+
 class HFFlexAttnCoreKernel(Module):
     """Reshape + q/k norm + RoPE + flex attention on LOCAL (head-sharded) tensors.
 
@@ -156,6 +188,10 @@ class HFFlexAttnCoreKernel(Module):
         # Process-group name for the CP k/v all-gather; None when CP is disabled.
         # Set by _wrap_flex_kernel_cp (parallelize.py) before model.parallelize.
         self._cp_pg_name = None
+        # TP process group for the TP-aware flat q/k norm (OLMoE-style full-
+        # projection RMSNorm under TP column-sharding); None when TP is disabled.
+        # Set by _wire_flex_kernel_tp (parallelize.py) before model.parallelize.
+        self._tp_group = None
 
     def forward(
         self,
@@ -185,10 +221,28 @@ class HFFlexAttnCoreKernel(Module):
         )
         q, k, v = query_BLD, key_BLD, value_BLD
         if flat_norm:
-            if q_norm is not None:
-                q = q_norm(q)
-            if k_norm is not None:
-                k = k_norm(k)
+            if self._tp_group is not None:
+                # Under TP the flat projection is column-sharded, so the full-
+                # projection RMSNorm must all-reduce its variance across TP. This
+                # manual collective + local weight slice is not typecheck-clean in
+                # the local region, so shield it and re-stamp q/k to their input
+                # (B, L, D) head-sharded type (the norm preserves shape/sharding).
+                with spmd.no_typecheck():
+                    if q_norm is not None:
+                        q = _tp_aware_flat_rmsnorm(q_norm, q, self._tp_group)
+                    if k_norm is not None:
+                        k = _tp_aware_flat_rmsnorm(k_norm, k, self._tp_group)
+                if spmd.is_type_checking():
+                    ps = spmd.PartitionSpec("dp", "cp", "tp")
+                    spmd.assert_type(q, spmd.V, ps)
+                    spmd.assert_type(k, spmd.V, ps)
+            else:
+                # tp=1 (EP-only / FSDP-only / single GPU): the full projection is
+                # local, so the plain norm over the full dim is exact.
+                if q_norm is not None:
+                    q = q_norm(q)
+                if k_norm is not None:
+                    k = k_norm(k)
             # OLMoE clamps q/k/v to +/- clip_qkv on the flat projection (a no-op
             # when clip_qkv is None / absent).
             clip = getattr(getattr(module, "config", None), "clip_qkv", None)
