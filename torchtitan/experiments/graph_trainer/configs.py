@@ -64,6 +64,10 @@ class EpOverlapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
+
+    enable_xpugraph: bool = False
+    """Whether to apply XPUGraph capture on XPU"""
+
     mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
