@@ -402,16 +402,44 @@ class TestCudagraphPass(unittest.TestCase):
                 ),
             ),
             (
-                torch.ops.minimal_async_ep.combine.default,
-                (cuda_f32(4, 8), cuda_f32(12, 8)),
+                torch.ops.minimal_async_ep.wait_dispatch.default,
+                (cuda_f32(16, 8), cuda_i64(4)),
             ),
             (
-                torch.ops.minimal_async_ep.dispatch_backward.default,
+                torch.ops.minimal_async_ep.dispatch_data.default,
+                cuda_f32(16, 8),
+            ),
+            (
+                torch.ops.minimal_async_ep.wait_dispatch_data.default,
+                cuda_f32(16, 8),
+            ),
+            (
+                torch.ops.minimal_async_ep.combine.default,
+                cuda_f32(12, 8),
+            ),
+            (
+                torch.ops.minimal_async_ep.wait_combine.default,
+                cuda_f32(12, 8),
+            ),
+            (
+                torch.ops.minimal_async_ep.combine_data.default,
+                cuda_f32(12, 8),
+            ),
+            (
+                torch.ops.minimal_async_ep.reduce_topk.default,
                 cuda_f32(4, 8),
             ),
             (
-                torch.ops.minimal_async_ep.combine_backward.default,
-                (cuda_f32(16, 8), cuda_f32(12)),
+                torch.ops.minimal_async_ep.expand_topk_grad.default,
+                cuda_f32(12, 8),
+            ),
+            (
+                torch.ops.minimal_async_ep.topk_scores_grad.default,
+                cuda_f32(12),
+            ),
+            (
+                torch.ops.minimal_async_ep.reduce_topk_no_scores.default,
+                cuda_f32(4, 8),
             ),
         ]
         nodes = []
