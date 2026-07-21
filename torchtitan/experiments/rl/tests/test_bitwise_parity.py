@@ -680,6 +680,10 @@ class BitwiseParityTestBase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         if hasattr(cls, "engine"):
+            # vLLM shutdown destroys the externally launched process group. Keep
+            # faster ranks from tearing it down while a peer is finishing a call.
+            if dist.is_initialized():
+                dist.barrier()
             cls.engine.engine_core.shutdown()
             del cls.engine
         if hasattr(cls, "model"):
