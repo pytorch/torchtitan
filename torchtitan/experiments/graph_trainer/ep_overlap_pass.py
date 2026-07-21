@@ -17,12 +17,13 @@ semantic input it relies on is chunk-body metadata collected by
 For each selected forward/backward region:
 
 * exactly two chunk bodies, chunk 0 and chunk 1, must be present;
-* true EP scheduling markers are
-  ``_c10d_functional.all_to_all_single.default`` launches inside the selected
-  chunk body;
-* ``custom[_EP_TOKEN_EXCHANGE]`` marks true token-exchange all-to-all launches;
-  waits may inherit the annotation from traceback and are normalized to
-  ``custom[_EP_TOKEN_EXCHANGE_WAIT]``;
+* true EP scheduling markers are graph-visible token-exchange launches inside
+  the selected chunk body: annotated all-to-all launches for the c10d path, and
+  MinimalAsyncEP dispatch/combine launch ops for the MinimalAsyncEP path;
+* ``custom[_EP_TOKEN_EXCHANGE]`` marks true c10d token-exchange launches; waits
+  may inherit the annotation from traceback and are normalized to
+  ``custom[_EP_TOKEN_EXCHANGE_WAIT]``. MinimalAsyncEP marker labels are inferred
+  from the launch/wait op names;
 * marker counts and labels must match across chunks;
 * forward emits marker pairs in chunk order 0 then 1, backward emits 1 then 0;
 * MoE-root chunking pairs both chunks' first-marker setup before launching the
@@ -42,8 +43,8 @@ Pseudo-code
 ===========
 1. Collect chunked regions and build node -> chunk-owner lookup from shared EP
    pass metadata.
-2. For each region, collect true token-exchange all-to-all markers per chunk
-   and normalize wait annotations inherited from traceback.
+2. For each region, collect true token-exchange markers per chunk and normalize
+   wait annotations inherited from traceback.
 3. Validate both chunks have the same marker signature, then build dependency
    closures needed to launch each marker.
 4. Emit wait-gated phases: marker pair in chunk order, ready filler work that
@@ -53,6 +54,8 @@ Pseudo-code
 """
 
 from __future__ import annotations
+
+import operator
 
 from dataclasses import dataclass
 from typing import Any
@@ -80,6 +83,16 @@ from torchtitan.tools.logging import logger
 
 _GRAPH_BOUNDARY_OPS = {"placeholder", "get_attr"}
 _EP_PHASES = {"dispatch", "combine"}
+_MINIMAL_ASYNC_EP_PHASES = {
+    "dispatch": "dispatch",
+    "dispatch_data": "dispatch",
+    "combine": "combine",
+    "combine_data": "combine",
+}
+_MINIMAL_ASYNC_EP_WAITS = {
+    "dispatch": frozenset({"wait_dispatch", "wait_dispatch_data"}),
+    "combine": frozenset({"wait_combine"}),
+}
 
 
 # Step 0: Small metadata helpers and local scheduling records.
@@ -111,25 +124,78 @@ def _custom_meta(node: fx.Node) -> dict[str, Any]:
     return custom if isinstance(custom, dict) else {}
 
 
+def _minimal_async_ep_op_name(node: fx.Node) -> str | None:
+    target = node.target
+    if getattr(target, "namespace", None) != "minimal_async_ep":
+        return None
+    return target._schema.name.rsplit("::", 1)[-1]
+
+
+def _minimal_async_ep_phase(node: fx.Node) -> str | None:
+    name = _minimal_async_ep_op_name(node)
+    return _MINIMAL_ASYNC_EP_PHASES.get(name) if name is not None else None
+
+
+def _is_minimal_async_ep_wait(node: fx.Node) -> bool:
+    name = _minimal_async_ep_op_name(node)
+    return any(name in waits for waits in _MINIMAL_ASYNC_EP_WAITS.values())
+
+
+def _is_matching_minimal_async_ep_wait(wait: fx.Node, launch: fx.Node) -> bool:
+    phase = _minimal_async_ep_phase(launch)
+    return phase is not None and _minimal_async_ep_op_name(wait) in (
+        _MINIMAL_ASYNC_EP_WAITS.get(phase) or ()
+    )
+
+
+def _token_exchange_launch_for_wait(node: fx.Node) -> fx.Node | None:
+    if node.op != "call_function" or not node.all_input_nodes:
+        return None
+    launch = node.all_input_nodes[0]
+    if (
+        _is_minimal_async_ep_wait(node)
+        and launch.op == "call_function"
+        and launch.target == operator.getitem
+        and launch.all_input_nodes
+    ):
+        launch = launch.all_input_nodes[0]
+    return launch
+
+
+def _is_token_exchange_projection(node: fx.Node, node_set: set[fx.Node]) -> bool:
+    if (
+        node.op != "call_function"
+        or node.target != operator.getitem
+        or not node.all_input_nodes
+    ):
+        return False
+    launch = node.all_input_nodes[0]
+    return launch in node_set and _is_token_exchange_launch(launch)
+
+
 def _ep_label(node: fx.Node) -> str:
     """Return the optional EP phase label for logs/wait metadata."""
     phase = _custom_meta(node).get(_EP_TOKEN_EXCHANGE)
-    return phase if phase in _EP_PHASES else "all_to_all"
+    if phase in _EP_PHASES:
+        return phase
+    phase = _minimal_async_ep_phase(node)
+    return phase if phase is not None else "token_exchange"
 
 
 def _is_token_exchange_launch(node: fx.Node) -> bool:
     """Return whether a node is a token-exchange scheduling marker.
 
-    Only all-to-all ops annotated with ``EP_token_exchange`` (dispatch or
-    combine) are scheduling markers. The counts all-to-all (which only has
-    ``EP: dispatch`` without ``EP_token_exchange``) is NOT a marker; it
-    stays in the closure with shared expert + router compute so that
-    compute is available as filler during the data dispatch window.
+    Only true token-exchange launches annotated with ``EP_token_exchange``
+    (dispatch or combine) are scheduling markers. For the all-to-all backend,
+    token-count all-to-all only carries ``EP: dispatch`` and intentionally is
+    not a marker. MinimalAsyncEP has no separate token-count scheduling marker.
     """
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops._c10d_functional.all_to_all_single.default
-        and _custom_meta(node).get(_EP_TOKEN_EXCHANGE) in _EP_PHASES
+    return node.op == "call_function" and (
+        (
+            node.target == torch.ops._c10d_functional.all_to_all_single.default
+            and _custom_meta(node).get(_EP_TOKEN_EXCHANGE) in _EP_PHASES
+        )
+        or _minimal_async_ep_phase(node) is not None
     )
 
 
@@ -181,13 +247,30 @@ def _same_region_owner(
 
 
 def _is_wait_for_token_exchange(node: fx.Node, node_set: set[fx.Node]) -> bool:
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops._c10d_functional.wait_tensor.default
-        and node.all_input_nodes
-        and node.all_input_nodes[0] in node_set
-        and _is_token_exchange_launch(node.all_input_nodes[0])
-    )
+    launch = _token_exchange_launch_for_wait(node)
+    if launch is None:
+        return False
+    if launch not in node_set or not _is_token_exchange_launch(launch):
+        return False
+    if launch.target == torch.ops._c10d_functional.all_to_all_single.default:
+        return node.target == torch.ops._c10d_functional.wait_tensor.default
+    return _is_matching_minimal_async_ep_wait(node, launch)
+
+
+def _token_exchange_wait_users(
+    launch: fx.Node,
+    *,
+    node_set: set[fx.Node],
+) -> list[fx.Node]:
+    candidates = set(launch.users)
+    for user in launch.users:
+        if user.op == "call_function" and user.target == operator.getitem:
+            candidates.update(user.users)
+    return [
+        user
+        for user in candidates
+        if user in node_set and _is_wait_for_token_exchange(user, {launch})
+    ]
 
 
 def _collect_token_exchanges(
@@ -209,21 +292,19 @@ def _collect_token_exchanges(
                 custom[_EP_TOKEN_EXCHANGE_WAIT] = phase
                 node.meta["custom"] = custom
                 continue
+            if _is_token_exchange_projection(node, node_set):
+                custom = dict(_custom_meta(node))
+                custom.pop(_EP_TOKEN_EXCHANGE, None)
+                node.meta["custom"] = custom
+                continue
             raise ValueError(
                 "ep_overlap found EP token-exchange metadata on non-marker "
-                f"node {node.name} ({node.target}). Only all_to_all launches "
-                "and their wait_tensor nodes may carry this annotation."
+                f"node {node.name} ({node.target}). Only token-exchange "
+                "launches and their waits may carry this annotation."
             )
-            continue
 
         label = _ep_label(node)
-        waits = [
-            user
-            for user in node.users
-            if user in node_set
-            and user.op == "call_function"
-            and user.target == torch.ops._c10d_functional.wait_tensor.default
-        ]
+        waits = _token_exchange_wait_users(node, node_set=node_set)
         if len(waits) != 1:
             raise ValueError(
                 f"ep_overlap expected one token-exchange wait for {node.name}, "
@@ -246,7 +327,7 @@ def _collect_token_exchanges(
 
 def _exchange_signature(exchanges: tuple[_TokenExchange, ...]) -> tuple[str, ...]:
     """Return the semantic marker sequence used to match chunk pairs."""
-    return ("all_to_all",) * len(exchanges)
+    return ("token_exchange",) * len(exchanges)
 
 
 def _exchange_labels(exchanges: tuple[_TokenExchange, ...]) -> tuple[str, ...]:
@@ -527,12 +608,14 @@ def _ready_nodes(
             key=order.__getitem__,
         )
         for node in candidates:
-            if not include_waits and _is_c10d_functional_node(node):
+            if not include_waits and (
+                _is_c10d_functional_node(node) or _is_minimal_async_ep_wait(node)
+            ):
                 continue
             deps = _body_deps(node, body=body, owner_by_node=owner_by_node)
             if all(dep in emitted for dep in deps):
                 ready.append(node)
-    return tuple(ready)
+    return tuple(dict.fromkeys(ready))
 
 
 def _append_ready_blocks(
@@ -821,7 +904,7 @@ def _plan_region(
         exchanges_by_chunk[1]
     ):
         raise ValueError(
-            f"ep_overlap expected matching EP all-to-all counts for "
+            f"ep_overlap expected matching EP token-exchange counts for "
             f"{root!r} ({direction}), found "
             f"chunk0={_exchange_signature(exchanges_by_chunk[0])} "
             f"chunk1={_exchange_signature(exchanges_by_chunk[1])}."
@@ -943,7 +1026,7 @@ def _schedule_ep_overlap_regions(
         _apply_schedule(gm, scheduled_regions)
     elif require_all_to_all:
         raise ValueError(
-            f"ep_overlap did not find any chunked EP all-to-all regions for "
+            f"ep_overlap did not find any chunked EP token-exchange regions for "
             f"pattern {module_pattern}."
         )
     return len(scheduled_regions)
@@ -982,7 +1065,7 @@ def ep_overlap_schedule_pass(
     require_all_to_all: bool = True,
     pair_first_token_exchange: bool = False,
 ) -> fx.GraphModule:
-    """Reorder already chunked regions around EP all-to-alls."""
+    """Reorder already chunked regions around EP token exchanges."""
     del example_inputs
     scheduled = _schedule_ep_overlap_regions(
         gm,
