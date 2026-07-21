@@ -518,7 +518,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel_minimal_async_ep",
                     "--compile.mode aot_fx_trace",
-                    "--compile.memory_policy full",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 4",
                 ],

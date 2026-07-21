@@ -63,6 +63,7 @@ from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
 )
 from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     _apply_schedule,
+    _ready_nodes,
     _schedule_ep_overlap_regions,
     _ScheduledRegion,
 )
@@ -95,6 +96,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _default_memory_policy_pass,
     _make_default_memory_policy,
     _make_full_memory_policy,
+    _tag_minimal_async_ep_moe_full_recompute,
     tag_sac_policy,
 )
 from torchtitan.experiments.graph_trainer.passes import (
@@ -1454,6 +1456,48 @@ class TestApplySACPass(TestCase):
         self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
         self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
+    def test_minimal_async_ep_moe_forces_full_recompute_only_inside_moe(self):
+        from torchtitan.models.common.token_dispatcher import (
+            MinimalAsyncEPTokenDispatcher,
+        )
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        moe = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        dense = graph.call_function(torch.ops.aten.neg.default, args=(moe,))
+        graph.output(dense)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        moe.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+        dense.meta["custom"] = {_MODULE_FQN: "layers.0.attention"}
+        for node in (moe, dense):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+
+        config = SimpleNamespace(
+            model_spec=SimpleNamespace(
+                model=SimpleNamespace(
+                    layers=[
+                        SimpleNamespace(
+                            moe=SimpleNamespace(
+                                experts=SimpleNamespace(
+                                    token_dispatcher=(
+                                        MinimalAsyncEPTokenDispatcher.Config(
+                                            num_experts=2,
+                                            top_k=1,
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    ]
+                )
+            )
+        )
+        _tag_minimal_async_ep_moe_full_recompute(gm, config=config)
+
+        self.assertEqual(moe.meta["recompute"], CheckpointPolicy.MUST_RECOMPUTE)
+        self.assertEqual(dense.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
     def test_default_policy_saves_fsdp_unshard_when_not_resharding(self):
         """Saves the helper-selected FSDP unshard output only when needed."""
         cases = (
@@ -2546,9 +2590,7 @@ class TestChunkPasses(TestCase):
 
         already_initialized = dist.is_initialized()
         if not already_initialized:
-            dist.init_process_group(
-                "fake", rank=0, world_size=2, store=FakeStore()
-            )
+            dist.init_process_group("fake", rank=0, world_size=2, store=FakeStore())
         try:
             yield init_device_mesh("cpu", (2,), mesh_dim_names=("dp",))
         finally:
@@ -2614,7 +2656,9 @@ class TestChunkPasses(TestCase):
             if chunk_strategy == "eager":
                 populate_eager_chunk_metadata_pass(gm)
             else:
-                populate_chunk_dim_metadata_pass(gm, traced.example_inputs, mode="batch")
+                populate_chunk_dim_metadata_pass(
+                    gm, traced.example_inputs, mode="batch"
+                )
                 ep_overlap_chunk_pass(
                     gm,
                     mode="batch",
@@ -4117,6 +4161,130 @@ class TestChunkPasses(TestCase):
                 bwd[0]["dispatch_wait"],
             ],
         )
+
+    def test_ep_overlap_schedules_minimal_async_ep_markers(self):
+        import torchtitan.distributed.minimal_async_ep  # noqa: F401
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        ranks = graph.placeholder("ranks")
+        rows = graph.placeholder("rows")
+        valid = graph.placeholder("valid")
+        refs = {}
+        ops = torch.ops.minimal_async_ep
+
+        for chunk_id in (0, 1):
+            pre = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+            dispatch = graph.call_function(
+                ops.dispatch.default,
+                args=(pre, ranks, rows, 8, 2),
+            )
+            dispatch_hidden = graph.call_function(
+                operator.getitem,
+                args=(dispatch, 0),
+            )
+            dispatch_wait = graph.call_function(
+                ops.wait_dispatch.default,
+                args=(dispatch_hidden, [pre]),
+            )
+            compute = graph.call_function(
+                torch.ops.aten.neg.default, args=(dispatch_wait,)
+            )
+            combine = graph.call_function(
+                ops.combine_data.default,
+                args=(compute, ranks, rows, valid, 4),
+            )
+            combine_wait = graph.call_function(
+                ops.wait_combine.default,
+                args=(combine, [compute, ranks, rows, valid]),
+            )
+            tail = graph.call_function(
+                torch.ops.aten.relu.default, args=(combine_wait,)
+            )
+            refs[chunk_id] = {
+                "dispatch": dispatch,
+                "dispatch_hidden": dispatch_hidden,
+                "dispatch_wait": dispatch_wait,
+                "compute": compute,
+                "combine": combine,
+                "combine_wait": combine_wait,
+                "tail": tail,
+            }
+
+            for node in (pre, dispatch, dispatch_hidden, dispatch_wait):
+                self._mark_chunk_body(
+                    node,
+                    chunk_id=chunk_id,
+                    ep="dispatch",
+                )
+            self._mark_chunk_body(compute, chunk_id=chunk_id)
+            for node in (combine, combine_wait, tail):
+                self._mark_chunk_body(
+                    node,
+                    chunk_id=chunk_id,
+                    ep="combine" if node is not tail else None,
+                )
+
+        graph.output((refs[0]["tail"], refs[1]["tail"]))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        order = self._schedule_ep_overlap_and_order(gm)
+
+        self.assertEqual(
+            refs[0]["dispatch_wait"].meta["custom"][_EP_TOKEN_EXCHANGE_WAIT],
+            "dispatch",
+        )
+        self.assertEqual(
+            refs[0]["combine_wait"].meta["custom"][_EP_TOKEN_EXCHANGE_WAIT],
+            "combine",
+        )
+        self._assert_nodes_in_order(
+            order,
+            [
+                refs[0]["dispatch"],
+                refs[1]["dispatch"],
+                refs[0]["dispatch_wait"],
+                refs[0]["compute"],
+                refs[0]["combine"],
+                refs[1]["dispatch_wait"],
+                refs[1]["compute"],
+                refs[1]["combine"],
+                refs[0]["combine_wait"],
+                refs[0]["tail"],
+                refs[1]["combine_wait"],
+                refs[1]["tail"],
+            ],
+        )
+
+    def test_ep_overlap_deduplicates_peer_chunk_ready_candidates(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        candidate = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        peer = graph.call_function(torch.ops.aten.neg.default, args=(x,))
+        graph.output((candidate, peer))
+
+        owners = {
+            0: ChunkOwner("layers.0", True, 0),
+            1: ChunkOwner("layers.0", True, 1),
+        }
+        bodies = {
+            0: ChunkBody(
+                owners[0], (candidate,), frozenset({candidate}), frozenset(), "test"
+            ),
+            1: ChunkBody(owners[1], (peer,), frozenset({peer}), frozenset(), "test"),
+        }
+        region = ChunkedRegion("layers.0", True, bodies)
+
+        ready = _ready_nodes(
+            candidates_by_chunk={0: {candidate}, 1: {candidate}},
+            emitted=set(),
+            region=region,
+            chunk_order=(1, 0),
+            order={node: idx for idx, node in enumerate(graph.nodes)},
+            owner_by_node={candidate: owners[0], peer: owners[1]},
+            include_waits=True,
+        )
+
+        self.assertEqual(ready, (candidate,))
 
     def test_ep_overlap_keeps_transformer_batch_first_marker_wait_gated(self):
         c10d = torch.ops._c10d_functional

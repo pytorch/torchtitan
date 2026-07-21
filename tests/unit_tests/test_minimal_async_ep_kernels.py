@@ -122,7 +122,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         "requires torchrun launcher",
     )
     @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
-    def test_launch_wait_api_matches_reference(self):
+    def test_two_buffer_sets_match_reference_and_preserve_outputs(self):
         initialized_pg = dist.is_initialized()
         if not initialized_pg:
             dist.init_process_group("nccl")
@@ -135,41 +135,55 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         minimal_async_ep_api._buffer_state = None
 
         def run_exchange(x, scores, expert_ids):
-            counts = torch.bincount(expert_ids.flatten(), minlength=4)
-            (
-                hidden,
-                dispatch_ranks,
-                dispatch_rows,
-                combine_ranks,
-                combine_rows,
-                num_valid,
-                expert_to_token,
-                token_to_expert,
-                _tokens_per_expert,
-            ) = minimal_async_ep_api.dispatch_op(x, expert_ids, counts, 16, 2)
-            hidden = minimal_async_ep_api.wait_dispatch_op(hidden, [x])
-            expert_output = hidden * 1.25
-            routed = minimal_async_ep_api.combine_op(
-                expert_output,
-                dispatch_ranks,
-                dispatch_rows,
-                combine_ranks,
-                combine_rows,
-                num_valid,
-                8,
-            )
-            routed = minimal_async_ep_api.wait_combine_op(
-                routed,
-                [expert_output, combine_ranks, combine_rows, num_valid],
-            )
-            return minimal_async_ep_api.reduce_topk_op(
-                routed,
-                token_to_expert,
-                expert_to_token,
-                scores.flatten(),
-                4,
-                2,
-            )
+            outputs = []
+            buffer_ptrs = []
+            for buffer_set, (chunk_x, chunk_scores, chunk_ids) in enumerate(
+                zip(x.chunk(2), scores.chunk(2), expert_ids.chunk(2), strict=True)
+            ):
+                counts = torch.bincount(chunk_ids.flatten(), minlength=4)
+                (
+                    hidden,
+                    dispatch_ranks,
+                    dispatch_rows,
+                    combine_ranks,
+                    combine_rows,
+                    num_valid,
+                    expert_to_token,
+                    token_to_expert,
+                    _tokens_per_expert,
+                ) = minimal_async_ep_api.dispatch_op(
+                    chunk_x, chunk_ids, counts, 8, 2, buffer_set
+                )
+                hidden = minimal_async_ep_api.wait_dispatch_op(hidden, [chunk_x])
+                expert_output = hidden * 1.25
+                routed = minimal_async_ep_api.combine_op(
+                    expert_output,
+                    dispatch_ranks,
+                    dispatch_rows,
+                    combine_ranks,
+                    combine_rows,
+                    num_valid,
+                    4,
+                    buffer_set,
+                )
+                routed = minimal_async_ep_api.wait_combine_op(
+                    routed,
+                    [expert_output, combine_ranks, combine_rows, num_valid],
+                )
+                outputs.append(
+                    minimal_async_ep_api.reduce_topk_op(
+                        routed,
+                        token_to_expert,
+                        expert_to_token,
+                        chunk_scores.flatten(),
+                        2,
+                        2,
+                    )
+                )
+                buffer_ptrs.append(
+                    (hidden.untyped_storage().data_ptr(), routed.data_ptr())
+                )
+            return torch.cat(outputs), buffer_ptrs
 
         try:
             minimal_async_ep_api.init_buffer(
@@ -180,6 +194,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 top_k=2,
                 dtype=torch.float32,
                 device=device,
+                num_buffer_sets=2,
             )
             rank = dist.get_rank()
             x = (
@@ -194,7 +209,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
 
             actual_x = x.clone().requires_grad_()
             actual_scores = scores.clone().requires_grad_()
-            actual = run_exchange(actual_x, actual_scores, expert_ids)
+            actual, buffer_ptrs = run_exchange(actual_x, actual_scores, expert_ids)
             actual_grads = torch.autograd.grad(
                 actual.square().sum(), (actual_x, actual_scores)
             )
@@ -213,6 +228,8 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             for actual, expected in zip(actual_grads, expected_grads, strict=True):
                 torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+            self.assertNotEqual(buffer_ptrs[0][0], buffer_ptrs[1][0])
+            self.assertNotEqual(buffer_ptrs[0][1], buffer_ptrs[1][1])
         finally:
             minimal_async_ep_api._buffer_state = None
             if not initialized_pg and dist.is_initialized():
