@@ -96,6 +96,6 @@ rollout truncation rate, mean       1.75%             14.55%
 
 The final recorded step had mean reward `0.302`, mean total length `3,999`, and truncation rate `18.75%`. The maximum observed mean reward was `0.632`; the maximum per-step truncation rate was `30.73%`. Initial AIME validation scored `0/30` before training.
 
-<!-- Plot placeholder: rollout_reward/_mean versus optimizer step. -->
+![Qwen3-4B DAPO Math-Verify reward](./assets/qwen3_4b_7k_reward.png)
 
-<!-- Plot placeholder: rollout/total_length/{mean,max} and rollout/truncation_rate/mean versus optimizer step. -->
+![Qwen3-4B DAPO mean response length](./assets/qwen3_4b_7k_response_length.png)
