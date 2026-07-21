@@ -243,6 +243,43 @@ class ConfigManager:
                 str_from_instance=lambda instance: [",".join(instance)],
             )
 
+        @registry.primitive_rule
+        def override_imports_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
+            """Parse ``--override.imports`` targets, each with optional kwargs.
+
+            Needed because ``OverrideConfig.imports`` is a ``str | tuple`` union,
+            which tyro cannot render as a CLI flag on its own. Tokens are space-
+            or comma-separated ``module.function`` targets; attach kwargs to a
+            target with ``target=<json>`` (see ``parse_cli_imports``),
+            e.g. ``--override.imports
+            'my_pkg.triton_rope.triton_rope={"block_size": 256}'``.
+            """
+            from torchtitan.config.override import (
+                format_cli_imports,
+                OverrideImport,
+                parse_cli_imports,
+            )
+
+            if type_info.type != list[OverrideImport]:
+                return None
+            return tyro.constructors.PrimitiveConstructorSpec(
+                nargs="*",
+                metavar="TARGET[='{\"k\": v}'] ...",
+                instance_from_str=lambda args: parse_cli_imports(args),
+                is_instance=lambda instance: isinstance(instance, list)
+                and all(
+                    isinstance(i, str)
+                    or (
+                        isinstance(i, tuple)
+                        and len(i) == 2
+                        and isinstance(i[0], str)
+                        and isinstance(i[1], dict)
+                    )
+                    for i in instance
+                ),
+                str_from_instance=lambda instance: format_cli_imports(instance),
+            )
+
 
 # Initialize the custom registry for tyro
 custom_registry = tyro.constructors.ConstructorRegistry()

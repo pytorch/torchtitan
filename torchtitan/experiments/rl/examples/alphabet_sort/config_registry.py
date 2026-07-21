@@ -609,9 +609,9 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
     host-synced, backward-able DeepEP path), while the generator applies per-actor
     overrides (``generator.override``) to its own copy (``fused_swiglu`` +
-    ``deepep_inference``) to switch its dispatchers to the cudagraph-able EXPAND layout.
-    The overrides touch only the generator's spec, so the trainer and weight sync are
-    unaffected.
+    ``deepep_override`` with ``cudagraphable=True``) to switch its dispatchers to the
+    cudagraph-able EXPAND layout. The overrides touch only the generator's spec, so the
+    trainer and weight sync are unaffected.
     """
     config = rl_grpo_qwen3_moe_debug_varlen()
     config.model_spec = model_registry(
@@ -621,8 +621,12 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
     config.generator.override = OverrideConfig(
         imports=[
-            "torchtitan.overrides.fused_swiglu",
-            "torchtitan.overrides.deepep_inference",
+            "torchtitan.overrides.fused_swiglu.fused_swiglu",
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+            (
+                "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+                {"cudagraphable": True},
+            ),
         ]
     )
     config.generator.cudagraph = VLLMCudagraphConfig(
@@ -634,7 +638,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     #    length -- it is effectively the longest input sequence length the engine batches
     #    (vLLM's 2048 default is just a stand-in for knowing that).
     #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
-    #    deepep_inference override. For a dropless model (highest memory) set it to
+    #    deepep_override. For a dropless model (highest memory) set it to
     #    longest_sequence_length // sp == max_num_batched_tokens // sp; lower it gradually to
     #    save memory (trading off dropped tokens).
     config.generator.max_num_batched_tokens = 2048
@@ -820,8 +824,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # OverrideConfig instances keep the trainer and generator overrides
     # independent (they run in different actors).
     perf_imports = [
-        "torchtitan.overrides.fused_swiglu",
-        "torchtitan.overrides.helion_rope",
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(
         config.trainer, override=OverrideConfig(imports=list(perf_imports))
