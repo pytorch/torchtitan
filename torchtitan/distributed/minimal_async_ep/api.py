@@ -21,6 +21,8 @@ Shape symbols used by the API entrypoints:
     ``EP``: expert-parallel group size.
 """
 
+import contextlib
+import contextvars
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -43,6 +45,7 @@ from torchtitan.tools.logging import logger
 
 
 _HIDDEN_RECV_BUFFER_COUNT = 2
+_DEFAULT_BUFFER_SET = 0
 
 _HIDDEN_READY_CHANNEL = 0
 _COUNTS_READY_CHANNEL = 0
@@ -78,27 +81,102 @@ class _PendingEvent:
 
 
 @dataclass
+class _HiddenRecvPool:
+    buffers: list[torch.Tensor]
+    handles: list[Any]
+    peer_buffers: list[list[torch.Tensor]]
+    peer_ptrs: list[torch.Tensor]
+    buffer_index: int = 0
+
+
+@dataclass
+class _BufferSet:
+    hidden_pools: dict[str, _HiddenRecvPool]
+    counts_buffer: torch.Tensor
+    counts_handle: Any
+    counts_peer_buffers: list[torch.Tensor]
+    counts_peer_ptrs: torch.Tensor
+
+
+@dataclass
 class _MinimalAsyncEPBufferState:
-    """Process-local symmetric-memory state initialized as one unit."""
+    """Process-local symmetric-memory state."""
 
     group: dist.ProcessGroup
     tokens_per_rank: int
-    hidden_recv_buffers: list[torch.Tensor]
-    hidden_recv_handles: list[Any]
-    hidden_recv_peer_buffers: list[list[torch.Tensor]]
-    hidden_recv_peer_ptrs: list[torch.Tensor]
-    counts_recv_buffer: torch.Tensor
-    counts_recv_handle: Any
-    counts_recv_peer_buffers: list[torch.Tensor]
-    counts_recv_peer_ptrs: torch.Tensor
+    buffer_sets: list[_BufferSet]
     comm_stream: torch.cuda.Stream
-    hidden_recv_buffer_index: int = 0
     pending_events: dict[tuple[str, int], deque[_PendingEvent]] = field(
         default_factory=dict
     )
 
 
 _buffer_state: _MinimalAsyncEPBufferState | None = None
+_active_buffer_set: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "minimal_async_ep_buffer_set", default=_DEFAULT_BUFFER_SET
+)
+
+
+def _get_buffer_set() -> int:
+    return _active_buffer_set.get()
+
+
+@contextlib.contextmanager
+def _use_buffer_set(index: int):
+    token = _active_buffer_set.set(index)
+    try:
+        yield
+    finally:
+        _active_buffer_set.reset(token)
+
+
+def _create_hidden_pool(
+    rows: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    group: dist.ProcessGroup,
+) -> _HiddenRecvPool:
+    buffers = [
+        symm_mem.empty(rows, hidden_dim, dtype=dtype, device=device)
+        for _ in range(_HIDDEN_RECV_BUFFER_COUNT)
+    ]
+    handles = [symm_mem.rendezvous(buffer, group) for buffer in buffers]
+    peer_buffers = [
+        [
+            handle.get_buffer(peer, buffer.shape, buffer.dtype)
+            for peer in range(group.size())
+        ]
+        for buffer, handle in zip(buffers, handles)
+    ]
+    peer_ptrs = [
+        torch.tensor(
+            [peer_buffer.data_ptr() for peer_buffer in peers],
+            dtype=torch.int64,
+            device=device,
+        )
+        for peers in peer_buffers
+    ]
+    return _HiddenRecvPool(buffers, handles, peer_buffers, peer_ptrs)
+
+
+def _create_counts_buffer(
+    ep_size: int,
+    num_experts: int,
+    device: torch.device,
+    group: dist.ProcessGroup,
+) -> tuple[torch.Tensor, Any, list[torch.Tensor], torch.Tensor]:
+    buffer = symm_mem.empty(ep_size, num_experts, dtype=torch.int64, device=device)
+    handle = symm_mem.rendezvous(buffer, group)
+    peer_buffers = [
+        handle.get_buffer(peer, buffer.shape, buffer.dtype) for peer in range(ep_size)
+    ]
+    peer_ptrs = torch.tensor(
+        [peer_buffer.data_ptr() for peer_buffer in peer_buffers],
+        dtype=torch.int64,
+        device=device,
+    )
+    return buffer, handle, peer_buffers, peer_ptrs
 
 
 def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None:
@@ -158,16 +236,38 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             "to set hidden_dim, tokens_per_rank, and dtype."
         )
 
-    memory_policy = getattr(config.compile, "memory_policy", None)
-    if (
-        not isinstance(config.activation_checkpoint, FullAC.Config)
-        and memory_policy != "full"
+    graph_remat_enabled = bool(
+        hasattr(config.compile, "memory_policy")
+        and config.compile.enable
+        and getattr(config.compile, "enable_passes", False)
+    )
+    disabled_passes = set(getattr(config.compile, "disable_passes", ()))
+    required_remat_passes = {
+        "tag_with_memory_policy_pass",
+        "selective_activation_remat_pass",
+    }
+    disabled_remat_passes = required_remat_passes & disabled_passes
+    if graph_remat_enabled and disabled_remat_passes:
+        raise ValueError(
+            "MinimalAsyncEP requires graph rematerialization; do not disable "
+            f"{', '.join(sorted(disabled_remat_passes))}."
+        )
+    if not graph_remat_enabled and not isinstance(
+        config.activation_checkpoint, FullAC.Config
     ):
         raise ValueError(
-            "MinimalAsyncEP requires full recompute: set "
-            "activation-checkpoint:full for eager training or "
-            "--compile.memory_policy full for graph_trainer."
+            "MinimalAsyncEP requires full recompute: enable GraphTrainer passes "
+            "or set activation-checkpoint:full."
         )
+
+    overlap_config = getattr(config.compile, "ep_overlap", None)
+    overlap_enabled = bool(getattr(overlap_config, "enabled", False))
+    if overlap_enabled and not graph_remat_enabled:
+        raise ValueError(
+            "MinimalAsyncEP EP overlap requires compile.enable and "
+            "compile.enable_passes."
+        )
+    num_buffer_sets = 2 if overlap_enabled else 1
 
     for token_dispatcher_cfg in dispatcher_cfgs:
         token_dispatcher_cfg.hidden_dim = model_config.dim
@@ -177,6 +277,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
             config.training.mixed_precision_param
         ]
+        token_dispatcher_cfg.num_buffer_sets = num_buffer_sets
 
 
 @dataclass
@@ -215,24 +316,36 @@ def init_buffer(
     top_k: int,
     dtype: torch.dtype,
     device: torch.device,
+    num_buffer_sets: int = 1,
 ) -> None:
     """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
     global _buffer_state
 
     device = torch.device(device)
     max_routed_tokens = group.size() * tokens_per_rank * min(top_k, num_local_experts)
+    max_combined_tokens = tokens_per_rank * top_k
     num_experts = group.size() * num_local_experts
     assert _buffer_state is None
 
+    if num_buffer_sets < 1:
+        raise ValueError(f"num_buffer_sets must be positive, got {num_buffer_sets}.")
+    if max_routed_tokens % num_buffer_sets or max_combined_tokens % num_buffer_sets:
+        raise ValueError(
+            "MinimalAsyncEP buffer capacities must divide evenly across "
+            f"num_buffer_sets={num_buffer_sets}."
+        )
+
     logger.info(
         "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
-        "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d",
+        "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d, "
+        "num_buffer_sets=%d",
         hidden_dim,
         tokens_per_rank,
         top_k,
         num_local_experts,
         group.size(),
         max_routed_tokens,
+        num_buffer_sets,
     )
     backend = symm_mem.get_backend(device)
     if backend != "CUDA":
@@ -241,60 +354,40 @@ def init_buffer(
             f"backend, got {backend}."
         )
 
-    hidden_recv_buffers = [
-        symm_mem.empty(
-            max_routed_tokens,
-            hidden_dim,
-            dtype=dtype,
-            device=device,
+    dispatch_rows = max_routed_tokens // num_buffer_sets
+    combine_rows = max_combined_tokens // num_buffer_sets
+    buffer_sets = []
+    for _ in range(num_buffer_sets):
+        dispatch_pool = _create_hidden_pool(
+            dispatch_rows, hidden_dim, dtype, device, group
         )
-        for _ in range(_HIDDEN_RECV_BUFFER_COUNT)
-    ]
-    counts_recv_buffer = symm_mem.empty(
-        group.size(), num_experts, dtype=torch.int64, device=device
-    )
-    hidden_recv_handles = [
-        symm_mem.rendezvous(buffer, group) for buffer in hidden_recv_buffers
-    ]
-    counts_recv_handle = symm_mem.rendezvous(counts_recv_buffer, group)
-    hidden_recv_peer_buffers = [
-        [
-            handle.get_buffer(peer, buffer.shape, buffer.dtype)
-            for peer in range(group.size())
-        ]
-        for buffer, handle in zip(hidden_recv_buffers, hidden_recv_handles)
-    ]
-    hidden_recv_peer_ptrs = [
-        torch.tensor(
-            [peer_buffer.data_ptr() for peer_buffer in peer_buffers],
-            dtype=torch.int64,
-            device=device,
+        hidden_pools = {"dispatch": dispatch_pool}
+        if num_buffer_sets == 1:
+            hidden_pools["combine"] = dispatch_pool
+        else:
+            hidden_pools["combine"] = _create_hidden_pool(
+                combine_rows, hidden_dim, dtype, device, group
+            )
+        (
+            counts_buffer,
+            counts_handle,
+            counts_peer_buffers,
+            counts_peer_ptrs,
+        ) = _create_counts_buffer(group.size(), num_experts, device, group)
+        buffer_sets.append(
+            _BufferSet(
+                hidden_pools=hidden_pools,
+                counts_buffer=counts_buffer,
+                counts_handle=counts_handle,
+                counts_peer_buffers=counts_peer_buffers,
+                counts_peer_ptrs=counts_peer_ptrs,
+            )
         )
-        for peer_buffers in hidden_recv_peer_buffers
-    ]
-    counts_recv_peer_buffers = [
-        counts_recv_handle.get_buffer(
-            peer, counts_recv_buffer.shape, counts_recv_buffer.dtype
-        )
-        for peer in range(group.size())
-    ]
-    counts_recv_peer_ptrs = torch.tensor(
-        [peer_buffer.data_ptr() for peer_buffer in counts_recv_peer_buffers],
-        dtype=torch.int64,
-        device=device,
-    )
 
     _buffer_state = _MinimalAsyncEPBufferState(
         group=group,
         tokens_per_rank=tokens_per_rank,
-        hidden_recv_buffers=hidden_recv_buffers,
-        hidden_recv_handles=hidden_recv_handles,
-        hidden_recv_peer_buffers=hidden_recv_peer_buffers,
-        hidden_recv_peer_ptrs=hidden_recv_peer_ptrs,
-        counts_recv_buffer=counts_recv_buffer,
-        counts_recv_handle=counts_recv_handle,
-        counts_recv_peer_buffers=counts_recv_peer_buffers,
-        counts_recv_peer_ptrs=counts_recv_peer_ptrs,
+        buffer_sets=buffer_sets,
         comm_stream=torch.cuda.Stream(device=device),
     )
 
@@ -341,6 +434,7 @@ def _copy_rows_to_peers_async_cuda(
     *,
     receive_capacity: int,
     exchange: str,
+    buffer_set: int,
     block_m: int = 1,
     num_warps: int = 4,
     src_rows: torch.Tensor | None = None,
@@ -351,7 +445,8 @@ def _copy_rows_to_peers_async_cuda(
     """Launch a row copy through symmetric memory on the EP comm stream."""
     assert _buffer_state is not None
 
-    buffer_rows = _buffer_state.hidden_recv_buffers[0].shape[0]
+    pool = _buffer_state.buffer_sets[buffer_set].hidden_pools[exchange]
+    buffer_rows = pool.buffers[0].shape[0]
     if receive_capacity > buffer_rows:
         raise RuntimeError(
             "MinimalAsyncEP receive capacity exceeds the initialized symmetric "
@@ -359,14 +454,12 @@ def _copy_rows_to_peers_async_cuda(
             f"buffer_rows={buffer_rows}."
         )
 
-    buffer_index = _buffer_state.hidden_recv_buffer_index
-    _buffer_state.hidden_recv_buffer_index = (
-        buffer_index + 1
-    ) % _HIDDEN_RECV_BUFFER_COUNT
-    hidden_recv_buffer = _buffer_state.hidden_recv_buffers[buffer_index]
-    hidden_recv_handle = _buffer_state.hidden_recv_handles[buffer_index]
-    hidden_recv_peer_buffers = _buffer_state.hidden_recv_peer_buffers[buffer_index]
-    hidden_recv_peer_ptrs = _buffer_state.hidden_recv_peer_ptrs[buffer_index]
+    buffer_index = pool.buffer_index
+    pool.buffer_index = (buffer_index + 1) % len(pool.buffers)
+    hidden_recv_buffer = pool.buffers[buffer_index]
+    hidden_recv_handle = pool.handles[buffer_index]
+    hidden_recv_peer_buffers = pool.peer_buffers[buffer_index]
+    hidden_recv_peer_ptrs = pool.peer_ptrs[buffer_index]
     hidden_recv_view = hidden_recv_buffer.narrow(0, 0, receive_capacity).narrow(
         1,
         0,
@@ -414,21 +507,23 @@ def _wait_ready(handle: Any, channel: int) -> None:
 def _copy_all_counts_to_peers_and_wait_cuda(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     ep_size: int,
+    buffer_set: int,
 ) -> torch.Tensor:
     """Copy this rank's expert counts to all peers and wait for peer counts."""
     assert _buffer_state is not None
 
+    buffers = _buffer_state.buffer_sets[buffer_set]
     num_experts = num_local_tokens_per_expert_E.numel()
     copy_full_counts_to_peers_kernel(
         num_local_tokens_per_expert_E,
-        _buffer_state.counts_recv_peer_buffers,
+        buffers.counts_peer_buffers,
         rank=_buffer_state.group.rank(),
         ep_size=ep_size,
         num_experts=num_experts,
-        dst_ptrs=_buffer_state.counts_recv_peer_ptrs,
+        dst_ptrs=buffers.counts_peer_ptrs,
     )
-    _wait_ready(_buffer_state.counts_recv_handle, _COUNTS_READY_CHANNEL)
-    return _buffer_state.counts_recv_buffer
+    _wait_ready(buffers.counts_handle, _COUNTS_READY_CHANNEL)
+    return buffers.counts_buffer
 
 
 def _allocate_direct_metadata(
@@ -563,6 +658,7 @@ def _dispatch_metadata(
     num_routed_rows: int,
     receive_capacity: int,
     ep_size: int,
+    buffer_set: int,
     outputs: _DispatchMetadataOutputs,
     scratch: _DispatchMetadataScratch,
 ) -> _DispatchMetadataOutputs:
@@ -590,6 +686,7 @@ def _dispatch_metadata(
     all_tokens_per_expert_RE = _copy_all_counts_to_peers_and_wait_cuda(  # noqa: N806
         num_local_tokens_per_expert_E,
         ep_size,
+        buffer_set,
     )
 
     # Instead of materializing an all-to-all rank-major receive tensor and then
@@ -616,6 +713,7 @@ def dispatch_op(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     receive_capacity: int,
     ep_size: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -678,6 +776,7 @@ def dispatch_op(
             num_routed_rows,
             receive_capacity,
             ep_size,
+            buffer_set,
             metadata_outputs,
             scratch,
         )
@@ -697,6 +796,7 @@ def dispatch_op(
             num_routed_rows,
             receive_capacity=receive_capacity,
             exchange="dispatch",
+            buffer_set=buffer_set,
             block_m=4,
             num_warps=8,
             src_rows=E_row_to_T_row_N,
@@ -723,6 +823,7 @@ def dispatch_op_fake(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     receive_capacity: int,
     ep_size: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -734,6 +835,7 @@ def dispatch_op_fake(
     torch.Tensor,
     torch.Tensor,
 ]:
+    del buffer_set
     num_routed_rows = topk_expert_ids_TK.numel()
     num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
     return (
@@ -917,6 +1019,7 @@ def dispatch(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     receive_capacity: int,
     ep_size: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -945,6 +1048,7 @@ def dispatch(
         num_local_tokens_per_expert_E,
         receive_capacity,
         ep_size,
+        buffer_set,
     )
     hidden_states, num_tokens_per_local_expert_e = wait_dispatch_op(
         hidden_states,
@@ -979,6 +1083,7 @@ def dispatch_data_op(
     dispatch_dst_rows: torch.Tensor,
     receive_capacity: int,
     num_routed_rows: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> torch.Tensor:
     """Launch a precomputed dispatch row copy to expert-owner ranks."""
     return _copy_rows_to_peers_async_cuda(
@@ -988,6 +1093,7 @@ def dispatch_data_op(
         num_routed_rows,
         receive_capacity=receive_capacity,
         exchange="dispatch",
+        buffer_set=buffer_set,
         block_m=4,
         num_warps=8,
     )
@@ -1000,8 +1106,9 @@ def dispatch_data_op_fake(
     dispatch_dst_rows: torch.Tensor,
     receive_capacity: int,
     num_routed_rows: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> torch.Tensor:
-    del dispatch_dst_ranks, dispatch_dst_rows, num_routed_rows
+    del dispatch_dst_ranks, dispatch_dst_rows, num_routed_rows, buffer_set
     return x_ND.new_empty(receive_capacity, x_ND.shape[1])
 
 
@@ -1011,6 +1118,7 @@ def dispatch_data(
     dispatch_dst_rows: torch.Tensor,
     receive_capacity: int,
     num_routed_rows: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> torch.Tensor:
     """Launch and wait for a precomputed dispatch row copy."""
     hidden_states = dispatch_data_op(
@@ -1019,6 +1127,7 @@ def dispatch_data(
         dispatch_dst_rows,
         receive_capacity,
         num_routed_rows,
+        buffer_set,
     )
     return _wait_dispatch_data_op(
         hidden_states,
@@ -1039,6 +1148,7 @@ def combine_op(
     combine_dst_rows: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> torch.Tensor:
     """Launch expert-output rows back to origin ranks.
 
@@ -1062,6 +1172,7 @@ def combine_op(
         x.shape[0],
         receive_capacity=num_routed_rows,
         exchange="combine",
+        buffer_set=buffer_set,
         block_m=4,
         num_valid_rows=combine_num_valid_rows,
     )
@@ -1077,12 +1188,14 @@ def combine_op_fake(
     combine_dst_rows: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> torch.Tensor:
     del dispatch_dst_ranks
     del dispatch_dst_rows
     del combine_dst_ranks
     del combine_dst_rows
     del combine_num_valid_rows
+    del buffer_set
     return x.new_empty(num_routed_rows, x.shape[1])
 
 
@@ -1097,6 +1210,7 @@ def combine_data_op(
     combine_dst_rows: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> torch.Tensor:
     """Launch a precomputed combine row copy back to origin ranks."""
     origin_recv_buffer = _copy_rows_to_peers_async_cuda(
@@ -1106,6 +1220,7 @@ def combine_data_op(
         x.shape[0],
         receive_capacity=num_routed_rows,
         exchange="combine",
+        buffer_set=buffer_set,
         block_m=4,
         num_valid_rows=combine_num_valid_rows,
     )
@@ -1119,8 +1234,9 @@ def combine_data_op_fake(
     combine_dst_rows: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> torch.Tensor:
-    del combine_dst_ranks, combine_dst_rows, combine_num_valid_rows
+    del combine_dst_ranks, combine_dst_rows, combine_num_valid_rows, buffer_set
     return x.new_empty(num_routed_rows, x.shape[1])
 
 
@@ -1130,6 +1246,7 @@ def combine_data(
     combine_dst_rows: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
+    buffer_set: int = _DEFAULT_BUFFER_SET,
 ) -> torch.Tensor:
     """Launch and wait for a precomputed combine row copy."""
     routed_output = combine_data_op(
@@ -1138,6 +1255,7 @@ def combine_data(
         combine_dst_rows,
         combine_num_valid_rows,
         num_routed_rows,
+        buffer_set,
     )
     return wait_combine_op(
         routed_output,
@@ -1380,6 +1498,7 @@ def dispatch_setup_context(ctx, inputs, output):
         _num_local_tokens_per_expert_E,
         _receive_capacity,
         _ep_size,
+        buffer_set,
     ) = inputs
     (
         _hidden_states,
@@ -1395,6 +1514,7 @@ def dispatch_setup_context(ctx, inputs, output):
     ctx.num_routed_rows = topk_expert_ids_TK.numel()
     ctx.num_tokens = dispatch_input.shape[0]
     ctx.top_k = topk_expert_ids_TK.shape[1]
+    ctx.buffer_set = buffer_set
     ctx.save_for_backward(
         combine_dst_ranks,
         combine_dst_rows,
@@ -1418,6 +1538,7 @@ def dispatch_autograd_backward(ctx, grad_hidden, *unused_grads):
         combine_dst_rows,
         combine_num_valid_rows,
         ctx.num_routed_rows,
+        ctx.buffer_set,
     )
     grad_input = reduce_topk_no_scores_op(
         grad_routed_input,
@@ -1426,8 +1547,8 @@ def dispatch_autograd_backward(ctx, grad_hidden, *unused_grads):
         ctx.top_k,
     )
 
-    # Grads for dispatch_input, topk_expert_ids, counts, capacity, and ep_size.
-    return grad_input, None, None, None, None
+    # Grads for dispatch inputs, capacity, EP size, and buffer set.
+    return grad_input, None, None, None, None, None
 
 
 def combine_setup_context(ctx, inputs, output):
@@ -1439,10 +1560,12 @@ def combine_setup_context(ctx, inputs, output):
         _combine_dst_rows,
         _combine_num_valid_rows,
         num_routed_rows,
+        buffer_set,
     ) = inputs
     del output
     ctx.receive_capacity = hidden_states.shape[0]
     ctx.num_routed_rows = num_routed_rows
+    ctx.buffer_set = buffer_set
     ctx.save_for_backward(
         dispatch_dst_ranks,
         dispatch_dst_rows,
@@ -1460,11 +1583,13 @@ def combine_autograd_backward(ctx, grad_routed_output):
         dispatch_dst_rows,
         ctx.receive_capacity,
         ctx.num_routed_rows,
+        ctx.buffer_set,
     )
 
-    # Grads for x, dispatch/combine metadata, and num_routed_rows.
+    # Grads for x, dispatch/combine metadata, num_routed_rows, and buffer set.
     return (
         grad_x,
+        None,
         None,
         None,
         None,

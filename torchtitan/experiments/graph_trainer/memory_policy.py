@@ -43,6 +43,7 @@ from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
 )
+from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
 from torchtitan.tools.logging import logger
 
 
@@ -64,6 +65,62 @@ def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node
     for node in gm.graph.find_nodes(op="placeholder"):
         save_nodes.update(find_fsdp_unshard_save_nodes(node))
     return save_nodes
+
+
+def _minimal_async_ep_moe_fqns(config: "GraphTrainer.Config") -> set[str]:
+    """Return MoE module FQNs that use MinimalAsyncEP token dispatch."""
+    model = getattr(config.model_spec, "model", None)
+    layers = getattr(model, "layers", ())
+    fqn_set: set[str] = set()
+    for layer_id, layer_cfg in enumerate(layers):
+        moe_cfg = getattr(layer_cfg, "moe", None)
+        if moe_cfg is None:
+            continue
+        token_dispatcher = moe_cfg.routed_experts.token_dispatcher
+        if isinstance(token_dispatcher, MinimalAsyncEPTokenDispatcher.Config):
+            fqn_set.add(f"layers.{layer_id}.moe")
+    return fqn_set
+
+
+def _tag_minimal_async_ep_moe_full_recompute(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> None:
+    """Force full remat inside MinimalAsyncEP MoE regions only.
+
+    MinimalAsyncEP reuses static symmetric-memory receive buffers. Saving MoE
+    activations from those buffers would make later exchanges overwrite saved
+    data, so the MoE region must be recomputed as a unit. This override leaves
+    the selected graph memory policy in place for non-MoE regions.
+    """
+    moe_fqns = _minimal_async_ep_moe_fqns(config)
+    if not moe_fqns:
+        return
+
+    tagged = 0
+    for node in gm.graph.nodes:
+        if (
+            node.op != "call_function"
+            or _is_backward_node(node)
+            or "recompute" not in node.meta
+        ):
+            continue
+        fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+        if not any(
+            fqn == moe_fqn or fqn.startswith(moe_fqn + ".") for moe_fqn in moe_fqns
+        ):
+            continue
+        if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        else:
+            node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        tagged += 1
+    if tagged:
+        logger.info(
+            "Forced %d MinimalAsyncEP MoE forward node(s) to full recompute.",
+            tagged,
+        )
 
 
 def _make_full_memory_policy() -> Callable:
@@ -351,5 +408,6 @@ def tag_with_memory_policy_pass(
             f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
     gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
+    _tag_minimal_async_ep_moe_full_recompute(gm, config=config)
     log_activation_memory_policy(gm)
     return gm

@@ -22,6 +22,7 @@ from torchtitan.distributed.minimal_async_ep import (
     wait_combine_op as minimal_async_ep_wait_combine_op,
     wait_dispatch_op as minimal_async_ep_wait_dispatch_op,
 )
+from torchtitan.distributed.minimal_async_ep.api import _get_buffer_set
 from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_sparse_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
@@ -1114,6 +1115,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     tokens_per_rank: int | None
     dtype: torch.dtype | None
     buffer_device: torch.device
+    num_buffer_sets: int
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
@@ -1121,6 +1123,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
+        num_buffer_sets: int = 1
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -1129,6 +1132,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self.hidden_dim = config.hidden_dim
         self.tokens_per_rank = config.tokens_per_rank
         self.dtype = config.dtype
+        self.num_buffer_sets = config.num_buffer_sets
         if config.device is None:
             buffer_device = torch.device(device_type, device_module.current_device())
         else:
@@ -1140,7 +1144,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     # initializes it, same-configuration dispatchers reuse it, and differing
     # metadata is invalid because the buffer layout would not match.
     _global_buffer_key: ClassVar[
-        tuple[object, int, int, int, int, torch.dtype, torch.device] | None
+        tuple[object, int, int, int, int, torch.dtype, torch.device, int] | None
     ] = None
 
     def wire_meshes(
@@ -1198,6 +1202,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             self.top_k,
             self.dtype,
             self.buffer_device,
+            self.num_buffer_sets,
         )
         if MinimalAsyncEPTokenDispatcher._global_buffer_key is not None:
             if MinimalAsyncEPTokenDispatcher._global_buffer_key != buffer_key:
@@ -1215,6 +1220,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             top_k=self.top_k,
             dtype=self.dtype,
             device=self.buffer_device,
+            num_buffer_sets=self.num_buffer_sets,
         )
         MinimalAsyncEPTokenDispatcher._global_buffer_key = buffer_key
 
@@ -1225,6 +1231,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         num_local_tokens_per_expert_E: torch.Tensor,
         receive_capacity: int,
         ep_size: int,
+        buffer_set: int,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -1242,12 +1249,14 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             num_local_tokens_per_expert_E,
             receive_capacity,
             ep_size,
+            buffer_set,
         )
 
     def _combine_token_exchange(
         self,
         routed_output_RD: torch.Tensor,
         state: MinimalAsyncEPDispatchMetadata,
+        buffer_set: int,
     ) -> torch.Tensor:
         return minimal_async_ep_combine_op(
             routed_output_RD,
@@ -1257,6 +1266,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             state.combine_dst_rows,
             state.combine_num_valid_rows,
             state.num_tokens * state.top_k,
+            buffer_set,
         )
 
     # pyrefly: ignore [bad-override]
@@ -1292,6 +1302,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         # TODO(xmfan): make this capacity configurable by user
         num_receive_rows_per_source_rank = num_tokens * min(top_k, num_local_experts)
         receive_capacity = ep_size * num_receive_rows_per_source_rank
+        buffer_set = _get_buffer_set()
 
         (
             hidden_states_RD,
@@ -1309,6 +1320,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             num_local_tokens_per_expert_E,
             receive_capacity,
             ep_size,
+            buffer_set,
         )
         (
             hidden_states_RD,
@@ -1348,9 +1360,11 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         """Combine tokens via MinimalAsyncEP."""
         del num_local_tokens_after_padding, local_seq_len_after_padding
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
+        buffer_set = _get_buffer_set()
         routed_output_ND = self._combine_token_exchange(  # noqa: N806
             routed_output_RD,
             state,
+            buffer_set,
         )
         routed_output_ND = minimal_async_ep_wait_combine_op(
             routed_output_ND,
