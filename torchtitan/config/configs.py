@@ -312,9 +312,6 @@ class CompileConfig:
 
     backend: str = "inductor"
 
-    enable_cudagraph: bool = False
-    """Whether to apply CUDAGraph capture."""
-
     def __post_init__(self) -> None:
         allowed = frozenset({"model", "loss"})
         unknown = [c for c in self.components if c not in allowed]
