@@ -60,7 +60,7 @@ def _qwen3_4b_dapo_math_config(
             num_groups_per_train_step=8,
             group_size=16,
             max_offpolicy_steps=4,
-            # AIME 2025 has 30 rows, so both validation passes cover the full set.
+            # Evaluate all 15 AIME I and 15 AIME II problems.
             validation=ValidationConfig(num_samples=30),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=max_total_tokens),
