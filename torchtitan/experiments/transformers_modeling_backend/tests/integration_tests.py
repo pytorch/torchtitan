@@ -16,23 +16,73 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
+
+    Each entry exercises several parallelism axes at once to keep the matrix
+    small. Coverage: T1 covers FSDP/TP/EP/CP for MoE + flex attention; T2 and
+    T3 cover the dense path and PP (PP is not wired for MoE); T4 covers SFT.
     """
     integration_tests_flavors = [
         OverrideDefinitions(
             [
                 [
                     "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_moe",
+                    "--parallelism.data_parallel_shard_degree -1",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend MoE FSDP+TP+EP+CP",
+            "transformers_modeling_backend_moe_fsdp+tp+ep+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
                     "--config transformers_modeling_backend_debugmodel",
-                    "--hf_model Qwen/Qwen2.5-7B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule 1F1B",
+                    "--training.steps 2",
                 ],
             ],
-            "Transformers Backend FSDP+TP+PP",
-            "transformers_modeling_backend_fsdp+tp+pp",
+            "Transformers Backend Dense FSDP+TP+PP",
+            "transformers_modeling_backend_dense_fsdp+tp+pp",
             ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule 1F1B",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend Dense CP+PP",
+            "transformers_modeling_backend_dense_cp+pp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_sft_debugmodel",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend SFT ChatDataset",
+            "transformers_modeling_backend_sft",
+            ngpu=2,
         ),
     ]
     return integration_tests_flavors

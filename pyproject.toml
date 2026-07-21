@@ -14,7 +14,7 @@ dependencies = [
     "torchdata>=0.8.0",
 
     # Hugging Face integrations
-    "datasets>=3.6.0",
+    "datasets>=3.6.0,<4.8.0",
     "tokenizers>=0.15.0",
     "safetensors",
 

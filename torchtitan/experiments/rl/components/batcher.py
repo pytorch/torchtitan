@@ -10,7 +10,7 @@
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 
@@ -113,6 +113,29 @@ class Batcher(Configurable):
             batcher.add_training_samples(training_sample_group=group0)  # -> None
             batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
         """
+        # Drop samples longer than seq_len: can't fill a row
+        samples = training_sample_group.training_samples
+        kept = [s for s in samples if self.num_tokens_to_pack(s) <= self.seq_len]
+        num_dropped = len(samples) - len(kept)
+        if num_dropped:
+            logger.warning(
+                "Batcher dropped %d/%d sample(s) exceeding seq_len=%d.",
+                num_dropped,
+                len(samples),
+                self.seq_len,
+            )
+            training_sample_group = replace(
+                training_sample_group,
+                training_samples=kept,
+                metrics=[
+                    *training_sample_group.metrics,
+                    m.Metric(
+                        "batcher/num_samples_dropped_oversized",
+                        m.Sum(float(num_dropped)),
+                    ),
+                ],
+            )
+
         self._groups_for_next_batch.append(training_sample_group)
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
