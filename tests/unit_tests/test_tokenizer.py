@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import unittest
 
-from requests.exceptions import HTTPError
+from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, LocalEntryNotFoundError
 from scripts.download_hf_assets import download_hf_assets
 from tokenizers import Tokenizer
 from torch.testing._internal.common_utils import (
@@ -138,7 +138,7 @@ class TestTokenizerIntegration(unittest.TestCase):
                 return tokenizer.get_vocab()
 
             def encode_text(tokenizer, text):
-                return tokenizer.encode(text)
+                return tokenizer.encode(text, add_special_tokens=False)
 
             def decode_tokens(tokenizer, tokens):
                 return tokenizer.decode(tokens)
@@ -263,7 +263,7 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
             # Compare encoding - handle different tokenizer types
             if hasattr(our_tokenizer, "tokenizer"):
                 # Our wrapper tokenizer - returns list directly
-                our_tokens = our_tokenizer.encode(text)
+                our_tokens = our_tokenizer.encode(text, add_bos=False, add_eos=False)
             else:
                 # Underlying HF tokenizer - returns object with .ids
                 our_encoded = our_tokenizer.encode(text)
@@ -307,7 +307,7 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
         for text in edge_cases:
             # Handle different tokenizer types for edge cases too
             if hasattr(our_tokenizer, "tokenizer"):
-                our_tokens = our_tokenizer.encode(text)
+                our_tokens = our_tokenizer.encode(text, add_bos=False, add_eos=False)
             else:
                 our_encoded = our_tokenizer.encode(text)
                 our_tokens = (
@@ -348,7 +348,7 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
                 local_dir=self.temp_dir,
                 asset_types="tokenizer",
             )
-        except HTTPError as e:
+        except (GatedRepoError, HfHubHTTPError, LocalEntryNotFoundError) as e:
             if test_repo_id == "meta-llama/Llama-3.1-8B":
                 self.skipTest(
                     f"Could not download tokenizer files for Llama-3.1-8B: {e}"

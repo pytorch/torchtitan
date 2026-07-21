@@ -6,7 +6,7 @@
 
 from fnmatch import fnmatch
 
-from requests.exceptions import HTTPError
+from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, LocalEntryNotFoundError
 from tqdm import tqdm
 
 
@@ -151,11 +151,10 @@ def download_hf_assets(
                 print(f"Available files: {available_files[:10]}...")
                 return
 
-        except HTTPError as e:
-            if e.response and e.response.status_code == 401:
-                print(
-                    "You need to pass a valid `--hf_token=...` to download private checkpoints."
-                )
+        except HfHubHTTPError as e:
+            print(
+                "You need to pass a valid `--hf_token=...` to download private checkpoints."
+            )
             raise e
 
     print(f"Found {len(files_found)} files:")
@@ -181,14 +180,18 @@ def download_hf_assets(
                 downloaded_files.append(filename)
                 pbar.update(1)
 
-            except HTTPError as e:
-                if e.response and e.response.status_code == 404:
-                    print(f"File {filename} not found, skipping...")
-                    missed_files.append(filename)
-                    pbar.update(1)
-                    continue
-                else:
-                    raise e
+            except HfHubHTTPError as e:
+                raise e
+            except LocalEntryNotFoundError as e:
+                # LocalEntry is subclass of EntryNotFoundError, so must be caught
+                # before Entry. After successful list_repo_files, it indicates
+                # gated/private (hub>=1.0 wraps 403 as cause), not a true 404.
+                raise e
+            except EntryNotFoundError as e:
+                print(f"File {filename} not found, skipping...")
+                missed_files.append(filename)
+                pbar.update(1)
+                continue
 
     if downloaded_files:
         print(
