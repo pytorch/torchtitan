@@ -263,10 +263,6 @@ class CompileConfig:
     enable_cudagraph: bool = False
     """Whether to apply CUDAGraph capture."""
 
-    enable_xpugraph: bool = False
-    """Whether to apply XPUGraph capture."""
-
-
 @dataclass(kw_only=True, slots=True)
 class CommConfig:
     init_timeout_seconds: int = 300
