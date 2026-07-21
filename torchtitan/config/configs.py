@@ -315,9 +315,6 @@ class CompileConfig:
     enable_cudagraph: bool = False
     """Whether to apply CUDAGraph capture."""
 
-    enable_xpugraph: bool = False
-    """Whether to apply XPUGraph capture."""
-
     def __post_init__(self) -> None:
         allowed = frozenset({"model", "loss"})
         unknown = [c for c in self.components if c not in allowed]
