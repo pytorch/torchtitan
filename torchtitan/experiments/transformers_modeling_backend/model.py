@@ -10,6 +10,7 @@ import math
 import os
 from dataclasses import dataclass, field, fields, MISSING
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch import nn
@@ -82,6 +83,504 @@ def _flex_attention_torchtitan(module, query, key, value, attention_mask, **kwar
         )
     out = kernel(query, key, value, module=module, block_mask=attention_mask, **kwargs)
     return out, None
+
+
+def _resolve_apply_rotary_pos_emb(module):
+    """Resolve the model's own ``apply_rotary_pos_emb`` from its HF module.
+
+    The attention module was ``__class__``-swapped to a dynamic (Module, HFClass)
+    type whose ``__module__`` is module_conversion; walk the MRO to find the HF
+    modeling module that defines ``apply_rotary_pos_emb`` so per-architecture
+    rotary conventions are honored.
+    """
+    import sys
+
+    for cls in type(module).__mro__:
+        hf_mod = sys.modules.get(cls.__module__)
+        if hf_mod is not None and hasattr(hf_mod, "apply_rotary_pos_emb"):
+            return hf_mod.apply_rotary_pos_emb
+    raise AssertionError("could not resolve apply_rotary_pos_emb")
+
+
+def _flex_cp_allgather_kv(key, value, pg_name):
+    """All-gather k/v across the CP axis on the seq dim (BHSD layout, dim 2).
+
+    Runs inside a flex core kernel's local_map region on local tensors: q reaches
+    flex seq-sharded on the CP axis, so k/v are gathered to full length (each rank
+    attends its q shard against the full keys; the BlockMask is Q-sharded/KV-full).
+    ``flex_cp_allgather`` is autograd-aware -- the backward reduce-scatters grads
+    back to the local seq shard. This is the in-kernel analogue of the
+    ``HFFlexKernel``-path ``_wrap_flex_kernel_cp`` collective, kept inside the
+    local region so the surrounding reshape/RoPE stay typecheck-clean.
+    """
+    from torch.distributed.tensor.experimental._context_parallel._attention import (
+        flex_cp_allgather,
+    )
+
+    return flex_cp_allgather(key.contiguous(), value.contiguous(), 2, pg_name)
+
+
+class HFFlexAttnCoreKernel(Module):
+    """Reshape + q/k norm + RoPE + flex attention on LOCAL (head-sharded) tensors.
+
+    Typecheck-clean attention core for standard GQA/MHA attention under the
+    flex-only backend + spmd_types. Receives q/k/v as ``(B, L, D)`` straight from
+    the projections (heads sharded on ``D`` via TP) plus the RoPE ``cos``/``sin``.
+    The Module protocol wraps this forward with ``local_map`` (q/k/v ``S(2)``,
+    cos/sin ``R``) so the head reshape -- which the type checker rejects on a
+    sharded ``D`` in the raw HF forward -- q/k norm, RoPE, and the flex HOP all
+    run on local tensors; returns ``(B, L, D)`` head-sharded (``S(-1)``). The
+    ``o_proj`` (rowwise) stays a checked module. RoPE uses the model's own
+    ``apply_rotary_pos_emb`` so per-architecture conventions are honored.
+
+    This is the flex analogue of the SDPA-era attention-core kernel: SDPA was
+    removed, so the local region runs the flex HOP (wrapped in ``no_typecheck``,
+    since compiled regions are incompatible with the checker) instead. At runtime
+    without typechecking the local_map is just a DTensor<->local conversion, so
+    the math is identical to the ``AttentionInterface`` flex path.
+
+    Under context parallelism, q/k/v arrive seq-sharded on the CP axis; the k/v
+    all-gather across CP (to full length, so each rank attends its q shard against
+    the full keys) is done here on local tensors via ``flex_cp_allgather`` (see
+    ``_cp_pg_name``, set by ``_wrap_flex_kernel_cp``). This folds what the
+    ``HFFlexKernel`` path did in ``_wrap_flex_kernel_cp`` into the local_map region
+    so the reshape/RoPE stay typecheck-clean. The BlockMask is Q-sharded/KV-full.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: "HFFlexAttnCoreKernel.Config") -> None:
+        super().__init__()
+        # Process-group name for the CP k/v all-gather; None when CP is disabled.
+        # Set by _wrap_flex_kernel_cp (parallelize.py) before model.parallelize.
+        self._cp_pg_name = None
+
+    def forward(
+        self,
+        query_BLD: torch.Tensor,
+        key_BLD: torch.Tensor,
+        value_BLD: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        module,
+        block_mask=None,
+        **kwargs,
+    ) -> torch.Tensor:
+        B, L, _ = query_BLD.shape
+        hd = module.head_dim
+        q_norm = getattr(module, "q_norm", None)
+        k_norm = getattr(module, "k_norm", None)
+        # Q/K norm placement differs by model: some norm the full projection
+        # before the head reshape (OLMoE, over n_heads*head_dim), others norm
+        # per-head after the reshape (Qwen3, over head_dim). Detect by the norm's
+        # normalized width and match the HF forward (RMSNorm over head_dim vs the
+        # full dim are different ops, so this must be exact).
+        flat_norm = (
+            q_norm is not None
+            and getattr(q_norm, "weight", None) is not None
+            and q_norm.weight.shape[-1] != hd
+        )
+        q, k, v = query_BLD, key_BLD, value_BLD
+        if flat_norm:
+            if q_norm is not None:
+                q = q_norm(q)
+            if k_norm is not None:
+                k = k_norm(k)
+            # OLMoE clamps q/k/v to +/- clip_qkv on the flat projection (a no-op
+            # when clip_qkv is None / absent).
+            clip = getattr(getattr(module, "config", None), "clip_qkv", None)
+            if clip is not None:
+                q = q.clamp(min=-clip, max=clip)
+                k = k.clamp(min=-clip, max=clip)
+                v = v.clamp(min=-clip, max=clip)
+        # reshape (not view): q/k/v may be non-contiguous after TP redistribution.
+        q = q.reshape(B, L, -1, hd)
+        k = k.reshape(B, L, -1, hd)
+        v = v.reshape(B, L, -1, hd).transpose(1, 2)
+        if not flat_norm:
+            # per-head norm on (B, L, heads, hd) (over hd) before the transpose
+            if q_norm is not None:
+                q = q_norm(q)
+            if k_norm is not None:
+                k = k_norm(k)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+
+        rope_fn = _resolve_apply_rotary_pos_emb(module)
+        q, k = rope_fn(q, k, cos, sin)
+
+        # The flex HOP is compiled; compiled regions are incompatible with the
+        # spmd typechecking TorchFunctionMode, so shield it (a no-op when
+        # typechecking is off). Under CP, all-gather k/v across the CP axis (seq
+        # dim 2 of the (B, heads, seq, hd) layout) on local tensors first -- an
+        # autograd-aware funcol collective (backward reduce-scatters grads back to
+        # the local seq shard); q stays seq-sharded. flex_attention_forward returns
+        # (out, lse) with out already transposed to (B, L, heads, hd).
+        with spmd.no_typecheck():
+            if self._cp_pg_name is not None:
+                k, v = _flex_cp_allgather_kv(k, v, self._cp_pg_name)
+            out, _ = flex_attention_forward(module, q, k, v, block_mask, **kwargs)
+        # no_typecheck strips out's SPMD type; re-stamp it (like core FlexAttention
+        # re-types the opaque flex output) so the head-merge reshape below type-
+        # checks. Layout (B, L, heads, hd): batch on dp, seq on cp, heads on tp.
+        if spmd.is_type_checking():
+            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None))
+        # Flatten heads back to (B, L, D), head-sharded (S(-1)); o_proj (rowwise)
+        # is a checked module outside this local region.
+        return out.reshape(B, L, -1)
+
+
+def _titan_flex_attn_forward(
+    self, hidden_states, position_embeddings, attention_mask=None, **kwargs
+):
+    """Typecheck-clean replacement for a standard HF (GQA/MHA) attention forward.
+
+    Runs the projections (checked, TP colwise/rowwise) but routes the reshape +
+    q/k norm + RoPE + flex through ``HFFlexAttnCoreKernel`` so those run in a
+    local_map region. Bound onto the HF attention module under spmd_types (non-CP)
+    in hf_sharding.py.
+    """
+    q = self.q_proj(hidden_states)
+    k = self.k_proj(hidden_states)
+    v = self.v_proj(hidden_states)
+    cos, sin = position_embeddings
+    out = self._titan_flex_attn_core(
+        q, k, v, cos, sin, module=self, block_mask=attention_mask
+    )
+    return self.o_proj(out), None
+
+
+class HFMLAFlexAttnCoreKernel(Module):
+    """Reshape + nope/pe split + RoPE + flex attention on LOCAL tensors for MLA.
+
+    Flex analogue of the SDPA-era MLA core kernel. MLA (DeepSeek V2/V3) cannot
+    reuse ``HFFlexAttnCoreKernel``: its per-head layout splits into nope/pe parts,
+    the key's rope component is a single broadcast head, and
+    ``qk_head_dim != v_head_dim``. Receives the projection outputs ``query_BLD``
+    (B, L, n_heads*qk_head_dim) and ``kv_BLD`` (B, L, n_heads*(qk_nope+v_head_dim))
+    -- both TP head-sharded on D -- plus the single-head ``k_pe_BLD``. The Module
+    protocol wraps this forward with ``local_map`` (q/kv ``S(2)``, k_pe ``R``) so
+    the head reshapes/splits -- which the checker rejects on a sharded ``D`` -- and
+    RoPE + the flex HOP run on local tensors; returns (B, L, n_heads*v_head_dim)
+    head-sharded (``S(-1)``). The model's own rotary fn is resolved from the HF
+    modeling module (cos/sin ``apply_rotary_pos_emb`` for V3; complex ``freqs_cis``
+    ``apply_rotary_emb`` for V2).
+
+    Under context parallelism, k/v are all-gathered across the CP axis on local
+    tensors via ``flex_cp_allgather`` (see ``_cp_pg_name``, set by
+    ``_wrap_flex_kernel_cp``), folding the ``HFFlexKernel``-path CP collective into
+    this local_map region. The BlockMask is Q-sharded/KV-full.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: "HFMLAFlexAttnCoreKernel.Config") -> None:
+        super().__init__()
+        # Process-group name for the CP k/v all-gather; None when CP is disabled.
+        self._cp_pg_name = None
+
+    def forward(
+        self,
+        query_BLD: torch.Tensor,
+        kv_BLD: torch.Tensor,
+        k_pe_BLD: torch.Tensor,
+        rope_a: torch.Tensor,
+        rope_b: torch.Tensor,
+        *,
+        module,
+        block_mask=None,
+        **kwargs,
+    ) -> torch.Tensor:
+        import sys
+
+        B, L, _ = query_BLD.shape
+        qk_nope = module.qk_nope_head_dim
+        qk_rope = module.qk_rope_head_dim
+        v_head_dim = module.v_head_dim
+        qk_head_dim = getattr(module, "qk_head_dim", qk_nope + qk_rope)
+
+        # reshape (not view): TP/EP redistribution may leave a non-contiguous shard
+        q = query_BLD.reshape(B, L, -1, qk_head_dim).transpose(1, 2)
+        q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
+
+        kv = kv_BLD.reshape(B, L, -1, qk_nope + v_head_dim).transpose(1, 2)
+        k_nope, value = torch.split(kv, [qk_nope, v_head_dim], dim=-1)
+
+        k_pe = k_pe_BLD.reshape(B, 1, L, qk_rope)
+
+        # Each MLA model defines exactly one rotary fn; resolve it from the HF
+        # modeling module (the module was __class__-swapped, so walk the MRO). The
+        # rope tensors ride as local_map inputs (rope_a=cos/freqs_cis, rope_b=sin
+        # or a duplicate) so they are local here, not typed args of a checked op.
+        rope_fn = rope_style = None
+        # DeepSeek-V3 uses interleaved rope weights when config.rope_interleave is
+        # set (V2-Lite/GLM do not); honor the model's choice so RoPE matches the
+        # raw HF forward exactly (otherwise the two rope layouts diverge).
+        interleave = getattr(getattr(module, "config", None), "rope_interleave", False)
+        for cls in type(module).__mro__:
+            hf_mod = sys.modules.get(cls.__module__)
+            if hf_mod is None:
+                continue
+            if hasattr(hf_mod, "apply_rotary_pos_emb"):
+                if interleave and hasattr(hf_mod, "apply_rotary_pos_emb_interleave"):
+                    rope_fn = hf_mod.apply_rotary_pos_emb_interleave
+                else:
+                    rope_fn = hf_mod.apply_rotary_pos_emb
+                rope_style = "cos_sin"
+                break
+            if hasattr(hf_mod, "apply_rotary_emb"):
+                rope_fn, rope_style = hf_mod.apply_rotary_emb, "freqs_cis"
+                break
+        assert rope_fn is not None, "could not resolve MLA rotary fn"
+        if rope_style == "cos_sin":
+            q_pe, k_pe = rope_fn(q_pe, k_pe, rope_a, rope_b)
+        else:
+            q_pe, k_pe = rope_fn(q_pe, k_pe, rope_a)
+
+        k_pe = k_pe.expand(B, k_nope.shape[1], L, qk_rope)
+        query = torch.cat([q_nope, q_pe], dim=-1)
+        key = torch.cat([k_nope, k_pe], dim=-1)
+
+        # Shield the compiled flex HOP from the checker (no-op when off); re-stamp
+        # the opaque output's type so the head-merge reshape typechecks. Under CP,
+        # all-gather k/v across the CP axis (seq dim 2) on local tensors first;
+        # query stays seq-sharded (BlockMask is Q-sharded/KV-full).
+        with spmd.no_typecheck():
+            if self._cp_pg_name is not None:
+                key, value = _flex_cp_allgather_kv(key, value, self._cp_pg_name)
+            out, _ = flex_attention_forward(
+                module,
+                query,
+                key,
+                value,
+                block_mask,
+                scaling=getattr(module, "scaling", None),
+                **kwargs,
+            )
+        if spmd.is_type_checking():
+            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None))
+        # out is (B, L, heads, v_head_dim); flatten heads to (B, L, D).
+        return out.reshape(B, L, -1)
+
+
+def _titan_mla_flex_attn_forward(
+    self, hidden_states, position_embeddings, attention_mask=None, **kwargs
+):
+    """Typecheck-clean replacement for an MLA (DeepSeek) attention forward.
+
+    Runs the low-rank q/kv projections (checked, TP) then routes the head
+    reshape, nope/pe split, RoPE, and flex through ``HFMLAFlexAttnCoreKernel`` (a
+    local_map region). The ``compressed_kv`` split + ``kv_a_layernorm`` run on the
+    replicated latent (checked). Bound onto the HF MLA attention module under
+    spmd_types without CP (see hf_sharding.py).
+    """
+    if getattr(self, "q_lora_rank", None) is None:
+        q = self.q_proj(hidden_states)
+    else:
+        q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
+    compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
+    k_latent, k_pe = torch.split(
+        compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+    )
+    kv = self.kv_b_proj(self.kv_a_layernorm(k_latent))
+    # Pass the rotary tensors as two local_map inputs so they are local inside the
+    # kernel: (cos, sin) for cos/sin models, (freqs_cis, freqs_cis) for the complex
+    # deepseek_v2 path (the second is ignored there).
+    if isinstance(position_embeddings, (tuple, list)):
+        rope_a, rope_b = position_embeddings
+    else:
+        rope_a = rope_b = position_embeddings
+    out = self._titan_mla_flex_attn_core(
+        q,
+        kv,
+        k_pe,
+        rope_a,
+        rope_b,
+        module=self,
+        block_mask=attention_mask,
+    )
+    return self.o_proj(out), None
+
+
+class HFDSAFlexAttnCoreKernel(Module):
+    """MLA reshape/split + RoPE + DSA indexer + dense-mask flex, on LOCAL tensors.
+
+    GLM-5 (model_type glm_moe_dsa) is MLA-style attention plus a DeepSeek sparse
+    attention (DSA) indexer that selects top-k keys per query and expresses the
+    selection as a dense additive mask (combined with the causal mask). Receives
+    the MLA projection outputs ``query_BLD`` / ``kv_BLD`` (TP head-sharded on D),
+    the single-head ``k_pe_BLD``, the indexer's ``q_resid`` and ``hidden_states``
+    (both TP-replicated, batch-sharded on DP), and cos/sin. The Module protocol
+    wraps this forward with ``local_map`` so the head reshape/split (which the
+    checker rejects on a sharded D) and RoPE run on local tensors.
+
+    The DSA-specific ops -- the indexer's ``scatter_``/fancy-index/``topk``, the
+    dense index-mask build, and the compiled flex HOP -- are not typecheck-clean
+    even locally, so they run under ``spmd.no_typecheck()``; the opaque flex
+    output is re-stamped via ``assert_type`` before the head-merge reshape. The
+    indexer's weights are replicated, so calling it here (on local, replicated
+    activations) is numerically the raw indexer. Returns (B, L, n_heads*v_head_dim)
+    head-sharded (``S(-1)``). CP is handled by the ``HFFlexKernel`` path instead.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: "HFDSAFlexAttnCoreKernel.Config") -> None:
+        super().__init__()
+
+    def forward(
+        self,
+        query_BLD: torch.Tensor,
+        kv_BLD: torch.Tensor,
+        k_pe_BLD: torch.Tensor,
+        q_resid_BLD: torch.Tensor,
+        hidden_states_BLD: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        module,
+        attention_mask=None,
+        prev_topk_indices=None,
+        **kwargs,
+    ) -> torch.Tensor:
+        B, L, _ = query_BLD.shape
+        qk_nope = module.qk_nope_head_dim
+        qk_rope = module.qk_rope_head_dim
+        v_head_dim = module.v_head_dim
+        qk_head_dim = getattr(module, "qk_head_dim", qk_nope + qk_rope)
+        rope_fn = _resolve_apply_rotary_pos_emb(module)
+
+        # MLA head reshape/split + RoPE on local tensors (BHSD layout). GLM's
+        # apply_rotary_pos_emb takes a single tensor + (cos, sin, unsqueeze_dim).
+        q = query_BLD.reshape(B, L, -1, qk_head_dim).transpose(1, 2)
+        q_nope, q_pe = torch.split(q, [qk_nope, qk_rope], dim=-1)
+        q_pe = rope_fn(q_pe, cos, sin, unsqueeze_dim=1)
+
+        kv = kv_BLD.reshape(B, L, -1, qk_nope + v_head_dim).transpose(1, 2)
+        k_nope, value = torch.split(kv, [qk_nope, v_head_dim], dim=-1)
+
+        k_pe = k_pe_BLD.reshape(B, 1, L, qk_rope)
+        k_pe = rope_fn(k_pe, cos, sin, unsqueeze_dim=1)
+        k_pe = k_pe.expand(-1, k_nope.shape[1], -1, -1)
+
+        query = torch.cat([q_nope, q_pe], dim=-1)
+        key = torch.cat([k_nope, k_pe], dim=-1)
+
+        # Indexer (top-k selection), dense index+causal mask build, and the
+        # compiled flex HOP are data-dependent / opaque -- shield from the checker
+        # (no-op when off). Mirrors the raw DSA forward exactly.
+        with spmd.no_typecheck():
+            total_len = key.shape[2]
+            if not getattr(module, "skip_topk", False) or prev_topk_indices is None:
+                if attention_mask is not None and attention_mask.dim() == 4:
+                    indexer_mask = attention_mask[:, 0, :, :]
+                elif attention_mask is not None:
+                    indexer_mask = attention_mask.unsqueeze(1)
+                else:
+                    indexer_mask = None
+                topk_indices = module.indexer(
+                    hidden_states_BLD,
+                    q_resid_BLD,
+                    (cos, sin),
+                    indexer_mask,
+                    use_cache=False,
+                )
+            else:
+                topk_indices = prev_topk_indices
+
+            index_mask = torch.full(
+                (B, L, total_len),
+                float("-inf"),
+                device=query.device,
+                dtype=query.dtype,
+            )
+            index_mask.scatter_(-1, topk_indices, 0.0)
+            index_mask = index_mask.unsqueeze(1)  # [B, 1, S, T]
+            if attention_mask is not None and attention_mask.dim() == 4:
+                combined_mask = index_mask + attention_mask[..., :total_len]
+            elif attention_mask is not None:
+                combined_mask = attention_mask.masked_fill(
+                    index_mask == float("-inf"), float("-inf")
+                )
+            else:
+                combined_mask = index_mask
+
+            out, _ = flex_attention_forward(
+                module,
+                query,
+                key,
+                value,
+                combined_mask,
+                scaling=getattr(module, "scaling", None),
+                **kwargs,
+            )
+        # Stash the topk indices for the next layer's prev_topk_indices (only used
+        # by "shared"-indexer layers; None otherwise). Read in the forward below.
+        module._dsa_next_topk = (
+            topk_indices if getattr(module, "next_skip_topk", False) else None
+        )
+        if spmd.is_type_checking():
+            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None))
+        # out is (B, L, heads, v_head_dim); flatten heads to (B, L, D).
+        return out.reshape(B, L, -1)
+
+
+def _titan_dsa_flex_attn_forward(
+    self,
+    hidden_states,
+    position_embeddings,
+    attention_mask=None,
+    past_key_values=None,
+    prev_topk_indices=None,
+    **kwargs,
+):
+    """Typecheck-clean replacement for the GLM-5 DSA attention forward.
+
+    Runs the low-rank q/kv projections (checked, TP) then routes the MLA head
+    reshape/split, RoPE, the DSA indexer, the dense-mask build, and flex through
+    ``HFDSAFlexAttnCoreKernel`` (a local_map region). Returns the DSA 3-tuple
+    ``(attn_output, attn_weights, next_topk_indices)`` its decoder layer expects.
+    Bound onto the HF DSA attention module under spmd_types without CP.
+    """
+    if getattr(self, "q_lora_rank", None) is None:
+        q = self.q_proj(hidden_states)
+        # The DSA indexer requires q_resid from the low-rank q path; a full-rank
+        # q model would need a different indexer input. GLM-5 always sets
+        # q_lora_rank, so fail loud rather than silently mis-feed the indexer.
+        raise NotImplementedError(
+            "DSA flex core kernel requires q_lora_rank (low-rank q path) for the "
+            "indexer's q_resid; got q_lora_rank=None."
+        )
+    q_resid = self.q_a_layernorm(self.q_a_proj(hidden_states))
+    q = self.q_b_proj(q_resid)
+    compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
+    k_compressed, k_pe = torch.split(
+        compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+    )
+    k_compressed = self.kv_a_layernorm(k_compressed)
+    kv = self.kv_b_proj(k_compressed)
+    cos, sin = position_embeddings
+    out = self._titan_dsa_flex_attn_core(
+        q,
+        kv,
+        k_pe,
+        q_resid,
+        hidden_states,
+        cos,
+        sin,
+        module=self,
+        attention_mask=attention_mask,
+        prev_topk_indices=prev_topk_indices,
+    )
+    next_topk = getattr(self, "_dsa_next_topk", None)
+    return self.o_proj(out), None, next_topk
 
 
 class SliceableModuleDict(ModuleDict):
@@ -1066,16 +1565,21 @@ class HFTransformerModel(BaseModel):
         else:
             mask_mod = get_causal_mask_mod()
         batch_size, seq_len = positions.shape
-        return create_attention_mask(
-            mask_mod,
-            batch_size,
-            None,
-            seq_len,
-            seq_len,
-            device=positions.device,
-            BLOCK_SIZE=128,
-            separate_full_blocks=not is_in_batch_invariant_mode(),
-        )
+        # create_attention_mask is torch.compile'd; compiled regions are not
+        # compatible with the spmd_types typechecking TorchFunctionMode (they
+        # segfault). Shield it exactly like the flex kernel shields the flex HOP
+        # (models/common/attention.py). A no-op when typechecking is off.
+        with spmd.no_typecheck():
+            return create_attention_mask(
+                mask_mod,
+                batch_size,
+                None,
+                seq_len,
+                seq_len,
+                device=positions.device,
+                BLOCK_SIZE=128,
+                separate_full_blocks=not is_in_batch_invariant_mode(),
+            )
 
     def _build_dense_attention_mask(self, positions: torch.Tensor) -> torch.Tensor:
         """Dense 4D additive attention mask for DSA models under flex.
@@ -1092,16 +1596,26 @@ class HFTransformerModel(BaseModel):
         batch_size, seq_len = positions.shape
         device = positions.device
         dtype = self.tok_embeddings.weight.dtype
-        idx = torch.arange(seq_len, device=device)
-        # [S, S] causal: query i (row) may attend to key j (col) when j <= i.
-        allowed = (idx[:, None] >= idx[None, :]).unsqueeze(0).expand(batch_size, -1, -1)
-        if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
-            doc_ids = torch.cumsum((positions == 0).int(), dim=1) - 1  # [B, S]
-            same_doc = doc_ids[:, :, None] == doc_ids[:, None, :]  # [B, S, S]
-            allowed = allowed & same_doc
-        mask = torch.zeros((batch_size, seq_len, seq_len), device=device, dtype=dtype)
-        mask.masked_fill_(~allowed, float("-inf"))
-        return mask.unsqueeze(1)  # [B, 1, S, S]
+        # A dense causal mask is a pure positional function of the batch-sharded
+        # positions (no shardable weights); its arange/compare/masked_fill ops
+        # are data-dependent and not typecheck-clean under spmd_types. Shield the
+        # build (a no-op when typechecking is off), like the flex BlockMask build
+        # and native RoPE. Each rank builds its local batch shard of the mask.
+        with spmd.no_typecheck():
+            idx = torch.arange(seq_len, device=device)
+            # [S, S] causal: query i (row) may attend to key j (col) when j <= i.
+            allowed = (
+                (idx[:, None] >= idx[None, :]).unsqueeze(0).expand(batch_size, -1, -1)
+            )
+            if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
+                doc_ids = torch.cumsum((positions == 0).int(), dim=1) - 1  # [B, S]
+                same_doc = doc_ids[:, :, None] == doc_ids[:, None, :]  # [B, S, S]
+                allowed = allowed & same_doc
+            mask = torch.zeros(
+                (batch_size, seq_len, seq_len), device=device, dtype=dtype
+            )
+            mask.masked_fill_(~allowed, float("-inf"))
+            return mask.unsqueeze(1)  # [B, 1, S, S]
 
     def forward(self, *args, **kwargs):
         positions = kwargs.pop("positions", None)

@@ -68,6 +68,8 @@ def set_hf_sharding_configs(
     model: nn.Module,
     *,
     enable_sp: bool,
+    spmd_backend: str = "default",
+    cp_enabled: bool = False,
 ) -> None:
     """Set ``_sharding_config`` on all HF modules for TP/EP parallelization.
 
@@ -78,11 +80,38 @@ def set_hf_sharding_configs(
     Args:
         model: The HFTransformerModel with Module-converted children.
         enable_sp: Whether sequence parallelism is enabled (TP > 1).
+        spmd_backend: The sharding backend ("default" or "spmd_types"). The
+            declarative configs are backend-agnostic; a few redistribute sources
+            are only declared under spmd_types (the default DTensor backend
+            infers them).
+        cp_enabled: Whether context parallelism is enabled. Under spmd_types
+            without CP, standard GQA/MHA attention routes reshape+RoPE+flex
+            through ``HFFlexAttnCoreKernel`` (typecheck-clean local region); with
+            CP it keeps the ``HFFlexKernel`` path (which does the CP k/v
+            all-gather).
     """
+    # spmd_types requires redistribution sources declared explicitly; the default
+    # (DTensor) backend infers them, and for the embedding it uses a special
+    # _MaskPartial that a plain Partial out_src would clash with -- so the
+    # embedding out_src is only declared under spmd_types.
+    use_spmd = spmd_backend == "spmd_types"
+
     # Root-level modules — nn.Identity modules are skipped (no params).
     if model.tok_embeddings is not None and not isinstance(
         model.tok_embeddings, nn.Identity
     ):
+        # The native masked-lookup treatment (Partial out_src + local_map) only
+        # applies when _install_native_embedding actually swapped in the native
+        # Embedding. Some models (e.g. Gemma4's Gemma4TextScaledWordEmbedding)
+        # are not plain nn.Embedding, so they are left as-is; their forward is not
+        # a masked local lookup (and its positional arg is not "input"), so under
+        # spmd_types they keep the plain embedding config (no out_src/local_map),
+        # which is correct for FSDP/EP (no vocab sharding). Such models are
+        # TP-incompatible anyway, so the vocab-parallel path is not needed.
+        from torchtitan.models.common.embedding import Embedding as _NativeEmbedding
+
+        emb_is_native = isinstance(model.tok_embeddings, _NativeEmbedding)
+        emb_use_spmd = use_spmd and emb_is_native
         emb_state: dict = {"weight": dense_param_placement(tp=spmd.S(0))}
         for buf_name, _ in model.tok_embeddings.named_buffers(recurse=False):
             emb_state[buf_name] = dense_param_placement(tp=spmd.R)
@@ -90,7 +119,27 @@ def set_hf_sharding_configs(
             state_shardings=emb_state,
             in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
             in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
+            # Vocab-sharded (S(0)) embedding lookup produces a Partial output on
+            # TP; spmd_types needs the redistribute source declared, but the
+            # default backend's DTensor embedding uses _MaskPartial (inferred),
+            # so only declare the Partial out_src for the swapped native Embedding
+            # (masked local lookup, run inside a local_map region -- mirrors
+            # decoder_sharding.set_decoder_sharding_config). For a non-native
+            # embedding under spmd_types (e.g. Gemma4, FSDP/EP-only, no vocab
+            # shard) the lookup output already matches out_dst, so declare
+            # out_src == out_dst (spmd requires an explicit source; this is a
+            # no-op redistribution). Under the default backend out_src stays None.
+            out_src_shardings=(
+                dense_activation_placement(tp=spmd.P)
+                if emb_use_spmd
+                else _sp_activation(enable_sp=enable_sp)
+                if use_spmd
+                else None
+            ),
             out_dst_shardings=_sp_activation(enable_sp=enable_sp),
+            local_map=(
+                LocalMapConfig(in_grad_placements=None) if emb_use_spmd else None
+            ),
         )
 
     if model.norm is not None and not isinstance(model.norm, nn.Identity):
@@ -109,10 +158,12 @@ def set_hf_sharding_configs(
                 "input": dense_activation_placement(tp=spmd.R),
             },
             # Vocab-shard the lm_head output S(-1) unconditionally, mirroring
-            # core's set_decoder_sharding_config. The S(-1) TP placement is a
-            # no-op when TP is absent from the runtime mesh, so no flag is
-            # needed: core cross_entropy_loss detects the vocab-sharded pred
-            # (spmd_types: tp mesh size > 1) and runs vocab-parallel CE.
+            # core's set_decoder_sharding_config (both out_src and out_dst). The
+            # S(-1) TP placement is a no-op when TP is absent, so no flag is
+            # needed: core cross_entropy_loss detects the vocab-sharded pred and
+            # runs vocab-parallel CE. Declaring out_src (S(0) weight -> S(-1)
+            # output) also gives spmd_types the redistribute source it requires.
+            out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
             out_dst_shardings=dense_activation_placement(tp=spmd.S(-1)),
         )
 
@@ -121,11 +172,18 @@ def set_hf_sharding_configs(
     # plain-Tensor / DTensor ops in apply_rotary_pos_emb.
     if hasattr(model, "rotary_emb") and not isinstance(model.rotary_emb, nn.Identity):
         rope = model.rotary_emb
-        rope._sharding_config = _rope_config(rope, enable_sp=enable_sp)
+        rope._sharding_config = _rope_config(
+            rope, enable_sp=enable_sp, use_spmd=use_spmd
+        )
 
     # Per-layer modules
     for transformer_block in model.layers:
-        _set_layer_sharding_configs(transformer_block, enable_sp=enable_sp)
+        _set_layer_sharding_configs(
+            transformer_block,
+            enable_sp=enable_sp,
+            use_spmd=use_spmd,
+            cp_enabled=cp_enabled,
+        )
 
     # Completeness backstop: every parameter/buffer-bearing module this function
     # is responsible for must have a sharding config, or it silently mixes a
@@ -194,13 +252,169 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
     ).build()
 
 
-def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
+def _attach_flex_attn_core_kernel(attn: nn.Module) -> None:
+    """Attach the flex attention-core kernel and bind the replacement forward.
+
+    q/k/v reach the kernel as ``(B, L, D)`` post-projection, heads TP-sharded on
+    tensor dim 2; cos/sin are replicated. The local_map converts them to local
+    tensors so the head reshape + q/k norm + RoPE + flex HOP run typecheck-clean,
+    and wraps the output back head-sharded on dim 2 (``S(-1)`` of ``(B, L, D)``).
+    The HF attention forward is replaced with ``_titan_flex_attn_forward`` so it
+    routes through this kernel (see model.py). Used under spmd_types without CP
+    for standard GQA/MHA attention.
+    """
+    import types
+
+    from torchtitan.experiments.transformers_modeling_backend.model import (
+        _titan_flex_attn_forward,
+        HFFlexAttnCoreKernel,
+    )
+
+    # (B, L, D): batch-sharded on DP, seq on CP, heads on TP dim 2 -- the
+    # standard dense activation layout. cos/sin come from the (unasserted) root
+    # rotary as Varying, so declare them R (treated as local in the region).
+    qkv = dense_activation_placement(tp=spmd.S(2))
+    cossin = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.R})
+    attn._titan_flex_attn_core = HFFlexAttnCoreKernel.Config(
+        sharding_config=ShardingConfig(
+            in_src_shardings={
+                "query_BLD": qkv,
+                "key_BLD": qkv,
+                "value_BLD": qkv,
+                "cos": cossin,
+                "sin": cossin,
+            },
+            in_dst_shardings={
+                "query_BLD": qkv,
+                "key_BLD": qkv,
+                "value_BLD": qkv,
+                "cos": cossin,
+                "sin": cossin,
+            },
+            out_src_shardings=qkv,
+            local_map=LocalMapConfig(
+                in_grad_placements=(qkv, qkv, qkv, cossin, cossin),
+            ),
+        )
+    ).build()
+    attn.forward = types.MethodType(_titan_flex_attn_forward, attn)
+
+
+def _attach_mla_flex_attn_core_kernel(attn: nn.Module) -> None:
+    """Attach the MLA flex attention-core kernel and bind the replacement forward.
+
+    Routes MLA's head reshape + nope/pe split + RoPE + flex through
+    ``HFMLAFlexAttnCoreKernel`` in a local_map region (see model.py). The
+    projection outputs q/kv arrive ``(B, L, D)`` TP head-sharded on dim 2; the
+    single-head ``k_pe`` is replicated; the rotary tensors ride as local_map
+    inputs. The MLA forward is replaced with ``_titan_mla_flex_attn_forward``.
+    Used under spmd_types without CP for MLA attention (no DSA indexer).
+    """
+    import types
+
+    from torchtitan.experiments.transformers_modeling_backend.model import (
+        _titan_mla_flex_attn_forward,
+        HFMLAFlexAttnCoreKernel,
+    )
+
+    qkv = dense_activation_placement(tp=spmd.S(2))
+    kpe = dense_activation_placement(tp=spmd.R)
+    # cos/sin (or freqs_cis) come from the unasserted rotary as Varying; declare
+    # them fully replicated so they are treated as local in the region.
+    rope = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.R})
+    attn._titan_mla_flex_attn_core = HFMLAFlexAttnCoreKernel.Config(
+        sharding_config=ShardingConfig(
+            in_src_shardings={
+                "query_BLD": qkv,
+                "kv_BLD": qkv,
+                "k_pe_BLD": kpe,
+                "rope_a": rope,
+                "rope_b": rope,
+            },
+            in_dst_shardings={
+                "query_BLD": qkv,
+                "kv_BLD": qkv,
+                "k_pe_BLD": kpe,
+                "rope_a": rope,
+                "rope_b": rope,
+            },
+            out_src_shardings=qkv,
+            local_map=LocalMapConfig(in_grad_placements=(qkv, qkv, kpe, rope, rope)),
+        )
+    ).build()
+    attn.forward = types.MethodType(_titan_mla_flex_attn_forward, attn)
+
+
+def _attach_dsa_flex_attn_core_kernel(attn: nn.Module) -> None:
+    """Attach the DSA (GLM-5) flex attention-core kernel and bind the forward.
+
+    Routes GLM-5's MLA reshape/split + RoPE + DSA indexer + dense-mask flex
+    through ``HFDSAFlexAttnCoreKernel`` in a local_map region (see model.py). The
+    MLA projection outputs q/kv arrive ``(B, L, D)`` TP head-sharded on dim 2; the
+    single-head ``k_pe`` and the indexer inputs ``q_resid``/``hidden_states``
+    (TP-replicated, batch-sharded) come in replicated on TP; the rotary tensors
+    ride as local_map inputs. The DSA forward is replaced with
+    ``_titan_dsa_flex_attn_forward``. Used under spmd_types without CP.
+    """
+    import types
+
+    from torchtitan.experiments.transformers_modeling_backend.model import (
+        _titan_dsa_flex_attn_forward,
+        HFDSAFlexAttnCoreKernel,
+    )
+
+    qkv = dense_activation_placement(tp=spmd.S(2))
+    # k_pe (single head), q_resid, and hidden_states are TP-replicated activations
+    # (batch-sharded on DP, seq on CP).
+    act_r = dense_activation_placement(tp=spmd.R)
+    rope = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.R})
+    attn._titan_dsa_flex_attn_core = HFDSAFlexAttnCoreKernel.Config(
+        sharding_config=ShardingConfig(
+            in_src_shardings={
+                "query_BLD": qkv,
+                "kv_BLD": qkv,
+                "k_pe_BLD": act_r,
+                "q_resid_BLD": act_r,
+                "hidden_states_BLD": act_r,
+                "cos": rope,
+                "sin": rope,
+            },
+            in_dst_shardings={
+                "query_BLD": qkv,
+                "kv_BLD": qkv,
+                "k_pe_BLD": act_r,
+                "q_resid_BLD": act_r,
+                "hidden_states_BLD": act_r,
+                "cos": rope,
+                "sin": rope,
+            },
+            out_src_shardings=qkv,
+            local_map=LocalMapConfig(
+                in_grad_placements=(qkv, qkv, act_r, act_r, act_r, rope, rope),
+            ),
+        )
+    ).build()
+    attn.forward = types.MethodType(_titan_dsa_flex_attn_forward, attn)
+
+
+def _set_layer_sharding_configs(
+    layer: nn.Module,
+    *,
+    enable_sp: bool,
+    use_spmd: bool = False,
+    cp_enabled: bool = False,
+) -> None:
     """Set ``_sharding_config`` on each sub-module of a decoder layer.
 
     Covers norms, attention projections, and (for non-MoE layers) dense MLP.
     MoE layers have their own ShardingConfig from the Titan MoE swap. Also
     attaches the flex-attention kernel Module that carries the attention
-    local_map (see ``_attach_flex_kernel``).
+    local_map (see ``_attach_flex_kernel``). ``use_spmd`` gates the DSA-indexer
+    fail-loud: under the DTensor backends the indexer's scatter_/index ops
+    cannot dispatch under TP, but under spmd_types (plain local shards) they do.
+    Under spmd_types without CP, standard GQA/MHA attention routes its
+    reshape+RoPE+flex through ``HFFlexAttnCoreKernel`` (typecheck-clean local
+    region) instead of the ``HFFlexKernel`` path.
     """
     # --- Norms ---
     if hasattr(layer, "input_layernorm"):
@@ -232,8 +446,46 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
     )
 
     # Flex attention: attach the kernel Module that carries the attention
-    # local_map so q/k/v are computed on local (head-sharded) tensors.
-    _attach_flex_kernel(attn)
+    # local_map so q/k/v are computed on local (head-sharded) tensors. Under
+    # spmd_types, standard GQA/MHA attention (full-rank q_proj/k_proj/v_proj, no
+    # MLA low-rank KV, no DSA indexer) routes the reshape+RoPE+flex through
+    # HFFlexAttnCoreKernel so the head reshape and RoPE run typecheck-clean in a
+    # local region (the raw HF forward does them on typed tensors, which the
+    # checker rejects: reshape splits the TP-sharded head dim, RoPE mixes typed q
+    # with untyped cos/sin). Under CP the core kernel also folds in the k/v
+    # all-gather (see HFFlexAttnCoreKernel / _wrap_flex_kernel_cp) so CP is
+    # typecheck-clean too. At runtime without typechecking the core-kernel and the
+    # HFFlexKernel paths are numerically identical.
+    #
+    # ``v_norm`` marks a non-standard attention whose forward the GQA core kernel
+    # does not replicate: Gemma4 applies a per-head ``v_norm`` to values, uses a
+    # single-tensor ``apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=2)`` (not
+    # the q/k two-tensor form the kernel calls), and has shared-KV layers. Such
+    # models keep the HFFlexKernel path (raw HF forward + flex HOP), correct at
+    # runtime; they are FSDP/EP-only (no TP head split) and not typecheck-wired.
+    is_standard_gqa = (
+        hasattr(attn, "q_proj")
+        and hasattr(attn, "k_proj")
+        and hasattr(attn, "v_proj")
+        and not hasattr(attn, "kv_a_proj_with_mqa")
+        and not hasattr(attn, "indexer")
+        and not hasattr(attn, "v_norm")
+    )
+    # MLA (DeepSeek V2/V3): low-rank KV (kv_a_proj_with_mqa) and no DSA indexer.
+    is_mla = hasattr(attn, "kv_a_proj_with_mqa") and not hasattr(attn, "indexer")
+    # DSA (GLM-5): MLA low-rank KV plus the DSA indexer subtree. Its core kernel
+    # additionally runs the indexer + dense index/causal mask inside the local
+    # region (shielded); see HFDSAFlexAttnCoreKernel. DSA-CP is not a wired config,
+    # so under CP DSA falls back to the HFFlexKernel path.
+    is_dsa = hasattr(attn, "kv_a_proj_with_mqa") and hasattr(attn, "indexer")
+    if use_spmd and is_standard_gqa:
+        _attach_flex_attn_core_kernel(attn)
+    elif use_spmd and is_mla:
+        _attach_mla_flex_attn_core_kernel(attn)
+    elif use_spmd and not cp_enabled and is_dsa:
+        _attach_dsa_flex_attn_core_kernel(attn)
+    else:
+        _attach_flex_kernel(attn)
 
     # Query projection. Detected independently of the KV path: a model may
     # use low-rank Q (q_a_proj/q_b_proj, e.g. DeepSeek-V3, GLM-4.7) or
@@ -286,25 +538,29 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
             norm._sharding_config = _replicate_config(norm)
 
     # GLM-5 DSA indexer -- a small auxiliary subtree with its own nested
-    # projections (e.g. wq_b/wk). Replicating its weights is necessary but not
-    # sufficient under TP: its @torch.no_grad() forward uses in-place scatter_ and
-    # fancy-index ops (and the surrounding attention does
-    # index_mask.scatter_(topk_indices)), which DTensor has no eager dispatch
-    # rules for, so it crashes with a "mixed Tensor and DTensor" error.
+    # projections (e.g. wq_b/wk). Its @torch.no_grad() forward uses scatter_/index
+    # ops (and the surrounding attention does index_mask.scatter_(topk_indices)),
+    # which DTensor's eager dispatch cannot handle -- under the default (DTensor)
+    # backend this crashes with a "mixed Tensor and DTensor" error under TP, so we
+    # still fail loud there.
     #
-    # TODO: move transformer backend off the DTensor sharding path onto spmd_types
-    # which will eliminate the error
-    #
-    # Until then: fail loud under TP; otherwise replicate the indexer weights (a
-    # no-op that resolves to no mesh) so FSDP/EP keep working.
+    # Under ``spmd_backend="spmd_types"`` state and activations are plain local
+    # shards (no tensor subclass), so these index/scatter ops dispatch natively and
+    # the indexer needs no special handling -- just replicated weights. So the
+    # fail-loud is gated to the DTensor backends; the declarative
+    # ShardingConfig/SpmdLayout below is backend-agnostic and used by both.
     if hasattr(attn, "indexer"):
-        if enable_sp:
+        if enable_sp and not use_spmd:
             raise NotImplementedError(
                 f"{type(attn).__name__}: the DSA indexer is currently not supported under "
                 "tensor parallelism with the DTensor sharding backend (its no_grad "
                 "forward uses scatter_/index ops that DTensor cannot dispatch). "
-                "This model only runs under FSDP/EP and no TP."
+                "This resolves under spmd_backend='spmd_types' (local tensors); "
+                "use spmd_types, or run this model with FSDP/EP and no TP."
             )
+        # Under spmd_types the indexer runs on plain local shards, so its
+        # scatter_/index ops dispatch natively -- no fail-loud needed. Replicate
+        # its weights (a no-op that resolves to no mesh).
         for sub in attn.indexer.modules():
             sub._sharding_config = _replicate_config(sub)
 
@@ -363,6 +619,7 @@ def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:
         state_shardings=state,
         in_src_shardings={"hidden_states": sp_layout},
         in_dst_shardings={"hidden_states": sp_layout},
+        out_src_shardings=sp_layout,
         out_dst_shardings=sp_layout,
     )
 
@@ -381,7 +638,9 @@ def _replicate_config(module: nn.Module) -> ShardingConfig:
     return ShardingConfig(state_shardings=state_shardings)
 
 
-def _rope_config(module: nn.Module, *, enable_sp: bool) -> ShardingConfig:
+def _rope_config(
+    module: nn.Module, *, enable_sp: bool, use_spmd: bool = False
+) -> ShardingConfig:
     """Sharding config for a rotary embedding module.
 
     The rotary embedding's forward receives the hidden-states activation (first
@@ -401,6 +660,13 @@ def _rope_config(module: nn.Module, *, enable_sp: bool) -> ShardingConfig:
         state_shardings[name] = dense_param_placement(tp=spmd.R)
     for name, _ in module.named_buffers(recurse=False):
         state_shardings[name] = dense_param_placement(tp=spmd.R)
+
+    if use_spmd:
+        # Under spmd typechecking, asserting an in_src on the hidden_states arg
+        # mismatches the actual activation type at the root rotary boundary.
+        # The rotary only reads hidden_states for dtype/device; leave it
+        # unasserted and let the replicated cos/sin computation run checked.
+        return ShardingConfig(state_shardings=state_shardings)
 
     sig = inspect.signature(type(module).forward)
     arg_names = [p.name for p in sig.parameters.values() if p.name != "self"]
