@@ -32,12 +32,63 @@ from torchtitan.components.loss import (
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
+    MTPLoss,
 )
+from torchtitan.models.common.mtp import roll_mtp_sequence
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import set_spmd_backend
 
 
 class TestLoss(unittest.TestCase):
+    def test_roll_mtp_sequence_respects_packed_document_boundaries(self):
+        tokens = torch.tensor([[10, 11, 12, 20, 21, 22, 23, 24]])
+        positions = torch.tensor([[0, 1, 2, 0, 1, 2, 3, 4]])
+
+        torch.testing.assert_close(
+            roll_mtp_sequence(tokens, shift=1, positions=positions, fill_value=0),
+            torch.tensor([[11, 12, 0, 21, 22, 23, 24, 0]]),
+        )
+        torch.testing.assert_close(
+            roll_mtp_sequence(tokens, shift=2, positions=positions, fill_value=0),
+            torch.tensor([[12, 0, 0, 22, 23, 24, 0, 0]]),
+        )
+
+    def test_mtp_loss_masks_document_boundaries_from_positions(self):
+        """MTP auxiliary labels must not cross packed-document boundaries."""
+        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+        recorded_labels = []
+
+        def record_labels(pred, labels, *, global_vocab_size=None):
+            recorded_labels.append(labels.clone())
+            return pred.new_zeros(())
+
+        loss_fn.fn = record_labels
+
+        # Two packed documents in one row: [A0, A1, A2, B0, B1, B2, B3, B4].
+        # TorchTitan positions reset at each document boundary.
+        positions = torch.tensor([[0, 1, 2, 0, 1, 2, 3, 4]])
+        labels = torch.arange(8).unsqueeze(0)
+        pred = [
+            torch.zeros(1, 8, 16),
+            torch.zeros(1, 8, 16),
+            torch.zeros(1, 8, 16),
+        ]
+
+        loss_fn(pred, labels, positions=positions)
+
+        self.assertEqual(len(recorded_labels), 3)
+        torch.testing.assert_close(recorded_labels[0], labels)
+        torch.testing.assert_close(
+            recorded_labels[1],
+            torch.tensor([[1, 2, IGNORE_INDEX, 4, 5, 6, 7, IGNORE_INDEX]]),
+        )
+        torch.testing.assert_close(
+            recorded_labels[2],
+            torch.tensor(
+                [[2, IGNORE_INDEX, IGNORE_INDEX, 5, 6, 7, IGNORE_INDEX, IGNORE_INDEX]]
+            ),
+        )
+
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.
 

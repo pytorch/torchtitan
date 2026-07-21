@@ -65,7 +65,7 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel_mtp")
+    config.model_spec.model.num_mtp_layers = 1
     config.loss = MTPLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model_spec),
         loss_scaling_factor=0.3,

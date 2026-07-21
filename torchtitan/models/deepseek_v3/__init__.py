@@ -17,7 +17,6 @@ from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
-    MTPBlock,
     MTPDecoder,
     MTPTransformerBlock,
     RMSNorm,
@@ -47,7 +46,6 @@ from .state_dict_adapter import DeepSeekV3StateDictAdapter
 __all__ = [
     "parallelize_deepseekv3",
     "DeepSeekV3Model",
-    "MTPBlock",
     "MTPDecoder",
     "MTPTransformerBlock",
     "deepseekv3_configs",
@@ -335,28 +333,6 @@ def _debugmodel(
     )
 
 
-def _debugmodel_mtp(
-    attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
-) -> DeepSeekV3Model.Config:
-    base = _debugmodel(
-        attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
-    )
-    return DeepSeekV3Model.Config(
-        vocab_size=base.vocab_size,
-        dim=base.dim,
-        tok_embeddings=base.tok_embeddings,
-        norm=base.norm,
-        lm_head=base.lm_head,
-        layers=base.layers,
-        enable_weight_tying=base.enable_weight_tying,
-        mtp=MTPBlock.Config(num_mtp_layers=1),
-    )
-
-
 def _16b(
     attn_backend: str,
     moe_comm_backend: str,
@@ -557,7 +533,6 @@ def _671b(
 
 deepseekv3_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_mtp": _debugmodel_mtp,
     "16B": _16b,
     "236B": _236b,
     "671B": _671b,

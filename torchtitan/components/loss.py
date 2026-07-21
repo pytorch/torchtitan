@@ -21,6 +21,7 @@ from torch.distributed.tensor.experimental import local_map
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common.mtp import roll_mtp_sequence
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -322,6 +323,7 @@ class BaseLoss(ABC, Configurable):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
+        **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return the scaled loss and any metrics computed by the loss."""
         loss = self.fn(pred, labels)
@@ -354,6 +356,7 @@ class CrossEntropyLoss(BaseLoss):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
+        **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
@@ -399,6 +402,7 @@ class MTPLoss(BaseLoss):
         pred: torch.Tensor | list[torch.Tensor],
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
+        **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if isinstance(pred, (list, tuple)):
             num_mtp_layers = len(pred) - 1
@@ -408,26 +412,41 @@ class MTPLoss(BaseLoss):
                     f"prediction, got {len(pred)} predictions."
                 )
 
-            seq_len = pred[0].shape[1]
-            if labels.shape[1] < seq_len + num_mtp_layers:
-                raise ValueError(
-                    f"MTP labels must have at least "
-                    f"{seq_len + num_mtp_layers} tokens, "
-                    f"got {labels.shape[1]}."
-                )
-
             main_loss = self.fn(
                 pred[0],
-                labels[:, :seq_len],
+                labels[:, : pred[0].shape[1]],
                 global_vocab_size=self.global_vocab_size,
             )
             mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
+            positions = loss_inputs.get("positions", None)
+
             for label_offset, mtp_pred in enumerate(pred[1:], 1):
                 # MTP depth d predicts the token d positions after the main
-                # decoder position, so labels are sliced with the same offset.
+                # decoder position. Packed-document boundaries follow the same
+                # reset-style positions convention as the model-side token roll.
+                mtp_seq_len = mtp_pred.shape[1]
+                if labels.shape[1] < mtp_seq_len:
+                    raise ValueError(
+                        f"MTP labels need at least {mtp_seq_len} "
+                        f"tokens for depth {label_offset}, got {labels.shape[1]}."
+                    )
+                if positions is not None:
+                    if positions.shape[1] < mtp_seq_len:
+                        raise ValueError(
+                            f"MTP positions need at least {mtp_seq_len} tokens "
+                            f"for depth {label_offset}, got {positions.shape[1]}."
+                        )
+                mtp_labels = roll_mtp_sequence(
+                    labels[:, :mtp_seq_len],
+                    shift=label_offset,
+                    positions=(
+                        positions[:, :mtp_seq_len] if positions is not None else None
+                    ),
+                    fill_value=IGNORE_INDEX,
+                )
                 mtp_loss = mtp_loss + self.fn(
                     mtp_pred,
-                    labels[:, label_offset : label_offset + seq_len],
+                    mtp_labels,
                     global_vocab_size=self.global_vocab_size,
                 ) / num_mtp_layers
             loss = main_loss + mtp_loss * self.loss_scaling_factor

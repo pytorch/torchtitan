@@ -33,7 +33,7 @@ from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
 
-__all__ = ["Decoder", "MTPDecoder", "TransformerBlock"]
+__all__ = ["Decoder", "TransformerBlock"]
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -329,102 +329,3 @@ class Decoder(BaseModel):
                 f"Only VarlenAttention and FlexAttention support attention masks, "
                 f"got {type(inner_attn).__name__}"
             )
-
-
-class MTPDecoder(Decoder):
-    """Decoder variant that owns prepared-input MTP blocks.
-
-    Dataloaders provide ``[B, S + K]`` tokens for K MTP depths. The main decoder
-    consumes the first S tokens, then the MTP block consumes shifted S-token
-    views and returns one hidden-state tensor per MTP depth.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
-        # Optional so one model class can serve both regular decoder and
-        # decoder-with-MTP configs.
-        mtp: "MTPBlock.Config | None" = None
-        extra_mtp_tokens: int = 0
-
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            self.extra_mtp_tokens = (
-                self.mtp.num_mtp_layers if self.mtp is not None else 0
-            )
-            MTPDecoder.materialize_mtp_config(self)
-
-    @staticmethod
-    def materialize_mtp_config(config: "MTPDecoder.Config") -> None:
-        """Materialize the MTP inner block before model-specific sharding."""
-        if config.mtp is None or config.mtp.num_mtp_layers <= 0:
-            return
-
-        from torchtitan.models.common.mtp import MTPBlock
-
-        inner_cfg = (
-            config.mtp.inner_block_config
-            if config.mtp.inner_block_config is not None
-            else config.layers[-1]
-        )
-        config.mtp.inner_block_config = MTPBlock.mtp_layer_config(
-            inner_cfg,
-            dim=config.dim,
-        )
-
-    def __init__(self, config: "MTPDecoder.Config"):
-        self.materialize_mtp_config(config)
-        super().__init__(config)
-        self.mtp_block = (
-            config.mtp.build()
-            if config.mtp is not None and config.mtp.num_mtp_layers > 0
-            else None
-        )
-
-    def forward(
-        self,
-        tokens: torch.Tensor,
-        positions: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
-    ):
-        # positions is listed before attention_masks so AutoParallel's input_fn,
-        # which returns (tokens, positions) and binds them positionally, maps
-        # positions to the right parameter.
-        mtp_tokens = tokens
-        if self.mtp_block is not None and self.mtp_block.num_depths > 0:
-            if self.tok_embeddings is None:
-                raise ValueError("MTP decoder forward requires token embeddings.")
-            tokens = self.mtp_block.prepare_main_tokens(tokens)
-            if positions is not None and positions.shape[1] == mtp_tokens.shape[1]:
-                positions = positions[:, : tokens.shape[1]]
-
-        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-
-        for layer in self.layers.values():
-            h = layer(h, attention_masks, positions)
-
-        mtp_prev_embed = h
-        h = self.norm(h) if self.norm is not None else h
-
-        if self.mtp_block is not None and self.mtp_block.num_depths > 0:
-            mtp_hidden_states = self.mtp_block(
-                mtp_tokens,
-                mtp_prev_embed,
-                self.tok_embeddings,
-                attention_masks,
-                positions,
-            )
-            h = [h] + mtp_hidden_states
-
-        if self._skip_lm_head:
-            return h
-        if isinstance(h, list):
-            return [
-                self.lm_head(item) if self.lm_head is not None else item
-                for item in h
-            ]
-        return self.lm_head(h) if self.lm_head is not None else h
