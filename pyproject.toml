@@ -18,6 +18,9 @@ dependencies = [
     "tokenizers>=0.15.0",
     "safetensors",
 
+    # Rule-based verification for math RL examples
+    "math-verify==0.9.0",
+
     # Miscellaneous
     "tyro",
     "tensorboard",
