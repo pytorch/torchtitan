@@ -10,7 +10,7 @@ import random
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from datasets import load_dataset
+from datasets import concatenate_datasets, load_dataset
 
 from torchtitan.config import Configurable
 
@@ -43,17 +43,13 @@ class _CyclingDataset(Configurable):
         *,
         seed: int,
         shuffle: bool,
-        num_samples: int | None = None,
     ) -> None:
         if not samples:
             raise ValueError("math dataset must contain at least one sample")
-        if num_samples is not None and not 0 < num_samples <= len(samples):
-            raise ValueError("num_samples must be between 1 and the dataset size")
         self._samples = samples
         self._rng = random.Random(seed)
         self._shuffle = shuffle
         self._order = list(range(len(samples)))
-        self._num_samples = num_samples if num_samples is not None else len(samples)
         if shuffle:
             self._rng.shuffle(self._order)
         self._position = 0
@@ -62,9 +58,9 @@ class _CyclingDataset(Configurable):
         return self
 
     def __next__(self) -> DapoMathSample:
-        if self._position == self._num_samples:
-            # Rollout production consumes an endless stream; crossing the configured
-            # cycle boundary starts a new epoch. Training reshuffles; validation does not.
+        if self._position == len(self._order):
+            # Rollout production consumes an endless stream; crossing the dataset
+            # boundary starts a new epoch. Training reshuffles; validation does not.
             if self._shuffle:
                 self._rng.shuffle(self._order)
             self._position = 0
@@ -126,19 +122,17 @@ class AIME2025Dataset(_CyclingDataset):
         num_samples: int = 30
 
     def __init__(self, config: Config) -> None:
-        samples: list[DapoMathSample] = []
-        for subset in config.subsets:
-            dataset = load_dataset(config.repo_id, subset, split=config.split)
-            samples.extend(
-                DapoMathSample(
-                    prompt=_AIME_PROMPT_TEMPLATE.format(problem=row["question"]),
-                    ground_truth=str(row["answer"]),
-                )
-                for row in dataset
+        dataset = concatenate_datasets(
+            [
+                load_dataset(config.repo_id, subset, split=config.split)
+                for subset in config.subsets
+            ]
+        ).select(range(config.num_samples))
+        samples = [
+            DapoMathSample(
+                prompt=_AIME_PROMPT_TEMPLATE.format(problem=row["question"]),
+                ground_truth=str(row["answer"]),
             )
-        super().__init__(
-            samples,
-            seed=config.seed,
-            shuffle=config.shuffle,
-            num_samples=config.num_samples,
-        )
+            for row in dataset
+        ]
+        super().__init__(samples, seed=config.seed, shuffle=config.shuffle)

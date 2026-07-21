@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+from datasets import Dataset
+
 from torchtitan.experiments.rl.examples.dapo_math import (
     AIME2025Dataset,
     DapoMathDataset,
@@ -58,7 +60,7 @@ def test_aime_dataset_combines_both_subsets(monkeypatch) -> None:
     def load_dataset(repo_id, subset, *, split):
         del repo_id, split
         answer = r"42^\circ" if subset == "AIME2025-I" else r"\boxed{42}"
-        return [{"question": f"{subset} question", "answer": answer}]
+        return Dataset.from_list([{"question": f"{subset} question", "answer": answer}])
 
     monkeypatch.setattr(math_data, "load_dataset", load_dataset)
     dataset = AIME2025Dataset.Config(num_samples=2).build()
@@ -71,7 +73,7 @@ def test_aime_dataset_combines_both_subsets(monkeypatch) -> None:
 def test_aime_dataset_restarts_after_configured_num_samples(monkeypatch) -> None:
     def load_dataset(repo_id, subset, *, split):
         del repo_id, split
-        return [{"question": f"{subset} question", "answer": "42"}]
+        return Dataset.from_list([{"question": f"{subset} question", "answer": "42"}])
 
     monkeypatch.setattr(math_data, "load_dataset", load_dataset)
     dataset = AIME2025Dataset.Config(num_samples=1).build()
