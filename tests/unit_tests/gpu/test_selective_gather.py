@@ -4,16 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multi-GPU tests for the selective-gather P2P transport.
+"""Multi-GPU tests for the selective-gather transports.
 
 Runs on the repo's multi-process harness, so the NCCL path is what is measured.
 A full plan reproduces a plain all-gather bitwise. A sliding-window plan is the
 selective case: asymmetric sends and receives, padded slots on the rank with no
 predecessor, and only the planned output slots written. Both backwards reduce
 each block's gradient over the ranks that read it.
+
+The P2P class pins its backend so it runs everywhere. The LSA class needs
+Hopper + CuTeDSL + nccl4py and skips without them.
 """
 
 import unittest
+from unittest import mock
 
 import pytest
 import torch
@@ -24,11 +28,13 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.distributed.context_parallel.selective_gather import (
+    backend as backend_mod,
     BlockGatherPlan,
     build_plan_metadata,
     full_plan,
     run_p2p_gather,
     run_p2p_gather_backward,
+    select_backend,
     selective_gather,
     SelectiveGatherContext,
     sliding_window_plan,
@@ -60,6 +66,9 @@ class TestP2PGatherNumerics(DTensorTestBase):
             block_numel=BLOCK_NUMEL,
             dtype=kv_local.dtype,
             device=device,
+            # Pin the portable backend: this box may auto-select "lsa", but this
+            # class validates the p2p transport specifically.
+            backend="p2p",
         )
         return pg, kv_local, ctx
 
@@ -252,6 +261,7 @@ class TestP2PGatherNumerics(DTensorTestBase):
             block_numel=BLOCK_NUMEL,
             dtype=torch.float64,
             device=device,
+            backend="p2p",
         )
         plan = full_plan(1, self.world_size, BLOCKS_PER_RANK, BLOCK_NUMEL, device)
         meta = build_plan_metadata(plan, pg, blocks_per_rank=BLOCKS_PER_RANK)
@@ -316,6 +326,7 @@ class TestP2PGatherNumerics(DTensorTestBase):
             block_numel=BLOCK_NUMEL,
             dtype=kv_local.dtype,
             device=other,
+            backend="p2p",
         )
         plan = full_plan(1, self.world_size, BLOCKS_PER_RANK, BLOCK_NUMEL, device)
         meta = build_plan_metadata(plan, pg, blocks_per_rank=BLOCKS_PER_RANK)
@@ -417,6 +428,7 @@ class TestP2PGatherNumerics(DTensorTestBase):
             block_numel=BLOCK_NUMEL,
             dtype=torch.bfloat16,
             device=device,
+            backend="p2p",
         )
         plan = full_plan(1, self.world_size, BLOCKS_PER_RANK, BLOCK_NUMEL, device)
         meta = build_plan_metadata(plan, pg, blocks_per_rank=BLOCKS_PER_RANK)
@@ -435,8 +447,262 @@ class TestP2PGatherNumerics(DTensorTestBase):
                 block_numel=BLOCK_NUMEL,
                 dtype=kv_local.dtype,
                 device=device,
-                backend="lsa",
+                backend="nvlink",
             )
+
+
+def _lsa_capable():
+    if not torch.cuda.is_available():
+        return False
+    from torchtitan.distributed.context_parallel.selective_gather import backend
+
+    dev = torch.device("cuda:0")
+    return (
+        backend._cutlass_ok()
+        and backend._nccl4py_ok()
+        and backend._nccl_ok()
+        and backend._hopper_ok(dev)
+    )
+
+
+# bf16 at 2048 elements keeps words_per_block a multiple of the 256-thread CTA
+# tiling the LSA kernels require.
+LSA_BLOCK_NUMEL = 2048
+
+
+@unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
+class TestLSAGatherNumerics(DTensorTestBase):
+    """The LSA CuTeDSL backend reproduces a plain all-gather bitwise (full_plan).
+
+    Mirrors TestP2PGatherNumerics against the "lsa" backend.
+    """
+
+    @property
+    def world_size(self):
+        return 2
+
+    def _setup(self, device):
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("cp",)
+        )
+        pg = mesh.get_group("cp")
+        shard_numel = BLOCKS_PER_RANK * LSA_BLOCK_NUMEL
+        torch.manual_seed(1234 + pg.rank())
+        kv_local = torch.randn(shard_numel, device=device, dtype=torch.bfloat16)
+        plan = full_plan(1, self.world_size, BLOCKS_PER_RANK, LSA_BLOCK_NUMEL, device)
+        meta = build_plan_metadata(plan, pg, blocks_per_rank=BLOCKS_PER_RANK)
+        ctx = SelectiveGatherContext(
+            mesh,
+            mesh_axis="cp",
+            shard_numel=shard_numel,
+            block_numel=LSA_BLOCK_NUMEL,
+            dtype=kv_local.dtype,
+            device=device,
+            max_consumers=meta.max_consumers,
+            backend="lsa",
+        )
+        return pg, kv_local, ctx, meta
+
+    @with_comms
+    def test_full_plan_forward_matches_all_gather(self):
+        device = torch.device(self.device_type)
+        pg, kv_local, ctx, meta = self._setup(device)
+        out = selective_gather(kv_local, ctx, meta)
+        gathered = [torch.empty_like(kv_local) for _ in range(self.world_size)]
+        dist.all_gather(gathered, kv_local, group=pg)
+        self.assertTrue(torch.equal(out, torch.cat(gathered)))
+        ctx.close()
+
+    @with_comms
+    def test_full_plan_backward_reduces_over_consumers(self):
+        device = torch.device(self.device_type)
+        _, kv_local, ctx, meta = self._setup(device)
+        kv_local.requires_grad_(True)
+        selective_gather(kv_local, ctx, meta).sum().backward()
+        grad = kv_local.grad
+        assert grad is not None
+        self.assertTrue(torch.equal(grad, torch.full_like(grad, self.world_size)))
+        ctx.close()
+
+    @with_comms
+    def test_rejects_metadata_from_another_group(self):
+        # The shared guard has to run on the LSA path too: without it these
+        # local rank ids reach raw window offsets instead of raising.
+        device = torch.device(self.device_type)
+        _, kv_local, ctx, meta = self._setup(device)
+        object.__setattr__(meta, "group_ranks", tuple(r + 100 for r in ctx.group_ranks))
+        kv_local.requires_grad_(True)
+        with self.assertRaises(ValueError):
+            selective_gather(kv_local, ctx, meta)
+        ctx.close()
+
+    @with_comms
+    def test_rejects_dtype_mismatch(self):
+        device = torch.device(self.device_type)
+        _, kv_local, ctx, meta = self._setup(device)
+        wrong = kv_local.detach().float().requires_grad_(True)
+        with self.assertRaises(ValueError):
+            selective_gather(wrong, ctx, meta)
+        ctx.close()
+
+    @with_comms
+    def test_rejects_metadata_tensors_on_another_device(self):
+        # The kernels dereference these on ctx.device, and neither .to(int32)
+        # nor .contiguous() would move them back.
+        device = torch.device(self.device_type)
+        pg, kv_local, ctx, meta = self._setup(device)
+        other = torch.device(device.type, (pg.rank() + 1) % self.world_size)
+        object.__setattr__(meta.plan, "src_rank", meta.plan.src_rank.to(other))
+        kv_local.requires_grad_(True)
+        with self.assertRaises(ValueError):
+            selective_gather(kv_local, ctx, meta)
+        ctx.close()
+
+
+class TestBackendSelection(DTensorTestBase):
+    """Automatic selection has to be group-wide and operation-aware.
+
+    LSA reads peer shards over NVLink, so it is only valid inside one host, and
+    every rank must reach the same verdict: a split choice deadlocks the group.
+    """
+
+    @property
+    def world_size(self):
+        return 2
+
+    def _group(self):
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("cp",)
+        )
+        return mesh.get_group("cp")
+
+    def _lsa_sized_context(self, device, *, backend):
+        """A context shaped so LSA is otherwise a valid choice."""
+        return SelectiveGatherContext(
+            self._group(),
+            shard_numel=BLOCKS_PER_RANK * LSA_BLOCK_NUMEL,
+            block_numel=LSA_BLOCK_NUMEL,
+            dtype=torch.bfloat16,
+            device=device,
+            backend=backend,
+        )
+
+    @with_comms
+    def test_p2p_for_a_dtype_lsa_cannot_run(self):
+        # float64 would reach the kernel and raise NotImplementedError.
+        device = torch.device(self.device_type)
+        chosen = select_backend(
+            device, self._group(), dtype=torch.float64, block_numel=LSA_BLOCK_NUMEL
+        )
+        self.assertEqual(chosen, "p2p")
+
+    @with_comms
+    def test_p2p_for_a_block_shape_lsa_cannot_tile(self):
+        # BLOCK_NUMEL bf16 is 8 bytes, far under one 4096-byte CTA tile.
+        device = torch.device(self.device_type)
+        chosen = select_backend(
+            device, self._group(), dtype=torch.bfloat16, block_numel=BLOCK_NUMEL
+        )
+        self.assertEqual(chosen, "p2p")
+
+    @with_comms
+    def test_p2p_without_a_group_to_agree_with(self):
+        device = torch.device(self.device_type)
+        chosen = select_backend(
+            device, None, dtype=torch.bfloat16, block_numel=LSA_BLOCK_NUMEL
+        )
+        self.assertEqual(chosen, "p2p")
+
+    @unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
+    @with_comms
+    def test_lsa_when_the_whole_group_can_run_it(self):
+        # The positive control: without it the fallback tests pass vacuously on
+        # a box that could never pick LSA anyway.
+        device = torch.device(self.device_type)
+        chosen = select_backend(
+            device, self._group(), dtype=torch.bfloat16, block_numel=LSA_BLOCK_NUMEL
+        )
+        self.assertEqual(chosen, "lsa")
+
+    @unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
+    @with_comms
+    def test_p2p_when_the_ranks_are_on_different_hosts(self):
+        device = torch.device(self.device_type)
+        pg = self._group()
+        with mock.patch("socket.gethostname", return_value=f"host{pg.rank()}"):
+            chosen = select_backend(
+                device, pg, dtype=torch.bfloat16, block_numel=LSA_BLOCK_NUMEL
+            )
+        self.assertEqual(chosen, "p2p")
+
+    @unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
+    @with_comms
+    def test_p2p_when_one_rank_is_not_capable(self):
+        # Only rank 1 fails the probe. Both ranks must still choose p2p, and the
+        # capable one must not block waiting on a collective the other skipped.
+        device = torch.device(self.device_type)
+        pg = self._group()
+        with mock.patch.object(backend_mod, "_hopper_ok", lambda dev: pg.rank() == 0):
+            chosen = select_backend(
+                device, pg, dtype=torch.bfloat16, block_numel=LSA_BLOCK_NUMEL
+            )
+        self.assertEqual(chosen, "p2p")
+
+    @unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
+    @with_comms
+    def test_context_falls_back_when_the_group_spans_lsa_teams(self):
+        # A shared hostname does not prove one LSA team; lsa_pointer addresses a
+        # peer inside the local team, so more than one means the wrong mapping.
+        import nccl.core as nccl
+
+        device = torch.device(self.device_type)
+        with mock.patch.object(
+            nccl.Communicator, "n_lsa_teams", property(lambda self: 2)
+        ):
+            ctx = self._lsa_sized_context(device, backend=None)
+        self.assertEqual(ctx.backend, "p2p")
+        ctx.close()
+
+    @unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
+    @with_comms
+    def test_context_falls_back_without_device_api_support(self):
+        import nccl.core as nccl
+
+        device = torch.device(self.device_type)
+        with mock.patch.object(
+            nccl.Communicator, "device_api_support", property(lambda self: False)
+        ):
+            ctx = self._lsa_sized_context(device, backend=None)
+        self.assertEqual(ctx.backend, "p2p")
+        ctx.close()
+
+    @unittest.skipUnless(_lsa_capable(), "LSA needs Hopper + CuTeDSL + nccl4py")
+    @with_comms
+    def test_forced_lsa_raises_when_the_group_spans_lsa_teams(self):
+        # Forcing the backend is user configuration, so it fails loudly instead
+        # of quietly running something else.
+        import nccl.core as nccl
+
+        device = torch.device(self.device_type)
+        with mock.patch.object(
+            nccl.Communicator, "n_lsa_teams", property(lambda self: 2)
+        ):
+            with self.assertRaises(ValueError):
+                self._lsa_sized_context(device, backend="lsa")
+
+    @with_comms
+    def test_context_auto_selects_p2p_for_an_unsupported_dtype(self):
+        # End to end through the context, which is what a caller actually hits.
+        device = torch.device(self.device_type)
+        ctx = SelectiveGatherContext(
+            self._group(),
+            shard_numel=BLOCKS_PER_RANK * LSA_BLOCK_NUMEL,
+            block_numel=LSA_BLOCK_NUMEL,
+            dtype=torch.float64,
+            device=device,
+        )
+        self.assertEqual(ctx.backend, "p2p")
+        ctx.close()
 
 
 if __name__ == "__main__":
