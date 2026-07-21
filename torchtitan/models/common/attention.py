@@ -41,7 +41,6 @@ from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_att
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
-
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -189,15 +188,22 @@ class VarlenAttention(Module):
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                # exclude CP from typecheck as varlen + CP is not yet supported.
-                spmd.assert_type(result, spmd.V, spmd.PartitionSpec("dp", "tp", None))
+                q_local = spmd.get_local_type(q_TNH)
+                # Varlen + CP is unsupported; packing a CP-sharded L into T is
+                # rejected during q_TNH reshape propagation.
+                q_ps = get_partition_spec(q_TNH)
+                spmd.assert_type(result, q_local, q_ps)
             out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            spmd.assert_type(out_TNH, spmd.V, spmd.PartitionSpec("dp", "tp", None))
-            spmd.assert_type(lse_NT, spmd.V, spmd.PartitionSpec("tp", "dp"))
+            q_local = spmd.get_local_type(q_TNH)
+            q_ps = get_partition_spec(q_TNH)
+            spmd.assert_type(out_TNH, q_local, q_ps)
+            # The current implementation returns LSE as (N, T).
+            lse_ps = None if q_ps is None else spmd.PartitionSpec(q_ps[1], q_ps[0])
+            spmd.assert_type(lse_NT, q_local, lse_ps)
 
         out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
