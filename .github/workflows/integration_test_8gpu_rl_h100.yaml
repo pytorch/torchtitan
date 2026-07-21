@@ -103,6 +103,9 @@ jobs:
         # but the CI docker image only has CUDA runtime, not the toolkit.
         uv pip install nvidia-cuda-nvcc
 
+        # Run Qwen3.5 GatedDeltaNet packed-sequence tests.
+        pytest torchtitan/experiments/rl/tests/test_gated_delta_net.py -v
+
         # Run bitwise parity tests (TP=2, batch-invariant mode). Varlen and
         # Flex are intentionally separate torchrun invocations so each backend
         # gets a fresh process group and vLLM engine lifecycle.

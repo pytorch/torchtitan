@@ -316,7 +316,7 @@ class GatedDeltaNet(Module):
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
 
-    def _causal_conv(
+    def _causal_conv1d(
         self, x: torch.Tensor, conv: nn.Module, cu_seqlens: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Depthwise causal conv, matching the GatedDeltaKernel backend.
@@ -329,10 +329,10 @@ class GatedDeltaNet(Module):
         (per-channel), so under TP it runs on channel-local shards via local_map.
         """
         if self.kernel.backend == "torch_native":
-            return self._torch_causal_conv(x, conv, cu_seqlens)
-        return self._fla_causal_conv(x, conv, cu_seqlens)
+            return self._causal_conv1d_torch(x, conv, cu_seqlens)
+        return self._causal_conv1d_fla(x, conv, cu_seqlens)
 
-    def _fla_causal_conv(
+    def _causal_conv1d_fla(
         self, x: torch.Tensor, conv: nn.Module, cu_seqlens: torch.Tensor | None
     ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
@@ -367,22 +367,9 @@ class GatedDeltaNet(Module):
             return conv_dt(x, conv.weight)  # pyrefly: ignore
         return _conv(x, conv.weight)  # pyrefly: ignore [bad-argument-type]
 
-    def _torch_causal_conv(
-        self, x: torch.Tensor, conv: nn.Module, cu_seqlens: torch.Tensor | None
+    def _causal_conv1d_torch_per_sample(
+        self, x: torch.Tensor, conv: nn.Module
     ) -> torch.Tensor:
-        if cu_seqlens is None:
-            return self._dense_causal_conv(x, conv)
-        # Packed: run F.conv1d per segment so the window never crosses a boundary.
-        bs, seqlen = x.shape[0], x.shape[1]
-        xf = x.reshape(1, bs * seqlen, *x.shape[2:])
-        bounds = cu_seqlens.tolist()
-        segs = [
-            self._dense_causal_conv(xf[:, s:e], conv)
-            for s, e in zip(bounds[:-1], bounds[1:])
-        ]
-        return torch.cat(segs, dim=1).reshape(bs, seqlen, *x.shape[2:])
-
-    def _dense_causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
         # Plain depthwise causal conv via F.conv1d (left-pad k-1, then silu).
         x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x, DTensor):
@@ -419,6 +406,21 @@ class GatedDeltaNet(Module):
             x = conv(x)
         return F.silu(x).transpose(1, 2)
 
+    def _causal_conv1d_torch(
+        self, x: torch.Tensor, conv: nn.Module, cu_seqlens: torch.Tensor | None
+    ) -> torch.Tensor:
+        if cu_seqlens is None:
+            return self._causal_conv1d_torch_per_sample(x, conv)
+        # Packed: run F.conv1d per segment so the window never crosses a boundary.
+        bs, seqlen = x.shape[0], x.shape[1]
+        xf = x.reshape(1, bs * seqlen, *x.shape[2:])
+        bounds = cu_seqlens.tolist()
+        segs = [
+            self._causal_conv1d_torch_per_sample(xf[:, s:e], conv)
+            for s, e in zip(bounds[:-1], bounds[1:])
+        ]
+        return torch.cat(segs, dim=1).reshape(bs, seqlen, *x.shape[2:])
+
     def forward(
         self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -428,9 +430,9 @@ class GatedDeltaNet(Module):
         #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
         #   xv, xz: (bs, seqlen, n_value_heads * value_head_dim)
         #   xa, xb: (bs, seqlen, n_value_heads)
-        xq = self._causal_conv(self.in_proj_q(x), self.conv_q, cu_seqlens)
-        xk = self._causal_conv(self.in_proj_k(x), self.conv_k, cu_seqlens)
-        xv = self._causal_conv(self.in_proj_v(x), self.conv_v, cu_seqlens)
+        xq = self._causal_conv1d(self.in_proj_q(x), self.conv_q, cu_seqlens)
+        xk = self._causal_conv1d(self.in_proj_k(x), self.conv_k, cu_seqlens)
+        xv = self._causal_conv1d(self.in_proj_v(x), self.conv_v, cu_seqlens)
         xz = self.in_proj_z(x)
         xa = self.in_proj_a(x)
         xb = self.in_proj_b(x)
@@ -873,19 +875,14 @@ class Qwen35Model(Decoder):
         else:
             x = tokens
 
+        assert positions is not None
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
-        assert rope_positions is not None
-        # cu_seqlens holds the packed sample boundaries, None for a single unpacked
-        # sequence. Computed once and shared across GatedDeltaNet layers so their
-        # recurrent state and causal conv reset per sample; reuses the same
-        # document-varlen metadata built for the full-attention masks.
+        # cu_seqlens holds the packed sample boundaries, None for one sample per row.
         # NOTE: not context-parallel aware; CP is unsupported for GatedDeltaNet.
-        cu_seqlens = None
-        if positions is not None:  # None on the mrope-only path (no text positions)
-            cu_seqlens = create_varlen_metadata_for_document(positions).cu_seq_q
-            if cu_seqlens.numel() <= 2:  # single unpacked sample -> non-varlen path
-                cu_seqlens = None
+        cu_seqlens = create_varlen_metadata_for_document(positions).cu_seq_q
+        if cu_seqlens.numel() == positions.shape[0] + 1:
+            cu_seqlens = None
         for layer in self.layers.values():
             x = layer(x, attention_masks, rope_positions, cu_seqlens)
 
