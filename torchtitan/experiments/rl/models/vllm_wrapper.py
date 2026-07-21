@@ -196,31 +196,33 @@ class VLLMModelWrapper(Module):
 
         # Replace inner_attention with VLLMAttentionWrapper in config
         model_config = model_spec.model
-        attn_config = model_config.layers[0].attention
-        n_heads = attn_config.n_heads
-        n_kv_heads = attn_config.n_kv_heads or n_heads
-        head_dim = (
-            attn_config.head_dim
-            if attn_config.head_dim is not None
-            else model_config.dim // n_heads
-        )
+        # Hybrid models (e.g. Qwen3.5) interleave full-attention layers with
+        # linear-attention (GatedDeltaNet) layers that have no ``.attention``; the
+        # paged GDN core for those is swapped in post-build by _replace_gdn_cores().
         new_layers = []
         for layer_cfg in model_config.layers:
+            a_cfg = getattr(layer_cfg, "attention", None)
+            if a_cfg is None:
+                new_layers.append(layer_cfg)  # linear-attention layer: nothing to swap
+                continue
+            n_heads = a_cfg.n_heads
+            n_kv_heads = a_cfg.n_kv_heads or n_heads
+            head_dim = (
+                a_cfg.head_dim
+                if a_cfg.head_dim is not None
+                else model_config.dim // n_heads
+            )
             vllm_backend = VLLMAttentionWrapper.Config(
                 hidden_size=model_config.dim,
                 num_heads=n_heads,
                 num_kv_heads=n_kv_heads,
                 head_dim=head_dim,
-                sliding_window_size=getattr(
-                    layer_cfg.attention, "sliding_window_size", None
-                ),
+                sliding_window_size=getattr(a_cfg, "sliding_window_size", None),
             )
             new_layers.append(
                 dataclasses.replace(
                     layer_cfg,
-                    attention=dataclasses.replace(
-                        layer_cfg.attention, inner_attention=vllm_backend
-                    ),
+                    attention=dataclasses.replace(a_cfg, inner_attention=vllm_backend),
                 )
             )
         self.config = dataclasses.replace(model_config, layers=new_layers)
@@ -313,10 +315,59 @@ class VLLMModelWrapper(Module):
         # TP-sharded.
         self._inject_attention_sinks()
 
+        # Replace each linear-attention layer's compute core with the paged-cache
+        # GDN generation core (unified path).
+        self._replace_gdn_cores()
+
         # Route the TP all-reduce through vLLM's custom AR (off under
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
+
+    def _replace_gdn_cores(self) -> None:
+        """Replace each linear-attention (GatedDeltaNet) layer's ``.core`` compute
+        slot with a paged-cache GDN generation core so the unified model path runs --
+        the layer keeps its projections/conv weights/gates/norm/out_proj and delegates
+        only its stateful conv + recurrence to the swapped-in core. Creating each core
+        registers it in vLLM's ``static_forward_context``, which is how vLLM's hybrid
+        KV-cache allocator discovers the GDN layers and selects the GDN attention
+        backend (``AttentionCGSupport.UNIFORM_BATCH`` -> decode cudagraph). No-op for
+        non-GDN models. Duck-typed on ``delta_net`` so this generic wrapper stays
+        decoupled from Qwen3.5 specifics."""
+        layers = getattr(self.model, "layers", None)
+        if layers is None:
+            return
+        cores_replaced = 0
+        for key, block in layers.items():
+            # Qwen3.5 blocks store the mixer (full attention OR GatedDeltaNet) as
+            # ``block.attn``, with ``block.full_attn`` selecting which. Attach a core
+            # only to linear-attention (GatedDeltaNet) mixers.
+            if getattr(block, "full_attn", True):
+                continue
+            gdn = getattr(block, "attn", None)
+            # ``core`` is the swappable compute slot (dense GatedDeltaCore in
+            # training); replace it with the paged generation core here.
+            if gdn is None or not hasattr(gdn, "core"):
+                continue
+            from torchtitan.experiments.rl.models.gdn import VLLMGatedDeltaNetCore
+
+            core = VLLMGatedDeltaNetCore(
+                VLLMGatedDeltaNetCore.Config(
+                    layer_idx=int(key),
+                    num_k_heads=gdn.key_dim // gdn.key_head_dim,
+                    num_v_heads=gdn.n_value_heads,
+                    head_k_dim=gdn.key_head_dim,
+                    head_v_dim=gdn.value_head_dim,
+                    conv_kernel_size=gdn.conv_kernel_size,
+                )
+            )
+            gdn.core = core
+            cores_replaced += 1
+        if cores_replaced:
+            logger.info(
+                f"[gdn-unified] replaced {cores_replaced} GDN compute cores with "
+                "paged-cache generation cores (unified model path)"
+            )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:

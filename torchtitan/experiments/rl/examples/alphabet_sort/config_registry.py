@@ -55,6 +55,7 @@ from torchtitan.experiments.rl.routing.strategies import (
 )
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
+from torchtitan.models.qwen3_5 import model_registry as qwen3_5_model_registry
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -906,3 +907,208 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             debug=batch_invariant_config,
         ),
     )
+
+
+def _qwen3_5_rl_model_registry(
+    flavor: str,
+    *,
+    attn_backend: str = "varlen",
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> ModelSpec:
+    """``qwen3_5.model_registry`` for RL, with the lm_head fp32 cast always on.
+
+    Qwen3.5 is hybrid (GatedDeltaNet linear-attention + full attention); the GDN
+    layers run the unified vLLM generation core. Like Qwen3, RL logprob/KL math
+    needs fp32 lm_head logits, so ``LMHeadCastConverter`` is always applied.
+    """
+    converters = list(converters or [])
+    converters.append(LMHeadCastConverter.Config())
+    return qwen3_5_model_registry(
+        flavor, attn_backend=attn_backend, converters=converters
+    )
+
+
+def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
+    """GRPO training config for Qwen3.5-9B (hybrid GatedDeltaNet + full attention).
+
+    TP=2 for both trainer and generator (6 GPUs: 4 train + 2 gen). The hybrid GDN
+    runs head-sharded under tensor parallelism: the trainer ``GatedDeltaCore`` and
+    the unified GDN generation core (``VLLMGatedDeltaNetCore``) both compute on
+    LOCAL per-rank head slices (fused conv + recurrence via local_map / a DTensor
+    bridge), and vLLM's paged conv/ssm state is TP-sharded (get_state_shape
+    divides by tp_size). Qwen3.5-9B has enough K/V heads for TP=2; scale further
+    with data parallelism. ``attn_backend="varlen"`` (GDN requires varlen);
+    compile is off (the GDN fla kernels run eager, wrapped in
+    ``torch.compiler.disable``).
+
+    ``hf_assets_path`` points at a Qwen3.5-9B HF checkpoint; adjust as needed.
+    """
+    group_size = 8
+    return Controller.Config(
+        model_spec=_qwen3_5_rl_model_registry("9B", attn_backend="varlen"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3.5-9B",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=1, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=False),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            # FULL_AND_PIECEWISE: decode captured FULL (GDN UNIFORM_BATCH), prefill
+            # captured PIECEWISE via breakable cudagraph (no inductor compile). The
+            # GDN/attention cores eager-break at the piecewise boundary, so this is
+            # bitwise-parity (verified prefill and decode) as long as the entry point
+            # sets VLLM_USE_BREAKABLE_CUDAGRAPH before register_to_vllm imports them.
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=700,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
+    """On-policy, batch-invariant GRPO for Qwen3.5-9B (trainer TP=2 + generator TP=2).
+
+    Strict on-policy (``max_offpolicy_steps=0``) + deterministic + batch-invariant.
+    For bitwise parity the trainer must match the generator's reduction order: same
+    TP, no SP (the generator has none), and ``dp_shard=1`` so both sides run on 2
+    ranks (FSDP dp_shard does not change the forward numerics).
+    """
+    config = rl_grpo_qwen3_5_9b_varlen()
+    config.async_loop = dataclasses.replace(config.async_loop, max_offpolicy_steps=0)
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        debug=_BATCH_INVARIANT_DEBUG,
+        # dp_shard=1 so trainer ranks match the generator; no SP so trainer/generator
+        # reduction order agrees (both required for bitwise parity).
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=1,
+            enable_sequence_parallel=False,
+        ),
+    )
+    # Inherit FULL_AND_PIECEWISE from the base config: it is bitwise-parity for both
+    # prefill and decode (the GDN/attention cores eager-break at the piecewise
+    # boundary). The parity test's setUpClass sets VLLM_USE_BREAKABLE_CUDAGRAPH
+    # before register_to_vllm imports those cores, which is required for the break.
+    config.generator = dataclasses.replace(
+        config.generator, debug=_BATCH_INVARIANT_DEBUG
+    )
+    return config
+
+
+def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
+    """Debug Qwen3.5 (hybrid GatedDeltaNet + full attention) GRPO config for CI.
+
+    Random-init debug model + bundled tokenizer -- no real checkpoint needed, so it
+    runs the full GRPO loop end-to-end on CI GPUs. The integration test overrides
+    parallelism to trainer FSDP=2 x TP=2 (4 GPUs) + 2 generators TP=2 (4 GPUs),
+    exercising the GDN unified vLLM generation path head-sharded under TP with the
+    FULL_AND_PIECEWISE (breakable) cudagraph. The debug model has 2 K/V heads and 2
+    GDN key heads, so TP is capped at 2.
+    """
+    group_size = 8
+    return Controller.Config(
+        model_spec=_qwen3_5_rl_model_registry("debugmodel", attn_backend="varlen"),
+        hf_assets_path="tests/assets/tokenizer",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=5,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=1, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=False),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),  # random-init weights
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=256,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
+    """Batch-invariant debug Qwen3.5 GDN config for e2e CI (8 GPUs).
+
+    On-policy (``max_offpolicy_steps=0``) + deterministic + batch-invariant, so the
+    hybrid GDN unified path runs bitwise end-to-end through the GRPO loop. Trainer
+    FSDP=2 x TP=2 matches the generator TP=2; SP is off so the trainer and generator
+    reduction orders agree (FSDP dp_shard does not change the forward numerics).
+    """
+    config = rl_grpo_qwen3_5_debug_varlen()
+    config.async_loop = dataclasses.replace(config.async_loop, max_offpolicy_steps=0)
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        debug=_BATCH_INVARIANT_DEBUG,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            enable_sequence_parallel=False,
+        ),
+    )
+    config.generator = dataclasses.replace(
+        config.generator, debug=_BATCH_INVARIANT_DEBUG
+    )
+    return config
