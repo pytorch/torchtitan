@@ -37,6 +37,13 @@ trainer batch:       [local_batch_size, 4096]
 
 Each document is shifted before packing, so a label never predicts the first token of the next document. Positions reset at every document boundary.
 
+```text
+token_ids=[0,1,2,3,4,5], seq_len=4
+
+inputs  [0,1,2,3]  labels [1,2,3,4]
+inputs  [4,0,0,0]  labels [5,-100,-100,-100]
+```
+
 ## Local JSONL
 
 This complete recipe reads JSON objects from local files:

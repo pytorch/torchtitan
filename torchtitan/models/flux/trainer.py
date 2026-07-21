@@ -48,7 +48,6 @@ class FluxTrainer(Trainer):
     def __init__(self, config: Config):
         # Compute image token count: autoencoder downscales the image,
         # then pack_latents tiles the latent into 2×2 patches.
-        # pyrefly: ignore [missing-attribute]
         if not isinstance(config.dataloader, GrainDataLoader.Config):
             raise ValueError(
                 "FluxTrainer requires GrainDataLoader.Config for dataloader"

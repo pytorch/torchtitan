@@ -9,11 +9,13 @@ from __future__ import annotations
 import contextlib
 import math
 import os
+import random
 from abc import abstractmethod
 from collections.abc import Iterable
 from datetime import timedelta
 from typing import Protocol, TYPE_CHECKING
 
+import numpy as np
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
@@ -248,6 +250,8 @@ def set_determinism(
     seed = debug_config.seed
     if parallel_dims.world_size == 1:
         if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed % 2**32)
             torch.manual_seed(seed)
             os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
             logger.debug(f"Single-process job using seed: {seed}")
@@ -297,6 +301,8 @@ def set_determinism(
         logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
 
     # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
+    random.seed(seed)
+    np.random.seed(seed % 2**32)
     torch.manual_seed(seed)
     # PYTHONHASHSEED can be a decimal number in the range [0, 2**32 - 1]
     os.environ["PYTHONHASHSEED"] = str(seed % 2**32)

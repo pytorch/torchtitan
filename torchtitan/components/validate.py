@@ -77,9 +77,8 @@ class Validator(BaseValidator):
 
         steps: int = -1
         """
-        Number of steps to take in the validation set, -1 means consuming
-        all the data in the validation dataset.
-        WARNING: When setting to -1 there could be hangs due to mismatch among ranks
+        Number of validation steps. -1 consumes the finite dataset and therefore
+        requires an effective data-parallel degree of one.
         """
 
         dataloader: BaseDataLoader.Config = field(

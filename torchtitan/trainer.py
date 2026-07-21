@@ -8,12 +8,15 @@ import dataclasses
 import json
 import math
 import os
+import pickle
+import random
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import numpy as np
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
@@ -1047,6 +1050,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     )
 
                     # Run validation if validator is available
+                    # TODO(checkpoint-validation-rng): Make validation RNG-neutral so a
+                    # checkpoint taken before validation restores the same training RNG.
                     if self.config.validator.enable and self.validator.should_validate(
                         self.step
                     ):
@@ -1076,11 +1081,34 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         return self.step < self.config.training.steps
 
     def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        rng_state: dict[str, Any] = {
+            "python_and_numpy": pickle.dumps(
+                (random.getstate(), np.random.get_state())
+            ),
+            "torch_cpu": torch.get_rng_state(),
+        }
+        if utils.device_module.is_available():
+            rng_state["accelerator"] = utils.device_module.get_rng_state()
+
+        return {
+            "step": self.step,
+            "ntokens_seen": self.ntokens_seen,
+            f"rng_state_{rank}": rng_state,
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
         self.ntokens_seen = state_dict["ntokens_seen"]
+
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        rng_state = state_dict[f"rng_state_{rank}"]
+        python_state, numpy_state = pickle.loads(rng_state["python_and_numpy"])
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(rng_state["torch_cpu"])
+        if utils.device_module.is_available():
+            utils.device_module.set_rng_state(rng_state["accelerator"])
 
     def close(self) -> None:
         if not self.config.training.disable_cuda_graphs:

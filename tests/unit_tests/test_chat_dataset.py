@@ -267,7 +267,8 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
             with self.subTest(rank=rank):
                 dataloader = _build_dataloader(world_size=2, rank=rank)
                 iterator = iter(dataloader)
-                for _ in range(4):
+                # The source has 10 rows, so 12 batches necessarily cross a repeat.
+                for _ in range(12):
                     next(iterator)
 
                 state = deepcopy(dataloader.state_dict())
