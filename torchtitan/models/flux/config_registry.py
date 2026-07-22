@@ -10,7 +10,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import MXFP8LinearConverter
-from torchtitan.config import BatchConfig, CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
 from torchtitan.models.flux.flux_datasets import FluxDataLoader
@@ -42,7 +42,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4),
+            local_batch_size=4,
             max_norm=2.0,
             steps=10,
         ),
@@ -104,7 +104,7 @@ def flux_dev() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=32),
+            local_batch_size=32,
             steps=30000,
         ),
         dataloader=FluxDataLoader.Config(
@@ -154,7 +154,7 @@ def flux_schnell() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=64),
+            local_batch_size=64,
             steps=30000,
         ),
         dataloader=FluxDataLoader.Config(

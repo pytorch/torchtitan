@@ -25,25 +25,17 @@ import torch
 
 
 @dataclass(kw_only=True, slots=True)
-class BatchConfig:
-    """Batch shape parameters shared by pretraining and RL."""
-
+class TrainingConfig:
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
 
     global_batch_size: int = -1
     """
-    Global batch size (defaults to `batch.local_batch_size * data-parallel degree`)
+    Global batch size (defaults to `training.local_batch_size * data-parallel degree`)
     """
 
     seq_len: int = 2048
     """Sequence length"""
-
-
-@dataclass(kw_only=True, slots=True)
-class TrainingConfig:
-    batch: BatchConfig = field(default_factory=BatchConfig)
-    """Batch shape parameters (local/global batch size, sequence length)"""
 
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""

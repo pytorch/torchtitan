@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 
 import torch
 
-from torchtitan.config import BatchConfig, Configurable
+from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import (
     TrainingBatch,
@@ -40,6 +40,25 @@ _DTYPES: dict[str, torch.dtype] = {
     "loss_mask": torch.bool,
     "advantages": torch.float,
 }
+
+
+@dataclass(kw_only=True, slots=True)
+class BatchConfig:
+    """Batch shape parameters for the RL batcher.
+
+    TODO: Refactor the pre-training trainer to use an owned batch config
+    instead of keeping batch shape fields directly on TrainingConfig.
+    NOTE: in pretraining we would have global_batch_size. But now we have
+    num_prompts_per_train_step. This will need to be addressed.
+    """
+
+    local_batch_size: int = 8
+    """Per-DP-rank microbatch size (rows per forward pass). If the number of tokens in the
+    rollouts exceed the number of rows*seq_len, a new microbatch is started.
+    If it is less, the remaining rows are padded to this size."""
+
+    seq_len: int = 2048
+    """Tokens per row (packed sequence length)."""
 
 
 class Batcher(Configurable):

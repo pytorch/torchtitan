@@ -67,18 +67,18 @@ def parallelize_autoparallel_llama(
     dense_mesh = parallel_dims.get_mesh(dense_names)
 
     def input_fn():
-        global_batch_size = training.batch.global_batch_size
+        global_batch_size = training.global_batch_size
         if global_batch_size < 0:
             dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
-            global_batch_size = training.batch.local_batch_size * dp_degree
+            global_batch_size = training.local_batch_size * dp_degree
         tokens = torch.randint(
             0,
             model.config.vocab_size,
-            (global_batch_size, training.batch.seq_len),
+            (global_batch_size, training.seq_len),
             device=torch.device("cuda"),
         )
         positions = torch.arange(
-            training.batch.seq_len,
+            training.seq_len,
             dtype=torch.int32,
             device=torch.device("cuda"),
         ).repeat(global_batch_size, 1)
