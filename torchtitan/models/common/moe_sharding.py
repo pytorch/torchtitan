@@ -15,6 +15,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
+from torchtitan.models.common.token_dispatcher import TensorCombineResult
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 
@@ -305,8 +306,8 @@ def set_moe_sharding_config(
                 enable_ep=enable_ep
             ),
         },
-        out_src_shardings=experts_out_layout,
-        out_dst_shardings=experts_out_layout,
+        out_src_shardings=TensorCombineResult(experts_out_layout),
+        out_dst_shardings=None,
         local_map=LocalMapConfig(
             in_grad_placements=(
                 (

@@ -9,7 +9,106 @@ import unittest.mock
 
 import torch
 
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    BaseEPTokenDispatcher,
+    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
+    LocalDispatchMetadata,
+    LocalTokenDispatcher,
+    MinimalAsyncEPTokenDispatcher,
+    TensorCombineResult,
+)
+
+
+class TestDispatcherProtocol(unittest.TestCase):
+    def test_all_ep_dispatchers_share_base_protocol(self):
+        for dispatcher_cls in (
+            AllToAllTokenDispatcher,
+            DeepEPTokenDispatcher,
+            HybridEPTokenDispatcher,
+            MinimalAsyncEPTokenDispatcher,
+        ):
+            with self.subTest(dispatcher=dispatcher_cls.__name__):
+                self.assertTrue(issubclass(dispatcher_cls, BaseEPTokenDispatcher))
+
+    def test_wiring_meshes_initializes_backend(self):
+        class BufferedDispatcher(BaseEPTokenDispatcher):
+            def __init__(self):
+                super().__init__(BaseEPTokenDispatcher.Config(num_experts=1, top_k=1))
+                self.initialized = False
+
+            def init_buffer(self):
+                self.initialized = True
+
+            def dispatch(self, *args, **kwargs):
+                raise NotImplementedError
+
+            def combine(self, *args, **kwargs):
+                raise NotImplementedError
+
+        dispatcher = BufferedDispatcher()
+        dispatcher.wire_meshes(ep_mesh=None, tp_mesh=None)
+
+        self.assertTrue(dispatcher.initialized)
+
+    def test_combine_returns_explicit_result(self):
+        dispatcher = LocalTokenDispatcher(
+            LocalTokenDispatcher.Config(num_experts=1, top_k=1)
+        )
+        result = dispatcher.combine(
+            torch.tensor([[1.0]]),
+            LocalDispatchMetadata(
+                token_indices_experts_sorted_N=torch.tensor([0]),
+                topk_scores_experts_sorted_N=torch.tensor([1.0]),
+            ),
+            torch.tensor([[[0.0]]]),
+            num_local_tokens_after_padding=1,
+            local_seq_len_after_padding=1,
+        )
+
+        self.assertIsInstance(result, TensorCombineResult)
+        torch.testing.assert_close(result.wait(), torch.tensor([[[1.0]]]))
+
+    def test_combine_result_preserves_wait_through_pytree_map(self):
+        wait_fn = unittest.mock.Mock()
+        result = TensorCombineResult(torch.tensor([1.0]), wait_fn)
+
+        mapped = torch.utils._pytree.tree_map(
+            lambda value: value + 1 if isinstance(value, torch.Tensor) else value,
+            result,
+        )
+
+        self.assertEqual(
+            torch.utils._pytree.tree_structure(result),
+            torch.utils._pytree.tree_structure(TensorCombineResult(object())),
+        )
+        torch.testing.assert_close(mapped.wait(), torch.tensor([2.0]))
+        wait_fn.assert_called_once_with()
+
+    def test_hybridep_runtime_config_sets_eager_buffer_shape(self):
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_hybridep,
+        )
+
+        config = deepseek_v3_debugmodel_hybridep()
+        config.parallelism.expert_parallel_degree = 2
+        model_config = config.model_spec.model
+        model_config.update_from_config(config=config)
+
+        dispatcher_cfgs = [
+            layer.moe.routed_experts.token_dispatcher
+            for layer in model_config.layers
+            if layer.moe is not None
+        ]
+        self.assertTrue(dispatcher_cfgs)
+        for dispatcher_cfg in dispatcher_cfgs:
+            self.assertIsInstance(dispatcher_cfg, HybridEPTokenDispatcher.Config)
+            self.assertEqual(dispatcher_cfg.hidden_dim, model_config.dim)
+            self.assertEqual(
+                dispatcher_cfg.num_tokens_per_rank,
+                config.training.local_batch_size * config.training.seq_len,
+            )
 
 
 class TestPermute(unittest.TestCase):
