@@ -176,6 +176,7 @@ def make_gqa_config(
     head_dim: int | None = None,
     fuse_qkv: bool = False,
     qk_norm: RMSNorm.Config | None = None,
+    sliding_window_size: int | None = None,
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
@@ -229,6 +230,7 @@ def make_gqa_config(
         qk_norm=qk_norm,
         inner_attention=inner_attention,
         rope=rope,
+        sliding_window_size=sliding_window_size,
     )
 
 
