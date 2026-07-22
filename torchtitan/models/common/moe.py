@@ -476,7 +476,7 @@ class MoE(Module):
         shared_out_BLD = (
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
-        if self.routed_experts.token_dispatcher.can_overlap_combine_with_shared_experts:
+        if self.routed_experts.token_dispatcher.overlap_combine_with_shared_experts:
             self.routed_experts.token_dispatcher.wait_combine()
 
         if shared_out_BLD is not None:
