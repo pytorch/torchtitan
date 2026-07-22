@@ -32,7 +32,6 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
@@ -194,6 +193,11 @@ class VLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
+        # The decorator on VLLMAttentionWrapper reads the breakable-cudagraph
+        # environment at import time. Import it only when vLLM constructs the
+        # model, after the generator configuration has set that environment.
+        from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
+
         # Replace inner_attention with VLLMAttentionWrapper in config
         model_config = model_spec.model
         # Hybrid models (e.g. Qwen3.5) interleave full-attention layers with
@@ -337,7 +341,7 @@ class VLLMModelWrapper(Module):
         layers = getattr(self.model, "layers", None)
         if layers is None:
             return
-        cores_replaced = 0
+        gdn_layers = []
         for key, block in layers.items():
             # Qwen3.5 blocks store the mixer (full attention OR GatedDeltaNet) as
             # ``block.attn``, with ``block.full_attn`` selecting which. Attach a core
@@ -349,8 +353,18 @@ class VLLMModelWrapper(Module):
             # training); replace it with the paged generation core here.
             if gdn is None or not hasattr(gdn, "core"):
                 continue
-            from torchtitan.experiments.rl.models.gdn import VLLMGatedDeltaNetCore
+            gdn_layers.append((key, gdn))
 
+        if not gdn_layers:
+            return
+
+        # Like the attention wrapper, this core has an import-time
+        # eager_break_during_capture decorator. Import it only after model
+        # construction has identified GDN layers and the generator environment
+        # has been configured.
+        from torchtitan.experiments.rl.models.gdn import VLLMGatedDeltaNetCore
+
+        for key, gdn in gdn_layers:
             core = VLLMGatedDeltaNetCore(
                 VLLMGatedDeltaNetCore.Config(
                     layer_idx=int(key),
@@ -362,12 +376,10 @@ class VLLMModelWrapper(Module):
                 )
             )
             gdn.core = core
-            cores_replaced += 1
-        if cores_replaced:
-            logger.info(
-                f"[gdn-unified] replaced {cores_replaced} GDN compute cores with "
-                "paged-cache generation cores (unified model path)"
-            )
+        logger.info(
+            f"[gdn-unified] replaced {len(gdn_layers)} GDN compute cores with "
+            "paged-cache generation cores (unified model path)"
+        )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
