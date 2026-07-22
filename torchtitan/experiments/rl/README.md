@@ -11,15 +11,6 @@ The integration consists of the following components:
 2. **RL Training Loop** (`train.py`): GRPO-based RL training with Monarch actors (single-turn only for now)
 
 
-### Rollout work buffer (`components/work_buffer.py`)
-
-`RolloutGroupWorkBuffer` is a run-ahead FIFO shared by the data-input, rollout, and batcher loops,
-with a windowed-FIFO scheduler (`window_lookahead_steps`) that bounds off-policy staleness.
-
-See [components/work_buffer.md](components/work_buffer.md) for the full write-up:
-entry lifecycle, active-slot accounting, capacity/window diagrams, and the `window_end` formula.
-
-
 ## Key features available
 
 1. **Unified model definition**: Canonical TorchTitan model definition shared by both trainer (TorchTitan) and generator (vLLM), enabling fast iteration, shared optimizations, and straightforward bitwise parity verification

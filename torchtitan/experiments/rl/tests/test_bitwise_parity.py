@@ -254,7 +254,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     async_loop = config.async_loop
     gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
     num_group_workers = (
-        async_loop.max_offpolicy_steps + 1
+        async_loop.target_off_policy_steps + 1
     ) * async_loop.num_prompts_per_train_step
     rollout_concurrency = max(
         num_group_workers * async_loop.num_samples_per_prompt,

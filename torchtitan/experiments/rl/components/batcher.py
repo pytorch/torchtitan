@@ -81,18 +81,6 @@ class Batcher(Configurable):
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
 
-    @property
-    def partial_batch_trainable_count(self) -> int:
-        """Trainable groups accumulated toward the next (not-yet-packed) batch (`0 <= r < P`).
-
-        This is the head-phase `r` the work buffer snapshots to size its r-aware look-ahead window
-        (see `RolloutGroupWorkBuffer.take_finalized`): it reflects how far the batcher has filled the
-        in-progress batch.
-        """
-        return sum(
-            bool(group.training_samples) for group in self._groups_for_next_batch
-        )
-
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
     ) -> TrainingBatch | None:
@@ -162,7 +150,7 @@ class Batcher(Configurable):
                     num_metric_only_groups,
                 ),
             ],
-            # Trainer computes policy_age from these at consume time (faithful to what it trains on).
+            # Trainer computes off-policy steps from these at consume time (faithful to what it trains on).
             # min_policy_version is the oldest version this training_sample was sampled under.
             min_policy_versions=[
                 training_sample.min_policy_version
@@ -368,7 +356,7 @@ class Batcher(Configurable):
         num_rollout_groups: int,
         num_metric_only_groups: int,
     ) -> list[m.Metric]:
-        """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
+        """Per-training-batch packing + count metrics. (off-policy steps are logged at trainer consume time.)"""
         total_slots = len(packed_rows) * self.seq_len
         non_padded = sum(sum(row["seq_lens"]) for row in packed_rows)
         return [

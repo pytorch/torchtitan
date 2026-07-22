@@ -20,6 +20,23 @@ from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.observability import structured_logger as sl
 
 
+def derive_window_size(
+    *,
+    num_prompts_per_train_step: int,
+    target_off_policy_steps: int,
+    max_off_policy_steps: int,
+) -> int:
+    """Derive the fixed FIFO look-ahead window from the hard off-policy-step bound.
+
+    Let ``P`` be prompts per train step, ``S`` be the desired mean off-policy
+    run-ahead, and ``M`` be the maximum off-policy steps tolerated. The active buffer
+    has ``B = (S + 1) * P`` slots. For a fixed window size ``W``, the worst case
+    number of off-policy steps is ``(B + W - 2) // P``. Solving for ``W`` gives
+    ``W = P * (M - S) + 1``.
+    """
+    return num_prompts_per_train_step * (max_off_policy_steps - target_off_policy_steps) + 1
+
+
 class _RolloutGroupWorkState(enum.Enum):
     """Where a RolloutGroupWork is in the WAITING -> INFLIGHT -> FINALIZED lifecycle."""
 
@@ -55,11 +72,8 @@ class RolloutGroupWorkBuffer(Configurable):
     """Run-ahead buffer of RolloutGroupWork shared by the data-input, rollout, and batcher loops.
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
-    run-ahead at `max_active_rollout_groups` active slots; the batcher takes finalized groups by
-    windowed FIFO -- greedily within a look-ahead window anchored at the oldest entry, stalling if
-    nothing in the window is finalized. The window is sized from `window_lookahead_steps` (extra
-    off-policy train-steps a straggler may incur), `num_prompts_per_train_step`, and the head's phase
-    (`window_lookahead_steps == 0`, the default, is strict FIFO).
+    run-ahead at `max_active_rollout_groups` active slots; the batcher takes finalized groups within
+    a fixed look-ahead window anchored at the oldest entry. `window_size=1` is strict FIFO.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -74,11 +88,11 @@ class RolloutGroupWorkBuffer(Configurable):
         active slot:  charged by add_work() ............ freed by release_active_groups()
 
     Example:
-        # max_offpolicy_steps=1, num_prompts_per_train_step=2 -> capacity=4
+        # target_off_policy_steps=1, num_prompts_per_train_step=2 -> capacity=4
         await buffer.add_work(g0); await buffer.add_work(g1)   # 2/4 active
         await buffer.add_work(g2); await buffer.add_work(g3)   # 4/4 active (cap)
-        g0 = await buffer.take_finalized(partial_batch_trainable_count=0)   # g0 leaves the dict; still 4/4 active
-        g1 = await buffer.take_finalized(partial_batch_trainable_count=0)   # g1 leaves the dict; still 4/4 active
+        g0 = await buffer.take_finalized()                      # g0 leaves the dict; still 4/4 active
+        g1 = await buffer.take_finalized()                      # g1 leaves the dict; still 4/4 active
         slot_task = asyncio.create_task(buffer.wait_for_slot())  # waits: take_finalized did not free a slot
         assert not slot_task.done()
         await buffer.release_active_groups(2, reason="trained")  # trainer pulled -> a slot frees
@@ -87,60 +101,29 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Buffer scheduling tunables; capacity is passed in by the controller via `build`."""
-
-        window_lookahead_steps: int = 0
-        """Windowed-FIFO look-ahead as extra off-policy train-steps (same units as `max_offpolicy_steps`).
-
-        A stuck head may be bypassed by newer FINALIZED groups, but only far enough that the trainer
-        consumes at most `s = window_lookahead_steps` extra optimizer steps ahead of that head -- so the
-        max policy age is exactly `max_offpolicy_steps + s`, regardless of the head's phase. `0` (the
-        default) is strict FIFO: the window is the head only (size 1 entry), so no batch is consumed
-        ahead of the head and max age == `max_offpolicy_steps`. Larger values trade a longer
-        straggler-staleness tail for less head-of-line stall; they do NOT raise the mean age or the
-        capacity."""
-
-        def __post_init__(self):
-            if self.window_lookahead_steps < 0:
-                raise ValueError(
-                    f"window_lookahead_steps must be >= 0, got {self.window_lookahead_steps}"
-                )
+        """No tunables: capacity and window size are derived by the controller."""
 
     def __init__(
-        self,
-        config: Config,
-        *,
-        max_active_rollout_groups: int,
-        num_prompts_per_train_step: int,
+        self, config: Config, *, max_active_rollout_groups: int, window_size: int = 1
     ) -> None:
-        self._max_active_rollout_groups = max_active_rollout_groups
-        if num_prompts_per_train_step < 1:
+        if max_active_rollout_groups < 1:
             raise ValueError(
-                f"num_prompts_per_train_step must be >= 1, got {num_prompts_per_train_step}"
+                f"max_active_rollout_groups must be >= 1, got {max_active_rollout_groups}"
             )
-        # Windowed FIFO look-ahead, sized dynamically per head so the extra staleness is exact. Let
-        #   P = num_prompts_per_train_step (groups trained per optimizer step),
-        #   K = max_offpolicy_steps
-        #   s = self._window_lookahead_steps (extra off-policy train-steps a straggler may incur),
-        #   r0 = the head's phase snapshot (trainable groups already accumulated toward the in-progress
-        #        batch when this head became the head; 0 <= r0 < P). Batches float -- the batcher packs
-        #        once it has P *trainable* groups, so batch boundaries are NOT group_id-aligned, and the
-        #        extra steps a stuck head incurs depends on r0.
-        # For a head at group_id h with phase r0, the window covers group_ids [h, window_end] where
-        #   s == 0 -> window_end = h                             (strict FIFO: head only)
-        #   s >= 1 -> window_end = h + (s + 1) * P - r0 - 1      (window size W = (s + 1) * P - r0)
-        self._prompts_per_step = num_prompts_per_train_step
-        self._window_lookahead_steps = config.window_lookahead_steps
-        # In-progress batch fill (r0) captured when the current head became head; holds window_end
-        # fixed for that head, recomputed on head-change.
-        self._windowed_head_id: int | None = None
-        self._head_partial_batch_trainable_count: int = 0
+        if not 1 <= window_size <= max_active_rollout_groups:
+            raise ValueError(
+                "window_size must be between 1 and max_active_rollout_groups, got "
+                f"window_size={window_size}, "
+                f"max_active_rollout_groups={max_active_rollout_groups}"
+            )
+        self._max_active_rollout_groups = max_active_rollout_groups
+        self._window_size = window_size
         self._active_rollout_groups = 0
         # metric: Per-flush peak active slots; reset on `.metrics()` call.
         self._active_rollout_groups_peak_since_flush = 0
-        self._work_by_group_id: collections.OrderedDict[int, RolloutGroupWork] = (
-            collections.OrderedDict()
-        )
+        self._work_by_group_id: collections.OrderedDict[
+            int, RolloutGroupWork
+        ] = collections.OrderedDict()
         # TODO(async-rl): Current we use a condition that alerts ALL rollout workers. There is no need to
         # alert all of them. Consider changing it to an async queue + event.
 
@@ -152,9 +135,9 @@ class RolloutGroupWorkBuffer(Configurable):
         # batcher consumes, so a cold start doesn't fill the whole off-policy window at policy version 0.
 
     @property
-    def window_lookahead_steps(self) -> int:
-        """Windowed-FIFO look-ahead in extra off-policy train-steps (>= 0); 0 = strict FIFO."""
-        return self._window_lookahead_steps
+    def window_size(self) -> int:
+        """Prompt-group look-ahead window anchored at the oldest buffered group."""
+        return self._window_size
 
     def _has_active_slot_available(self) -> bool:
         return self._active_rollout_groups < self._max_active_rollout_groups
@@ -214,60 +197,34 @@ class RolloutGroupWorkBuffer(Configurable):
             self._condition.notify_all()
 
     @sl.log_trace_span("take_finalized")
-    async def take_finalized(self, *, partial_batch_trainable_count: int) -> RolloutGroup | None:
-        """Batcher loop: windowed FIFO -- greedily return any FINALIZED group within the head's
-        look-ahead window, else stall. `window_lookahead_steps == 0` is strict FIFO (head only).
+    async def take_finalized(self) -> RolloutGroup | None:
+        """Batcher loop: return the oldest FINALIZED group inside the anchored window.
 
-        The window is anchored at the head (oldest entry) and measured in `group_id` space, which
-        `_data_input_loop` assigns as a contiguous, monotonically increasing position. Its right edge
-        is sized so that a straggler head is bypassed by at most `s = window_lookahead_steps` extra
-        train-steps, exactly, regardless of the head's phase. Let P = num_prompts_per_train_step and
-        `r0` = the head-phase snapshot (`partial_batch_trainable_count` captured when this head became the
-        head). For head group_id `h`:
-            s == 0 -> window_end = h                            (strict FIFO)
-            s >= 1 -> window_end = h + (s + 1) * P - r0 - 1     (max window of the exact-s band)
-        `r0` is snapshotted at head-change and held until the head is consumed, so the window does not
-        shrink from the right as non-head groups are consumed. Consuming a non-head group leaves a gap
-        but does NOT move the head, so the window slides right only when the head itself is consumed --
-        entries beyond the window stay blocked regardless of completion.
-
-        Args:
-            partial_batch_trainable_count: The batcher's phase `r` -- trainable groups already accumulated
-                toward the next (not-yet-packed) batch, `0 <= r < P`. Snapshotted as `r0` on each head-change.
+        The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
+        window stay blocked even if they are finalized, so taking non-head groups does not slide
+        the window. `window_size=1` gives strict FIFO.
 
         Example:
-            # s=0: head g0 INFLIGHT, g1 FINALIZED -> WAITS for g0 (strict FIFO)
-            # s=1, P=2, r0=0: window_end = g0 + 2*2 - 0 - 1 = g3 -> g1, g2 fetched ahead of stuck g0
-            await buffer.take_finalized(partial_batch_trainable_count=0)
+            # window_size=1: head g0 still INFLIGHT, g1 FINALIZED -> waits for g0
+            await buffer.take_finalized()
         """
-        s = self._window_lookahead_steps
-        p = self._prompts_per_step
         async with self._condition:
             while True:
                 if self._closed:
                     return None
                 if self._work_by_group_id:
-                    # Head anchors the window; group_id is a contiguous position, so entries beyond
-                    # window_end are outside the window even across consumed gaps.
                     head_group_id = next(iter(self._work_by_group_id))
-                    # Snapshot r0 (in-progress batch fill) on head-change; hold window_end fixed until consumed.
-                    if head_group_id != self._windowed_head_id:
-                        self._windowed_head_id = head_group_id
-                        self._head_partial_batch_trainable_count = partial_batch_trainable_count
-                    if s == 0:
-                        window_end = head_group_id  # strict FIFO: head only
-                    else:
-                        window_end = (
-                            head_group_id + (s + 1) * p - self._head_partial_batch_trainable_count - 1
-                        )
+                    window_end = head_group_id + self._window_size - 1
                     for group_id, work in self._work_by_group_id.items():
                         if group_id > window_end:
-                            break  # beyond the window -> blocked regardless of state
-                        if work.state is _RolloutGroupWorkState.FINALIZED:
-                            del self._work_by_group_id[group_id]
-                            self._condition.notify_all()
-                            return work.rollout_group
-                await self._condition.wait()  # nothing FINALIZED in window -> STALL
+                            break
+                        if work.state is not _RolloutGroupWorkState.FINALIZED:
+                            continue
+                        del self._work_by_group_id[group_id]
+                        self._condition.notify_all()
+                        assert work.rollout_group is not None
+                        return work.rollout_group
+                await self._condition.wait()  # nothing finalized inside the window -> stall
 
     async def release_active_groups(self, count: int, *, reason: str) -> None:
         """Free active slots: the trainer releases trained slots after its weight pull; the batcher

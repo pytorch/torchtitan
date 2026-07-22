@@ -25,7 +25,7 @@ _data_input_loop                                      _rollout_loop[N] (group wo
                         v                                                     | v
 RolloutGroupWorkBuffer
 +---------------------------------------------------------------------------------------------------------------------+
-| active slots = (max_offpolicy_steps + 1) * num_prompts_per_train_step                                                |
+| active slots = (target_off_policy_steps + 1) * num_prompts_per_train_step                                                |
 |                                                                                                                     |
 | caller            group_buffer call                                            state / active slot                  |
 | _data_input_loop  add_work(RolloutGroupWork)                                   WAITING; slot acquired               |
@@ -75,8 +75,8 @@ _rollout_loop[N]
     unblocked by: n/a
 
 _batcher_loop
-  consumes: a FINALIZED group within the window (group_buffer.take_finalized, windowed FIFO)
-    waits for:    a group in the window becoming FINALIZED
+  consumes: the oldest FINALIZED group inside the FIFO window (group_buffer.take_finalized)
+    waits for:    a group inside the window becoming FINALIZED
     unblocked by: _rollout_loop[N] group_buffer.finalize_work()
   produces: TrainingBatch (training_batch_queue.put)
     waits for:    a free training_batch_queue slot (maxsize=1)
@@ -103,6 +103,7 @@ import torchstore as ts
 import tyro
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
+
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
@@ -112,13 +113,14 @@ from torchtitan.experiments.rl.components.training_sample_builder import (
 )
 from torchtitan.experiments.rl.components.weight_sync import WeightSyncManager
 from torchtitan.experiments.rl.components.work_buffer import (
+    derive_window_size,
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
 from torchtitan.experiments.rl.controller_metrics import (
     combine_microbatch_metrics,
+    compute_off_policy_step_metrics,
     compute_perf_ratio_metrics,
-    compute_policy_age_metrics,
     compute_rollout_metrics,
     MetricsTimer,
 )
@@ -162,9 +164,13 @@ class AsyncLoopConfig(Configurable.Config):
     num_samples_per_prompt: int = 8
     """Sibling rollouts sampled per prompt (the GRPO group)."""
 
-    max_offpolicy_steps: int = 3
-    """Max train-steps a rollout may lag the trainer. Sets the rollout buffer size and its
-    stalling behavior. 0 = fully on-policy (sync): generator and trainer alternate in lockstep."""
+    target_off_policy_steps: int = 3
+    """Mean off-policy train-step run-ahead. Sets active buffer size to `(S + 1) * P`.
+    0 = fully on-policy (sync): generator and trainer alternate in lockstep."""
+
+    max_off_policy_steps: int = -1
+    """Hard consume-time off-policy-step bound. -1 means `target_off_policy_steps` (strict FIFO).
+    Raising this above `target_off_policy_steps` enables windowed FIFO look-ahead."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -174,6 +180,38 @@ class AsyncLoopConfig(Configurable.Config):
     )
     batcher: Batcher.Config = field(default_factory=Batcher.Config)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
+
+    def __post_init__(self) -> None:
+        if self.num_prompts_per_train_step < 1:
+            raise ValueError(
+                "num_prompts_per_train_step must be >= 1, got "
+                f"{self.num_prompts_per_train_step}"
+            )
+        if self.target_off_policy_steps < 0:
+            raise ValueError(
+                f"target_off_policy_steps must be >= 0, got {self.target_off_policy_steps}"
+            )
+        if self.max_off_policy_steps < 0:
+            self.max_off_policy_steps = self.target_off_policy_steps
+
+        max_active_rollout_groups = (
+            self.target_off_policy_steps + 1
+        ) * self.num_prompts_per_train_step
+        max_allowed_off_policy_steps = (
+            2 * max_active_rollout_groups - 2
+        ) // self.num_prompts_per_train_step
+        if not (
+            self.target_off_policy_steps
+            <= self.max_off_policy_steps
+            <= max_allowed_off_policy_steps
+        ):
+            raise ValueError(
+                "max_off_policy_steps must be -1 or between "
+                f"{self.target_off_policy_steps} and {max_allowed_off_policy_steps} "
+                "after resolution, got "
+                f"max_off_policy_steps={self.max_off_policy_steps}, "
+                f"active_buffer_size={max_active_rollout_groups}"
+            )
 
 
 class Controller(Configurable):
@@ -483,7 +521,7 @@ class Controller(Configurable):
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
         max_active_rollout_groups = (
-            async_loop.max_offpolicy_steps + 1
+            async_loop.target_off_policy_steps + 1
         ) * async_loop.num_prompts_per_train_step
         rollout_concurrency = max(
             max_active_rollout_groups * async_loop.num_samples_per_prompt,
@@ -704,14 +742,19 @@ class Controller(Configurable):
         # Trainer policy version, seeded from the resumed step; advances at each optimizer step.
         self._trainer_policy_version = self.start_step
 
-        # Buffer capacity caps how far generation runs ahead of the trainer (bounds off-policy staleness).
+        # Buffer capacity sets the mean run-ahead; window size sets the hard off-policy-step bound.
         max_active_rollout_groups = (
-            async_loop.max_offpolicy_steps + 1
+            async_loop.target_off_policy_steps + 1
         ) * async_loop.num_prompts_per_train_step
+        window_size = derive_window_size(
+            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
+            target_off_policy_steps=async_loop.target_off_policy_steps,
+            max_off_policy_steps=async_loop.max_off_policy_steps,
+        )
 
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,
-            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
+            window_size=window_size,
         )
 
         # Overlaps each step's weight handoff (push -> pull -> buffer-slot release) with the next step's fwd/bwd
@@ -921,17 +964,15 @@ class Controller(Configurable):
         On a clean close/shutdown the group_buffer drains and returns None; we forward a `None` sentinel
         so the trainer stops.
 
-        consumes: a FINALIZED group within the window (group_buffer.take_finalized, windowed FIFO)
-            waits for:    a group in the window becoming FINALIZED
+        consumes: the oldest FINALIZED group inside the FIFO window (group_buffer.take_finalized)
+            waits for:    a group inside the window becoming FINALIZED
             unblocked by: _rollout_loop[N] group_buffer.finalize_work()
         produces: TrainingBatch (training_batch_queue.put)
             waits for:    a free training_batch_queue slot (maxsize=1)
             unblocked by: _trainer_loop training_batch_queue.get()
         """
         while True:
-            rollout_group = await group_buffer.take_finalized(
-                partial_batch_trainable_count=batcher.partial_batch_trainable_count
-            )
+            rollout_group = await group_buffer.take_finalized()
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")
                 break
@@ -986,14 +1027,12 @@ class Controller(Configurable):
                 await self.generator_router.fanout("sync_log_step", step)
             step_timer = MetricsTimer()
 
-            with (
-                sl.log_trace_span("train_step"),
-                step_timer.record("timing/step/total"),
+            with sl.log_trace_span("train_step"), step_timer.record(
+                "timing/step/total"
             ):
                 # Waits for a TrainingBatch to be ready (or None on shutdown).
-                with (
-                    sl.log_trace_span("wait_for_training_batch"),
-                    step_timer.record("timing/step/wait_for_training_batch"),
+                with sl.log_trace_span("wait_for_training_batch"), step_timer.record(
+                    "timing/step/wait_for_training_batch"
                 ):
                     packed = await training_batch_queue.get()
 
@@ -1001,24 +1040,20 @@ class Controller(Configurable):
                     logger.info("Batcher closed and drained; stopping training")
                     break
 
-                # Policy age is computed HERE, at consumption time, against the live trainer version, so it is
+                # Off-policy steps are computed HERE, at consumption time, against the live trainer version, so it is
                 # faithful to what this step trains on -- not the version when the batch was packed.
-                # Windowed FIFO keeps the MEAN age ~= max_offpolicy_steps; a straggler head may be bypassed
-                # by at most window_lookahead_steps (s) extra train-steps, so max age = max_offpolicy_steps + s
-                # exactly (s == 0, strict FIFO, keeps this at max_offpolicy_steps + 1).
-                policy_age_panel = compute_policy_age_metrics(
+                off_policy_step_panel = compute_off_policy_step_metrics(
                     trainer_policy_version=self._trainer_policy_version,
                     min_policy_versions=packed.min_policy_versions,
-                    max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
-                    window_lookahead_steps=self._group_buffer.window_lookahead_steps,
+                    target_off_policy_steps=self.config.async_loop.target_off_policy_steps,
+                    max_off_policy_steps=self.config.async_loop.max_off_policy_steps,
                 )
 
                 # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
                 #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optim.
-                with (
-                    sl.log_trace_span("forward_backward"),
-                    step_timer.record("timing/step/forward_backward"),
+                with sl.log_trace_span("forward_backward"), step_timer.record(
+                    "timing/step/forward_backward"
                 ):
                     # fwd_bwd on all microbatches
                     microbatch_metrics = [
@@ -1037,17 +1072,15 @@ class Controller(Configurable):
                         break
 
                 # Await trainer weight push to finish before optim step mutates the weights.
-                with (
-                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
-                    step_timer.record(
-                        "timing/step/blocking_trainer_push_model_state_dict"
-                    ),
+                with sl.log_trace_span(
+                    "blocking_trainer_push_model_state_dict"
+                ), step_timer.record(
+                    "timing/step/blocking_trainer_push_model_state_dict"
                 ):
                     push_metrics = await self._weight_sync.wait_prev_push()
 
-                with (
-                    sl.log_trace_span("optim_step"),
-                    step_timer.record("timing/step/optim"),
+                with sl.log_trace_span("optim_step"), step_timer.record(
+                    "timing/step/optim"
                 ):
                     optim_result = self._get_rank_0_value(
                         await self.trainer.optim_step.call()
@@ -1055,11 +1088,10 @@ class Controller(Configurable):
                 self._trainer_policy_version = optim_result.policy_version
 
                 # Await generator weight pull to finish before the trainer's next push.
-                with (
-                    sl.log_trace_span("blocking_generator_pull_model_state_dict"),
-                    step_timer.record(
-                        "timing/step/blocking_generator_pull_model_state_dict"
-                    ),
+                with sl.log_trace_span(
+                    "blocking_generator_pull_model_state_dict"
+                ), step_timer.record(
+                    "timing/step/blocking_generator_pull_model_state_dict"
                 ):
                     pull_metrics = await self._weight_sync.wait_prev_pull()
 
@@ -1087,7 +1119,7 @@ class Controller(Configurable):
                         ],
                         *self._group_buffer.metrics(),
                         *time_metrics,
-                        *policy_age_panel,
+                        *off_policy_step_panel,
                         # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
                         *push_metrics,
                         *pull_metrics,

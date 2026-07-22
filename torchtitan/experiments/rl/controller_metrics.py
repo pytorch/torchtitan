@@ -164,47 +164,57 @@ def compute_perf_ratio_metrics(
     return out
 
 
-def compute_policy_age_metrics(
+def compute_off_policy_step_metrics(
     *,
     trainer_policy_version: int,
     min_policy_versions: list[int],
-    max_offpolicy_steps: int,
-    window_lookahead_steps: int = 0,
+    target_off_policy_steps: int,
+    max_off_policy_steps: int | None = None,
 ) -> list[m.Metric]:
-    """Age of each packed training sample at the moment the trainer consumes the batch.
+    """Off-policy train steps for each packed sample when the trainer consumes the batch.
 
-    Computed in the trainer loop (not at pack time) so the logged age is faithful to the version the
-    batch actually trains against, and so the consume-time freshness invariant is checked here.
+    Computed in the trainer loop (not at pack time) so the logged value is faithful to
+    the version the batch actually trains against, and so the consume-time freshness
+    invariant is checked here.
 
     Args:
         trainer_policy_version: Policy version that will consume this batch.
         min_policy_versions: Oldest sampled policy version for each packed training sample.
-        max_offpolicy_steps: Configured max consume-time trainer-version lag (the strict-FIFO bound).
-        window_lookahead_steps: Extra consume-time lag that windowed FIFO may admit while a straggler
-            waits, measured in train-steps (`s`), NOT window entries.
+        target_off_policy_steps: Mean off-policy run-ahead used for buffer sizing.
+        max_off_policy_steps: Hard consume-time off-policy-step lag. Defaults to
+            ``target_off_policy_steps`` for strict FIFO.
 
     Example:
-        # trainer at v=10; training samples' oldest versions [8, 9] -> ages [2, 1]
-        compute_policy_age_metrics(trainer_policy_version=10, min_policy_versions=[8, 9], max_offpolicy_steps=3)
-        # -> train_batch/policy_age mean 1.5, train_batch/policy_age_max 2
+        # trainer at v=10; training samples' oldest versions [8, 9] -> off-policy steps [2, 1]
+        compute_off_policy_step_metrics(
+            trainer_policy_version=10,
+            min_policy_versions=[8, 9],
+            target_off_policy_steps=3,
+        )
+        # -> train_batch/off_policy_steps mean 1.5, train_batch/off_policy_steps_max 2
     """
-    policy_ages = [
+    off_policy_steps = [
         trainer_policy_version - min_policy_version
         for min_policy_version in min_policy_versions
     ]
-    max_policy_age = max(policy_ages, default=0)
-    max_policy_age_tolerance = max_offpolicy_steps + window_lookahead_steps
-    if max_policy_age > max_policy_age_tolerance:
+    max_observed_off_policy_steps = max(off_policy_steps, default=0)
+    off_policy_step_limit = (
+        target_off_policy_steps if max_off_policy_steps is None else max_off_policy_steps
+    )
+    if max_observed_off_policy_steps > off_policy_step_limit:
         raise RuntimeError(
             "rollout backpressure admitted stale training data: "
-            f"max_policy_age={max_policy_age}, "
-            f"max_offpolicy_steps={max_offpolicy_steps}, "
-            f"window_lookahead_steps={window_lookahead_steps}, "
+            f"max_observed_off_policy_steps={max_observed_off_policy_steps}, "
+            f"target_off_policy_steps={target_off_policy_steps}, "
+            f"max_off_policy_steps={off_policy_step_limit}, "
             f"trainer_policy_version={trainer_policy_version}"
         )
     return [
-        m.Metric("train_batch/policy_age", m.Mean.from_list(policy_ages)),
-        m.Metric("train_batch/policy_age_max", m.NoReduce(float(max_policy_age))),
+        m.Metric("train_batch/off_policy_steps", m.Mean.from_list(off_policy_steps)),
+        m.Metric(
+            "train_batch/off_policy_steps_max",
+            m.NoReduce(float(max_observed_off_policy_steps)),
+        ),
     ]
 
 

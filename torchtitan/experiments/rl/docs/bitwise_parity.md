@@ -155,7 +155,7 @@ compute-bound the workload is.
 **Experiment setup.** Dense Qwen3-8B on the Search-R1 recipe
 (`rl_grpo_qwen3_8b_search_r1` with and without the `_batch_invariant` variant),
 8xH100, matched TP2/TP2 (trainer `tensor_parallel_degree=2` + generator
-`tensor_parallel_degree=2`), on-policy (`max_offpolicy_steps=0`), generator
+`tensor_parallel_degree=2`), on-policy (`target_off_policy_steps=0`), generator
 cudagraph ON (`FULL_DECODE_ONLY`) in BOTH runs, 30 training steps, 4 groups x
 group_size 8 = 32 rollouts/step. The two runs differ ONLY in
 `DebugConfig(batch_invariant=...)`. All values are per-step medians.
