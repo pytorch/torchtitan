@@ -11,6 +11,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.hf_datasets.pretokenized import PreTokenizedTextDataLoader
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
@@ -92,8 +93,12 @@ def olmo3_7b() -> Trainer.Config:
             seq_len=8192,
             steps=1_192_092,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=PreTokenizedTextDataLoader.Config(
+            dataset="dolma3_common_crawl_religion_0016",
+            dataset_path=(
+                "/home/ruisizhang123/ruisizhang123_data/tree/"
+                "dolma3_mix-6T-1025-7B/pre-tokenize-data/common_crawl-religion-0016"
+            ),
         ),
         parallelism=ParallelismConfig(
             data_parallel_replicate_degree=2,
