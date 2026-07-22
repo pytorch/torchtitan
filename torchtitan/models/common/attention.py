@@ -103,10 +103,18 @@ class VarlenAttention(Module):
 
         from torchtitan.tools.utils import has_cuda_capability
 
-        # Hopper (SM 9.0) uses FA3
-        if has_cuda_capability(9, 0):
-            if current_flash_attention_impl() != "FA3":
-                activate_flash_attention_impl("FA3")
+        if has_cuda_capability(10, 0):
+            flash_attention_impl = "FA4"
+        elif has_cuda_capability(9, 0):
+            flash_attention_impl = "FA3"
+        else:
+            flash_attention_impl = None
+
+        if (
+            flash_attention_impl is not None
+            and current_flash_attention_impl() != flash_attention_impl
+        ):
+            activate_flash_attention_impl(flash_attention_impl)
 
     def forward(
         self,
@@ -875,6 +883,11 @@ class GQAttention(BaseAttention):
         head_dim: int | None = None
         inner_attention: Module.Config
         rope: RoPE.Config
+        sliding_window_size: int | None = None
+        """Causal sliding-window size for this layer (e.g. Olmo3-style hybrid
+        attention). Not consumed by ``forward`` -- windowing is applied via
+        mask selection (flex) or ``inner_attention.window_size`` (varlen);
+        this field only tags the layer for that selection."""
 
     def __init__(self, config: Config):
         super().__init__()
