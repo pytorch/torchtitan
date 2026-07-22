@@ -89,17 +89,17 @@ class _FakeConfigManager:
         return self.config
 
 
-def test_async_loop_config_resolves_default_max_off_policy_steps() -> None:
-    async_loop = AsyncLoopConfig(target_off_policy_steps=2)
-    assert async_loop.max_off_policy_steps == 2
+def test_async_loop_config_resolves_default_max_offpolicy_steps() -> None:
+    async_loop = AsyncLoopConfig(target_offpolicy_steps=2)
+    assert async_loop.max_offpolicy_steps == 2
 
 
-def test_async_loop_config_rejects_max_off_policy_steps_above_window_bound() -> None:
-    with pytest.raises(ValueError, match="max_off_policy_steps"):
+def test_async_loop_config_rejects_max_offpolicy_steps_above_window_bound() -> None:
+    with pytest.raises(ValueError, match="max_offpolicy_steps"):
         AsyncLoopConfig(
             num_prompts_per_train_step=3,
-            target_off_policy_steps=2,
-            max_off_policy_steps=6,
+            target_offpolicy_steps=2,
+            max_offpolicy_steps=6,
         )
 
 

@@ -25,7 +25,7 @@ _data_input_loop                                      _rollout_loop[N] (group wo
                         v                                                     | v
 RolloutGroupWorkBuffer
 +---------------------------------------------------------------------------------------------------------------------+
-| active slots = (target_off_policy_steps + 1) * num_prompts_per_train_step                                                |
+| active slots = (target_offpolicy_steps + 1) * num_prompts_per_train_step                                                |
 |                                                                                                                     |
 | caller            group_buffer call                                            state / active slot                  |
 | _data_input_loop  add_work(RolloutGroupWork)                                   WAITING; slot acquired               |
@@ -164,13 +164,16 @@ class AsyncLoopConfig(Configurable.Config):
     num_samples_per_prompt: int = 8
     """Sibling rollouts sampled per prompt (the GRPO group)."""
 
-    target_off_policy_steps: int = 3
+    target_offpolicy_steps: int = 3
     """Mean off-policy train-step run-ahead. Sets active buffer size to `(S + 1) * P`.
     0 = fully on-policy (sync): generator and trainer alternate in lockstep."""
 
-    max_off_policy_steps: int = -1
-    """Hard consume-time off-policy-step bound. -1 means `target_off_policy_steps` (strict FIFO).
-    Raising this above `target_off_policy_steps` enables windowed FIFO look-ahead."""
+    max_offpolicy_steps: int = -1
+    """Hard consume-time off-policy-step bound. -1 means `target_offpolicy_steps` (strict FIFO).
+    Raising this above `target_offpolicy_steps` enables windowed FIFO look-ahead. After
+    resolution, valid values are between `target_offpolicy_steps` and
+    `(2 * (target_offpolicy_steps + 1) * num_prompts_per_train_step - 2)
+    // num_prompts_per_train_step`."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -187,29 +190,29 @@ class AsyncLoopConfig(Configurable.Config):
                 "num_prompts_per_train_step must be >= 1, got "
                 f"{self.num_prompts_per_train_step}"
             )
-        if self.target_off_policy_steps < 0:
+        if self.target_offpolicy_steps < 0:
             raise ValueError(
-                f"target_off_policy_steps must be >= 0, got {self.target_off_policy_steps}"
+                f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
             )
-        if self.max_off_policy_steps < 0:
-            self.max_off_policy_steps = self.target_off_policy_steps
+        if self.max_offpolicy_steps < 0:
+            self.max_offpolicy_steps = self.target_offpolicy_steps
 
         max_active_rollout_groups = (
-            self.target_off_policy_steps + 1
+            self.target_offpolicy_steps + 1
         ) * self.num_prompts_per_train_step
         max_allowed_off_policy_steps = (
             2 * max_active_rollout_groups - 2
         ) // self.num_prompts_per_train_step
         if not (
-            self.target_off_policy_steps
-            <= self.max_off_policy_steps
+            self.target_offpolicy_steps
+            <= self.max_offpolicy_steps
             <= max_allowed_off_policy_steps
         ):
             raise ValueError(
-                "max_off_policy_steps must be -1 or between "
-                f"{self.target_off_policy_steps} and {max_allowed_off_policy_steps} "
+                "max_offpolicy_steps must be -1 or between "
+                f"{self.target_offpolicy_steps} and {max_allowed_off_policy_steps} "
                 "after resolution, got "
-                f"max_off_policy_steps={self.max_off_policy_steps}, "
+                f"max_offpolicy_steps={self.max_offpolicy_steps}, "
                 f"active_buffer_size={max_active_rollout_groups}"
             )
 
@@ -521,7 +524,7 @@ class Controller(Configurable):
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
         max_active_rollout_groups = (
-            async_loop.target_off_policy_steps + 1
+            async_loop.target_offpolicy_steps + 1
         ) * async_loop.num_prompts_per_train_step
         rollout_concurrency = max(
             max_active_rollout_groups * async_loop.num_samples_per_prompt,
@@ -744,12 +747,12 @@ class Controller(Configurable):
 
         # Buffer capacity sets the mean run-ahead; window size sets the hard off-policy-step bound.
         max_active_rollout_groups = (
-            async_loop.target_off_policy_steps + 1
+            async_loop.target_offpolicy_steps + 1
         ) * async_loop.num_prompts_per_train_step
         window_size = derive_window_size(
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
-            target_off_policy_steps=async_loop.target_off_policy_steps,
-            max_off_policy_steps=async_loop.max_off_policy_steps,
+            target_offpolicy_steps=async_loop.target_offpolicy_steps,
+            max_offpolicy_steps=async_loop.max_offpolicy_steps,
         )
 
         self._group_buffer = async_loop.group_buffer.build(
@@ -1045,8 +1048,8 @@ class Controller(Configurable):
                 policy_age_panel = compute_policy_age_metrics(
                     trainer_policy_version=self._trainer_policy_version,
                     min_policy_versions=packed.min_policy_versions,
-                    target_off_policy_steps=self.config.async_loop.target_off_policy_steps,
-                    max_off_policy_steps=self.config.async_loop.max_off_policy_steps,
+                    target_offpolicy_steps=self.config.async_loop.target_offpolicy_steps,
+                    max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
                 # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by

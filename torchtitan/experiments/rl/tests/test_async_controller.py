@@ -207,7 +207,7 @@ def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
         compute_policy_age_metrics(
             trainer_policy_version=4,
             min_policy_versions=[0],
-            target_off_policy_steps=3,
+            target_offpolicy_steps=3,
         )
 
 
@@ -215,8 +215,8 @@ def test_compute_policy_age_metrics_uses_hard_off_policy_limit() -> None:
     metrics = compute_policy_age_metrics(
         trainer_policy_version=4,
         min_policy_versions=[0],
-        target_off_policy_steps=3,
-        max_off_policy_steps=4,
+        target_offpolicy_steps=3,
+        max_offpolicy_steps=4,
     )
     assert any(metric.key == "train_batch/policy_age_max" for metric in metrics)
 
@@ -224,8 +224,8 @@ def test_compute_policy_age_metrics_uses_hard_off_policy_limit() -> None:
         compute_policy_age_metrics(
             trainer_policy_version=5,
             min_policy_versions=[0],
-            target_off_policy_steps=3,
-            max_off_policy_steps=4,
+            target_offpolicy_steps=3,
+            max_offpolicy_steps=4,
         )
 
 
@@ -256,24 +256,24 @@ def test_derive_window_size_from_off_policy_limit() -> None:
     assert (
         derive_window_size(
             num_prompts_per_train_step=3,
-            target_off_policy_steps=2,
-            max_off_policy_steps=3,
+            target_offpolicy_steps=2,
+            max_offpolicy_steps=3,
         )
         == 4
     )
     assert (
         derive_window_size(
             num_prompts_per_train_step=3,
-            target_off_policy_steps=2,
-            max_off_policy_steps=2,
+            target_offpolicy_steps=2,
+            max_offpolicy_steps=2,
         )
         == 1
     )
     assert (
         derive_window_size(
             num_prompts_per_train_step=3,
-            target_off_policy_steps=2,
-            max_off_policy_steps=5,
+            target_offpolicy_steps=2,
+            max_offpolicy_steps=5,
         )
         == 9
     )

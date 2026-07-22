@@ -120,7 +120,7 @@ class WeightSyncManager:
         #   share / resume it early); needs the born-fresh invariant to hold per-generator, not globally.
 
         # Born-fresh: admit the next groups only now that the generators are on `version`, so a new
-        # rollout starts at the current version (keeps policy age <= target_off_policy_steps).
+        # rollout starts at the current version (keeps policy_age <= target_offpolicy_steps).
         await self._group_buffer.release_active_groups(
             self._num_prompts_per_train_step, reason="trained"
         )

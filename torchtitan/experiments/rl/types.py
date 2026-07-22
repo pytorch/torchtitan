@@ -148,7 +148,7 @@ class TrainingBatch:
     microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
     num_global_valid_tokens: int
     metrics: list[m.Metric]
-    # one per packed training_sample; trainer computes policy age at consume time
+    # one per packed training_sample; trainer computes policy_age at consume time
     min_policy_versions: list[int]
 
 

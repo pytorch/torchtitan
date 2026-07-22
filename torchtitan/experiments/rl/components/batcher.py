@@ -169,7 +169,7 @@ class Batcher(Configurable):
                     num_metric_only_groups,
                 ),
             ],
-            # Trainer computes policy age from these at consume time (faithful to what it trains on).
+            # Trainer computes policy_age from these at consume time (faithful to what it trains on).
             # min_policy_version is the oldest version this training_sample was sampled under.
             min_policy_versions=[
                 training_sample.min_policy_version

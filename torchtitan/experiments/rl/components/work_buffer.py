@@ -23,18 +23,23 @@ from torchtitan.observability import structured_logger as sl
 def derive_window_size(
     *,
     num_prompts_per_train_step: int,
-    target_off_policy_steps: int,
-    max_off_policy_steps: int,
+    target_offpolicy_steps: int,
+    max_offpolicy_steps: int,
 ) -> int:
     """Derive the fixed FIFO look-ahead window from the hard off-policy-step bound.
 
-    Let ``P`` be prompts per train step, ``S`` be the desired mean off-policy
-    run-ahead, and ``M`` be the maximum off-policy steps tolerated. The active buffer
-    has ``B = (S + 1) * P`` slots. For a fixed window size ``W``, the worst case
-    number of off-policy steps is ``(B + W - 2) // P``. Solving for ``W`` gives
-    ``W = P * (M - S) + 1``.
+    Symbols:
+        ``P``: prompts per train step (``num_prompts_per_train_step``).
+        ``S``: target mean off-policy steps (``target_offpolicy_steps``).
+        ``M``: maximum off-policy steps tolerated; larger values allow a wider FIFO
+        window for better performance (``max_offpolicy_steps``).
+        ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
+        ``W``: FIFO look-ahead window size to derive.
+
+    For a fixed window size ``W``, the worst case number of off-policy steps is
+    ``(B + W - 2) // P``. Solving for ``W`` gives ``W = P * (M - S) + 1``.
     """
-    return num_prompts_per_train_step * (max_off_policy_steps - target_off_policy_steps) + 1
+    return num_prompts_per_train_step * (max_offpolicy_steps - target_offpolicy_steps) + 1
 
 
 class _RolloutGroupWorkState(enum.Enum):
@@ -73,7 +78,9 @@ class RolloutGroupWorkBuffer(Configurable):
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
     run-ahead at `max_active_rollout_groups` active slots; the batcher takes finalized groups within
-    a fixed look-ahead window anchored at the oldest entry. `window_size=1` is strict FIFO.
+    a fixed look-ahead window anchored at the oldest entry. Users get strict FIFO by leaving
+    `max_offpolicy_steps=-1` or setting `max_offpolicy_steps == target_offpolicy_steps`,
+    which derives `window_size=1`.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -88,11 +95,11 @@ class RolloutGroupWorkBuffer(Configurable):
         active slot:  charged by add_work() ............ freed by release_active_groups()
 
     Example:
-        # target_off_policy_steps=1, num_prompts_per_train_step=2 -> capacity=4
+        # target_offpolicy_steps=1, num_prompts_per_train_step=2 -> capacity=4
         await buffer.add_work(g0); await buffer.add_work(g1)   # 2/4 active
         await buffer.add_work(g2); await buffer.add_work(g3)   # 4/4 active (cap)
-        g0 = await buffer.take_finalized()                      # g0 leaves the dict; still 4/4 active
-        g1 = await buffer.take_finalized()                      # g1 leaves the dict; still 4/4 active
+        g0 = await buffer.take_finalized()                     # g0 leaves the dict; still 4/4 active
+        g1 = await buffer.take_finalized()                     # g1 leaves the dict; still 4/4 active
         slot_task = asyncio.create_task(buffer.wait_for_slot())  # waits: take_finalized did not free a slot
         assert not slot_task.done()
         await buffer.release_active_groups(2, reason="trained")  # trainer pulled -> a slot frees
@@ -136,7 +143,7 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @property
     def window_size(self) -> int:
-        """Prompt-group look-ahead window anchored at the oldest buffered group."""
+        """Prompt-group look-ahead window anchored at the oldest prompt group in the buffer."""
         return self._window_size
 
     def _has_active_slot_available(self) -> bool:
@@ -202,7 +209,8 @@ class RolloutGroupWorkBuffer(Configurable):
 
         The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
         window stay blocked even if they are finalized, so taking non-head groups does not slide
-        the window. `window_size=1` gives strict FIFO.
+        the window. Users get strict FIFO by leaving `max_offpolicy_steps=-1` or setting
+        `max_offpolicy_steps == target_offpolicy_steps`, which derives `window_size=1`.
 
         Example:
             # window_size=1: head g0 still INFLIGHT, g1 FINALIZED -> waits for g0
@@ -222,7 +230,6 @@ class RolloutGroupWorkBuffer(Configurable):
                             continue
                         del self._work_by_group_id[group_id]
                         self._condition.notify_all()
-                        assert work.rollout_group is not None
                         return work.rollout_group
                 await self._condition.wait()  # nothing finalized inside the window -> stall
 
