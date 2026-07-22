@@ -62,7 +62,8 @@ class TestDispatcherProtocol(unittest.TestCase):
                 token_indices_experts_sorted_N=torch.tensor([0]),
                 topk_scores_experts_sorted_N=torch.tensor([1.0]),
             ),
-            torch.tensor([[[0.0]]]),
+            torch.tensor([[0.0]]),
+            batch_size=1,
             num_local_tokens_after_padding=1,
             local_seq_len_after_padding=1,
         )
