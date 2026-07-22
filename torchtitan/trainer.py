@@ -22,6 +22,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.external_eval import ExternalEval
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -102,6 +103,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
+        external_eval: ExternalEval.Config = field(default_factory=ExternalEval.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
@@ -524,6 +526,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
+        self.external_eval = config.external_eval.build()
+
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
             spmd_typechecking=(
@@ -912,6 +916,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         last_step=(self.step == config.training.steps),
                     )
 
+                    if config.external_eval.enable and self.external_eval.should_eval(
+                        self.step
+                    ):
+                        self.external_eval.launch(
+                            step=self.step,
+                            trainer_config=config,
+                            checkpointer=self.checkpointer,
+                        )
+
                     # Run validation if validator is available
                     if self.config.validator.enable and self.validator.should_validate(
                         self.step
@@ -953,3 +966,5 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
+        if hasattr(self, "external_eval") and self.external_eval:
+            self.external_eval.close()

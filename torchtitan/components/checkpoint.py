@@ -796,6 +796,55 @@ class CheckpointManager(Configurable):
         )
         return True
 
+    @sl.log_trace_span("external_eval_checkpoint_save")
+    @torch.no_grad()
+    def save_for_external_eval(self, curr_step: int) -> str:
+        """Save a model-only DCP checkpoint for an external evaluation job.
+
+        This bypasses the regular checkpoint interval so eval cadence can differ
+        from training checkpoint cadence. If the checkpoint already exists, it is
+        reused.
+        """
+
+        if not self.enable:
+            raise ValueError("Cannot save external eval checkpoint when disabled.")
+        if self.load_only:
+            raise ValueError("Cannot save external eval checkpoint in load_only mode.")
+
+        self.maybe_wait_for_saving()
+
+        regular_checkpoint_id = self.get_checkpoint_id(curr_step)
+        if filesystem.isdir(regular_checkpoint_id) and filesystem.isfile(
+            filesystem.join(regular_checkpoint_id, ".metadata")
+        ):
+            logger.info(
+                "Reusing existing checkpoint for external eval: %s",
+                regular_checkpoint_id,
+            )
+            return regular_checkpoint_id
+
+        eval_folder = filesystem.join(self.folder, "external_eval")
+        checkpoint_id = self.get_checkpoint_id(curr_step, folder=eval_folder)
+        if filesystem.isdir(checkpoint_id) and filesystem.isfile(
+            filesystem.join(checkpoint_id, ".metadata")
+        ):
+            logger.info(
+                "Reusing existing external eval checkpoint: %s", checkpoint_id
+            )
+            return checkpoint_id
+
+        logger.info(
+            "Saving model-only checkpoint for external eval at step %s.", curr_step
+        )
+        states = self.states[MODEL].state_dict()
+        self.dcp_save(
+            states,
+            checkpoint_id=checkpoint_id,
+            async_mode=AsyncMode.DISABLED,
+            enable_garbage_collection=True,
+        )
+        return checkpoint_id
+
     @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
@@ -1014,6 +1063,9 @@ class CheckpointManager(Configurable):
         (e.g., 'checkpoints/step-100')."""
         folder = folder or self.folder
         return filesystem.join(folder, f"step-{step}")
+
+    def get_checkpoint_id(self, step: int, folder: str = "") -> str:
+        return self._create_checkpoint_id(step, folder)
 
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
