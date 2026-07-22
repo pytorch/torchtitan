@@ -4,6 +4,16 @@
 DTensor parameters and momentum as the persistent optimizer and checkpoint
 objects. It requires the batched-matrix behavior from PyTorch PR #190597.
 
+The implementation has two independent layers:
+
+1. `spmd.dtensor_compute_view()` performs generic physical
+   storage-to-compute redistribution and writeback.
+2. `SPMDMuon` optionally views the resulting physical tensor as a logical
+   matrix batch such as `[H, Dh, D]`.
+
+The first layer contains no optimizer or head/expert semantics and can also be
+used by storage-level operations such as gradient clipping.
+
 Select parameters explicitly with ordered regular expressions:
 
 ```python
@@ -23,9 +33,11 @@ OptimizersContainer.Config(
 )
 ```
 
-Every selected tensor must logically have shape `[..., M, N]`. Sharding is
-allowed only on dimensions before `M` and `N`; `Partial`, unqualified
-`Varying`, and matrix-dimension shards fail before the update.
+Every selected tensor must logically have shape `[..., M, N]`. `SPMDMuon`
+chooses a physical compute placement containing complete matrices. Leading
+matrix-batch shards are retained; shards that split `M` or `N` are temporarily
+redistributed to `Replicate` and written back to storage after the update.
+Residual `Partial` gradients fail before the update.
 
 Grouped expert weights such as `[E, F, D]` work directly when only `E` is
 sharded. Physically structured head weights such as `[H, Dh, D]` follow the
@@ -45,7 +57,7 @@ ParamGroupConfig(
 )
 ```
 
-`matrix_shape` is a storage-sharing view only. It is rejected for physically
-sharded flattened tensors because the current metadata cannot prove that shard
-boundaries coincide with head boundaries. Store those parameters as
-`[H, Dh, D]` and shard `H` instead.
+`matrix_shape` is applied only after the generic storage-to-compute transition.
+For a physically sharded flattened tensor, `SPMDMuon` first requests a
+replicated physical compute tensor and then applies the storage-sharing logical
+view. The reshape itself never owns communication or persistent storage.

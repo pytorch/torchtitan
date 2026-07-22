@@ -16,6 +16,14 @@ from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfi
 from torchtitan.components.spmd_muon import SPMDMuon
 
 
+def _has_batched_muon() -> bool:
+    try:
+        torch.optim.Muon([torch.nn.Parameter(torch.randn(1, 2, 3))])
+    except ValueError:
+        return False
+    return True
+
+
 class TestSPMDMuon(FakeProcessGroupTestCase):
     WORLD_SIZE = 2
 
@@ -112,26 +120,35 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
         self.assertIsInstance(momentum, DTensor)
         self.assertEqual(momentum.placements, param.placements)
 
-    def test_matrix_dimension_shard_fails_before_update(self):
-        param = self._dtensor_parameter(
-            torch.randn(3, 4), Shard(0), global_shape=(6, 4)
-        )
+    def test_matrix_dimension_shard_redistributes_for_compute(self):
+        local_param = torch.randn(3, 4)
+        local_grad = torch.randn(3, 4)
+        param = self._dtensor_parameter(local_param, Shard(0), global_shape=(6, 4))
         param.grad = DTensor.from_local(
-            torch.randn(3, 4),
+            local_grad,
             self.mesh,
             [Shard(0)],
             run_check=False,
             shape=(6, 4),
             stride=(4, 1),
         )
-        before = param.to_local().clone()
         optimizer = SPMDMuon([param], lr=0.02, ns_steps=1)
+        reference = torch.nn.Parameter(torch.cat([local_param, local_param], dim=0))
+        reference.grad = torch.cat([local_grad, local_grad], dim=0)
+        reference_optimizer = torch.optim.Muon([reference], lr=0.02, ns_steps=1)
 
-        with self.assertRaisesRegex(spmd.SpmdTypeError, "final 2 dimensions"):
+        comm_mode = CommDebugMode()
+        with comm_mode:
             optimizer.step()
+        reference_optimizer.step()
 
-        torch.testing.assert_close(param.to_local(), before)
-        self.assertNotIn(param, optimizer.state)
+        self.assertGreater(comm_mode.get_total_counts(), 0)
+        torch.testing.assert_close(param.to_local(), reference[:3])
+        momentum = optimizer.state[param]["momentum_buffer"]
+        reference_momentum = reference_optimizer.state[reference]["momentum_buffer"]
+        self.assertIsInstance(momentum, DTensor)
+        self.assertEqual(momentum.placements, param.placements)
+        torch.testing.assert_close(momentum.to_local(), reference_momentum[:3])
 
     def test_dtensor_leading_shard_matrix_batch(self):
         # The same layout covers physical per-head [H, Dh, D] and grouped
@@ -242,16 +259,42 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
             reference_optimizer.state[reference]["momentum_buffer"],
         )
 
-    def test_flattened_shard_is_rejected(self):
+    @unittest.skipUnless(_has_batched_muon(), "requires PyTorch PR #190597")
+    def test_flattened_shard_redistributes_before_head_view(self):
+        head_dim, model_dim = 3, 4
+        local_param = torch.randn(head_dim, model_dim)
+        local_grad = torch.randn_like(local_param)
         param = self._dtensor_parameter(
-            torch.randn(3, 4), Shard(0), global_shape=(6, 4)
+            local_param,
+            Shard(0),
+            global_shape=(2 * head_dim, model_dim),
         )
-        compute = spmd.dtensor_to_local(param)
+        param.grad = DTensor.from_local(
+            local_grad,
+            self.mesh,
+            [Shard(0)],
+            run_check=False,
+            shape=(2 * head_dim, model_dim),
+            stride=(model_dim, 1),
+        )
+        optimizer = SPMDMuon(
+            [{"params": [param], "matrix_shape": (head_dim, model_dim)}],
+            lr=0.02,
+            ns_steps=1,
+        )
+        reference = torch.nn.Parameter(
+            torch.stack([local_param, local_param], dim=0)
+        )
+        reference.grad = torch.stack([local_grad, local_grad], dim=0)
+        reference_optimizer = torch.optim.Muon([reference], lr=0.02, ns_steps=1)
 
-        with self.assertRaisesRegex(
-            spmd.SpmdTypeError, "matrix-boundary alignment"
-        ):
-            SPMDMuon._logical_matrix_view(compute, (3, 4))
+        optimizer.step()
+        reference_optimizer.step()
+
+        torch.testing.assert_close(param.to_local(), reference[0])
+        momentum = optimizer.state[param]["momentum_buffer"]
+        reference_momentum = reference_optimizer.state[reference]["momentum_buffer"]
+        torch.testing.assert_close(momentum.to_local(), reference_momentum[0])
 
 
 if __name__ == "__main__":

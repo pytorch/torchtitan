@@ -4,14 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Muon adapter for temporary plain-tensor SPMD compute views."""
+"""Muon policy and logical views over generic SPMD compute tensors."""
 
 from collections.abc import MutableMapping
+from contextlib import ExitStack
 
 import spmd_types as spmd
 import torch
 from torch import Tensor
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import (
+    DTensor,
+    Partial as DtPartial,
+    Placement as DtPlacement,
+    Replicate as DtReplicate,
+    Shard as DtShard,
+)
+from torch.optim._muon import muon
 
 
 __all__ = ["SPMDMuon"]
@@ -27,9 +35,54 @@ class SPMDMuon(torch.optim.Muon):
     """
 
     @staticmethod
-    def _compute_view(tensor: Tensor, source: Tensor | None = None) -> Tensor:
+    def _compute_placements(
+        tensor: DTensor,
+        matrix_shape: tuple[int, int] | None,
+    ) -> tuple[DtPlacement, ...]:
+        """Choose a physical DTensor layout containing complete Muon matrices."""
+        compute_placements = []
+        first_matrix_dim = tensor.ndim - 2
+        for placement in tensor.placements:
+            if isinstance(placement, DtPartial):
+                raise spmd.SpmdTypeError(
+                    "SPMDMuon requires gradients to be reduced before the "
+                    "optimizer step; Partial storage is not a valid input"
+                )
+            if isinstance(placement, DtShard):
+                shard_dim = placement.dim % tensor.ndim
+                # A logical reshape makes every physical shard boundary
+                # ambiguous. Native [..., M, N] tensors may retain shards only
+                # on their leading matrix-batch dimensions.
+                if (
+                    matrix_shape is not None
+                    or type(placement) is not DtShard
+                    or shard_dim >= first_matrix_dim
+                ):
+                    placement = DtReplicate()
+            compute_placements.append(placement)
+        return tuple(compute_placements)
+
+    def _compute_view(
+        self,
+        tensor: Tensor,
+        source: Tensor | None = None,
+        *,
+        matrix_shape: tuple[int, int] | None,
+        writeback: bool,
+    ) -> Tensor:
         if isinstance(tensor, DTensor):
-            return spmd.dtensor_to_local(tensor)
+            stack = getattr(self, "_compute_view_stack", None)
+            if stack is None:
+                raise RuntimeError(
+                    "SPMDMuon compute views must be opened inside step()"
+                )
+            return stack.enter_context(
+                spmd.dtensor_compute_view(
+                    tensor,
+                    placements=self._compute_placements(tensor, matrix_shape),
+                    writeback=writeback,
+                )
+            )
         if not spmd.has_local_type(tensor):
             if source is None:
                 raise spmd.SpmdTypeError(
@@ -54,15 +107,6 @@ class SPMDMuon(torch.optim.Muon):
             raise ValueError(
                 "SPMDMuon matrix_shape must be a tuple of two positive integers, "
                 f"got {matrix_shape!r}"
-            )
-        partition_spec = spmd.get_partition_spec(tensor)
-        if partition_spec is not None and any(
-            entry is not None for entry in partition_spec
-        ):
-            raise spmd.SpmdTypeError(
-                "SPMDMuon matrix_shape cannot reinterpret a physically sharded "
-                "tensor because matrix-boundary alignment is not yet provable. "
-                "Store the parameter as [..., M, N] and shard a leading dimension."
             )
         matrix_numel = matrix_shape[0] * matrix_shape[1]
         if tensor.numel() % matrix_numel != 0:
@@ -95,8 +139,18 @@ class SPMDMuon(torch.optim.Muon):
             if persistent_grad.is_sparse:
                 raise RuntimeError("Muon does not support sparse gradients")
 
-            param = self._compute_view(persistent_param)
-            grad = self._compute_view(persistent_grad, param)
+            matrix_shape = group.get("matrix_shape")
+            param = self._compute_view(
+                persistent_param,
+                matrix_shape=matrix_shape,
+                writeback=True,
+            )
+            grad = self._compute_view(
+                persistent_grad,
+                param,
+                matrix_shape=matrix_shape,
+                writeback=False,
+            )
             spmd.assert_type_like(grad, param)
             for compute_tensor in (param, grad):
                 spmd.assert_local_block(compute_tensor, trailing_dims=2)
@@ -106,7 +160,6 @@ class SPMDMuon(torch.optim.Muon):
                     f"same shape, got {param.shape} and {grad.shape}"
                 )
 
-            matrix_shape = group.get("matrix_shape")
             storage_param = param
             param = self._logical_matrix_view(param, matrix_shape)
             grad = self._logical_matrix_view(grad, matrix_shape)
@@ -119,7 +172,12 @@ class SPMDMuon(torch.optim.Muon):
                     persistent_grad, memory_format=torch.preserve_format
                 )
             persistent_momentum = state["momentum_buffer"]
-            momentum = self._compute_view(persistent_momentum, storage_param)
+            momentum = self._compute_view(
+                persistent_momentum,
+                storage_param,
+                matrix_shape=matrix_shape,
+                writeback=True,
+            )
             spmd.assert_type_like(momentum, storage_param)
             spmd.assert_local_block(momentum, trailing_dims=2)
             momentum = self._logical_matrix_view(momentum, matrix_shape)
@@ -135,9 +193,47 @@ class SPMDMuon(torch.optim.Muon):
 
         return False
 
+    @torch.no_grad()
     def step(self, closure=None):
-        # Multi-leading-dimension flatten/unflatten is not yet representable by
-        # global PartitionSpec propagation. The entry assertion above retains
-        # the global safety proof; the Muon body needs only local SPMD rules.
-        with spmd.local():
-            return super().step(closure)
+        """Run each parameter group in its requested physical compute layout."""
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            # Scope gathered parameter/gradient/state buffers to one group so a
+            # model-wide step does not retain every temporary compute layout.
+            with ExitStack() as stack:
+                self._compute_view_stack = stack
+                try:
+                    # Multi-leading-dimension flatten/unflatten is not yet
+                    # representable by global PartitionSpec propagation. The
+                    # entry assertion retains the global safety proof.
+                    with spmd.local():
+                        params_with_grad: list[Tensor] = []
+                        grads: list[Tensor] = []
+                        muon_momentum_bufs: list[Tensor] = []
+                        has_complex = self._init_group(
+                            group,
+                            params_with_grad,
+                            grads,
+                            muon_momentum_bufs,
+                        )
+                        muon(
+                            params_with_grad,
+                            grads,
+                            muon_momentum_bufs,
+                            lr=group["lr"],
+                            weight_decay=group["weight_decay"],
+                            momentum=group["momentum"],
+                            nesterov=group["nesterov"],
+                            ns_coefficients=group["ns_coefficients"],
+                            eps=group["eps"],
+                            ns_steps=group["ns_steps"],
+                            adjust_lr_fn=group["adjust_lr_fn"],
+                            has_complex=has_complex,
+                        )
+                finally:
+                    self._compute_view_stack = None
+        return loss
