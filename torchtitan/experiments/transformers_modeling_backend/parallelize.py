@@ -56,9 +56,9 @@ def parallelize_hf_transformers(
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
-        training.batch.seq_len % parallel_dims.seq_len_divisor == 0
+        training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {training.batch.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 

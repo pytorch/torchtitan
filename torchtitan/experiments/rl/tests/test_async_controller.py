@@ -11,8 +11,7 @@ import asyncio
 
 import pytest
 
-from torchtitan.config import BatchConfig
-from torchtitan.experiments.rl.components.batcher import Batcher
+from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,

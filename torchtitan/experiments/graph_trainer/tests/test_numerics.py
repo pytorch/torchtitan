@@ -348,8 +348,8 @@ GRAPH_PP_DSV3_PP_OPTIONS = (
     "--parallelism.pipeline_parallel_degree=2"
     " --parallelism.data_parallel_shard_degree=4"
     " --parallelism.expert_parallel_degree=2"
-    " --training.batch.local_batch_size=8"
-    " --training.batch.global_batch_size=32"
+    " --training.local_batch_size=8"
+    " --training.global_batch_size=32"
     # Eager PP cannot be the baseline for ZBVZeroBubble or DualPipeV here:
     # FlexAttention needs torch.compile, and torch.compile is incompatible with
     # those eager PP schedules. Compare GraphPP schedules against eager

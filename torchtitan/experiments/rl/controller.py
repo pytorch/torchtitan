@@ -209,7 +209,7 @@ class Controller(Configurable):
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
         dump_folder: str = "outputs/rl"
-        """Base output folder for RL artifacts (temp weights, logs, etc.)."""
+        """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
@@ -277,8 +277,8 @@ class Controller(Configurable):
                         f"by sequence parallel degree ({sp_degree})."
                     )
 
-            # Mirror the batcher width into trainer.training.batch.seq_len for the model build.
-            self.trainer.training.batch.seq_len = self.async_loop.batcher.batch.seq_len
+            # Mirror the batcher width into trainer.training.seq_len for the model build.
+            self.trainer.training.seq_len = self.async_loop.batcher.batch.seq_len
 
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len

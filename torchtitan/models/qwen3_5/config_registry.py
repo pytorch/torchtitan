@@ -11,7 +11,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
-from torchtitan.config import BatchConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -57,7 +57,8 @@ def qwen35_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=1, seq_len=512),
+            local_batch_size=1,
+            seq_len=512,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -84,7 +85,8 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=2, seq_len=512),
+            local_batch_size=2,
+            seq_len=512,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -116,7 +118,8 @@ def qwen35_0_8b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4, seq_len=4096),
+            local_batch_size=4,
+            seq_len=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -145,7 +148,8 @@ def qwen35_2b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4, seq_len=4096),
+            local_batch_size=4,
+            seq_len=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -174,7 +178,8 @@ def qwen35_4b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4, seq_len=4096),
+            local_batch_size=4,
+            seq_len=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -202,7 +207,8 @@ def qwen35_9b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4, seq_len=4096),
+            local_batch_size=4,
+            seq_len=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -232,7 +238,8 @@ def qwen35_27b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4, seq_len=4096),
+            local_batch_size=4,
+            seq_len=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -262,7 +269,8 @@ def qwen35_35b_a3b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4, seq_len=4096),
+            local_batch_size=4,
+            seq_len=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -293,7 +301,8 @@ def qwen35_122b_a10b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4, seq_len=4096),
+            local_batch_size=4,
+            seq_len=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -324,7 +333,8 @@ def qwen35_397b_a17b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            batch=BatchConfig(local_batch_size=4, seq_len=4096),
+            local_batch_size=4,
+            seq_len=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(

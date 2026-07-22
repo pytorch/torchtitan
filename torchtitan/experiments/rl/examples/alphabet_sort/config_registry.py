@@ -18,7 +18,6 @@ from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
-    BatchConfig,
     CompileConfig,
     DebugConfig,
     OverrideConfig,
@@ -32,7 +31,7 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
-from torchtitan.experiments.rl.components.batcher import Batcher
+from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
