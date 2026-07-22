@@ -355,6 +355,7 @@ def make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+            hidden_dim=hidden_dim,
         )
     elif comm_backend == "minimal_async_ep":
         return MinimalAsyncEPTokenDispatcher.Config(

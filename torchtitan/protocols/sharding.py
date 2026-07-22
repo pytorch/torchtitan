@@ -13,6 +13,7 @@ meshes.
 """
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
@@ -96,11 +97,10 @@ class ShardingConfig:
             ``None`` means no input redistribution.
         out_src_shardings: Source placement of the forward's output as a
             DTensor. When ``local_map`` is set this also tells ``local_map``
-            what to wrap the local output back to. Accepts a single
-            ``SpmdLayout`` (single-output case) or a tuple (multi-
-            output case). ``None``
-            means "infer from the output" (it's already a DTensor at the
-            right placement, or there's no local_map to drive).
+            what to wrap the local output back to. Accepts a ``SpmdLayout``
+            or a pytree matching the output, with one ``SpmdLayout`` per
+            tensor leaf. ``None`` means "infer from the output" (it's already
+            a DTensor at the right placement, or there's no local_map to drive).
             e.g. ``{TP: Partial()}`` for the MoE wrapper.
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
@@ -114,7 +114,7 @@ class ShardingConfig:
     state_shardings: dict[str, SpmdLayout] = field(default_factory=dict)
     in_src_shardings: dict[str, SpmdLayout] | None = None
     in_dst_shardings: dict[str, SpmdLayout] | None = None
-    out_src_shardings: SpmdLayout | tuple[SpmdLayout, ...] | None = None
+    out_src_shardings: Any = None
     out_dst_shardings: SpmdLayout | None = None
     local_map: LocalMapConfig | None = None
 

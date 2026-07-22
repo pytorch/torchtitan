@@ -19,7 +19,7 @@ from spmd_types.runtime import get_local_type, get_partition_spec, has_local_typ
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_leaves, tree_map
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
@@ -454,7 +454,7 @@ class Module(nn.Module, Configurable):
         fn: Callable,
         parallel_dims: ParallelDims,
         in_named: list[SpmdLayout],
-        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+        out_src: Any,
     ) -> Callable:
         """Apply DTensor local_map for a local-tensor compute region."""
         sharding_config = self._sharding_config
@@ -462,10 +462,11 @@ class Module(nn.Module, Configurable):
         lm = sharding_config.local_map
         assert lm is not None
 
-        if isinstance(out_src, tuple):
-            out_named: list[SpmdLayout] = [p for p in out_src if p is not None]
-        else:
-            out_named = [out_src]
+        out_named: list[SpmdLayout] = []
+        for placement in tree_leaves(out_src):
+            if placement is not None:
+                assert isinstance(placement, SpmdLayout)
+                out_named.append(placement)
         # in_grad_placements may contain None for non-tensor args; filter
         # them out for mesh resolution -- local_map passes None through.
         grad_named = lm.in_grad_placements
@@ -476,8 +477,11 @@ class Module(nn.Module, Configurable):
         if resolved_mesh is None:
             return fn
 
-        out_placements: tuple[tuple[Placement, ...], ...] = tuple(
-            resolve_placements(p, resolved_mesh) for p in out_named
+        out_placements: tuple[tuple[Placement, ...] | None, ...] = tuple(
+            resolve_placements(placement, resolved_mesh)
+            if placement is not None
+            else None
+            for placement in tree_leaves(out_src)
         )
         in_grad_placements = (
             tuple(
@@ -499,14 +503,18 @@ class Module(nn.Module, Configurable):
         self,
         fn: Callable,
         in_named: list[SpmdLayout],
-        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+        out_src: Any,
     ) -> Callable:
         """Apply spmd_types local_map for a local-tensor compute region."""
         in_types = tuple(
             (layout.axis_types, layout.partition_spec) for layout in in_named
         )
         out_types = tree_map(
-            lambda layout: (layout.axis_types, layout.partition_spec),
+            lambda layout: (
+                (layout.axis_types, layout.partition_spec)
+                if layout is not None
+                else None
+            ),
             out_src,
             is_leaf=lambda x: isinstance(x, SpmdLayout),
         )
@@ -631,11 +639,9 @@ class Module(nn.Module, Configurable):
     def _redistribute_outputs(self, parallel_dims: ParallelDims, outputs: Any) -> Any:
         """Redistribute output to desired placement.
 
-        TODO: Currently only handles a single DTensor output. Extend to
-        support nested outputs (tuples, dicts) when models with
-        multi-tensor forward returns (e.g., Flux, MoE) adopt config-based
-        sharding. ``out_dst_shardings`` would also need to become a nested
-        structure.
+        TODO: Redistribution currently only handles a single DTensor output.
+        Registered pytrees can cross a local-map boundary, but nested output
+        redistribution needs a matching ``out_dst_shardings`` pytree.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
@@ -678,6 +684,9 @@ class Module(nn.Module, Configurable):
                 # pyrefly: ignore [bad-argument-type]
                 out_dst.per_axis_spmd_types(),
             )
+
+        if not isinstance(outputs, torch.Tensor):
+            return outputs
 
         if isinstance(out_src, tuple):
             return outputs

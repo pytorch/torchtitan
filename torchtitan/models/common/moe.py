@@ -20,7 +20,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import CombineResult, LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -140,13 +140,17 @@ class RoutedExperts(Module):
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
-    ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add.
+        *,
+        num_local_tokens_after_seq_dim_padding: int,
+    ) -> CombineResult:
+        """Dispatch tokens to experts, compute, and combine.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor->local conversion from the configured input placements and
-        local->DTensor wrapping with the configured output placement. The
-        forward body operates on plain local tensors.
+        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
+        on exit. The forward body operates on plain local tensors.
+
+        The returned result may represent a deferred combine. Call ``wait``
+        before consuming its output.
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
@@ -169,14 +173,14 @@ class RoutedExperts(Module):
             routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
-        out_TD = self.token_dispatcher.combine(
+        combine_result = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
-            x_TD,
+            x_BLD,
+            num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
+            local_seq_len_after_padding=local_seq_len_after_padding,
         )
-        # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
-        # won't cause _StridedShard in the downstream view (e.g., CP is used).
-        return out_TD.view(B, -1, D)
+        return combine_result
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize the grouped experts, then wire the EP mesh on the
@@ -458,25 +462,19 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
-        out_BLD = self.routed_experts(
+        combine_result = self.routed_experts(
             x_BLD,
             topk_scores_BLK,
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
         )
 
-        # shared_experts runs in parallel with deepep combine communication.
+        # Backends with a deferred combine can overlap its communication with
+        # shared-expert computation. Other backends finish combine before returning.
         shared_out_BLD = (
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
-
-        if isinstance(self.routed_experts.token_dispatcher, DeepEPTokenDispatcher):
-            # Sync the combine operation before using routed_output.
-            # This inserts a CUDA stream wait, ensuring combine is complete before
-            # the subsequent addition or view operations read routed output.
-            from torchtitan.distributed.deepep.deepep import sync_combine
-
-            sync_combine()
+        out_BLD = combine_result.wait()
 
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
