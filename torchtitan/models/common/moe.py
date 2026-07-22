@@ -162,15 +162,16 @@ class RoutedExperts(Module):
             routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
-        out_BLD = self.token_dispatcher.combine(
+        out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
             x_TD,
-            batch_size=B,
             num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
             local_seq_len_after_padding=local_seq_len_after_padding,
         )
-        return out_BLD
+        # Reshape before local_map wraps the output as a DTensor. Reshaping the
+        # sharded DTensor afterward can introduce a _StridedShard placement.
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize the grouped experts, then wire EP/TP meshes on the

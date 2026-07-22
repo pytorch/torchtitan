@@ -62,12 +62,11 @@ class TestDispatcherProtocol(unittest.TestCase):
                 topk_scores_experts_sorted_N=torch.tensor([1.0]),
             ),
             torch.tensor([[0.0]]),
-            batch_size=1,
             num_local_tokens_after_padding=1,
             local_seq_len_after_padding=1,
         )
 
-        torch.testing.assert_close(result, torch.tensor([[[1.0]]]))
+        torch.testing.assert_close(result, torch.tensor([[1.0]]))
         self.assertIsNone(dispatcher.wait_combine())
 
     def test_hybridep_runtime_config_sets_eager_buffer_shape(self):

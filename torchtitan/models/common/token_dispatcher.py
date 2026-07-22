@@ -58,7 +58,6 @@ class EPTokenDispatcher(Protocol):
         metadata: object,
         x_TD: torch.Tensor,
         *,
-        batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
@@ -194,7 +193,6 @@ class LocalTokenDispatcher(Configurable):
         metadata: LocalDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
@@ -204,14 +202,13 @@ class LocalTokenDispatcher(Configurable):
             routed_output_RD: ``(R, D)`` expert outputs
             metadata: LocalDispatchMetadata from dispatch()
             x_TD: ``(T, D)`` original input tokens
-            batch_size: Original input batch size.
             num_local_tokens_after_padding: Unused for local dispatch; kept
                 for a shared dispatcher combine signature.
             local_seq_len_after_padding: Unused for local dispatch; kept for
                 a shared dispatcher combine signature.
 
         Returns:
-            Combined output with shape ``(B, L, D)``.
+            Combined output with shape ``(T, D)``.
         """
         del num_local_tokens_after_padding, local_seq_len_after_padding
         out_TD = torch.zeros_like(x_TD)
@@ -227,7 +224,7 @@ class LocalTokenDispatcher(Configurable):
             metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
             routed_output_RD,
         )
-        return out_TD.view(batch_size, -1, out_TD.shape[-1])
+        return out_TD
 
     def wait_combine(self) -> None:
         """Local combine is complete when ``combine`` returns."""
@@ -306,7 +303,6 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, EPTokenDispatcher, ABC):
         metadata: object,
         x_TD: torch.Tensor,
         *,
-        batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
@@ -653,7 +649,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         metadata: AllToAllDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
@@ -667,7 +662,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD: ``(R, D)`` expert outputs in expert-major order
             metadata: AllToAllDispatchMetadata from dispatch()
             x_TD: ``(T, D)`` original input tokens
-            batch_size: Original input batch size.
             num_local_tokens_after_padding: Local token count to use for the
                 combined SP view after logical padding. MoE padding passes this
                 count without materializing pad rows.
@@ -676,8 +670,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 positions.
 
         Returns:
-            A result whose output has shape ``(B, global_L, D)`` with SP and
-            ``(B, L, D)`` otherwise.
+            Combined output with shape ``(T_global, D)`` with SP and
+            ``(T, D)`` otherwise.
         """
         D = x_TD.shape[-1]
         # EP=1: fall back to local combine (no all-to-all needed)
@@ -687,7 +681,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 routed_output_RD,
                 metadata,
                 x_TD,
-                batch_size=batch_size,
                 num_local_tokens_after_padding=num_local_tokens_after_padding,
                 local_seq_len_after_padding=local_seq_len_after_padding,
             )
@@ -744,7 +737,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, out_TD.shape[-1]),
             routed_output_RD,
         )
-        return out_TD.view(batch_size, -1, D)
+        return out_TD
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
@@ -818,7 +811,6 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         metadata,
         x_TD,
         *,
-        batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ):
@@ -827,7 +819,6 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
                 routed_output_RD,
                 metadata,
                 x_TD,
-                batch_size=batch_size,
                 num_local_tokens_after_padding=num_local_tokens_after_padding,
                 local_seq_len_after_padding=local_seq_len_after_padding,
             )
@@ -855,7 +846,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
             routed_output_RD,
         )
-        return out_TD.view(batch_size, -1, out_TD.shape[-1])
+        return out_TD
 
     def _permute(
         self,
@@ -1017,7 +1008,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         metadata: EPDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
@@ -1030,7 +1020,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        D = x_TD.shape[-1]
         # pyrefly: ignore [bad-argument-type]
         combined_TD = combine_tokens(routed_output_RD, metadata.state)
 
@@ -1050,9 +1039,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
                 local_seq_len_after_padding,
             )
             out_TD[global_indices] = combined_TD
-            return out_TD.view(batch_size, -1, D)
+            return out_TD
 
-        return combined_TD.view(batch_size, -1, D)
+        return combined_TD
 
     def wait_combine(self) -> None:
         """Wait for the asynchronous DeepEP combine on the current stream."""
@@ -1178,14 +1167,12 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         metadata: EPDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via HybridEP."""
         from torchtitan.distributed.deepep import hybridep
 
-        D = x_TD.shape[-1]
         combined_TD = hybridep.combine_tokens(
             routed_output_RD,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
@@ -1207,9 +1194,9 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
                 local_seq_len_after_padding,
             )
             out_TD[global_indices] = combined_TD
-            return out_TD.view(batch_size, -1, D)
+            return out_TD
 
-        return combined_TD.view(batch_size, -1, D)
+        return combined_TD
 
 
 def maybe_update_hybrid_ep_config(model_config: Any, config: Any) -> None:
@@ -1392,7 +1379,6 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         metadata: EPDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
@@ -1412,4 +1398,4 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             state.num_tokens,
             state.top_k,
         )
-        return combined_TD.view(batch_size, -1, x_TD.shape[-1])
+        return combined_TD
