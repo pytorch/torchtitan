@@ -192,22 +192,9 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
 
 
 def deepseek_v3_671b() -> Trainer.Config:
-    compile_config = CompileConfig(enable=True, components=["loss"])
-    model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
-    )
     model_spec = model_registry(
         "671B",
         attn_backend="flex",
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["output", "router.gate"],
-                model_compile_enabled=model_compile_enabled,
-            ),
-            Float8GroupedExpertsConverter.Config(
-                model_compile_enabled=model_compile_enabled
-            ),
-        ],
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -238,5 +225,30 @@ def deepseek_v3_671b() -> Trainer.Config:
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=SelectiveAC.Config(),
-        compile=compile_config,
+        compile=CompileConfig(enable=True, components=["loss"]),
     )
+
+
+def deepseek_v3_671b_float8() -> Trainer.Config:
+    config = deepseek_v3_671b()
+    # Quantize the dense Linear layers and the MoE expert grouped GEMMs to
+    # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
+    # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
+    # build time, so use the plain deepseek_v3_671b config there.
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "671B",
+        attn_backend="flex",
+        converters=[
+            Float8LinearConverter.Config(
+                filter_fqns=["output", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+            Float8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled
+            ),
+        ],
+    )
+    return config
