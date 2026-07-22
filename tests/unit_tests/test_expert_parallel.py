@@ -50,10 +50,11 @@ class TestDispatcherProtocol(unittest.TestCase):
 
         self.assertTrue(dispatcher.initialized)
 
-    def test_combine_returns_explicit_result(self):
+    def test_combine_returns_tensor(self):
         dispatcher = LocalTokenDispatcher(
             LocalTokenDispatcher.Config(num_experts=1, top_k=1)
         )
+        self.assertFalse(dispatcher.can_overlap_combine_with_shared_experts)
         result = dispatcher.combine(
             torch.tensor([[1.0]]),
             LocalDispatchMetadata(

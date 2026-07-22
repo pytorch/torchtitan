@@ -494,7 +494,8 @@ class MoE(Module):
         shared_out_BLD = (
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
-        self.routed_experts.token_dispatcher.wait_combine()
+        if self.routed_experts.token_dispatcher.can_overlap_combine_with_shared_experts:
+            self.routed_experts.token_dispatcher.wait_combine()
 
         if seq_dim_pad_tokens:
             # Combine constructs a sequence-dim padded SP view for each batch

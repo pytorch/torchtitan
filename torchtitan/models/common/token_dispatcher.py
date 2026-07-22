@@ -27,6 +27,11 @@ from torchtitan.tools.utils import device_module, device_type
 
 
 class EPTokenDispatcher(Protocol):
+    @property
+    def can_overlap_combine_with_shared_experts(self) -> bool:
+        """Whether combine can overlap shared-expert computation."""
+        ...
+
     def wire_meshes(
         self,
         *,
@@ -96,6 +101,11 @@ class LocalTokenDispatcher(Configurable):
     def __init__(self, config: Config):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
+
+    @property
+    def can_overlap_combine_with_shared_experts(self) -> bool:
+        """Local combine completes before returning."""
+        return False
 
     def wire_meshes(
         self,
@@ -936,6 +946,11 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
+
+    @property
+    def can_overlap_combine_with_shared_experts(self) -> bool:
+        """Whether this topology permits combine/shared-expert overlap."""
+        return self.sp_size == 1
 
     def init_buffer(self) -> None:
         """Eagerly create the static inference buffer before CUDA graph capture."""
