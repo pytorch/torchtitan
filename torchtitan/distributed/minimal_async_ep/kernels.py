@@ -171,7 +171,7 @@ def _reduce_topk_slots_kernel(
         ``scores=[0.1, 0.2, 0.3, 0.4]``, the output is
         ``[[10], [15]]``.
     """
-    token = tl.program_id(0)
+    token = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
     acc = tl.zeros((BLOCK_N,), tl.float32)
@@ -223,7 +223,7 @@ def _expand_topk_grad_kernel(
         ``scores=[0.1, 0.2, 0.3, 0.4]``, the output is
         ``grad_routed=[[60], [10], [80], [20]]``.
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
     flat_index = tl.load(flat_indices + row)
@@ -269,7 +269,7 @@ def _topk_scores_grad_kernel(
         ``flat_indices=[2, 0, 3, 1]``, the slot-ordered output is
         ``grad_scores=[2000, 4000, 2000, 6000]``.
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
     flat_index = tl.load(flat_indices + row)
