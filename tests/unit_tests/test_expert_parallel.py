@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-import unittest.mock
 
 import torch
 
@@ -17,7 +16,6 @@ from torchtitan.models.common.token_dispatcher import (
     LocalDispatchMetadata,
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
-    TensorCombineResult,
 )
 
 
@@ -68,24 +66,8 @@ class TestDispatcherProtocol(unittest.TestCase):
             local_seq_len_after_padding=1,
         )
 
-        self.assertIsInstance(result, TensorCombineResult)
-        torch.testing.assert_close(result.wait(), torch.tensor([[[1.0]]]))
-
-    def test_combine_result_preserves_wait_through_pytree_map(self):
-        wait_fn = unittest.mock.Mock()
-        result = TensorCombineResult(torch.tensor([1.0]), wait_fn)
-
-        mapped = torch.utils._pytree.tree_map(
-            lambda value: value + 1 if isinstance(value, torch.Tensor) else value,
-            result,
-        )
-
-        self.assertEqual(
-            torch.utils._pytree.tree_structure(result),
-            torch.utils._pytree.tree_structure(TensorCombineResult(object())),
-        )
-        torch.testing.assert_close(mapped.wait(), torch.tensor([2.0]))
-        wait_fn.assert_called_once_with()
+        torch.testing.assert_close(result, torch.tensor([[[1.0]]]))
+        self.assertIsNone(dispatcher.wait_combine())
 
     def test_hybridep_runtime_config_sets_eager_buffer_shape(self):
         from torchtitan.models.deepseek_v3.config_registry import (
