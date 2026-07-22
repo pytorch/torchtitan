@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import cast, Generic, Protocol, TypeVar
+from typing import Any, cast, Generic, Protocol, TypeVar
 
 import spmd_types as spmd
 import torch
@@ -1217,6 +1217,24 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             return TensorCombineResult(out_TD.view(B, -1, D))
 
         return TensorCombineResult(combined_TD.view(B, -1, D))
+
+
+def maybe_update_hybrid_ep_config(model_config: Any, config: Any) -> None:
+    """Fill HybridEP buffer dimensions from a trainer runtime config."""
+    from torchtitan.trainer import Trainer
+
+    if not isinstance(config, Trainer.Config):
+        return
+
+    num_tokens_per_rank = config.training.local_batch_size * config.training.seq_len
+    for layer_cfg in model_config.layers:
+        moe_cfg = getattr(layer_cfg, "moe", None)
+        if moe_cfg is None:
+            continue
+        dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
+        if isinstance(dispatcher_cfg, HybridEPTokenDispatcher.Config):
+            dispatcher_cfg.hidden_dim = model_config.dim
+            dispatcher_cfg.num_tokens_per_rank = num_tokens_per_rank
 
 
 class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
