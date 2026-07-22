@@ -30,6 +30,8 @@ class ConfigManager:
 
     def __init__(self):
         self.register_tyro_rules(custom_registry)
+        # Set by _load_config; used for run naming.
+        self.config_name: str | None = None
 
     def parse_args(self, args: list[str] | None = None):
         if args is None:
@@ -156,6 +158,7 @@ class ConfigManager:
             )
 
         loaded_config = config_fn()
+        self.config_name = config_name
         return loaded_config, filtered_args
 
     @staticmethod

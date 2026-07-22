@@ -53,6 +53,17 @@ checkpoint=CheckpointManager.Config(
 
 A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpoint.py` (`CheckpointManager.Config`).
 
+## Output folder and resuming
+
+Checkpoints are written under `{--dump_folder}/{--checkpoint.folder}`.
+
+By default, each training run writes to its own unique subfolder: when `--dump_folder` is not passed on the command line, `train.py` appends a per-run `{config_name}-{timestamp}` suffix onto the base (e.g. `./outputs/llama3_8b-20250115-143022`). This ensures every launch writes to a fresh location and never accidentally resumes from — or collides with — a previous run's checkpoints.
+
+To resume a specific run, pass its exact path via `--dump_folder`, which disables the per-run suffix and honors the path as-is:
+```bash
+./run_train.sh --module <module_name> --config <config_name> --dump_folder ./outputs/llama3_8b-20250115-143022
+```
+
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.
 E.g. it is hard, if not impossible, for meta initialization on multiple devices to reproduce the initialization on a single device.

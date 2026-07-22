@@ -23,8 +23,10 @@ python3 -m torchtitan.experiments.rl.train \
 """
 
 import asyncio
+import datetime
 import logging
 import os
+import sys
 from dataclasses import dataclass
 
 # must run before torch import. Set it as early as possible to avoid other
@@ -249,8 +251,22 @@ async def main():
     # https://github.com/meta-pytorch/monarch/pull/4211
     os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
 
-    config = ConfigManager().parse_args()
+    manager = ConfigManager()
+    config = manager.parse_args()
     assert isinstance(config, Controller.Config)
+
+    # Give each run its own dump folder so it never resumes from / collides with a
+    # previous run's checkpoints. Skip when --dump_folder is set explicitly (then
+    # the user's exact path is honored, e.g. to resume a specific run).
+    dump_folder_overridden = any(
+        a == "--dump_folder" or a.startswith("--dump_folder=") for a in sys.argv[1:]
+    )
+    if not dump_folder_overridden:
+        run_name = manager.config_name or "run"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        config.dump_folder = os.path.join(config.dump_folder, f"{run_name}-{timestamp}")
+    logger.info(f"Dumping run artifacts to: {config.dump_folder}")
+
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
