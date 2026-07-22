@@ -54,7 +54,7 @@ class TestDispatcherProtocol(unittest.TestCase):
         dispatcher = LocalTokenDispatcher(
             LocalTokenDispatcher.Config(num_experts=1, top_k=1)
         )
-        self.assertFalse(dispatcher.can_overlap_combine_with_shared_experts)
+        self.assertFalse(dispatcher.overlap_combine_with_shared_experts)
         result = dispatcher.combine(
             torch.tensor([[1.0]]),
             LocalDispatchMetadata(

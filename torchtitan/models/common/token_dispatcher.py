@@ -28,7 +28,7 @@ from torchtitan.tools.utils import device_module, device_type
 
 class EPTokenDispatcher(Protocol):
     @property
-    def can_overlap_combine_with_shared_experts(self) -> bool:
+    def overlap_combine_with_shared_experts(self) -> bool:
         """Whether combine can overlap shared-expert computation."""
         ...
 
@@ -102,7 +102,7 @@ class LocalTokenDispatcher(Configurable):
         self.top_k = config.top_k
 
     @property
-    def can_overlap_combine_with_shared_experts(self) -> bool:
+    def overlap_combine_with_shared_experts(self) -> bool:
         """Local combine completes before returning."""
         return False
 
@@ -939,7 +939,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     @property
-    def can_overlap_combine_with_shared_experts(self) -> bool:
+    def overlap_combine_with_shared_experts(self) -> bool:
         """Whether this topology permits combine/shared-expert overlap."""
         return self.sp_size == 1
 
