@@ -11,15 +11,14 @@ import asyncio
 
 import pytest
 
-from torchtitan.config import BatchConfig
-from torchtitan.experiments.rl.components.batcher import Batcher
+from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
     derive_window_size,
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
 from torchtitan.experiments.rl.controller_metrics import (
-    compute_off_policy_step_metrics,
+    compute_policy_age_metrics,
     compute_perf_ratio_metrics,
     MetricsTimer,
 )
@@ -203,26 +202,26 @@ def test_untrainable_group_releases_before_training() -> None:
     asyncio.run(run())
 
 
-def test_compute_off_policy_step_metrics_raises_on_consume_time_staleness() -> None:
+def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
     with pytest.raises(RuntimeError, match="admitted stale training data"):
-        compute_off_policy_step_metrics(
+        compute_policy_age_metrics(
             trainer_policy_version=4,
             min_policy_versions=[0],
             target_off_policy_steps=3,
         )
 
 
-def test_compute_off_policy_step_metrics_uses_hard_off_policy_limit() -> None:
-    metrics = compute_off_policy_step_metrics(
+def test_compute_policy_age_metrics_uses_hard_off_policy_limit() -> None:
+    metrics = compute_policy_age_metrics(
         trainer_policy_version=4,
         min_policy_versions=[0],
         target_off_policy_steps=3,
         max_off_policy_steps=4,
     )
-    assert any(metric.key == "train_batch/off_policy_steps_max" for metric in metrics)
+    assert any(metric.key == "train_batch/policy_age_max" for metric in metrics)
 
     with pytest.raises(RuntimeError, match="admitted stale training data"):
-        compute_off_policy_step_metrics(
+        compute_policy_age_metrics(
             trainer_policy_version=5,
             min_policy_versions=[0],
             target_off_policy_steps=3,

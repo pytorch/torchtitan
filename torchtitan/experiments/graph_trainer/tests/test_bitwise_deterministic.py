@@ -28,7 +28,7 @@ from torch.nn.attention.flex_attention import flex_attention
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import BatchConfig, DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -138,7 +138,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         runtime_config = Trainer.Config(
             model_spec=model_spec,
             training=TrainingConfig(
-                batch=BatchConfig(local_batch_size=BATCH_SIZE, seq_len=SEQ_LEN),
+                local_batch_size=BATCH_SIZE,
+                seq_len=SEQ_LEN,
                 steps=NUM_STEPS,
             ),
             parallelism=ParallelismConfig(),

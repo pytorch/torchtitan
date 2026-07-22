@@ -120,7 +120,7 @@ class Decoder(BaseModel):
             """Apply runtime config to model config.
 
             When *config* is a ``Trainer.Config``, validates
-            ``training.batch.seq_len`` against each attention layer's intrinsic
+            ``training.seq_len`` against each attention layer's intrinsic
             RoPE max sequence length, resizes RoPE caches, and propagates
             debug flags. Non-trainer callers may pass any config-like
             object with a ``ParallelismConfig`` in its ``parallelism``
@@ -198,11 +198,11 @@ class Decoder(BaseModel):
             maybe_update_minimal_async_ep_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip
-            # training.batch.seq_len sync. Generated sequence length is not known
+            # training.seq_len sync. Generated sequence length is not known
             # ahead of time, so keep the RoPE cache at the model's max_seq_len.
             if isinstance(config, Trainer.Config):
                 debug = config.debug
-                seq_len = config.training.batch.seq_len
+                seq_len = config.training.seq_len
                 max_seq_len = self.max_seq_len
                 if seq_len > max_seq_len:
                     raise ValueError(

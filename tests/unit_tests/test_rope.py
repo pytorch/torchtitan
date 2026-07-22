@@ -240,13 +240,11 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
     """update_from_config must reject seq_len > rope.max_seq_len."""
 
     def _make_trainer_config(self, seq_len):
-        from torchtitan.config import BatchConfig, DebugConfig, ParallelismConfig, TrainingConfig
+        from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
         from torchtitan.trainer import Trainer
 
         return Trainer.Config(
-            training=dataclasses.replace(
-                TrainingConfig(), batch=BatchConfig(seq_len=seq_len)
-            ),
+            training=dataclasses.replace(TrainingConfig(), seq_len=seq_len),
             parallelism=ParallelismConfig(),
             debug=DebugConfig(),
         )

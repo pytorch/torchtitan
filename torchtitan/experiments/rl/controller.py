@@ -119,7 +119,7 @@ from torchtitan.experiments.rl.components.work_buffer import (
 )
 from torchtitan.experiments.rl.controller_metrics import (
     combine_microbatch_metrics,
-    compute_off_policy_step_metrics,
+    compute_policy_age_metrics,
     compute_perf_ratio_metrics,
     compute_rollout_metrics,
     MetricsTimer,
@@ -246,7 +246,7 @@ class Controller(Configurable):
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
         dump_folder: str = "outputs/rl"
-        """Base output folder for RL artifacts (temp weights, logs, etc.)."""
+        """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
@@ -314,8 +314,8 @@ class Controller(Configurable):
                         f"by sequence parallel degree ({sp_degree})."
                     )
 
-            # Mirror the batcher width into trainer.training.batch.seq_len for the model build.
-            self.trainer.training.batch.seq_len = self.async_loop.batcher.batch.seq_len
+            # Mirror the batcher width into trainer.training.seq_len for the model build.
+            self.trainer.training.seq_len = self.async_loop.batcher.batch.seq_len
 
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
@@ -1040,9 +1040,9 @@ class Controller(Configurable):
                     logger.info("Batcher closed and drained; stopping training")
                     break
 
-                # Off-policy steps are computed HERE, at consumption time, against the live trainer version, so it is
+                # Policy age is computed HERE, at consumption time, against the live trainer version, so it is
                 # faithful to what this step trains on -- not the version when the batch was packed.
-                off_policy_step_panel = compute_off_policy_step_metrics(
+                policy_age_panel = compute_policy_age_metrics(
                     trainer_policy_version=self._trainer_policy_version,
                     min_policy_versions=packed.min_policy_versions,
                     target_off_policy_steps=self.config.async_loop.target_off_policy_steps,
@@ -1119,7 +1119,7 @@ class Controller(Configurable):
                         ],
                         *self._group_buffer.metrics(),
                         *time_metrics,
-                        *off_policy_step_panel,
+                        *policy_age_panel,
                         # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
                         *push_metrics,
                         *pull_metrics,

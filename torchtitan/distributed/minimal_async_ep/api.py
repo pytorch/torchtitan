@@ -138,7 +138,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
     for token_dispatcher_cfg in dispatcher_cfgs:
         token_dispatcher_cfg.hidden_dim = model_config.dim
         token_dispatcher_cfg.tokens_per_rank = (
-            config.training.batch.local_batch_size * config.training.batch.seq_len
+            config.training.local_batch_size * config.training.seq_len
         )
         token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
             config.training.mixed_precision_param

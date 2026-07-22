@@ -536,8 +536,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     # global batch size = 8 * 2 = 16.
                     # To achieve 2 gradient accumulation steps, multiply
                     # default global batch size by 2. 16 * 2 = 32.
-                    "--training.batch.local_batch_size 8",
-                    "--training.batch.global_batch_size 32",
+                    "--training.local_batch_size 8",
+                    "--training.global_batch_size 32",
                 ],
             ],
             "Gradient accumulation",

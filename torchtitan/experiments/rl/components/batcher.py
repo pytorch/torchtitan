@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 
 import torch
 
-from torchtitan.config import BatchConfig, Configurable
+from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import (
     TrainingBatch,
@@ -40,6 +40,25 @@ _DTYPES: dict[str, torch.dtype] = {
     "loss_mask": torch.bool,
     "advantages": torch.float,
 }
+
+
+@dataclass(kw_only=True, slots=True)
+class BatchConfig:
+    """Batch shape parameters for the RL batcher.
+
+    TODO: Refactor the pre-training trainer to use an owned batch config
+    instead of keeping batch shape fields directly on TrainingConfig.
+    NOTE: in pretraining we would have global_batch_size. But now we have
+    num_prompts_per_train_step. This will need to be addressed.
+    """
+
+    local_batch_size: int = 8
+    """Per-DP-rank microbatch size (rows per forward pass). If the number of tokens in the
+    rollouts exceed the number of rows*seq_len, a new microbatch is started.
+    If it is less, the remaining rows are padded to this size."""
+
+    seq_len: int = 2048
+    """Tokens per row (packed sequence length)."""
 
 
 class Batcher(Configurable):
@@ -150,7 +169,7 @@ class Batcher(Configurable):
                     num_metric_only_groups,
                 ),
             ],
-            # Trainer computes off-policy steps from these at consume time (faithful to what it trains on).
+            # Trainer computes policy age from these at consume time (faithful to what it trains on).
             # min_policy_version is the oldest version this training_sample was sampled under.
             min_policy_versions=[
                 training_sample.min_policy_version
@@ -356,7 +375,7 @@ class Batcher(Configurable):
         num_rollout_groups: int,
         num_metric_only_groups: int,
     ) -> list[m.Metric]:
-        """Per-training-batch packing + count metrics. (off-policy steps are logged at trainer consume time.)"""
+        """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
         total_slots = len(packed_rows) * self.seq_len
         non_padded = sum(sum(row["seq_lens"]) for row in packed_rows)
         return [
