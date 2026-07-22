@@ -209,7 +209,7 @@ class Controller(Configurable):
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
         dump_folder: str = "outputs/rl"
-        """Base output folder for RL artifacts (temp weights, logs, etc.)."""
+        """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
