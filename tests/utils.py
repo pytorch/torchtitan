@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import hashlib
+import importlib
 import importlib.util
 import json
 
@@ -22,7 +23,7 @@ def num_available_gpus() -> int:
 def has_fa3() -> bool:
     """True if the flash-attn-3 package is available (torch.ops.flash_attn_3)."""
     try:
-        import flash_attn_interface  # noqa: F401
+        importlib.import_module("flash_attn_interface")
     except ImportError:
         return False
     return hasattr(torch.ops, "flash_attn_3")

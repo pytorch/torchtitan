@@ -347,7 +347,7 @@ def spmd_redistribute_per_axis(
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     for axis_name, dst_t in dst_types.items():
         src_t = src_types.get(axis_name)
-
+        # pyrefly: ignore [missing-attribute]
         axis = axis_name.value
         axis_size = (
             mesh.size(mesh.mesh_dim_names.index(axis))

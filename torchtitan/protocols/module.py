@@ -138,7 +138,7 @@ class Module(nn.Module, Configurable):
 
         saved = {
             fqn: SpmdLayout(
-
+                # pyrefly: ignore [bad-argument-type]
                 axis_types=get_local_type(buf),
                 partition_spec=get_partition_spec(buf),
             )
@@ -578,9 +578,9 @@ class Module(nn.Module, Configurable):
                 value = spmd_redistribute_per_axis(
                     value,
                     current_spmd_mesh(),
-
+                    # pyrefly: ignore [bad-argument-type]
                     src_spmd_layout.per_axis_spmd_types(),
-
+                    # pyrefly: ignore [bad-argument-type]
                     dst_spmd_layout.per_axis_spmd_types(),
                 )
                 new_kwargs[name] = value
@@ -673,9 +673,9 @@ class Module(nn.Module, Configurable):
             return spmd_redistribute_per_axis(
                 outputs,
                 current_spmd_mesh(),
-
+                # pyrefly: ignore [bad-argument-type]
                 out_src.per_axis_spmd_types(),
-
+                # pyrefly: ignore [bad-argument-type]
                 out_dst.per_axis_spmd_types(),
             )
 
