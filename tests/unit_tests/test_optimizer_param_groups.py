@@ -44,6 +44,23 @@ class SimpleModel(nn.Module):
         return self.output(x)
 
 
+class MuonModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.expert_weight = nn.Parameter(torch.randn(2, 3, 4))
+        self.flattened_attention_weight = nn.Parameter(torch.randn(6, 4))
+        self.other_weight = nn.Parameter(torch.randn(4, 4))
+        self.bias = nn.Parameter(torch.randn(4))
+
+
+def _has_batched_muon() -> bool:
+    try:
+        torch.optim.Muon([nn.Parameter(torch.randn(1, 2, 3))])
+    except ValueError:
+        return False
+    return True
+
+
 class FakeMoE(nn.Module):
     def __init__(self, load_balance_coeff, tokens):
         super().__init__()
@@ -495,6 +512,97 @@ class TestDCPWithParamGroups(unittest.TestCase):
 
 
 class TestMixedOptimizers(unittest.TestCase):
+    @unittest.skipUnless(_has_batched_muon(), "requires PyTorch PR #190597")
+    def test_muon_selection_is_regex_driven(self):
+        model = MuonModel()
+        config = OptimizersContainer.Config(
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"^expert_weight$",
+                    optimizer_name="Muon",
+                    optimizer_kwargs={"lr": 1e-2, "ns_steps": 1},
+                ),
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                ),
+            ],
+        )
+
+        container = config.build(model_parts=[model])
+        muon = next(
+            opt for opt in container.optimizers if type(opt) is torch.optim.Muon
+        )
+        adamw = next(
+            opt for opt in container.optimizers if type(opt) is torch.optim.AdamW
+        )
+
+        self.assertEqual(
+            _get_param_names_in_group(model, muon.param_groups[0]),
+            {"expert_weight"},
+        )
+        self.assertNotIn("fused", muon.param_groups[0])
+        self.assertNotIn("foreach", muon.param_groups[0])
+        # A 2D parameter is not implicitly routed to Muon.
+        self.assertIn(
+            "other_weight", _get_param_names_in_group(model, adamw.param_groups[0])
+        )
+
+    @unittest.skipUnless(_has_batched_muon(), "requires PyTorch PR #190597")
+    def test_muon_preserves_matrix_batch_shapes(self):
+        model = MuonModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"^expert_weight$",
+                    optimizer_name="Muon",
+                    optimizer_kwargs={"lr": 1e-2, "ns_steps": 1},
+                ),
+                ParamGroupConfig(
+                    pattern=r"^flattened_attention_weight$",
+                    optimizer_name="Muon",
+                    optimizer_kwargs={"lr": 2e-2, "ns_steps": 1},
+                ),
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                ),
+            ],
+        )
+
+        container = config.build(model_parts=[model])
+        muon = next(
+            opt for opt in container.optimizers if type(opt) is torch.optim.Muon
+        )
+        self.assertEqual(len(muon.param_groups), 2)
+        self.assertIs(muon.param_groups[0]["params"][0], model.expert_weight)
+        self.assertIs(
+            muon.param_groups[1]["params"][0], model.flattened_attention_weight
+        )
+        self.assertEqual(tuple(muon.param_groups[0]["params"][0].shape), (2, 3, 4))
+        # The flattened projection remains one (6, 4) matrix; TorchTitan does not
+        # infer logical attention heads or reshape it.
+        self.assertEqual(tuple(muon.param_groups[1]["params"][0].shape), (6, 4))
+
+        for group in muon.param_groups:
+            for param in group["params"]:
+                param.grad = torch.randn_like(param)
+        container.step()
+
+        self.assertEqual(
+            tuple(muon.state[model.expert_weight]["momentum_buffer"].shape),
+            (2, 3, 4),
+        )
+        self.assertEqual(
+            tuple(
+                muon.state[model.flattened_attention_weight]["momentum_buffer"].shape
+            ),
+            (6, 4),
+        )
+
     def test_mixed_optimizer_types(self):
         """Different optimizer for a param group."""
         model = SimpleModel()

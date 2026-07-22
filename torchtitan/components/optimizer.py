@@ -23,6 +23,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
+from torchtitan.components.spmd_muon import SPMDMuon
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -30,6 +31,7 @@ from torchtitan.tools.logging import logger
 __all__ = [
     "OptimizersContainer",
     "ParamGroupConfig",
+    "SPMDMuon",
     "default_adamw",
     "register_moe_load_balancing_hook",
 ]
@@ -109,9 +111,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
         """
-        Optimizer implementation mode applied to all optimizer instances.
-        Per-param-group ``optimizer_kwargs`` can override this (e.g.
-        ``"fused": False`` for optimizers that don't support fused).
+        Optimizer implementation mode applied to optimizer instances that
+        support ``fused`` and ``foreach``. Muon uses its built-in implementation
+        and ignores this setting. Per-param-group ``optimizer_kwargs`` can
+        override the generated implementation kwargs.
 
         - 'fused': Use fused implementation (CUDA only) for best performance.
         - 'foreach': Use some horizontal fusion of tensors for better performance.
@@ -131,6 +134,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         optimizer_classes = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
+            "Muon": torch.optim.Muon,
+            "SPMDMuon": SPMDMuon,
         }
         if name not in optimizer_classes:
             raise NotImplementedError(f"Optimizer {name} not added.")
@@ -190,11 +195,24 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     f"matched no parameters"
                 )
 
+            # Muon does not expose fused/foreach constructor options. Selection
+            # remains entirely regex-driven; tensor rank does not affect routing.
+            if (
+                "matrix_shape" in pg.optimizer_kwargs
+                and pg.optimizer_name != "SPMDMuon"
+            ):
+                raise ValueError(
+                    "matrix_shape is only supported by SPMDMuon; ordinary Muon "
+                    "uses the parameter's physical [..., M, N] shape"
+                )
+            optimizer_impl_kwargs = (
+                {} if pg.optimizer_name in ("Muon", "SPMDMuon") else impl_kwargs
+            )
             groups[pg.optimizer_name].append(
                 {
                     "params": params,
                     "param_names": param_names,
-                    **impl_kwargs,
+                    **optimizer_impl_kwargs,
                     **pg.optimizer_kwargs,
                 }
             )
@@ -237,6 +255,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "eps",
             "momentum",
             "nesterov",
+            "matrix_shape",
             "fused",
             "foreach",
         }
