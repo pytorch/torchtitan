@@ -5,15 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, cast, Generic, Protocol, TypeVar
+from typing import Any, cast, Protocol
 
 import spmd_types as spmd
 import torch
 from torch.distributed._functional_collectives import all_to_all_single
 from torch.distributed.tensor import DeviceMesh
-from torch.utils._pytree import register_pytree_node
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.minimal_async_ep import (
@@ -26,12 +24,6 @@ from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_spars
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.tools.utils import device_module, device_type
-
-
-class CombineResult(Protocol):
-    def wait(self) -> torch.Tensor:
-        """Return output safe to consume on the current CUDA stream."""
-        ...
 
 
 class EPTokenDispatcher(Protocol):
@@ -64,43 +56,12 @@ class EPTokenDispatcher(Protocol):
         batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
-    ) -> CombineResult:
+    ) -> torch.Tensor:
         ...
 
-
-_T = TypeVar("_T")
-
-
-@dataclass(frozen=True)
-class TensorCombineResult(Generic[_T]):
-    """Tensor-backed combine result that can cross local-map boundaries."""
-
-    output: _T
-    _wait_fn: Callable[[], None] | None = None
-
-    def wait(self) -> torch.Tensor:
-        if self._wait_fn is not None:
-            self._wait_fn()
-        assert isinstance(self.output, torch.Tensor)
-        return self.output
-
-
-def _unflatten_tensor_combine_result(
-    values: Iterable[object], _context: object
-) -> TensorCombineResult[object]:
-    output, wait_fn = values
-    return TensorCombineResult(
-        output,
-        cast(Callable[[], None] | None, wait_fn),
-    )
-
-
-register_pytree_node(
-    TensorCombineResult,
-    lambda result: ([result.output, result._wait_fn], None),
-    _unflatten_tensor_combine_result,
-    serialized_type_name="torchtitan.TensorCombineResult",
-)
+    def wait_combine(self) -> None:
+        """Make the most recent combine output safe to consume."""
+        ...
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -226,8 +187,8 @@ class LocalTokenDispatcher(Configurable):
         batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
-    ) -> CombineResult:
-        """Combine routed expert outputs and return an immediately ready result.
+    ) -> torch.Tensor:
+        """Combine routed expert outputs.
 
         Args:
             routed_output_RD: ``(R, D)`` expert outputs
@@ -240,7 +201,7 @@ class LocalTokenDispatcher(Configurable):
                 a shared dispatcher combine signature.
 
         Returns:
-            A result whose output has shape ``(B, L, D)``.
+            Combined output with shape ``(B, L, D)``.
         """
         del num_local_tokens_after_padding, local_seq_len_after_padding
         out_TD = torch.zeros_like(x_TD)
@@ -256,7 +217,10 @@ class LocalTokenDispatcher(Configurable):
             metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
             routed_output_RD,
         )
-        return TensorCombineResult(out_TD.view(batch_size, -1, out_TD.shape[-1]))
+        return out_TD.view(batch_size, -1, out_TD.shape[-1])
+
+    def wait_combine(self) -> None:
+        """Local combine is complete when ``combine`` returns."""
 
 
 class BaseEPTokenDispatcher(LocalTokenDispatcher, EPTokenDispatcher, ABC):
@@ -335,8 +299,8 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, EPTokenDispatcher, ABC):
         batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
-    ) -> CombineResult:
-        """Combine expert outputs and return an explicit completion result."""
+    ) -> torch.Tensor:
+        """Combine expert outputs."""
         raise NotImplementedError
 
 
@@ -682,7 +646,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
-    ) -> CombineResult:
+    ) -> torch.Tensor:
         """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
         When sp_size > 1, dispatch uses local token indices.
@@ -770,7 +734,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, out_TD.shape[-1]),
             routed_output_RD,
         )
-        return TensorCombineResult(out_TD.view(batch_size, -1, D))
+        return out_TD.view(batch_size, -1, D)
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
@@ -881,7 +845,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
             routed_output_RD,
         )
-        return TensorCombineResult(out_TD.view(batch_size, -1, out_TD.shape[-1]))
+        return out_TD.view(batch_size, -1, out_TD.shape[-1])
 
     def _permute(
         self,
@@ -1041,7 +1005,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
-    ) -> CombineResult:
+    ) -> torch.Tensor:
         """Combine tokens via DeepEP.
 
         When sp_size == 1, combine is async; sync_combine() is deferred
@@ -1071,9 +1035,16 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
                 local_seq_len_after_padding,
             )
             out_TD[global_indices] = combined_TD
-            return TensorCombineResult(out_TD.view(batch_size, -1, D))
+            return out_TD.view(batch_size, -1, D)
 
-        return TensorCombineResult(combined_TD.view(batch_size, -1, D), sync_combine)
+        return combined_TD.view(batch_size, -1, D)
+
+    def wait_combine(self) -> None:
+        """Wait for the asynchronous DeepEP combine on the current stream."""
+        if self.sp_size == 1:
+            from torchtitan.distributed.deepep.deepep import sync_combine
+
+            sync_combine()
 
 
 class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
@@ -1195,7 +1166,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
-    ) -> CombineResult:
+    ) -> torch.Tensor:
         """Combine tokens via HybridEP."""
         from torchtitan.distributed.deepep import hybridep
 
@@ -1221,9 +1192,9 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
                 local_seq_len_after_padding,
             )
             out_TD[global_indices] = combined_TD
-            return TensorCombineResult(out_TD.view(batch_size, -1, D))
+            return out_TD.view(batch_size, -1, D)
 
-        return TensorCombineResult(combined_TD.view(batch_size, -1, D))
+        return combined_TD.view(batch_size, -1, D)
 
 
 def maybe_update_hybrid_ep_config(model_config: Any, config: Any) -> None:
@@ -1409,7 +1380,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         batch_size: int,
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
-    ) -> CombineResult:
+    ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
         del num_local_tokens_after_padding, local_seq_len_after_padding
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
@@ -1426,4 +1397,4 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             state.num_tokens,
             state.top_k,
         )
-        return TensorCombineResult(combined_TD.view(batch_size, -1, x_TD.shape[-1]))
+        return combined_TD.view(batch_size, -1, x_TD.shape[-1])
