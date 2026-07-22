@@ -4,8 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import spmd_types as spmd
 
@@ -13,14 +14,17 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import resolve_placements
 
-from .token_dispatcher import CombineResult, LocalTokenDispatcher
+from .token_dispatcher import CombineResult, LocalTokenDispatcher, TensorCombineResult
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -121,6 +125,83 @@ class RoutedExperts(Module):
         super().__init__()
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
+
+    def _maybe_wrap_with_local_region(
+        self,
+        fn: Callable,
+        parallel_dims: ParallelDims,
+    ) -> Callable:
+        """Apply local_map to the tensor and wait callback result leaves."""
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        local_map_config = sharding_config.local_map
+        if local_map_config is None:
+            return fn
+
+        out_src = sharding_config.out_src_shardings
+        assert isinstance(out_src, TensorCombineResult)
+        output_layout = out_src.output
+        assert isinstance(output_layout, SpmdLayout)
+
+        in_dst = (
+            sharding_config.in_dst_shardings or sharding_config.in_src_shardings or {}
+        )
+        pos_args = self._cache_pos_arg_names()
+        missing_in = [name for name in pos_args if name not in in_dst]
+        if missing_in:
+            raise AssertionError(
+                f"{type(self).__name__}: local_map is set but in_dst_shardings "
+                f"is missing entries for: {missing_in}"
+            )
+        input_layouts = [in_dst[name] for name in pos_args]
+
+        if parallel_dims.spmd_backend == "spmd_types":
+            in_types = tuple(
+                (layout.axis_types, layout.partition_spec) for layout in input_layouts
+            )
+            out_types = TensorCombineResult(
+                (output_layout.axis_types, output_layout.partition_spec),
+                None,
+            )
+            return spmd.local_map(in_types=in_types, out_types=out_types)(fn)
+
+        grad_layouts = local_map_config.in_grad_placements
+        resolved_mesh = parallel_dims.resolve_shared_mesh(
+            input_layouts
+            + [output_layout]
+            + (list(grad_layouts) if grad_layouts else [])
+        )
+        if resolved_mesh is None:
+            return fn
+
+        in_grad_placements = (
+            tuple(
+                resolve_placements(layout, resolved_mesh)
+                if layout is not None
+                else None
+                for layout in grad_layouts
+            )
+            if grad_layouts is not None
+            else None
+        )
+        return local_map(
+            fn,
+            in_placements=tuple(
+                resolve_placements(layout, resolved_mesh) for layout in input_layouts
+            ),
+            out_placements=(resolve_placements(output_layout, resolved_mesh), None),
+            in_grad_placements=in_grad_placements,
+            device_mesh=resolved_mesh,
+        )
+
+    def _redistribute_outputs(self, parallel_dims: ParallelDims, outputs: Any) -> Any:
+        """Keep the combine result intact until MoE waits on its tensor."""
+        del parallel_dims
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        assert sharding_config.out_dst_shardings is None
+        assert isinstance(outputs, TensorCombineResult)
+        return outputs
 
     def forward(
         self,
