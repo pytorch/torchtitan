@@ -66,35 +66,6 @@ def _install_native_embedding(model: nn.Module) -> None:
         )
 
 
-def _wrap_rope_no_typecheck(model: nn.Module) -> None:
-    """Run the HF rotary embedding's cos/sin computation under no_typecheck.
-
-    HF computes cos/sin at runtime via a batched matmul (inv_freq @ position_ids).
-    Under spmd_types typechecking with a DP-sharded batch -- e.g. EP or FSDP add a
-    ``dp`` mesh axis over which the batch is Varying -- that bmm mixes ``R`` and
-    ``V`` batch placements, which the checker rejects ("No valid sharding strategy
-    for matmul on axis mesh_dp"). RoPE is a pure positional function with no
-    shardable weights (inv_freq is a fixed buffer), so shield it exactly like
-    native RoPE (models/common/rope.py wraps its helpers in @spmd.no_typecheck()).
-    A no-op when typechecking is off. Called before ``model.parallelize`` so the
-    wrap sits inside the Module-protocol forward.
-    """
-    import spmd_types as spmd
-
-    rope = getattr(model, "rotary_emb", None)
-    if rope is None or isinstance(rope, nn.Identity):
-        return
-
-    def _make_nc_forward(orig_forward):
-        def nc_forward(*args, **kwargs):
-            with spmd.no_typecheck():
-                return orig_forward(*args, **kwargs)
-
-        return nc_forward
-
-    rope.forward = _make_nc_forward(rope.forward)
-
-
 def _wrap_moe_experts_contiguous(model: nn.Module) -> None:
     """Make the native MoE experts tolerate a non-contiguous local input.
 
@@ -137,44 +108,84 @@ def _wrap_moe_experts_contiguous(model: nn.Module) -> None:
         module.forward = _make_contiguous_forward(module.forward)
 
 
-def _wire_flex_kernel_tp(model: nn.Module, tp_mesh: DeviceMesh) -> None:
-    """Give GQA flex core kernels the TP group for the TP-aware flat q/k norm.
+def _wrap_flat_qk_norm_tp(model: nn.Module, tp_mesh: DeviceMesh) -> None:
+    """Make an OLMoE-style flat q/k RMSNorm TP-aware at runtime.
 
-    OLMoE-style attention norms the full q/k projection (n_heads*head_dim) before
-    the head reshape; under TP that projection is column-sharded, so
-    ``HFFlexAttnCoreKernel`` must all-reduce the RMSNorm variance across the TP
-    group (see ``_tp_aware_flat_rmsnorm``). Set the TP group on each GQA core
-    kernel here (before ``model.parallelize``). A no-op for per-head-norm (Qwen3)
-    and no-norm (Mixtral) models -- they never enter the flat-norm branch.
+    Some models (OLMoE) apply q/k RMSNorm over the full projection
+    (``n_heads*head_dim``) *before* the head reshape. Under TP the projection is
+    column-sharded, so each rank holds only ``1/tp`` of that dim -- HF's RMSNorm
+    then normalizes over the wrong (local) dim and its replicated weight
+    shape-mismatches the local shard (2048 vs 1024). The default (DTensor)
+    backend fixes this by all-reducing the variance and redistributing the
+    weight; under spmd_types the activations are plain local shards with no
+    auto-redistribution, so we replicate that math here: wrap the flat
+    q_norm/k_norm forward to all-reduce the local sum-of-squares across the TP
+    group, divide by the full dim, normalize the local shard, and multiply by the
+    local weight slice (the projection is column-sharded contiguously, weight
+    ``S(0)``, so rank ``r`` owns ``weight[r*local : (r+1)*local]``).
+
+    Runtime-only and self-contained (funcol all-reduce, no spmd typechecking).
+    Called before ``model.parallelize`` so the wrap is captured in the norm's
+    Module forward. A no-op at TP=1 (returns early -- bit-identical) and only
+    applied to *flat*-norm modules (norm width != ``head_dim``); per-head-norm
+    (Qwen3) and no-norm (Mixtral) models are untouched.
     """
+    import torch.distributed as dist
+    import torch.distributed._functional_collectives as funcol
+
     tp_group = tp_mesh.get_group()
+    tp_size = dist.get_world_size(tp_group)
+    if tp_size == 1:
+        return
+    tp_rank = dist.get_rank(tp_group)
+
+    def _make_tp_norm_forward(norm):
+        def tp_norm_forward(hidden_local):
+            # RMSNorm over the FULL (column-sharded) projection: the variance
+            # must span all TP ranks, so all-reduce the local sum-of-squares.
+            input_dtype = hidden_local.dtype
+            h = hidden_local.float()
+            local_dim = h.shape[-1]
+            local_sumsq = h.pow(2).sum(-1, keepdim=True)
+            global_sumsq = funcol.all_reduce(
+                local_sumsq, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
+            )
+            variance = global_sumsq / (local_dim * tp_size)
+            h = h * torch.rsqrt(variance + norm.variance_epsilon)
+            weight_local = norm.weight.narrow(0, tp_rank * local_dim, local_dim)
+            return weight_local * h.to(input_dtype)
+
+        return tp_norm_forward
+
     for module in model.modules():
-        core = getattr(module, "_titan_flex_attn_core", None)
-        if core is not None:
-            core._tp_group = tp_group
+        head_dim = getattr(module, "head_dim", None)
+        if head_dim is None:
+            continue
+        for norm_name in ("q_norm", "k_norm"):
+            norm = getattr(module, norm_name, None)
+            # Flat norm: normalized width spans the full projection (!= head_dim).
+            if (
+                norm is not None
+                and getattr(norm, "weight", None) is not None
+                and norm.weight.shape[-1] != head_dim
+            ):
+                norm.forward = _make_tp_norm_forward(norm)
 
 
 def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
-    """Wire the CP k/v all-gather into each attention kernel.
+    """All-gather k/v across the CP axis inside each flex kernel forward.
 
-    q/k/v reach attention seq-sharded on the CP axis. Attention needs full-length
-    k/v, so k/v are all-gathered across the CP mesh with a funcol collective
-    (autograd-aware: the backward reduce-scatters gradients back to the local
-    shard). q stays sharded, so each rank computes attention for its seq shard
-    against the full keys -- the BlockMask is Q-sharded / KV-full to match.
+    q/k/v reach the flex kernel seq-sharded on the CP axis (tensor dim 2 of the
+    ``(b, heads, seq, dim)`` layout). Attention needs full-length k/v, so we
+    all-gather them across the CP mesh with a funcol collective (autograd-aware:
+    the backward reduce-scatters gradients back to the local shard). q stays
+    sharded, so each rank computes attention for its seq shard against the full
+    keys -- the BlockMask is Q-sharded / KV-full to match.
 
-    Two kernel families need this, both handled here (called before
-    ``model.parallelize`` so the effect is captured inside the local_map region,
-    where the CP mesh dim is no longer visible to a declarative redistribute):
-
-    * flex core kernels (``_titan_flex_attn_core`` / ``_titan_mla_flex_attn_core``,
-      GQA/MLA under spmd_types): they reshape/RoPE then run flex inside their own
-      local_map region, so the all-gather must happen inside that forward on
-      local (already reshaped) tensors. We only hand them the CP process-group
-      name here (``_cp_pg_name``); the kernel does the gather itself.
-    * ``HFFlexKernel`` (``_titan_flex_kernel``, the DSA path and any CP-without-a-
-      core-kernel case): it receives q/k/v already reshaped to
-      ``(b, heads, seq, dim)``, so wrap its forward to gather k/v on seq dim 2.
+    Called before ``model.parallelize`` so the wrap is captured inside the
+    attention module's local_map region, where the CP mesh dim is no longer
+    visible to a declarative redistribute, so the gather is done here on local
+    tensors.
     """
     import torch.distributed as dist
     from torch.distributed.tensor.experimental._context_parallel._attention import (
@@ -185,13 +196,6 @@ def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
     seq_dim = 2  # (b, heads, seq, dim)
 
     for module in model.modules():
-        # Flex core kernels (GQA/MLA): gather happens inside their forward.
-        for attr in ("_titan_flex_attn_core", "_titan_mla_flex_attn_core"):
-            core = getattr(module, attr, None)
-            if core is not None:
-                core._cp_pg_name = pg_name
-
-        # HFFlexKernel path (DSA): wrap the forward to gather already-reshaped k/v.
         kernel = getattr(module, "_titan_flex_kernel", None)
         if kernel is None:
             continue
@@ -326,7 +330,6 @@ def parallelize_hf_transformers(
             model,
             enable_sp=parallel_dims.tp_enabled,
             spmd_backend=parallelism.spmd_backend,
-            cp_enabled=parallel_dims.cp_enabled,
         )
 
         # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
@@ -336,12 +339,6 @@ def parallelize_hf_transformers(
         if parallel_dims.cp_enabled:
             _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
 
-        # 3b'. Under TP, give GQA flex core kernels the TP group so an OLMoE-style
-        # full-projection q/k RMSNorm all-reduces its variance across TP (the
-        # projection is column-sharded). No-op for per-head / no-norm models.
-        if parallel_dims.tp_enabled:
-            _wire_flex_kernel_tp(model, parallel_dims.get_mesh("tp"))
-
         # 3c. Under spmd + combined TP+EP, the experts local_map yields a
         # non-contiguous local shard that native GroupedExperts.forward's .view
         # rejects; wrap the experts forward (before parallelize, so it is inside
@@ -349,11 +346,12 @@ def parallelize_hf_transformers(
         if use_spmd and parallel_dims.tp_enabled and parallel_dims.ep_enabled:
             _wrap_moe_experts_contiguous(model)
 
-        # 3d. Under spmd, shield the HF rotary embedding's runtime cos/sin bmm
-        # from typechecking (it mixes R/V batch placements when the batch is
-        # DP-sharded, e.g. under EP/FSDP). See _wrap_rope_no_typecheck.
-        if use_spmd:
-            _wrap_rope_no_typecheck(model)
+        # 3d. Under spmd + TP, make an OLMoE-style flat q/k RMSNorm (normed over
+        # the full projection before the head reshape) TP-aware: the projection is
+        # column-sharded, so the RMSNorm variance must be all-reduced across TP.
+        # No-op for per-head-norm (Qwen3) and no-norm (Mixtral) models.
+        if use_spmd and parallel_dims.tp_enabled:
+            _wrap_flat_qk_norm_tp(model, parallel_dims.get_mesh("tp"))
 
         # 4. Single parallelize call -- handles TP, EP, MoE, everything
         model.parallelize(parallel_dims)

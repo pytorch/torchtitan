@@ -69,7 +69,6 @@ def set_hf_sharding_configs(
     *,
     enable_sp: bool,
     spmd_backend: str = "default",
-    cp_enabled: bool = False,
 ) -> None:
     """Set ``_sharding_config`` on all HF modules for TP/EP parallelization.
 
@@ -84,11 +83,6 @@ def set_hf_sharding_configs(
             declarative configs are backend-agnostic; a few redistribute sources
             are only declared under spmd_types (the default DTensor backend
             infers them).
-        cp_enabled: Whether context parallelism is enabled. Under spmd_types
-            without CP, standard GQA/MHA attention routes reshape+RoPE+flex
-            through ``HFFlexAttnCoreKernel`` (typecheck-clean local region); with
-            CP it keeps the ``HFFlexKernel`` path (which does the CP k/v
-            all-gather).
     """
     # spmd_types requires redistribution sources declared explicitly; the default
     # (DTensor) backend infers them, and for the embedding it uses a special
@@ -182,7 +176,6 @@ def set_hf_sharding_configs(
             transformer_block,
             enable_sp=enable_sp,
             use_spmd=use_spmd,
-            cp_enabled=cp_enabled,
         )
 
     # Completeness backstop: every parameter/buffer-bearing module this function
@@ -252,157 +245,11 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
     ).build()
 
 
-def _attach_flex_attn_core_kernel(attn: nn.Module) -> None:
-    """Attach the flex attention-core kernel and bind the replacement forward.
-
-    q/k/v reach the kernel as ``(B, L, D)`` post-projection, heads TP-sharded on
-    tensor dim 2; cos/sin are replicated. The local_map converts them to local
-    tensors so the head reshape + q/k norm + RoPE + flex HOP run typecheck-clean,
-    and wraps the output back head-sharded on dim 2 (``S(-1)`` of ``(B, L, D)``).
-    The HF attention forward is replaced with ``_titan_flex_attn_forward`` so it
-    routes through this kernel (see model.py). Used under spmd_types without CP
-    for standard GQA/MHA attention.
-    """
-    import types
-
-    from torchtitan.experiments.transformers_modeling_backend.model import (
-        _titan_flex_attn_forward,
-        HFFlexAttnCoreKernel,
-    )
-
-    # (B, L, D): batch-sharded on DP, seq on CP, heads on TP dim 2 -- the
-    # standard dense activation layout. cos/sin come from the (unasserted) root
-    # rotary as Varying, so declare them R (treated as local in the region).
-    qkv = dense_activation_placement(tp=spmd.S(2))
-    cossin = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.R})
-    attn._titan_flex_attn_core = HFFlexAttnCoreKernel.Config(
-        sharding_config=ShardingConfig(
-            in_src_shardings={
-                "query_BLD": qkv,
-                "key_BLD": qkv,
-                "value_BLD": qkv,
-                "cos": cossin,
-                "sin": cossin,
-            },
-            in_dst_shardings={
-                "query_BLD": qkv,
-                "key_BLD": qkv,
-                "value_BLD": qkv,
-                "cos": cossin,
-                "sin": cossin,
-            },
-            out_src_shardings=qkv,
-            local_map=LocalMapConfig(
-                in_grad_placements=(qkv, qkv, qkv, cossin, cossin),
-            ),
-        )
-    ).build()
-    attn.forward = types.MethodType(_titan_flex_attn_forward, attn)
-
-
-def _attach_mla_flex_attn_core_kernel(attn: nn.Module) -> None:
-    """Attach the MLA flex attention-core kernel and bind the replacement forward.
-
-    Routes MLA's head reshape + nope/pe split + RoPE + flex through
-    ``HFMLAFlexAttnCoreKernel`` in a local_map region (see model.py). The
-    projection outputs q/kv arrive ``(B, L, D)`` TP head-sharded on dim 2; the
-    single-head ``k_pe`` is replicated; the rotary tensors ride as local_map
-    inputs. The MLA forward is replaced with ``_titan_mla_flex_attn_forward``.
-    Used under spmd_types without CP for MLA attention (no DSA indexer).
-    """
-    import types
-
-    from torchtitan.experiments.transformers_modeling_backend.model import (
-        _titan_mla_flex_attn_forward,
-        HFMLAFlexAttnCoreKernel,
-    )
-
-    qkv = dense_activation_placement(tp=spmd.S(2))
-    kpe = dense_activation_placement(tp=spmd.R)
-    # cos/sin (or freqs_cis) come from the unasserted rotary as Varying; declare
-    # them fully replicated so they are treated as local in the region.
-    rope = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.R})
-    attn._titan_mla_flex_attn_core = HFMLAFlexAttnCoreKernel.Config(
-        sharding_config=ShardingConfig(
-            in_src_shardings={
-                "query_BLD": qkv,
-                "kv_BLD": qkv,
-                "k_pe_BLD": kpe,
-                "rope_a": rope,
-                "rope_b": rope,
-            },
-            in_dst_shardings={
-                "query_BLD": qkv,
-                "kv_BLD": qkv,
-                "k_pe_BLD": kpe,
-                "rope_a": rope,
-                "rope_b": rope,
-            },
-            out_src_shardings=qkv,
-            local_map=LocalMapConfig(in_grad_placements=(qkv, qkv, kpe, rope, rope)),
-        )
-    ).build()
-    attn.forward = types.MethodType(_titan_mla_flex_attn_forward, attn)
-
-
-def _attach_dsa_flex_attn_core_kernel(attn: nn.Module) -> None:
-    """Attach the DSA (GLM-5) flex attention-core kernel and bind the forward.
-
-    Routes GLM-5's MLA reshape/split + RoPE + DSA indexer + dense-mask flex
-    through ``HFDSAFlexAttnCoreKernel`` in a local_map region (see model.py). The
-    MLA projection outputs q/kv arrive ``(B, L, D)`` TP head-sharded on dim 2; the
-    single-head ``k_pe`` and the indexer inputs ``q_resid``/``hidden_states``
-    (TP-replicated, batch-sharded) come in replicated on TP; the rotary tensors
-    ride as local_map inputs. The DSA forward is replaced with
-    ``_titan_dsa_flex_attn_forward``. Used under spmd_types without CP.
-    """
-    import types
-
-    from torchtitan.experiments.transformers_modeling_backend.model import (
-        _titan_dsa_flex_attn_forward,
-        HFDSAFlexAttnCoreKernel,
-    )
-
-    qkv = dense_activation_placement(tp=spmd.S(2))
-    # k_pe (single head), q_resid, and hidden_states are TP-replicated activations
-    # (batch-sharded on DP, seq on CP).
-    act_r = dense_activation_placement(tp=spmd.R)
-    rope = SpmdLayout({DP: spmd.R, CP: spmd.R, TP: spmd.R})
-    attn._titan_dsa_flex_attn_core = HFDSAFlexAttnCoreKernel.Config(
-        sharding_config=ShardingConfig(
-            in_src_shardings={
-                "query_BLD": qkv,
-                "kv_BLD": qkv,
-                "k_pe_BLD": act_r,
-                "q_resid_BLD": act_r,
-                "hidden_states_BLD": act_r,
-                "cos": rope,
-                "sin": rope,
-            },
-            in_dst_shardings={
-                "query_BLD": qkv,
-                "kv_BLD": qkv,
-                "k_pe_BLD": act_r,
-                "q_resid_BLD": act_r,
-                "hidden_states_BLD": act_r,
-                "cos": rope,
-                "sin": rope,
-            },
-            out_src_shardings=qkv,
-            local_map=LocalMapConfig(
-                in_grad_placements=(qkv, qkv, act_r, act_r, act_r, rope, rope),
-            ),
-        )
-    ).build()
-    attn.forward = types.MethodType(_titan_dsa_flex_attn_forward, attn)
-
-
 def _set_layer_sharding_configs(
     layer: nn.Module,
     *,
     enable_sp: bool,
     use_spmd: bool = False,
-    cp_enabled: bool = False,
 ) -> None:
     """Set ``_sharding_config`` on each sub-module of a decoder layer.
 
@@ -410,11 +257,8 @@ def _set_layer_sharding_configs(
     MoE layers have their own ShardingConfig from the Titan MoE swap. Also
     attaches the flex-attention kernel Module that carries the attention
     local_map (see ``_attach_flex_kernel``). ``use_spmd`` gates the DSA-indexer
-    fail-loud: under the DTensor backends the indexer's scatter_/index ops
-    cannot dispatch under TP, but under spmd_types (plain local shards) they do.
-    Under spmd_types without CP, standard GQA/MHA attention routes its
-    reshape+RoPE+flex through ``HFFlexAttnCoreKernel`` (typecheck-clean local
-    region) instead of the ``HFFlexKernel`` path.
+    fail-loud: under the DTensor backend the indexer's scatter_/index ops cannot
+    dispatch under TP, but under spmd_types (plain local shards) they do.
     """
     # --- Norms ---
     if hasattr(layer, "input_layernorm"):
@@ -446,46 +290,14 @@ def _set_layer_sharding_configs(
     )
 
     # Flex attention: attach the kernel Module that carries the attention
-    # local_map so q/k/v are computed on local (head-sharded) tensors. Under
-    # spmd_types, standard GQA/MHA attention (full-rank q_proj/k_proj/v_proj, no
-    # MLA low-rank KV, no DSA indexer) routes the reshape+RoPE+flex through
-    # HFFlexAttnCoreKernel so the head reshape and RoPE run typecheck-clean in a
-    # local region (the raw HF forward does them on typed tensors, which the
-    # checker rejects: reshape splits the TP-sharded head dim, RoPE mixes typed q
-    # with untyped cos/sin). Under CP the core kernel also folds in the k/v
-    # all-gather (see HFFlexAttnCoreKernel / _wrap_flex_kernel_cp) so CP is
-    # typecheck-clean too. At runtime without typechecking the core-kernel and the
-    # HFFlexKernel paths are numerically identical.
-    #
-    # ``v_norm`` marks a non-standard attention whose forward the GQA core kernel
-    # does not replicate: Gemma4 applies a per-head ``v_norm`` to values, uses a
-    # single-tensor ``apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=2)`` (not
-    # the q/k two-tensor form the kernel calls), and has shared-KV layers. Such
-    # models keep the HFFlexKernel path (raw HF forward + flex HOP), correct at
-    # runtime; they are FSDP/EP-only (no TP head split) and not typecheck-wired.
-    is_standard_gqa = (
-        hasattr(attn, "q_proj")
-        and hasattr(attn, "k_proj")
-        and hasattr(attn, "v_proj")
-        and not hasattr(attn, "kv_a_proj_with_mqa")
-        and not hasattr(attn, "indexer")
-        and not hasattr(attn, "v_norm")
-    )
-    # MLA (DeepSeek V2/V3): low-rank KV (kv_a_proj_with_mqa) and no DSA indexer.
-    is_mla = hasattr(attn, "kv_a_proj_with_mqa") and not hasattr(attn, "indexer")
-    # DSA (GLM-5): MLA low-rank KV plus the DSA indexer subtree. Its core kernel
-    # additionally runs the indexer + dense index/causal mask inside the local
-    # region (shielded); see HFDSAFlexAttnCoreKernel. DSA-CP is not a wired config,
-    # so under CP DSA falls back to the HFFlexKernel path.
-    is_dsa = hasattr(attn, "kv_a_proj_with_mqa") and hasattr(attn, "indexer")
-    if use_spmd and is_standard_gqa:
-        _attach_flex_attn_core_kernel(attn)
-    elif use_spmd and is_mla:
-        _attach_mla_flex_attn_core_kernel(attn)
-    elif use_spmd and not cp_enabled and is_dsa:
-        _attach_dsa_flex_attn_core_kernel(attn)
-    else:
-        _attach_flex_kernel(attn)
+    # local_map so q/k/v are computed on local (head-sharded) tensors. HF's own
+    # attention forward (GQA/MHA reshape+RoPE, MLA nope/pe split, DSA indexer +
+    # dense mask) runs on plain local spmd tensors, then routes through this
+    # kernel for the flex HOP; under CP ``_wrap_flex_kernel_cp`` folds the k/v
+    # all-gather into the kernel forward. (Typecheck-clean flex core kernels that
+    # reimplement those HF forwards live on the hf-backend-spmd-types-typecheck
+    # branch; runtime spmd_types does not need them.)
+    _attach_flex_kernel(attn)
 
     # Query projection. Detected independently of the KV path: a model may
     # use low-rank Q (q_a_proj/q_b_proj, e.g. DeepSeek-V3, GLM-4.7) or
