@@ -176,7 +176,8 @@ class RoutedExperts(Module):
         combine_result = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
-            x_BLD,
+            x_TD,
+            batch_size=B,
             num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
             local_seq_len_after_padding=local_seq_len_after_padding,
         )
