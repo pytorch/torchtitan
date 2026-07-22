@@ -6,11 +6,6 @@
 
 from fnmatch import fnmatch
 
-from huggingface_hub.errors import (
-    EntryNotFoundError,
-    HfHubHTTPError,
-    LocalEntryNotFoundError,
-)
 from tqdm import tqdm
 
 
@@ -60,6 +55,11 @@ def download_hf_assets(
     import os
 
     from huggingface_hub import hf_hub_download, list_repo_files
+    from huggingface_hub.errors import (
+        EntryNotFoundError,
+        HfHubHTTPError,
+        LocalEntryNotFoundError,
+    )
 
     # Extract model name from repo_id (part after "/")
     if "/" not in repo_id:
