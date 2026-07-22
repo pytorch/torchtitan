@@ -10,11 +10,6 @@ import shutil
 import tempfile
 import unittest
 
-from huggingface_hub.errors import (
-    GatedRepoError,
-    HfHubHTTPError,
-    LocalEntryNotFoundError,
-)
 from scripts.download_hf_assets import download_hf_assets
 from tokenizers import Tokenizer
 from torch.testing._internal.common_utils import (
@@ -345,6 +340,12 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
         3. Compares behavior with official Tokenizer library
         4. Compares with transformers AutoTokenizer (if available)
         """
+        from huggingface_hub.errors import (
+            GatedRepoError,
+            HfHubHTTPError,
+            LocalEntryNotFoundError,
+        )
+
         # Step 1: Download tokenizer files
         try:
             download_hf_assets(
