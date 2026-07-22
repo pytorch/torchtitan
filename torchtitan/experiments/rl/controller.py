@@ -279,6 +279,30 @@ class Controller(Configurable):
 
             # Mirror the batcher width into trainer.training.seq_len for the model build.
             self.trainer.training.seq_len = self.async_loop.batcher.batch.seq_len
+            self.trainer.training.local_batch_size = (
+                self.async_loop.batcher.batch.local_batch_size
+            )
+            if (
+                self.trainer.parallelism.pipeline_parallel_degree > 1
+                and self.trainer.parallelism.pipeline_parallel_microbatch_size
+                != self.trainer.training.local_batch_size
+            ):
+                raise ValueError(
+                    "RL pipeline parallelism currently requires one pipeline "
+                    "microbatch per packed trainer batch because the pipeline "
+                    "schedule does not shard loss kwargs. Set "
+                    "pipeline_parallel_microbatch_size to the batcher's "
+                    f"local_batch_size ({self.trainer.training.local_batch_size})."
+                )
+            if (
+                self.trainer.parallelism.pipeline_parallel_degree > 1
+                and self.trainer.parallelism.pipeline_parallel_schedule != "GPipe"
+            ):
+                raise ValueError(
+                    "RL pipeline parallelism currently requires the GPipe "
+                    "schedule because the packed trainer batch is one pipeline "
+                    "microbatch."
+                )
 
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
@@ -504,6 +528,7 @@ class Controller(Configurable):
         self.trainer_dp_degree = (
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
+        self.trainer_pp_degree = trainer_parallelism.pipeline_parallel_degree
 
         generator_dp_degree = max(config.generator.parallelism.data_parallel_degree, 1)
         num_generator_dp_shards = len(generator_meshes) * generator_dp_degree
@@ -559,10 +584,33 @@ class Controller(Configurable):
                     model_path=config.hf_assets_path,
                     compile_config=config.compile,
                     max_num_seqs=max_num_seqs,
+                    trainer_pp_degree=self.trainer_pp_degree,
                     output_dir=config.dump_folder,
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
+
+            # Match TorchTitan's rank order (pp, batch, cp, tp), retaining all
+            # PP/CP/TP ranks when a microbatch is sent to one DP slice.
+            self.trainer = self.trainer.flatten("rank").split(
+                rank=("pp", "batch", "within_batch"),
+                pp=self.trainer_pp_degree,
+                batch=self.trainer_dp_degree,
+            )
+
+        reported_parallel_ranks = await asyncio.gather(
+            *[
+                self.trainer.slice(batch=dp_rank).get_parallel_ranks.call()
+                for dp_rank in range(self.trainer_dp_degree)
+            ]
+        )
+        for dp_rank, value_mesh in enumerate(reported_parallel_ranks):
+            actual_dp_ranks = [reported[1] for reported in value_mesh.values()]
+            if any(reported != dp_rank for reported in actual_dp_ranks):
+                raise ValueError(
+                    "Trainer Monarch layout does not match the SPMD batch axis: "
+                    f"batch slice {dp_rank} reported DP ranks {actual_dp_ranks}."
+                )
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -1012,14 +1060,22 @@ class Controller(Configurable):
                     "timing/step/forward_backward"
                 ):
                     # fwd_bwd on all microbatches
-                    microbatch_metrics = [
-                        self._get_rank_0_value(
-                            await self.trainer.forward_backward.call(
-                                microbatch, packed.num_global_valid_tokens
-                            )
+                    microbatch_metrics = []
+                    for microbatch in packed.microbatches:
+                        per_dp_rank_results = await asyncio.gather(
+                            *[
+                                self.trainer.slice(
+                                    batch=dp_rank
+                                ).forward_backward.call(
+                                    microbatch[dp_rank],
+                                    packed.num_global_valid_tokens,
+                                )
+                                for dp_rank in range(self.trainer_dp_degree)
+                            ]
                         )
-                        for microbatch in packed.microbatches
-                    ]
+                        microbatch_metrics.append(
+                            self._get_rank_0_value(per_dp_rank_results[0])
+                        )
 
                     fwd_bwd_metrics = combine_microbatch_metrics(microbatch_metrics)
 

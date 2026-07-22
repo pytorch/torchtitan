@@ -10,9 +10,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
 from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -33,6 +34,7 @@ from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     SelectiveAC,
 )
+from torchtitan.distributed.context_parallel import cp_shard
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
@@ -114,6 +116,7 @@ class PolicyTrainer(Actor, Configurable):
         self.config = config
         self.compile_config = compile_config
         self.loss_fn = config.loss.build()
+        self._pipeline_loss_metrics: list[dict[str, torch.Tensor]] = []
         # TODO: add support to compile the loss.
 
         # Only cast if generator dtype differs from training dtype, otherwise
@@ -159,17 +162,18 @@ class PolicyTrainer(Actor, Configurable):
         else:
             self.sd_adapter = None
 
-        # Create training policy model
-        model = self._build_model(model_spec, config, device_type)
-        model.train()
-        self.model = model
-        self.model_parts = [model]
+        # Create training policy model parts and, under PP, the pipeline schedule.
+        self.model_parts = self._build_model(model_spec, config, device_type)
 
         if isinstance(self.loss_fn, ChunkedLossWrapper):
-            lm_head = model.lm_head
-            assert lm_head is not None, "Model must have lm_head for ChunkedLossWrapper"
-            self.loss_fn.set_lm_head(lm_head)
-            model._skip_lm_head = True
+            if not self.parallel_dims.pp_enabled or self.pp_has_last_stage:
+                model = self.model_parts[-1]
+                lm_head = model.lm_head
+                assert (
+                    lm_head is not None
+                ), "Last model part must have lm_head for ChunkedLossWrapper"
+                self.loss_fn.set_lm_head(lm_head)
+                model._skip_lm_head = True
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
@@ -214,6 +218,11 @@ class PolicyTrainer(Actor, Configurable):
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
 
+    def _pipeline_loss_fn(self, *args, **kwargs):
+        loss, metrics = self.loss_fn(*args, **kwargs)
+        self._pipeline_loss_metrics.append(metrics)
+        return loss, metrics
+
     def state_dict(self) -> dict[str, Any]:
         # Checkpoint "train_state": policy_version == completed optim steps, so it
         # doubles as the resume step counter.
@@ -257,7 +266,7 @@ class PolicyTrainer(Actor, Configurable):
             device_type: Device type string (e.g. "cuda").
 
         Returns:
-            Model with random-initialized weights.
+            Local model parts with random-initialized weights.
         """
 
         from torchtitan.models.common.attention import VarlenAttention
@@ -296,26 +305,64 @@ class PolicyTrainer(Actor, Configurable):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
 
-        model = model_spec.parallelize_fn(
-            model,
-            parallel_dims=self.parallel_dims,
-            training=config.training,
-            parallelism=config.parallelism,
-            compile_config=self.compile_config,
-            ac_config=config.ac_config,
-            dump_folder=config.dump_folder,
-        )
+        if self.parallel_dims.pp_enabled:
+            if model_spec.pipelining_fn is None:
+                raise ValueError(
+                    f"Model {model_spec.name!r} does not support pipeline parallelism"
+                )
+            (
+                self.pp_schedule,
+                model_parts,
+                self.pp_has_first_stage,
+                self.pp_has_last_stage,
+            ) = model_spec.pipelining_fn(
+                model,
+                parallel_dims=self.parallel_dims,
+                training=config.training,
+                parallelism=config.parallelism,
+                compile_config=self.compile_config,
+                ac_config=config.ac_config,
+                dump_folder=config.dump_folder,
+                device=self.device,
+                model_config=model_spec.model,
+                parallelize_fn=model_spec.parallelize_fn,
+                loss_fn=self._pipeline_loss_fn,
+            )
+            del model
+        else:
+            model = model_spec.parallelize_fn(
+                model,
+                parallel_dims=self.parallel_dims,
+                training=config.training,
+                parallelism=config.parallelism,
+                compile_config=self.compile_config,
+                ac_config=config.ac_config,
+                dump_folder=config.dump_folder,
+            )
+            model_parts = [model]
+            self.pp_schedule = None
+            self.pp_has_first_stage = False
+            self.pp_has_last_stage = False
 
-        model.to_empty(device=device_type)
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
+        for model_part in model_parts:
+            model_part.to_empty(device=device_type)
+            with torch.no_grad():
+                model_part.init_weights(buffer_device=None)
+            model_part.train()
 
-        return model
+        return model_parts
 
     @endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
+
+    @endpoint
+    async def get_parallel_ranks(self) -> tuple[int, int]:
+        """Return this actor's pipeline- and data-parallel ranks."""
+        pp_mesh = self.parallel_dims.get_optional_mesh("pp")
+        pp_rank = pp_mesh.get_local_rank() if pp_mesh is not None else 0
+        return pp_rank, self.dp_rank
 
     def reduce_forward_backward_metrics(
         self,
@@ -355,14 +402,13 @@ class PolicyTrainer(Actor, Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[TrainingMicrobatch],
+        local_batch: TrainingMicrobatch,
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            training_data: List of TrainingMicrobatch, one per DP rank. Local rank
-                picks training_data[self.dp_rank].
+            local_batch: This data-parallel rank's training microbatch.
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
                 sharding training_samples.
@@ -375,17 +421,6 @@ class PolicyTrainer(Actor, Configurable):
             f"step {self.policy_version}"
         )
 
-        # RL does not support pipeline parallelism yet, so the trainer
-        # owns one model part.
-        if len(self.model_parts) != 1:
-            raise ValueError(
-                f"PolicyTrainer expects exactly one model part, got "
-                f"{len(self.model_parts)} (pipeline parallelism is not yet "
-                "supported in RL)."
-            )
-        model = self.model_parts[0]
-
-        local_batch = training_data[self.dp_rank]
         device = self.device
         token_ids = local_batch.token_ids.to(device)
         labels = local_batch.labels.to(device)
@@ -394,8 +429,107 @@ class PolicyTrainer(Actor, Configurable):
         generator_logprobs = local_batch.generator_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
-        attention_masks = model.get_attention_masks(positions)
+        attention_masks = self.model_parts[0].get_attention_masks(positions)
+        if self.parallel_dims.cp_enabled:
+            (
+                (
+                    token_ids,
+                    labels,
+                    positions,
+                    generator_logprobs,
+                    loss_mask,
+                    advantages,
+                ),
+                attention_masks,
+            ) = cp_shard(
+                self.parallel_dims.get_mesh("cp"),
+                (
+                    token_ids,
+                    labels,
+                    positions,
+                    generator_logprobs,
+                    loss_mask,
+                    advantages,
+                ),
+                attention_masks,
+                self.config.parallelism.context_parallel_load_balancer,
+            )
 
+        if self.parallel_dims.pp_enabled:
+            self._pipeline_loss_metrics = []
+            targets, losses = (
+                (labels, []) if self.pp_has_last_stage else (None, None)
+            )
+            model_kwargs = {
+                "positions": positions,
+                "attention_masks": attention_masks,
+            }
+            loss_kwargs = {
+                "global_valid_tokens": num_global_valid_tokens,
+                "generator_logprobs": generator_logprobs,
+                "loss_mask": loss_mask,
+                "advantages": advantages,
+            }
+
+            with self.train_context():
+                if self.pp_has_first_stage:
+                    self.pp_schedule.step(
+                        token_ids,
+                        **model_kwargs,
+                        target=targets,
+                        losses=losses,
+                        loss_kwargs=loss_kwargs,
+                        return_outputs=False,
+                    )
+                else:
+                    self.pp_schedule.step(
+                        **model_kwargs,
+                        target=targets,
+                        losses=losses,
+                        loss_kwargs=loss_kwargs,
+                        return_outputs=False,
+                    )
+
+            reduced_metrics = None
+            if self.pp_has_last_stage:
+                assert self._pipeline_loss_metrics
+                loss_metrics = {
+                    key: (
+                        torch.stack(
+                            [metrics[key] for metrics in self._pipeline_loss_metrics]
+                        ).max()
+                        if key.endswith("/max")
+                        else torch.stack(
+                            [metrics[key] for metrics in self._pipeline_loss_metrics]
+                        ).sum()
+                    )
+                    for key in self._pipeline_loss_metrics[0]
+                }
+                reduced_metrics = self.reduce_forward_backward_metrics(
+                    sum_reduced_metrics={
+                        key: value
+                        for key, value in loss_metrics.items()
+                        if not key.endswith("/max")
+                    },
+                    max_reduced_metrics={
+                        key: value
+                        for key, value in loss_metrics.items()
+                        if key.endswith("/max")
+                    },
+                )
+
+            metrics_object = [reduced_metrics]
+            pp_mesh = self.parallel_dims.get_mesh("pp")
+            dist.broadcast_object_list(
+                metrics_object,
+                group=pp_mesh.get_group(),
+                group_src=pp_mesh.size() - 1,
+                device=self.device,
+            )
+            assert metrics_object[0] is not None
+            return metrics_object[0]
+
+        model = self.model_parts[0]
         with self.train_context():
             with sl.log_trace_span("model_forward"):
                 pred = model(
@@ -497,7 +631,7 @@ class PolicyTrainer(Actor, Configurable):
         `direct_rdma=False` copies the state dict GPU->CPU, so the trainer's GPU weights are free once
         this returns and any number of generators can read the staged copy.
         """
-        state_dict = self.model.state_dict()
+        state_dict = ModelWrapper(self.model_parts).state_dict()
         if self._transfer_dtype is not None:
             # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
             # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
@@ -510,7 +644,9 @@ class PolicyTrainer(Actor, Configurable):
             # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
             #   CPU-staged path.
             buffer_names = {
-                canonical_fqn(name) for name, _ in self.model.named_buffers()
+                canonical_fqn(name)
+                for model_part in self.model_parts
+                for name, _ in model_part.named_buffers()
             }
             state_dict = {
                 name: (
@@ -519,8 +655,10 @@ class PolicyTrainer(Actor, Configurable):
                 for name, tensor in state_dict.items()
             }
 
-        await ts.put_state_dict(
-            state_dict,
-            "model_state_dict",
-            direct_rdma=False,
+        pp_mesh = self.parallel_dims.get_optional_mesh("pp")
+        state_dict_key = (
+            f"model_state_dict_pp_{pp_mesh.get_local_rank()}"
+            if pp_mesh is not None
+            else "model_state_dict"
         )
+        await ts.put_state_dict(state_dict, state_dict_key, direct_rdma=False)
