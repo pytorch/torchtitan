@@ -277,6 +277,14 @@ def test_derive_window_size_from_off_policy_limit() -> None:
         )
         == 9
     )
+    assert (
+        derive_window_size(
+            num_prompts_per_train_step=8,
+            target_offpolicy_steps=3,
+            max_offpolicy_steps=7,
+        )
+        == 32
+    )
 
 
 def test_windowed_fifo_takes_within_anchored_window() -> None:

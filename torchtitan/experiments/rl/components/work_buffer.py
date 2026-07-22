@@ -37,9 +37,18 @@ def derive_window_size(
         ``W``: FIFO look-ahead window size to derive.
 
     For a fixed window size ``W``, the worst case number of off-policy steps is
-    ``(B + W - 2) // P``. Solving for ``W`` gives ``W = P * (M - S) + 1``.
+    ``(B + W - 2) // P``. Solving for the largest safe look-ahead window gives
+    ``P * (M - S) + 1``. The final window is capped at ``B`` because looking
+    beyond the active buffer has no additional effect.
     """
-    return num_prompts_per_train_step * (max_offpolicy_steps - target_offpolicy_steps) + 1
+    max_active_rollout_groups = (
+        target_offpolicy_steps + 1
+    ) * num_prompts_per_train_step
+    window_size = (
+        num_prompts_per_train_step * (max_offpolicy_steps - target_offpolicy_steps)
+        + 1
+    )
+    return min(window_size, max_active_rollout_groups)
 
 
 class _RolloutGroupWorkState(enum.Enum):
