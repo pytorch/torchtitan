@@ -24,16 +24,9 @@ This adds `record_function` contexts for major module regions such as
 `TT::block::layers.0`, `TT::attention::layers.0.attention`,
 `TT::ffn::layers.0.feed_forward`, and `TT::moe::layers.0.moe`.
 
-Use include/exclude globs to adjust the coarse target set:
-
-```bash
---profiler.module_profiler_include layers.0.extra_module
---profiler.module_profiler_exclude layers.0.attention
-```
-
-For CUDA graph kernel annotations, also pass
-`--profiler.enable_module_mark_kernels`. This is best-effort and requires
-PyTorch/CUDA support for `torch.cuda._graph_annotations.mark_kernels`.
+The same labels are also emitted as best-effort CUDA graph kernel annotations
+when PyTorch/CUDA support for `torch.cuda._graph_annotations.mark_kernels` is
+available.
 
 ## Enable Memory Profiling
 

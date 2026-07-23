@@ -9,9 +9,8 @@
 from __future__ import annotations
 
 import contextlib
-import fnmatch
 import functools
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from typing import Any, cast
 
 import torch
@@ -34,31 +33,23 @@ _mark_kernels_warned = False
 
 def apply_module_profiler(
     model_parts: Iterable[nn.Module],
-    *,
-    emit_record_function: bool,
-    emit_mark_kernels: bool,
-    include: Sequence[str] = (),
-    exclude: Sequence[str] = (),
 ) -> int:
-    """Wrap coarse model modules with profiler contexts.
+    """Wrap coarse model modules with profiler annotations.
 
     The default target policy is intentionally coarse:
     ``layers.<N>`` blocks, attention modules, dense feed-forward modules, and
-    MoE modules. ``include`` adds FQN glob matches to the target set, and
-    ``exclude`` removes FQN glob matches.
+    MoE modules. Wrapped modules emit ``record_function`` contexts while the
+    PyTorch profiler is active and best-effort CUDA graph kernel annotations.
 
     Returns:
         Number of modules newly wrapped.
     """
-    if not emit_record_function and not emit_mark_kernels:
-        return 0
-
     num_wrapped = 0
     for model_part_idx, model_part in enumerate(model_parts):
         for module_fqn, module in model_part.named_modules():
             if module_fqn == "":
                 continue
-            kind = select_module_kind(module_fqn, include=include, exclude=exclude)
+            kind = coarse_module_kind(module_fqn)
             if kind is None:
                 continue
             if wrap_module_forward(
@@ -66,26 +57,11 @@ def apply_module_profiler(
                 module_fqn=module_fqn,
                 module_kind=kind,
                 model_part_idx=model_part_idx,
-                emit_record_function=emit_record_function,
-                emit_mark_kernels=emit_mark_kernels,
             ):
                 num_wrapped += 1
 
     logger.info(f"Applied module profiler instrumentation to {num_wrapped} module(s)")
     return num_wrapped
-
-
-def select_module_kind(
-    module_fqn: str,
-    *,
-    include: Sequence[str],
-    exclude: Sequence[str],
-) -> str | None:
-    if matches_any(module_fqn, exclude):
-        return None
-    if matches_any(module_fqn, include):
-        return "custom"
-    return coarse_module_kind(module_fqn)
 
 
 def coarse_module_kind(module_fqn: str) -> str | None:
@@ -103,18 +79,12 @@ def coarse_module_kind(module_fqn: str) -> str | None:
     return None
 
 
-def matches_any(module_fqn: str, patterns: Sequence[str]) -> bool:
-    return any(fnmatch.fnmatchcase(module_fqn, pattern) for pattern in patterns)
-
-
 def wrap_module_forward(
     module: nn.Module,
     *,
     module_fqn: str,
     module_kind: str,
     model_part_idx: int,
-    emit_record_function: bool,
-    emit_mark_kernels: bool,
 ) -> bool:
     if getattr(module, _WRAPPED_ATTR, False):
         return False
@@ -122,6 +92,7 @@ def wrap_module_forward(
     original_forward = module.forward
     label = f"TT::{module_kind}::{module_fqn}"
     annotation: dict[str, Any] = {
+        "name": label,
         "module_fqn": module_fqn,
         "module_kind": module_kind,
         "model_part_idx": model_part_idx,
@@ -129,15 +100,12 @@ def wrap_module_forward(
 
     @functools.wraps(original_forward)
     def wrapped_forward(*args, **kwargs):
-        record_active = emit_record_function and is_profiler_active()
-        if not record_active and not emit_mark_kernels:
-            return original_forward(*args, **kwargs)
+        record_active = is_profiler_active()
 
         with contextlib.ExitStack() as stack:
             if record_active:
                 stack.enter_context(torch.profiler.record_function(label))
-            if emit_mark_kernels:
-                stack.enter_context(mark_kernels_context(annotation))
+            stack.enter_context(mark_kernels_context(annotation))
             return original_forward(*args, **kwargs)
 
     module.forward = wrapped_forward
@@ -172,8 +140,9 @@ def warn_mark_kernels_unavailable(exc: Exception) -> None:
         return
     _mark_kernels_warned = True
     logger.warning(
-        "CUDA graph kernel annotations were requested, but "
-        "torch.cuda._graph_annotations.mark_kernels is unavailable: "
+        "Module profiler was enabled, but CUDA graph kernel annotations are "
+        "unavailable because importing torch.cuda._graph_annotations.mark_kernels "
+        "failed: "
         f"{type(exc).__name__}: {exc}"
     )
 

@@ -36,14 +36,10 @@ class _Model(nn.Module):
         return self.extra(x)
 
 
-class TestProfilerRanges(unittest.TestCase):
+class TestModuleProfiler(unittest.TestCase):
     def test_record_function_contexts_are_emitted_for_coarse_modules(self):
         model = _Model()
-        num_wrapped = apply_module_profiler(
-            [model],
-            emit_record_function=True,
-            emit_mark_kernels=False,
-        )
+        num_wrapped = apply_module_profiler([model])
 
         self.assertEqual(num_wrapped, 3)
 
@@ -63,43 +59,11 @@ class TestProfilerRanges(unittest.TestCase):
 
     def test_wrapping_is_idempotent(self):
         model = _Model()
-        first = apply_module_profiler(
-            [model],
-            emit_record_function=True,
-            emit_mark_kernels=False,
-        )
-        second = apply_module_profiler(
-            [model],
-            emit_record_function=True,
-            emit_mark_kernels=False,
-        )
+        first = apply_module_profiler([model])
+        second = apply_module_profiler([model])
 
         self.assertEqual(first, 3)
         self.assertEqual(second, 0)
-
-    def test_include_and_exclude_patterns(self):
-        model = _Model()
-        num_wrapped = apply_module_profiler(
-            [model],
-            emit_record_function=True,
-            emit_mark_kernels=False,
-            include=["extra"],
-            exclude=["layers.0.attention"],
-        )
-
-        self.assertEqual(num_wrapped, 3)
-
-        x = torch.randn(2, 4)
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU]
-        ) as prof:
-            model(x)
-
-        keys = {event.key for event in prof.key_averages()}
-        self.assertIn("TT::block::layers.0", keys)
-        self.assertNotIn("TT::attention::layers.0.attention", keys)
-        self.assertIn("TT::ffn::layers.0.feed_forward", keys)
-        self.assertIn("TT::custom::extra", keys)
 
     def test_mark_kernels_context_uses_same_annotation_metadata(self):
         model = _Model()
@@ -114,11 +78,7 @@ class TestProfilerRanges(unittest.TestCase):
             "torchtitan.tools.module_profiler.get_mark_kernels",
             return_value=fake_mark_kernels,
         ):
-            apply_module_profiler(
-                [model],
-                emit_record_function=False,
-                emit_mark_kernels=True,
-            )
+            apply_module_profiler([model])
             model(torch.randn(2, 4))
 
         self.assertEqual(
@@ -134,6 +94,14 @@ class TestProfilerRanges(unittest.TestCase):
         )
         self.assertTrue(
             all(annotation["model_part_idx"] == 0 for annotation in annotations)
+        )
+        self.assertEqual(
+            {annotation["name"] for annotation in annotations},
+            {
+                "TT::block::layers.0",
+                "TT::attention::layers.0.attention",
+                "TT::ffn::layers.0.feed_forward",
+            },
         )
 
 
