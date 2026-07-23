@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""FP8 graph analysis for GraphTrainer's Phase 1 full-compile path."""
+"""FP8 graph annotation and validation for GraphTrainer compilation."""
 
 from __future__ import annotations
 
@@ -53,14 +53,13 @@ def _classify_fp8_node(node: torch.fx.Node) -> str:
     return "other"
 
 
-def analyze_fp8_regions_pass(
+def _inspect_fp8_regions(
     gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
     *,
     strict: bool,
+    annotate: bool,
 ) -> torch.fx.GraphModule:
-    """Record and validate FP8 regions in a traced joint forward/backward graph."""
-    del example_inputs
+    """Inspect FP8 regions and optionally annotate their nodes."""
     regions: dict[tuple[str, str], dict[str, int]] = {}
     target_inventory: defaultdict[str, set[str]] = defaultdict(set)
 
@@ -79,15 +78,18 @@ def analyze_fp8_regions_pass(
         target_inventory[quantization_kind].add(str(node.target))
 
         role = _classify_fp8_node(node)
-        node.meta.setdefault("custom", {})[_FP8_META] = {
-            "format": "mxfp8" if quantization_kind.startswith("mxfp8") else "float8",
-            "module_kind": (
-                "grouped_experts"
-                if quantization_kind.endswith("grouped_experts")
-                else "linear"
-            ),
-            "op_role": role,
-        }
+        if annotate:
+            node.meta.setdefault("custom", {})[_FP8_META] = {
+                "format": (
+                    "mxfp8" if quantization_kind.startswith("mxfp8") else "float8"
+                ),
+                "module_kind": (
+                    "grouped_experts"
+                    if quantization_kind.endswith("grouped_experts")
+                    else "linear"
+                ),
+                "op_role": role,
+            }
         if role == "gemm":
             phase = "backward" if node.meta.get("autograd_backward", False) else "forward"
             region[f"{phase}_gemms"] += 1
@@ -119,3 +121,126 @@ def analyze_fp8_regions_pass(
     gm.meta["fp8_summary"] = summary
     logger.info("GraphTrainer FP8 analysis: %s", summary)
     return gm
+
+
+def _is_regional_fp8_compute_node(
+    node: torch.fx.Node,
+    *,
+    module_fqn: str,
+    quantization_kind: str,
+) -> bool:
+    if node.op != "call_function":
+        return False
+    custom = node.meta.get("custom", {})
+    if (
+        custom.get(_MODULE_FQN) != module_fqn
+        or custom.get(_QUANTIZATION_KIND) != quantization_kind
+    ):
+        return False
+    target_name = str(node.target)
+    if not target_name.startswith("aten."):
+        return False
+    value = node.meta.get("val")
+    return isinstance(value, torch.Tensor) and value.device.type == "cuda"
+
+
+def _annotate_fp8_for_regional_inductor(
+    gm: torch.fx.GraphModule,
+) -> torch.fx.GraphModule:
+    """Tag maximal dense FP8 compute components for regional Inductor.
+
+    Each component is seeded by a scaled GEMM and expands only through CUDA
+    aten nodes with the same module and quantization provenance. Communication,
+    host work, and grouped-expert FP8 remain outside Phase 2 regional support.
+    """
+    candidate_nodes: set[torch.fx.Node] = set()
+    seeds: list[torch.fx.Node] = []
+
+    for node in gm.graph.nodes:
+        custom = node.meta.get("custom", {})
+        fp8 = custom.get(_FP8_META)
+        if fp8 is None:
+            continue
+        quantization_kind = custom.get(_QUANTIZATION_KIND)
+        module_fqn = custom.get(_MODULE_FQN, "")
+        if quantization_kind is None:
+            continue
+        if quantization_kind.endswith("grouped_experts"):
+            raise ValueError(
+                "FP8 regional compilation does not support grouped experts. "
+                "Use full Inductor or wait for Phase 4 MoE support."
+            )
+        if _is_regional_fp8_compute_node(
+            node,
+            module_fqn=module_fqn,
+            quantization_kind=quantization_kind,
+        ):
+            candidate_nodes.add(node)
+            if fp8["op_role"] == "gemm":
+                seeds.append(node)
+
+    if not seeds:
+        return gm
+
+    tagged_nodes: set[torch.fx.Node] = set()
+    num_regions = 0
+    for seed in seeds:
+        if seed in tagged_nodes:
+            continue
+        seed_custom = seed.meta["custom"]
+        module_fqn = seed_custom[_MODULE_FQN]
+        quantization_kind = seed_custom[_QUANTIZATION_KIND]
+        component = {seed}
+        pending = [seed]
+        while pending:
+            node = pending.pop()
+            neighbors = (*node.all_input_nodes, *node.users)
+            for neighbor in neighbors:
+                if neighbor in component or neighbor not in candidate_nodes:
+                    continue
+                if not _is_regional_fp8_compute_node(
+                    neighbor,
+                    module_fqn=module_fqn,
+                    quantization_kind=quantization_kind,
+                ):
+                    continue
+                component.add(neighbor)
+                pending.append(neighbor)
+
+        for node in component:
+            node.meta.setdefault("custom", {})["compile_with_inductor"] = {}
+            node.meta["custom"][_FP8_META]["regional_region_id"] = num_regions
+        tagged_nodes.update(component)
+        num_regions += 1
+
+    gm.meta["fp8_regional_summary"] = {
+        "num_regions": num_regions,
+        "num_tagged_nodes": len(tagged_nodes),
+    }
+    logger.info(
+        "GraphTrainer FP8 regional annotation: %s", gm.meta["fp8_regional_summary"]
+    )
+    return gm
+
+
+def validate_fp8_graph_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    strict: bool,
+) -> torch.fx.GraphModule:
+    """Validate FP8 lowering without changing node-level compilation metadata."""
+    del example_inputs
+    return _inspect_fp8_regions(gm, strict=strict, annotate=False)
+
+
+def annotate_fp8_for_regional_inductor_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    strict: bool,
+) -> torch.fx.GraphModule:
+    """Validate FP8 lowering and tag dense FP8 regions for regional Inductor."""
+    del example_inputs
+    gm = _inspect_fp8_regions(gm, strict=strict, annotate=True)
+    return _annotate_fp8_for_regional_inductor(gm)

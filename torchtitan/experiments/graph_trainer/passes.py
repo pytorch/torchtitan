@@ -71,7 +71,10 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
-from torchtitan.experiments.graph_trainer.fp8_passes import analyze_fp8_regions_pass
+from torchtitan.experiments.graph_trainer.fp8_passes import (
+    annotate_fp8_for_regional_inductor_pass,
+    validate_fp8_graph_pass,
+)
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
     full_inductor_compilation_pass,
@@ -209,10 +212,14 @@ def compile_time_passes(
         else []
     )
     fp8_config = getattr(config.compile, "fp8", None)
-    if fp8_config is not None and fp8_config.enabled:
+    if (
+        fp8_config is not None
+        and fp8_config.enabled
+        and config.compile.inductor_compilation == "full"
+    ):
         passes.append(
             functools.partial(
-                analyze_fp8_regions_pass,
+                validate_fp8_graph_pass,
                 strict=fp8_config.strict_validation,
             )
         )
@@ -345,6 +352,18 @@ def compile_time_passes(
 
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    if (
+        fp8_config is not None
+        and fp8_config.enabled
+        and config.compile.inductor_compilation == "regional"
+    ):
+        passes.append(
+            functools.partial(
+                annotate_fp8_for_regional_inductor_pass,
+                strict=fp8_config.strict_validation,
+            )
+        )
 
     if not include_inductor:
         return passes

@@ -33,7 +33,7 @@ try:
         class Config(Linear.Config):
             """Drop-in replacement for Linear.Config that builds MXFP8Linear."""
 
-            pass
+            _quantization_recipe_name: str = "mxfp8_rceil"
 
         def __init__(self, config: Config):
             TorchAOMXFP8Linear.__init__(
@@ -41,6 +41,9 @@ try:
                 config.in_features,
                 config.out_features,
                 bias=config.bias,
+            )
+            self._torchtitan_quantization_recipe_name = (
+                config._quantization_recipe_name
             )
 
 except ImportError:
@@ -86,6 +89,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                     out_features=config.out_features,
                     bias=config.bias,
                     param_init=config.param_init,
+                    _quantization_recipe_name="mxfp8_rceil",
                 )
                 if parent is None:
                     model_config = new_config

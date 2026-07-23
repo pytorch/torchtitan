@@ -42,6 +42,19 @@ def graph_trainer_llama3_debugmodel_float8() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_llama3_debugmodel_float8_regional() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(
+        llama3_debugmodel_float8(model_compile_enabled=True), model_registry
+    )
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        inductor_compilation="regional",
+        disable_passes=["cudagraph_pass"],
+        fp8=FP8GraphConfig(enabled=True),
+    )
+    return config
+
+
 def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     """Debug model on the test-only SDPA backend.
 

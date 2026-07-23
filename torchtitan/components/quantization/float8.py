@@ -36,6 +36,8 @@ try:
             """Drop-in replacement for Linear.Config that builds Float8Linear."""
 
             _torchao_config: object = None
+            _quantization_recipe_name: str = ""
+            _quantization_emulate: bool = False
 
         def __init__(self, config: Config):
             TorchAOFloat8Linear.__init__(
@@ -45,6 +47,10 @@ try:
                 bias=config.bias,
                 config=config._torchao_config,
             )
+            self._torchtitan_quantization_recipe_name = (
+                config._quantization_recipe_name
+            )
+            self._torchtitan_quantization_emulate = config._quantization_emulate
 
 except ImportError:
     Float8Linear = None
@@ -161,6 +167,8 @@ class Float8LinearConverter(QuantizationConverter):
                     bias=linear_config.bias,
                     param_init=linear_config.param_init,
                     _torchao_config=self.torchao_config,
+                    _quantization_recipe_name=self.config.recipe_name,
+                    _quantization_emulate=self.config.emulate,
                 )
                 if parent is None:
                     model_config = new_config

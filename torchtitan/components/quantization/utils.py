@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
+
 import torch.nn as nn
 
 from torchtitan.models.common.linear import Linear
@@ -111,3 +113,50 @@ def get_quantization_kind(module: nn.Module) -> str | None:
     if any(isinstance(module, cls) for cls in _mxfp8_experts_cache.values()):
         return "mxfp8_grouped_experts"
     return None
+
+
+@dataclass(frozen=True)
+class QuantizationSignature:
+    """Stable lowering-relevant identity for one quantized runtime module."""
+
+    module_fqn: str
+    kind: str
+    recipe_name: str
+    emulate: bool
+
+
+def get_quantization_signature(
+    model: nn.Module,
+) -> tuple[QuantizationSignature, ...]:
+    """Return sorted stable signatures for quantized runtime modules.
+
+    Grouped-expert modules are rejected because regional grouped FP8
+    compilation is a Phase 4 feature and has no complete artifact signature.
+    """
+    signatures = []
+    for module_fqn, module in model.named_modules():
+        kind = get_quantization_kind(module)
+        if kind is None:
+            continue
+        if kind.endswith("grouped_experts"):
+            raise ValueError(
+                "FP8 precompile does not support grouped experts. "
+                "Use dense FP8 or wait for Phase 4 MoE support."
+            )
+        recipe_name = getattr(module, "_torchtitan_quantization_recipe_name", "")
+        if not recipe_name:
+            raise ValueError(
+                "Quantized module is missing stable recipe metadata: "
+                f"{module_fqn} ({kind})."
+            )
+        signatures.append(
+            QuantizationSignature(
+                module_fqn=module_fqn,
+                kind=kind,
+                recipe_name=recipe_name,
+                emulate=bool(
+                    getattr(module, "_torchtitan_quantization_emulate", False)
+                ),
+            )
+        )
+    return tuple(sorted(signatures, key=lambda signature: signature.module_fqn))

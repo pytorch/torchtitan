@@ -38,11 +38,15 @@ def test_float8_applied_by_model_registry():
     assert has_quantization(model_config)
     # Some Linear.Config instances should be swapped to Float8Linear
     converted = [
-        fqn
-        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
-        if isinstance(lc, Float8Linear.Config)
+        linear_config
+        for _fqn, linear_config, _parent, _attr in model_config.traverse(
+            Linear.Config
+        )
+        if isinstance(linear_config, Float8Linear.Config)
     ]
     assert len(converted) > 0
+    assert all(config._quantization_recipe_name == "rowwise" for config in converted)
+    assert all(config._quantization_emulate for config in converted)
 
 
 def test_quantized_grouped_experts():
