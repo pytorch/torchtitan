@@ -6,7 +6,6 @@
 
 import unittest
 
-import spmd_types as spmd
 import torch
 from spmd_types._test_utils import FakeProcessGroupTestCase
 from spmd_types.checker import typecheck
@@ -146,6 +145,35 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
         self.assertIsInstance(momentum, DTensor)
         self.assertEqual(momentum.placements, param.placements)
         torch.testing.assert_close(momentum.to_local(), reference_momentum[:3])
+
+    def test_validation_precedes_compute_views(self):
+        param = self._dtensor_parameter(
+            torch.randn(3, 4), Shard(0), global_shape=(6, 4)
+        )
+        param.grad = DTensor.from_local(
+            torch.randn(3, 4),
+            self.mesh,
+            [Shard(0)],
+            run_check=False,
+            shape=(6, 4),
+            stride=(4, 1),
+        )
+        complex_param = torch.nn.Parameter(torch.randn(3, 4, dtype=torch.complex64))
+        complex_param.grad = torch.randn_like(complex_param)
+        optimizer = MuonAdapter([param, complex_param], lr=0.02, ns_steps=1)
+
+        comm_mode = CommDebugMode()
+        with (
+            comm_mode,
+            self.assertRaisesRegex(
+                RuntimeError, "Muon does not support complex parameters"
+            ),
+        ):
+            optimizer.step()
+
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(len(optimizer.state), 0)
+        self.assertFalse(hasattr(optimizer, "_compute_view_stack"))
 
     def test_dtensor_leading_shard_matrix_batch(self):
         # The same layout covers physical per-head [H, Dh, D] and grouped
