@@ -6742,6 +6742,28 @@ class TestIsFullCudagraphable(TestCase):
         self.assertFalse(is_cudagraphable(s))
         self.assertFalse(is_full_cudagraphable(gm))
 
+    def test_lift_fresh_copy_of_constant_is_cudagraphable(self):
+        # make_fx bakes the Python scalar 0 in ``t[mask] = 0`` into a GraphModule
+        # attribute named ``_tensor_constantN`` (a get_attr node) and lifts it via
+        # lift_fresh_copy. The lifted value is a compile-time constant baked into
+        # the captured kernels, so the pure-CPU rejection must not gate it even
+        # though the lifted 0-d tensor lives on CPU.
+        g = torch.fx.Graph()
+        const = g.get_attr("_tensor_constant0")
+        lift = g.call_function(torch.ops.aten.lift_fresh_copy.default, (const,))
+        g.output(lift)
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                # plain tensor attr -> GraphModule._copy_attr registers it as a
+                # buffer, mirroring make_fx's _tensor_constantN baking.
+                self._tensor_constant0 = torch.tensor(0)
+
+        gm = torch.fx.GraphModule(M(), g)
+        self.assertTrue(is_cudagraphable(lift))
+        self.assertTrue(is_full_cudagraphable(gm))
+
 
 class TestEagerChunking(TestCase):
     def _config(
