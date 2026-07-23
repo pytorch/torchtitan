@@ -71,6 +71,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
+from torchtitan.experiments.graph_trainer.fp8_passes import analyze_fp8_regions_pass
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
     full_inductor_compilation_pass,
@@ -207,6 +208,14 @@ def compile_time_passes(
         if include_mandatory_normalization
         else []
     )
+    fp8_config = getattr(config.compile, "fp8", None)
+    if fp8_config is not None and fp8_config.enabled:
+        passes.append(
+            functools.partial(
+                analyze_fp8_regions_pass,
+                strict=fp8_config.strict_validation,
+            )
+        )
     ep_overlap_chunk_passes: list[Callable] = []
     ep_overlap_module_fqn: str | None = None
     ep_overlap_chunk_strategy: str | None = None

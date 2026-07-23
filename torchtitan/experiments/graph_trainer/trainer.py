@@ -20,6 +20,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     trace_input_preparer_keys,
+    validate_fp8_graph_config,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -106,6 +107,7 @@ class GraphTrainer(Trainer):
         )
 
     def __init__(self, config):
+        validate_fp8_graph_config(config.compile)
         super().__init__(config)
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
