@@ -18,8 +18,8 @@ from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWorkBuffer,
 )
 from torchtitan.experiments.rl.controller_metrics import (
-    compute_policy_age_metrics,
     compute_perf_ratio_metrics,
+    compute_policy_age_metrics,
     MetricsTimer,
 )
 from torchtitan.experiments.rl.observability import metrics as m

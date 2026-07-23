@@ -119,8 +119,8 @@ from torchtitan.experiments.rl.components.work_buffer import (
 )
 from torchtitan.experiments.rl.controller_metrics import (
     combine_microbatch_metrics,
-    compute_policy_age_metrics,
     compute_perf_ratio_metrics,
+    compute_policy_age_metrics,
     compute_rollout_metrics,
     MetricsTimer,
 )
