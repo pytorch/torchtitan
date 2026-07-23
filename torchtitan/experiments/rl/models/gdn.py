@@ -35,6 +35,7 @@ from fla.modules.convolution import (
     causal_conv1d_update as _fla_causal_conv1d_update,
 )
 from fla.ops.gated_delta_rule import (
+    chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
 )
 from torch.distributed.tensor import DTensor
@@ -193,8 +194,13 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
         ssm_state: torch.Tensor,
         slot_indices: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        use_chunk: bool,
     ) -> torch.Tensor:
-        """Run FLA's recurrence and update the selected paged SSM slots."""
+        """Run FLA's gated-delta rule and update the selected paged SSM slots.
+
+        ``use_chunk`` selects the parallel chunk kernel over the sequential
+        recurrent kernel; the caller sets it for non-batch-invariant prefill.
+        """
         query, key, value = self._split_qkv(conv_output)
         # Grouped-value heads: expand q/k to match the value head count.
         if query.shape[2] != value.shape[2]:
@@ -213,7 +219,17 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
             value = value.float()
             update_gate = update_gate.float()
 
-        output, final_state = _fla_fused_recurrent_gated_delta_rule(
+        # Non-batch-invariant prefill/mixed batches use the parallel chunk kernel
+        # (far faster than the O(seqlen) sequential recurrence). Batch-invariant
+        # mode keeps the recurrent kernel so the generator matches the trainer's
+        # recurrent forward bitwise; pure decode is a single token, where chunking
+        # gains nothing and the recurrent kernel stays cudagraph-capturable.
+        gated_delta_rule = (
+            _fla_chunk_gated_delta_rule
+            if use_chunk
+            else _fla_fused_recurrent_gated_delta_rule
+        )
+        output, final_state = gated_delta_rule(
             query,
             key,
             value,
@@ -289,7 +305,7 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
         conv_output = mixed_qkv.new_empty(num_actual_tokens, mixed_qkv.shape[1])
 
         decode_slots = state_indices[:num_decodes]
-        if num_decodes > 0:
+        if num_decodes > 0:  # pure decode, or mixed prefill decode
             decode_conv_state = conv_state[decode_slots]
             # vLLM stores the trailing W - 1 inputs. FLA expects W entries but
             # ignores the first, so prepend a zero column and drop it on write.
@@ -316,7 +332,7 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
             prefill_start = num_decode_tokens if num_decodes > 0 else 0
             # cu_seqlens must be 0-based within the prefill slice that the conv
             # kernel receives (mixed_qkv[prefill_start:]).
-            if num_decodes == 0:  # pure prefill
+            if num_decodes == 0:
                 # No decode tokens in front, so the batch offsets are already
                 # 0-based for the prefill slice.
                 prefill_cu_seqlens = gdn_metadata.non_spec_query_start_loc
@@ -362,10 +378,9 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
 
         # Recurrence over the whole batch in one call. Decode (T=1) and prefill
         # (T>1) sequences run together, delimited by cu_seqlens; each gets a
-        # materialized fp32 initial state. torchtitan already runs
-        # recurrent-everywhere, and the kernel processes each sequence
-        # independently from its cu_seqlens entry and initial-state row, so
-        # merging the former per-segment calls is free.
+        # materialized fp32 initial state. The kernel processes each sequence
+        # independently from its cu_seqlens entry and initial-state row, so a
+        # single call covers the whole batch (chunk or recurrent, chosen below).
         cu_seqlens = gdn_metadata.non_spec_query_start_loc[: num_sequences + 1]
         if num_prefills == 0:
             # Pure decode is captured in a CUDA graph, which forbids host syncs and
@@ -403,6 +418,9 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
                 .transpose(-1, -2)
                 .to(torch.float32)
             )
+        # Non-batch-invariant prefill/mixed batches take the parallel chunk kernel;
+        # batch-invariant mode and pure decode take the recurrent kernel.
+        use_chunk = num_prefills > 0 and not is_in_batch_invariant_mode()
         recurrent_output = self._run_recurrence(
             conv_output,
             a,
@@ -413,6 +431,7 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
             ssm_state,
             all_slots,
             cu_seqlens,
+            use_chunk,
         )
         output[:num_actual_tokens] = recurrent_output[0, :num_actual_tokens].to(
             output.dtype
