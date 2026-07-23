@@ -62,9 +62,8 @@ _buffer: ElasticBuffer | None = None
 _handle_cache: dict = {}
 _handle_counter: int = 0
 
-# Pending combine event for deferred synchronization, so shared_experts compute can
-# overlap with the combine communication (the caller MUST call sync_combine() before
-# using the combine result). Process-local + single-threaded, so a module var suffices.
+# Pending combine event used to make the current stream wait for combine completion.
+# Process-local + single-threaded, so a module variable suffices.
 _pending_combine_event = None
 
 
@@ -267,7 +266,7 @@ def _combine_op_impl(
         topk_weights=None,
         async_with_compute_stream=True,
     )
-    # Defer the sync so shared_experts compute can overlap the combine communication.
+    # Record completion so the dispatcher can synchronize before returning.
     _pending_combine_event = after_event
     return combined
 
