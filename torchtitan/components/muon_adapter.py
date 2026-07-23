@@ -8,9 +8,11 @@
 
 from collections.abc import MutableMapping
 from contextlib import ExitStack
+from typing import Any
 
 import spmd_types as spmd
 import torch
+import torch.distributed.tensor.placement_types as placement_types
 from torch import Tensor
 from torch.distributed.tensor import (
     DTensor,
@@ -25,6 +27,18 @@ from torch.optim._muon import muon
 __all__ = ["MuonAdapter"]
 
 
+def _is_shard_like(placement: Placement) -> bool:
+    predicate = getattr(placement_types, "_is_shard_like", None)
+    if predicate is not None:
+        return predicate(placement)
+
+    strided_shard_type = getattr(placement_types, "_StridedShard", None)
+    return isinstance(placement, Shard) or (
+        strided_shard_type is not None
+        and isinstance(placement, strided_shard_type)
+    )
+
+
 class MuonAdapter(torch.optim.Muon):
     """Run core Muon through optional storage and logical-view adaptation.
 
@@ -34,6 +48,15 @@ class MuonAdapter(torch.optim.Muon):
     two matrix dimensions are complete on the current rank. Ordinary untyped
     tensors retain the behavior of ``torch.optim.Muon``.
     """
+
+    def add_param_group(self, param_group: dict[str, Any]) -> None:
+        if param_group.get("fused") or param_group.get("foreach"):
+            raise NotImplementedError(
+                "MuonAdapter does not support fused or foreach implementations. "
+                "Configure implementation='for-loop' or explicitly disable both "
+                "options in each Muon parameter group."
+            )
+        super().add_param_group(param_group)
 
     @staticmethod
     def _compute_placements(
@@ -49,8 +72,8 @@ class MuonAdapter(torch.optim.Muon):
                     "MuonAdapter requires gradients to be reduced before the "
                     "optimizer step; Partial storage is not a valid input"
                 )
-            if isinstance(placement, Shard):
-                shard_dim = placement.dim % tensor.ndim
+            if _is_shard_like(placement):
+                shard_dim = getattr(placement, "dim") % tensor.ndim
                 # A logical reshape makes every physical shard boundary
                 # ambiguous. Native [..., M, N] tensors may retain shards only
                 # on their leading matrix-batch dimensions.

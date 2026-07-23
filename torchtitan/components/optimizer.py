@@ -178,15 +178,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         claimed: set[str] = set()  # first-match-wins
 
         for pg in param_group_configs:
-            if pg.optimizer_name == "Muon" and (
-                pg.optimizer_kwargs.get("fused", impl_kwargs["fused"])
-                or pg.optimizer_kwargs.get("foreach", impl_kwargs["foreach"])
-            ):
-                raise NotImplementedError(
-                    "Muon does not support fused or foreach implementations. "
-                    "Set implementation='for-loop' or explicitly disable both "
-                    "options in this Muon parameter group."
-                )
             pattern = re.compile(pg.pattern)
             params: list[nn.Parameter] = []
             param_names: list[str] = []
