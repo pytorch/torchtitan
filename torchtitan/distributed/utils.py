@@ -11,7 +11,7 @@ import math
 import os
 import random
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
 from typing import Protocol, TYPE_CHECKING
 
@@ -36,6 +36,25 @@ if TYPE_CHECKING:
 
 
 _spmd_backend = "spmd_types"
+
+
+@contextlib.contextmanager
+def preserve_rng_state() -> Iterator[None]:
+    """Restore rank-local ambient RNG after an isolated operation."""
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_cpu_state = torch.get_rng_state()
+    accelerator_state = (
+        device_module.get_rng_state() if device_module.is_available() else None
+    )
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_cpu_state)
+        if accelerator_state is not None:
+            device_module.set_rng_state(accelerator_state)
 
 
 def set_spmd_backend(spmd_backend: str) -> None:

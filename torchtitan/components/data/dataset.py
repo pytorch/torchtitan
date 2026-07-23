@@ -6,6 +6,7 @@
 
 """Composable dataset recipes backed by Grain."""
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -82,8 +83,9 @@ class SingleDatasetConfig:
     """One source with row processing and filtering."""
 
     source: SourceConfig
+    pre_filters: tuple[Callable[[Any], bool], ...] = ()
     processor: SampleProcessor.Config | None = None
-    filters: tuple[Callable[[Any], bool], ...] = ()
+    post_filters: tuple[Callable[[Any], bool], ...] = ()
 
     def build(
         self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
@@ -103,23 +105,27 @@ class SingleDatasetConfig:
                     window_size=iteration.streaming_shuffle_window_size,
                     seed=iteration.seed,
                 )
+            for filter_fn in self.pre_filters:
+                dataset = dataset.filter(filter_fn)
             if self.processor is not None:
                 dataset = dataset.random_map(
                     self.processor.build(context=context),
                     seed=iteration.seed + iteration.dp_rank,
                 )
-            for filter_fn in self.filters:
+            for filter_fn in self.post_filters:
                 dataset = dataset.filter(filter_fn)
             return dataset
 
         if not isinstance(source, RandomAccessSource):
             raise TypeError("source must support len/getitem or be a Grain IterDataset")
         dataset = grain.MapDataset.source(source)
+        for filter_fn in self.pre_filters:
+            dataset = dataset.filter(filter_fn)
         if self.processor is not None:
             dataset = dataset.random_map(
                 self.processor.build(context=context), seed=iteration.seed
             )
-        for filter_fn in self.filters:
+        for filter_fn in self.post_filters:
             dataset = dataset.filter(filter_fn)
         if iteration.shuffle:
             dataset = dataset.shuffle(seed=iteration.seed)
@@ -144,32 +150,38 @@ class WeightedDataset:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class DatasetMixConfig:
-    """Deterministically interleaves weighted child datasets."""
+    """Interleaves weighted children until any finite child is exhausted."""
 
     datasets: tuple[WeightedDataset, ...]
 
     def build(
         self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
     ) -> GrainDataset:
-        if not self.datasets or any(item.weight <= 0 for item in self.datasets):
-            raise ValueError("DatasetMixConfig requires positive-weight datasets")
+        if not self.datasets or any(
+            not math.isfinite(item.weight) or item.weight <= 0
+            for item in self.datasets
+        ):
+            raise ValueError(
+                "DatasetMixConfig requires finite, positive-weight datasets"
+            )
         children = [
             item.dataset.build(
                 context=context,
+                # Inserting or reordering a child reseeds every later child.
                 iteration=replace(iteration, seed=iteration.seed + index),
             )
             for index, item in enumerate(self.datasets)
         ]
         weights = [item.weight for item in self.datasets]
-        if all(isinstance(child, grain.MapDataset) for child in children):
-            return grain.MapDataset.mix(
-                cast(list[grain.MapDataset], children), weights=weights
-            )
-        if all(isinstance(child, grain.IterDataset) for child in children):
-            return grain.IterDataset.mix(
-                cast(list[grain.IterDataset], children), weights=weights
-            )
-        raise TypeError("a mix cannot combine map and iterable child datasets")
+        children = [
+            child.to_iter_dataset(read_options=context.read_options)
+            if isinstance(child, grain.MapDataset)
+            else child
+            for child in children
+        ]
+        return grain.IterDataset.mix(
+            cast(list[grain.IterDataset], children), weights=weights
+        )
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

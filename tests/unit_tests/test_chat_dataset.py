@@ -81,13 +81,13 @@ def _build_rows(seq_len):
         dataset=SingleDatasetConfig(
             source=HuggingFaceRandomAccessSource.Config(
                 path="json",
+                split="train",
                 load_dataset_kwargs={
                     "data_files": _DATA_PATH,
-                    "split": "train",
                 },
             ),
             processor=ChatProcessor.Config(messages_fn=_process_sample),
-            filters=(lambda sample: sample is not None,),
+            post_filters=(lambda sample: sample is not None,),
         )
     )
     return dataset.build(
@@ -109,13 +109,13 @@ def _build_dataloader(seq_len=128, world_size=1, rank=0):
             dataset=SingleDatasetConfig(
                 source=HuggingFaceRandomAccessSource.Config(
                     path="json",
+                    split="train",
                     load_dataset_kwargs={
                         "data_files": _DATA_PATH,
-                        "split": "train",
                     },
                 ),
                 processor=ChatProcessor.Config(messages_fn=_process_sample),
-                filters=(lambda sample: sample is not None,),
+                post_filters=(lambda sample: sample is not None,),
             )
         ),
         seed=42,

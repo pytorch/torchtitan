@@ -7,9 +7,13 @@
 """CPU tests for the composed Grain data pipeline."""
 
 import json
+import multiprocessing
+import time
 from dataclasses import dataclass, replace
 from typing import Any
+from unittest import mock
 
+import datasets
 import grain.python as grain
 import numpy as np
 import pytest
@@ -31,11 +35,13 @@ from torchtitan.components.data.packing import (
     FirstFitPackingConfig,
 )
 from torchtitan.components.data.sources import (
+    HuggingFaceRandomAccessSource,
     HuggingFaceStreamingSource,
     IndexedJsonlSource,
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
+from torchtitan.trainer import Trainer
 
 
 class FakeTokenizer:
@@ -96,6 +102,33 @@ class RowToTokens(SampleProcessor):
         )
 
 
+class VerifyFilterOrder(SampleProcessor):
+    @dataclass(kw_only=True, slots=True)
+    class Config(SampleProcessor.Config):
+        pass
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext):
+        del config, context
+
+    def __call__(self, sample, rng):
+        del rng
+        assert sample["keep"]
+        return {"value": sample["value"] * 2, "processed": True}
+
+
+class RaiseInWorker(SampleProcessor):
+    @dataclass(kw_only=True, slots=True)
+    class Config(SampleProcessor.Config):
+        pass
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext):
+        del config, context
+
+    def __call__(self, sample, rng):
+        del rng
+        raise RuntimeError(f"worker failed on row {sample['value']}")
+
+
 def test_indexed_jsonl_random_access(tmp_path):
     write_jsonl(tmp_path / "b.jsonl", [{"id": 2}, {"id": 3}])
     write_jsonl(tmp_path / "a.jsonl", [{"id": 0}, {"id": 1}])
@@ -129,7 +162,8 @@ def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
     write_jsonl(path, [{"id": index} for index in range(10)])
     config = HuggingFaceStreamingSource.Config(
         path="json",
-        load_dataset_kwargs={"data_files": str(path), "split": "train"},
+        split="train",
+        load_dataset_kwargs={"data_files": str(path)},
     )
     rank_rows = []
     for rank in range(2):
@@ -158,9 +192,10 @@ def test_hf_cursor_restores_through_grain_wrappers(tmp_path):
     config = SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="json",
-            load_dataset_kwargs={"data_files": str(path), "split": "train"},
+            split="train",
+            load_dataset_kwargs={"data_files": str(path)},
         ),
-        filters=(lambda row: row["id"] % 2 == 0,),
+        post_filters=(lambda row: row["id"] % 2 == 0,),
     )
     policy = iteration(repeat=True, shuffle=True)
     iterator = iter(config.build(context=CONTEXT, iteration=policy))
@@ -175,15 +210,142 @@ def test_hf_cursor_restores_through_grain_wrappers(tmp_path):
     assert [next(restored) for _ in range(5)] == expected
 
 
+@pytest.mark.parametrize(
+    ("source_type", "streaming"),
+    [
+        (HuggingFaceRandomAccessSource, False),
+        (HuggingFaceStreamingSource, True),
+    ],
+)
+def test_hf_explicit_fields_are_passed_to_load_dataset(
+    monkeypatch, source_type, streaming
+):
+    loaded = (
+        datasets.IterableDataset.from_generator(lambda: iter(({"id": 0},)))
+        if streaming
+        else datasets.Dataset.from_dict({"id": [0]})
+    )
+    load_dataset = mock.Mock(return_value=loaded)
+    monkeypatch.setattr(
+        "torchtitan.components.data.sources.datasets.load_dataset",
+        load_dataset,
+    )
+
+    source_type.Config(
+        path="owner/dataset",
+        name="configuration",
+        split="validation",
+        revision="abc123",
+        load_dataset_kwargs={"token": "secret"},
+    ).build(dp_rank=0, dp_world_size=1)
+
+    load_dataset.assert_called_once_with(
+        "owner/dataset",
+        name="configuration",
+        split="validation",
+        revision="abc123",
+        streaming=streaming,
+        token="secret",
+    )
+
+
+@pytest.mark.parametrize(
+    "source_type", [HuggingFaceRandomAccessSource, HuggingFaceStreamingSource]
+)
+def test_hf_lineage_fields_are_serialized(source_type):
+    config = GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(
+            source=source_type.Config(
+                path="owner/dataset",
+                name="configuration",
+                split="validation",
+                revision="abc123",
+            )
+        )
+    )
+
+    source = config.to_dict()["dataset"]["source"]
+
+    assert source["path"] == "owner/dataset"
+    assert source["name"] == "configuration"
+    assert source["split"] == "validation"
+    assert source["revision"] == "abc123"
+
+
+@pytest.mark.parametrize(
+    "source_type", [HuggingFaceRandomAccessSource, HuggingFaceStreamingSource]
+)
+def test_hf_config_requires_split(source_type):
+    with pytest.raises(TypeError, match="split"):
+        source_type.Config(path="owner/dataset")
+
+
+@pytest.mark.parametrize(
+    "source_type", [HuggingFaceRandomAccessSource, HuggingFaceStreamingSource]
+)
+@pytest.mark.parametrize("field", ["split", "name", "revision", "streaming"])
+def test_hf_config_rejects_duplicate_first_class_fields(source_type, field):
+    with pytest.raises(ValueError, match="repeated in kwargs"):
+        source_type.Config(
+            path="owner/dataset",
+            split="train",
+            load_dataset_kwargs={field: "duplicate"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("source_type", "wrong_leaf", "message"),
+    [
+        (
+            HuggingFaceRandomAccessSource,
+            datasets.IterableDataset.from_generator(lambda: iter(({"id": 0},))),
+            "requires one Dataset",
+        ),
+        (
+            HuggingFaceRandomAccessSource,
+            datasets.DatasetDict({"train": datasets.Dataset.from_dict({"id": [0]})}),
+            "requires one Dataset",
+        ),
+        (
+            HuggingFaceStreamingSource,
+            datasets.Dataset.from_dict({"id": [0]}),
+            "requires one IterableDataset",
+        ),
+        (
+            HuggingFaceStreamingSource,
+            datasets.IterableDatasetDict(
+                {
+                    "train": datasets.IterableDataset.from_generator(
+                        lambda: iter(({"id": 0},))
+                    )
+                }
+            ),
+            "requires one IterableDataset",
+        ),
+    ],
+)
+def test_hf_source_rejects_wrong_leaf(monkeypatch, source_type, wrong_leaf, message):
+    monkeypatch.setattr(
+        "torchtitan.components.data.sources.datasets.load_dataset",
+        lambda *args, **kwargs: wrong_leaf,
+    )
+
+    with pytest.raises(TypeError, match=message):
+        source_type.Config(path="owner/dataset", split="train").build(
+            dp_rank=0, dp_world_size=1
+        )
+
+
 def test_loader_requires_repeat_with_data_parallelism(tmp_path):
     path = tmp_path / "rows.jsonl"
     write_jsonl(path, [{"id": index} for index in range(4)])
     config = SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="json",
-            load_dataset_kwargs={"data_files": str(path), "split": "train"},
+            split="train",
+            load_dataset_kwargs={"data_files": str(path)},
         ),
-        filters=(lambda row: row["id"] % 2 == 0,),
+        post_filters=(lambda row: row["id"] % 2 == 0,),
     )
 
     with pytest.raises(ValueError, match="repeat=False with data parallelism"):
@@ -213,6 +375,45 @@ class StreamingRowsSourceConfig:
         dataset = grain.MapDataset.source(self.rows)
         dataset = dataset[dp_rank::dp_world_size]
         return dataset.to_iter_dataset()
+
+
+@pytest.mark.parametrize("source_type", [RowsSourceConfig, StreamingRowsSourceConfig])
+def test_pre_and_post_filters_restore_exactly(source_type):
+    rows = tuple({"value": index, "keep": index % 2 == 0} for index in range(12))
+    config = SingleDatasetConfig(
+        source=source_type(rows=rows),
+        pre_filters=(lambda row: row["keep"],),
+        processor=VerifyFilterOrder.Config(),
+        post_filters=(lambda row: row["processed"] and row["value"] % 4 == 0,),
+    )
+    dataset = config.build(context=CONTEXT, iteration=iteration())
+    if isinstance(dataset, grain.MapDataset):
+        dataset = dataset.to_iter_dataset(read_options=CONTEXT.read_options)
+    iterator = iter(dataset)
+
+    assert next(iterator)["value"] == 0
+    state = iterator.get_state()
+    expected = list(iterator)
+
+    restored_dataset = config.build(context=CONTEXT, iteration=iteration())
+    if isinstance(restored_dataset, grain.MapDataset):
+        restored_dataset = restored_dataset.to_iter_dataset(
+            read_options=CONTEXT.read_options
+        )
+    restored = iter(restored_dataset)
+    restored.set_state(state)
+
+    assert (
+        list(restored)
+        == expected
+        == [
+            {"value": 4, "processed": True},
+            {"value": 8, "processed": True},
+            {"value": 12, "processed": True},
+            {"value": 16, "processed": True},
+            {"value": 20, "processed": True},
+        ]
+    )
 
 
 def test_single_dataset_shuffle_shard_repeat_order():
@@ -257,7 +458,8 @@ def test_weighted_mix_keeps_weight_with_dataset():
             WeightedDataset(dataset=right, weight=1.0),
         )
     ).build(context=CONTEXT, iteration=iteration(repeat=True))
-    values = [dataset[index]["source"] for index in range(12)]
+    iterator = iter(dataset)
+    values = [next(iterator)["source"] for _ in range(12)]
 
     assert values.count("left") == 8
     assert values.count("right") == 4
@@ -298,6 +500,127 @@ def test_mix_reaches_all_rows_of_larger_iterable_child():
     seen = {row["index"] for row in rows if row["source"] == "large"}
 
     assert seen == set(range(100))
+
+
+def test_filtered_mix_weights_emitted_rows():
+    sparse = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"source": "sparse", "index": index} for index in range(100))
+        ),
+        pre_filters=(lambda row: row["index"] % 10 == 0,),
+    )
+    dense = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"source": "dense", "index": index} for index in range(100))
+        )
+    )
+    dataset = DatasetMixConfig(
+        datasets=(
+            WeightedDataset(dataset=sparse),
+            WeightedDataset(dataset=dense),
+        )
+    ).build(context=CONTEXT, iteration=iteration(repeat=True))
+    iterator = iter(dataset)
+    sources = [next(iterator)["source"] for _ in range(2_000)]
+
+    assert 900 <= sources.count("sparse") <= 1_100
+
+
+def test_mix_composes_map_and_iterable_children():
+    map_child = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"source": "map", "index": index} for index in range(8))
+        )
+    )
+    stream_child = SingleDatasetConfig(
+        source=StreamingRowsSourceConfig(
+            rows=tuple({"source": "stream", "index": index} for index in range(8))
+        )
+    )
+    dataset = DatasetMixConfig(
+        datasets=(
+            WeightedDataset(dataset=map_child),
+            WeightedDataset(dataset=stream_child),
+        )
+    ).build(context=CONTEXT, iteration=iteration(repeat=True))
+    iterator = iter(dataset)
+    sources = {next(iterator)["source"] for _ in range(40)}
+
+    assert sources == {"map", "stream"}
+
+
+@pytest.mark.parametrize("lengths", [(3, 3), (2, 10)])
+def test_finite_mix_stops_when_first_child_exhausts(lengths):
+    children = tuple(
+        WeightedDataset(
+            dataset=SingleDatasetConfig(
+                source=RowsSourceConfig(
+                    rows=tuple(
+                        {"source": source, "index": index} for index in range(length)
+                    )
+                )
+            )
+        )
+        for source, length in enumerate(lengths)
+    )
+    rows = list(
+        DatasetMixConfig(datasets=children).build(
+            context=CONTEXT, iteration=iteration()
+        )
+    )
+    counts = [sum(row["source"] == source for row in rows) for source in range(2)]
+
+    assert any(count == length for count, length in zip(counts, lengths, strict=True))
+    assert all(count <= length for count, length in zip(counts, lengths, strict=True))
+
+
+def test_finite_mix_with_empty_iterable_child_is_empty():
+    empty = SingleDatasetConfig(source=StreamingRowsSourceConfig(rows=()))
+    nonempty = SingleDatasetConfig(
+        source=StreamingRowsSourceConfig(
+            rows=tuple({"value": index} for index in range(4))
+        )
+    )
+
+    rows = list(
+        DatasetMixConfig(
+            datasets=(
+                WeightedDataset(dataset=empty),
+                WeightedDataset(dataset=nonempty),
+            )
+        ).build(context=CONTEXT, iteration=iteration())
+    )
+
+    assert rows == []
+
+
+def test_iterable_mix_restores_exactly():
+    config = DatasetMixConfig(
+        datasets=tuple(
+            WeightedDataset(
+                dataset=SingleDatasetConfig(
+                    source=RowsSourceConfig(
+                        rows=tuple(
+                            {"source": source, "index": index} for index in range(20)
+                        )
+                    )
+                ),
+                weight=source + 1,
+            )
+            for source in range(2)
+        )
+    )
+    policy = iteration(repeat=True)
+    iterator = iter(config.build(context=CONTEXT, iteration=policy))
+    for _ in range(17):
+        next(iterator)
+    state = iterator.get_state()
+    expected = [next(iterator) for _ in range(20)]
+
+    restored = iter(config.build(context=CONTEXT, iteration=policy))
+    restored.set_state(state)
+
+    assert [next(restored) for _ in range(20)] == expected
 
 
 def test_concat_shards_after_one_global_index_space():
@@ -650,7 +973,8 @@ def test_concat_rejects_iterable_children(tmp_path):
     stream = SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="json",
-            load_dataset_kwargs={"data_files": str(path), "split": "train"},
+            split="train",
+            load_dataset_kwargs={"data_files": str(path)},
         )
     )
 
@@ -787,7 +1111,7 @@ def finite_rows_loader():
         )
         for index in range(5)
     )
-    return GrainDataLoader.Config(
+    loader = GrainDataLoader.Config(
         dataset=SingleDatasetConfig(source=RowsSourceConfig(rows=rows)),
         shuffle=False,
         repeat=False,
@@ -799,6 +1123,61 @@ def finite_rows_loader():
         seq_len=1,
         local_batch_size=2,
     )
+    yield loader
+    loader.close()
+
+
+def build_process_rows_loader(*, process_workers, row_count):
+    # DefaultCollator converts these rows to tensors after process prefetch.
+    rows = tuple(
+        (
+            {
+                "input": np.asarray([index], dtype=np.int64),
+                "positions": np.asarray([0], dtype=np.int64),
+            },
+            np.asarray([index], dtype=np.int64),
+        )
+        for index in range(row_count)
+    )
+    return GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(source=RowsSourceConfig(rows=rows)),
+        shuffle=False,
+        repeat=False,
+        batch_prefetch_buffer_size=1,
+        process_workers=process_workers,
+        process_prefetch_buffer_size=1,
+        read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+    ).build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        seq_len=1,
+        local_batch_size=2,
+    )
+
+
+def wait_for_processes_to_start(baseline_pids):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        added = {
+            process.pid for process in multiprocessing.active_children()
+        } - baseline_pids
+        if added:
+            return added
+        time.sleep(0.05)
+    pytest.fail("process workers did not start within 5 seconds")
+
+
+def wait_for_processes_to_stop(process_pids):
+    remaining = process_pids
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        active_pids = {process.pid for process in multiprocessing.active_children()}
+        remaining = process_pids & active_pids
+        if not remaining:
+            return
+        time.sleep(0.05)
+    pytest.fail(f"process workers did not stop within 5 seconds: {sorted(remaining)}")
 
 
 def test_mix_rejects_empty_datasets():
@@ -809,8 +1188,10 @@ def test_mix_rejects_empty_datasets():
         )
 
 
-@pytest.mark.parametrize("weight", [0.0, -1.0])
-def test_mix_rejects_nonpositive_weight(weight):
+@pytest.mark.parametrize(
+    "weight", [0.0, -1.0, float("nan"), float("inf"), -float("inf")]
+)
+def test_mix_rejects_non_finite_or_nonpositive_weight(weight):
     dataset = SingleDatasetConfig(source=RowsSourceConfig(rows=({"value": 0},)))
 
     with pytest.raises(ValueError, match="positive-weight"):
@@ -838,14 +1219,173 @@ def test_loader_rejects_missing_rank_state(finite_rows_loader):
         finite_rows_loader.load_state_dict(state)
 
 
-def test_loader_batches_exact_rows_and_drops_remainder(finite_rows_loader):
+def test_loader_batches_exact_rows_and_preserves_finite_tail(finite_rows_loader):
     batches = list(finite_rows_loader)
 
-    assert len(batches) == 2
+    assert len(batches) == 3
     assert batches[0][0]["input"].tolist() == [[0], [1]]
     assert batches[0][1].tolist() == [[0], [1]]
     assert batches[1][0]["input"].tolist() == [[2], [3]]
     assert batches[1][1].tolist() == [[2], [3]]
+    assert batches[2][0]["input"].tolist() == [[4]]
+    assert batches[2][1].tolist() == [[4]]
+
+
+@pytest.mark.parametrize("process_workers", [1, 2, 4])
+def test_process_workers_emit_every_map_row_once(process_workers):
+    baseline_pids = {process.pid for process in multiprocessing.active_children()}
+    loader = build_process_rows_loader(
+        process_workers=process_workers,
+        row_count=17,
+    )
+    worker_pids = set()
+    try:
+        iterator = iter(loader)
+        batches = [next(iterator)]
+        worker_pids = wait_for_processes_to_start(baseline_pids)
+        batches.extend(iterator)
+        values = [
+            value
+            for inputs, _ in batches
+            for value in inputs["input"].flatten().tolist()
+        ]
+        assert sorted(values) == list(range(17))
+    finally:
+        loader.close()
+
+    wait_for_processes_to_stop(worker_pids)
+
+
+def test_process_workers_reject_iterable_root_before_startup():
+    child = SingleDatasetConfig(
+        source=RowsSourceConfig(rows=tuple({"value": index} for index in range(4)))
+    )
+    config = GrainDataLoader.Config(
+        dataset=DatasetMixConfig(
+            datasets=(
+                WeightedDataset(dataset=child),
+                WeightedDataset(dataset=child),
+            )
+        ),
+        process_workers=1,
+    )
+
+    with pytest.raises(ValueError, match="requires a map-root dataset"):
+        config.build(
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=FakeTokenizer(),
+            seq_len=1,
+            local_batch_size=1,
+        )
+
+
+def test_process_workers_restore_exactly_with_same_topology():
+    loader = build_process_rows_loader(process_workers=1, row_count=24)
+    restored = None
+    try:
+        iterator = iter(loader)
+        next(iterator)
+        state = loader.state_dict()
+        expected = [next(iterator) for _ in range(4)]
+
+        restored = build_process_rows_loader(process_workers=1, row_count=24)
+        restored.load_state_dict(state)
+        actual = [next(iter(restored)) for _ in range(4)]
+
+        for expected_batch, actual_batch in zip(expected, actual, strict=True):
+            assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
+            assert torch.equal(expected_batch[1], actual_batch[1])
+    finally:
+        loader.close()
+        if restored is not None:
+            restored.close()
+
+
+def mock_grain_loader():
+    loader = object.__new__(GrainDataLoader)
+    loader._dp_world_size = 1
+    loader._process_workers = 0
+    loader._rank_id = "dp_rank_0"
+    loader._iterator = mock.Mock()
+    return loader
+
+
+def test_changed_process_topology_closes_before_rejecting():
+    baseline_pids = {process.pid for process in multiprocessing.active_children()}
+    loader = build_process_rows_loader(process_workers=1, row_count=10_000)
+    worker_pids = set()
+    try:
+        next(iter(loader))
+        worker_pids = wait_for_processes_to_start(baseline_pids)
+        state = loader.state_dict()
+        state["process_workers"] = 2
+
+        with pytest.raises(ValueError, match="changing process_workers"):
+            loader.load_state_dict(state)
+    finally:
+        loader.close()
+
+    wait_for_processes_to_stop(worker_pids)
+
+
+def test_restore_failure_closes_loader():
+    loader = mock_grain_loader()
+    loader._iterator.set_state.side_effect = RuntimeError("invalid Grain state")
+    state = loader.state_dict()
+
+    with pytest.raises(RuntimeError, match="invalid Grain state"):
+        loader.load_state_dict(state)
+
+    loader._iterator.close.assert_called_once_with()
+
+
+def test_trainer_shutdown_closes_process_workers():
+    baseline_pids = {process.pid for process in multiprocessing.active_children()}
+    loader = build_process_rows_loader(process_workers=1, row_count=10_000)
+    worker_pids = set()
+    try:
+        next(iter(loader))
+        worker_pids = wait_for_processes_to_start(baseline_pids)
+        trainer = Trainer.__new__(Trainer)
+        trainer.dataloader = loader
+        trainer.checkpointer = None
+        trainer.metrics_processor = None
+
+        trainer.close()
+    finally:
+        loader.close()
+
+    wait_for_processes_to_stop(worker_pids)
+
+
+def test_process_worker_exception_reaches_consumer():
+    baseline_pids = {process.pid for process in multiprocessing.active_children()}
+    loader = GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(rows=({"value": 0},)),
+            processor=RaiseInWorker.Config(),
+        ),
+        shuffle=False,
+        repeat=False,
+        process_workers=1,
+        batch_prefetch_buffer_size=1,
+    ).build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        seq_len=1,
+        local_batch_size=1,
+    )
+    try:
+        with pytest.raises(Exception, match="worker failed on row 0"):
+            next(iter(loader))
+    finally:
+        loader.close()
+    remaining_pids = {
+        process.pid for process in multiprocessing.active_children()
+    } - baseline_pids
+    wait_for_processes_to_stop(remaining_pids)
 
 
 def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):

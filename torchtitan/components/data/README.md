@@ -3,7 +3,7 @@
 TorchTitan uses one data path for pretraining, SFT, and image training:
 
 ```text
-source -> process -> mix/concat -> pack -> batch -> collate -> trainer
+source -> pre-filter -> process -> post-filter -> mix/concat -> pack -> batch -> collate -> trainer
 ```
 
 `GrainDataLoader` owns batching, prefetch, distributed run policy, and checkpoint state. Dataset configs describe the graph below it.
@@ -97,11 +97,9 @@ from torchtitan.components.data import HuggingFaceRandomAccessSource
 
 source = HuggingFaceRandomAccessSource.Config(
     path="openai/gsm8k",
-    load_dataset_kwargs={
-        "name": "main",
-        "split": "train",
-        "revision": "<immutable-revision>",
-    },
+    name="main",
+    split="train",
+    revision="<immutable-revision>",
 )
 ```
 
@@ -112,15 +110,15 @@ from torchtitan.components.data import HuggingFaceStreamingSource
 
 source = HuggingFaceStreamingSource.Config(
     path="allenai/c4",
-    load_dataset_kwargs={
-        "name": "en",
-        "split": "train",
-        "revision": "<immutable-revision>",
-    },
+    name="en",
+    split="train",
+    revision="<immutable-revision>",
 )
 ```
 
 TorchTitan sets `streaming=True` or `False` from the source class. Hugging Face owns Hub access, caching, decoding, and the streaming cursor. Grain owns processing, shuffle, repeat, mixing, packing, batching, and recursive iterator state.
+
+Exact streaming cursor continuation requires unchanged source contents and the raw Hugging Face cursor path. Hugging Face-side shuffle buffers and batched maps are outside this guarantee.
 
 ## Mixing datasets
 
@@ -181,6 +179,15 @@ from torchtitan.components.data import DatasetConcatConfig
 documents = DatasetConcatConfig(datasets=(books, code, math))
 ```
 
+`repeat` controls whether either graph is finite:
+
+```text
+concat + repeat=False -> consume every child once, in order
+concat + repeat=True  -> repeat the complete concatenation
+mix + repeat=False    -> stop when the first child exhausts
+mix + repeat=True     -> mix repeated children indefinitely
+```
+
 ## SFT
 
 SFT uses the same source, loader, batching, distributed, and checkpoint path. It changes row processing and uses whole-example first-fit packing.
@@ -207,16 +214,14 @@ config.dataloader = GrainDataLoader.Config(
         dataset=SingleDatasetConfig(
             source=HuggingFaceRandomAccessSource.Config(
                 path="openai/gsm8k",
-                load_dataset_kwargs={
-                    "name": "main",
-                    "split": "train",
-                    "revision": "<immutable-revision>",
-                },
+                name="main",
+                split="train",
+                revision="<immutable-revision>",
             ),
             processor=ChatProcessor.Config(
                 messages_fn=question_answer_to_messages,
             ),
-            filters=(lambda sample: sample is not None,),
+            post_filters=(lambda sample: sample is not None,),
         ),
     ),
 )
@@ -376,18 +381,23 @@ config.dataloader = GrainDataLoader.Config(
         prefetch_buffer_size=32,
     ),
     batch_prefetch_buffer_size=8,
+    process_workers=0,
+    process_prefetch_buffer_size=1,
 )
 ```
 
-The three buffers have different jobs:
+The buffers have different jobs:
 
 ```text
 streaming_shuffle_window_size -> raw streaming rows available to shuffle
 read_options                  -> parallel map-source reads and their row buffer
 batch_prefetch_buffer_size    -> completed trainer batches ready for training
+process_prefetch_buffer_size  -> rows buffered by each process worker
 ```
 
 `shuffle`, `repeat`, and these buffering controls are configured once on the loader, not on every leaf dataset.
+
+Process prefetch is opt-in and currently requires a map-root dataset. Streaming, mixing, and packing remain single-process. Each worker owns its own `ReadOptions.num_threads` pool, so map-stage concurrency scales as `process_workers * max(num_threads, 1)` per rank. Custom map sources and processors must be picklable and reopen process-local resources. Worker count is checkpoint topology, so resume requires the same `process_workers` value.
 
 ## Distributed behavior
 
@@ -409,7 +419,7 @@ With effective DP greater than one, `repeat=False` is rejected because finite ra
 `GrainDataLoader.state_dict()` records:
 
 ```text
-version and effective DP degree
+version, effective DP degree, and process worker count
 per-rank iterator state:
   source cursor/index
   repeat and shuffle state
@@ -418,7 +428,7 @@ per-rank iterator state:
   batch and prefetch state
 ```
 
-Resume is exact when code, config, source contents, tokenizer, and effective DP degree stay the same. Changing the effective DP degree is rejected. The loader does not store a duplicate fingerprint of the pipeline config.
+Resume is exact when code, config, source contents, tokenizer, effective DP degree, and process worker count stay the same. Changing either topology value is rejected. The loader does not store a duplicate fingerprint of the pipeline config.
 
 Packing is rank-local, so changing the effective DP topology is not supported. The packing implementations carry a TODO for a future global pack plan that could make topology-independent resume possible.
 

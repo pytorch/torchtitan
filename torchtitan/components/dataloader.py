@@ -43,3 +43,6 @@ class BaseDataLoader(Stateful, ABC, Configurable):
     @abstractmethod
     def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         ...
+
+    def close(self) -> None:
+        pass

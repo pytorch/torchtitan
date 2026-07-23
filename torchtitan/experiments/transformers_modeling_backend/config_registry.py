@@ -197,13 +197,13 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
                 dataset=SingleDatasetConfig(
                     source=HuggingFaceRandomAccessSource.Config(
                         path="json",
+                        split="train",
                         load_dataset_kwargs={
                             "data_files": "tests/assets/sft_test/data.json",
-                            "split": "train",
                         },
                     ),
                     processor=ChatProcessor.Config(messages_fn=process_sample),
-                    filters=(lambda sample: sample is not None,),
+                    post_filters=(lambda sample: sample is not None,),
                 ),
             ),
         ),
@@ -259,13 +259,13 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
                 dataset=SingleDatasetConfig(
                     source=HuggingFaceRandomAccessSource.Config(
                         path="json",
+                        split="train",
                         load_dataset_kwargs={
                             "data_files": "tests/assets/sft_test/data.json",
-                            "split": "train",
                         },
                     ),
                     processor=ChatProcessor.Config(messages_fn=process_sample),
-                    filters=(lambda sample: sample is not None,),
+                    post_filters=(lambda sample: sample is not None,),
                 ),
             ),
         ),

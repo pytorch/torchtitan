@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import grain.python as grain
+import torch
 from grain import experimental as grain_experimental
 
 from torchtitan.components.data.collators import Collator, DefaultCollator, TrainerBatch
@@ -21,6 +22,11 @@ from torchtitan.components.data.dataset import (
 )
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.tokenizer import BaseTokenizer
+
+
+def _configure_data_worker(worker_index: int, worker_count: int) -> None:
+    del worker_index, worker_count
+    torch.set_num_threads(1)
 
 
 class GrainDataLoader(BaseDataLoader):
@@ -39,6 +45,10 @@ class GrainDataLoader(BaseDataLoader):
         """Grain map-to-iter reader threads and row buffer."""
         batch_prefetch_buffer_size: int = 8
         """Completed trainer batches prefetched ahead of training."""
+        process_workers: int = 0
+        """Processes used for map-root prefetch; zero disables process prefetch."""
+        process_prefetch_buffer_size: int = 1
+        """Rows buffered by each process worker."""
 
     def __init__(
         self,
@@ -58,6 +68,7 @@ class GrainDataLoader(BaseDataLoader):
                 "controlled step count"
             )
         self._dp_world_size = dp_world_size
+        self._process_workers = config.process_workers
         self._rank_id = f"dp_rank_{dp_rank}"
         context = DatasetBuildContext(
             tokenizer=tokenizer,
@@ -76,10 +87,25 @@ class GrainDataLoader(BaseDataLoader):
 
         dataset = config.dataset.build(context=context, iteration=iteration)
         collator = config.collator.build(context=context)
+        if config.process_workers and not isinstance(dataset, grain.MapDataset):
+            raise ValueError(
+                "process prefetch currently requires a map-root dataset; "
+                "streaming, mixing, and packing remain single-process"
+            )
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=config.read_options)
+        if config.process_workers:
+            dataset = dataset.mp_prefetch(
+                grain.MultiprocessingOptions(
+                    num_workers=config.process_workers,
+                    per_worker_buffer_size=config.process_prefetch_buffer_size,
+                ),
+                worker_init_fn=_configure_data_worker,
+            )
         dataset = dataset.batch(
-            local_batch_size, drop_remainder=True, batch_fn=collator
+            local_batch_size,
+            drop_remainder=config.repeat,
+            batch_fn=collator,
         )
         dataset = grain_experimental.ThreadPrefetchIterDataset(
             dataset, prefetch_buffer_size=config.batch_prefetch_buffer_size
@@ -93,6 +119,7 @@ class GrainDataLoader(BaseDataLoader):
         return {
             "version": 1,
             "dp_world_size": self._dp_world_size,
+            "process_workers": self._process_workers,
             self._rank_id: self._iterator.get_state(),
         }
 
@@ -107,8 +134,22 @@ class GrainDataLoader(BaseDataLoader):
             raise ValueError(
                 "cannot resume after changing the effective data-parallel degree"
             )
+        if state_dict.get("process_workers", 0) != self._process_workers:
+            self.close()
+            raise ValueError(
+                "cannot resume after changing process_workers from "
+                f"{state_dict.get('process_workers', 0)} "
+                f"to {self._process_workers}"
+            )
         if self._rank_id not in state_dict:
             raise ValueError(
                 f"checkpoint is missing dataloader state for {self._rank_id}"
             )
-        self._iterator.set_state(state_dict[self._rank_id])
+        try:
+            self._iterator.set_state(state_dict[self._rank_id])
+        except Exception:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        self._iterator.close()
