@@ -170,11 +170,12 @@ class AsyncLoopConfig(Configurable.Config):
     `max_offpolicy_steps` is derived from the resulting window size.
     0 = fully on-policy (sync): generator and trainer alternate in lockstep."""
 
-    window_fifo_fraction: float = 1.0
+    window_fifo_fraction: float | None = None
     """Fraction `f` of the active buffer used as the FIFO look-ahead window.
 
-    Must be in `(0, 1]`. Larger values allow more finalized prompt groups to bypass
-    older unfinished groups, increasing the derived consume-time offpolicy bound."""
+    None means strict FIFO (`window_size=1`). If set, must be in `(0, 1]`.
+    Larger values allow more finalized prompt groups to bypass older unfinished
+    groups, increasing the derived consume-time offpolicy bound."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -195,9 +196,11 @@ class AsyncLoopConfig(Configurable.Config):
             raise ValueError(
                 f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
             )
-        if not 0 < self.window_fifo_fraction <= 1:
+        if self.window_fifo_fraction is not None and not (
+            0 < self.window_fifo_fraction <= 1
+        ):
             raise ValueError(
-                "window_fifo_fraction must be in (0, 1], got "
+                "window_fifo_fraction must be None or in (0, 1], got "
                 f"{self.window_fifo_fraction}"
             )
         if self.window_size < 1:
@@ -213,6 +216,8 @@ class AsyncLoopConfig(Configurable.Config):
 
     @property
     def window_size(self) -> int:
+        if self.window_fifo_fraction is None:
+            return 1
         return derive_window_size(
             num_prompts_per_train_step=self.num_prompts_per_train_step,
             target_offpolicy_steps=self.target_offpolicy_steps,

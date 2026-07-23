@@ -87,7 +87,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
-            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -147,7 +146,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
-            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -215,7 +213,6 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
-    config.async_loop.window_fifo_fraction = 1 / config.async_loop.max_active_rollout_groups
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -245,7 +242,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=5,
-            window_fifo_fraction=1 / 20,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -305,7 +301,6 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
             num_prompts_per_train_step=5,
-            window_fifo_fraction=1 / 20,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -370,7 +365,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
             num_prompts_per_train_step=5,
-            window_fifo_fraction=1 / 5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -434,7 +428,6 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
-            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -489,7 +482,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
-            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -549,7 +541,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
             num_prompts_per_train_step=8,
-            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -692,7 +683,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
             num_prompts_per_train_step=8,
-            window_fifo_fraction=1 / 8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -765,7 +755,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
-            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -872,7 +861,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
             num_prompts_per_train_step=8,
-            window_fifo_fraction=1 / 8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(

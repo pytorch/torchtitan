@@ -37,7 +37,7 @@ def derive_window_size(
         ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
         ``W``: FIFO look-ahead window size, ``W = floor(f * B)``.
 
-    For a fixed window size ``W``, the worst case number of offpolicy steps is
+    This window implies a worst case consume-time offpolicy bound of
     ``(B + W - 2) // P``.
     """
     max_active_rollout_groups = (
@@ -82,8 +82,8 @@ class RolloutGroupWorkBuffer(Configurable):
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
     the pipeline at `max_active_rollout_groups` active slots; the batcher takes finalized groups within
-    a fixed look-ahead window anchored at the oldest entry. The controller derives
-    `window_size` from `window_fifo_fraction`; strict FIFO means the derived window is 1.
+    a fixed look-ahead window anchored at the oldest entry. The controller defaults
+    to strict FIFO (`window_size=1`) unless `window_fifo_fraction` is set.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -212,8 +212,8 @@ class RolloutGroupWorkBuffer(Configurable):
 
         The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
         window stay blocked even if they are finalized, so taking non-head groups does not slide
-        the window. The controller derives `window_size` from `window_fifo_fraction`;
-        strict FIFO means the derived window is 1.
+        the window. The controller defaults to strict FIFO (`window_size=1`)
+        unless `window_fifo_fraction` is set.
 
         Example:
             # window_size=1: head g0 still INFLIGHT, g1 FINALIZED -> waits for g0
