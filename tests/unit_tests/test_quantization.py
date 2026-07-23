@@ -45,6 +45,36 @@ def test_float8_applied_by_model_registry():
     assert len(converted) > 0
 
 
+def test_nvfp4_converter_targets_layers_not_lm_head(monkeypatch):
+    pytest.importorskip("torchao")
+    from torchtitan.components.quantization import NVFP4Linear
+
+    if NVFP4Linear is None:
+        pytest.skip("torchao NVFP4 training prototype not available")
+    # Exercise convert() targeting independent of GPU: bypass the sm100 gate
+    # that NVFP4LinearConverter.__init__ enforces (hardware is irrelevant to the
+    # config-tree transform under test).
+    import torchtitan.components.quantization.nvfp4 as nvfp4_mod
+
+    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args(
+        ["--module", "llama3", "--config", "llama3_debugmodel_nvfp4"]
+    )
+    model_config = config.model_spec.model
+    assert has_quantization(model_config)
+
+    converted, stock = [], []
+    for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
+        (converted if isinstance(lc, NVFP4Linear.Config) else stock).append(fqn)
+
+    # Every in-layer linear is swapped; the lm_head stays stock (NVFP4 requires
+    # each GEMM dim divisible by 128, which the vocab projection violates).
+    assert converted and all("layers" in fqn for fqn in converted)
+    assert stock == ["lm_head"]
+
+
 def test_quantized_grouped_experts():
     """Quantized GroupedExperts: _owner, subclass handling, extra config fields."""
     # Base case
