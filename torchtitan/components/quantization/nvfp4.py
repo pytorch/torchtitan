@@ -231,7 +231,19 @@ try:
             )
             w_local = self.weight.to_local()
             bias_local = self.bias.to_local() if self.bias is not None else None
-            x_local = x.to_local(grad_placements=x.placements)
+            # Pin the input-grad placement per TP style (distributed rules require
+            # this for to_local). A colwise linear receives a TP-Replicate
+            # activation, so each rank's local input-grad is only a partial sum
+            # over the output shard and must be all-reduced: grad is Partial on
+            # the TP axis. A rowwise linear receives a TP-Shard(-1) activation
+            # whose grad stays Shard(-1). Defaulting to x.placements would
+            # mislabel the colwise Partial grad as Replicate and skip the
+            # reduction, corrupting the gradient into the upstream residual.
+            if self._tp_style == "colwise":
+                _, x_grad_placements = _swap_tp_placement(x, Partial())
+            else:
+                x_grad_placements = x.placements
+            x_local = x.to_local(grad_placements=x_grad_placements)
             y = nvfp4_linear(
                 x_local,
                 w_local,
