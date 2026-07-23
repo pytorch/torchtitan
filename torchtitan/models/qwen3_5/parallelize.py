@@ -68,10 +68,14 @@ def parallelize_qwen3_5(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
     parallelism to the Qwen3.5 model.
+
+    ``skip_dp=True`` applies TP/AC/compile but no FSDP/DP -- used by the vLLM
+    generator, which replicates params across vLLM DP groups (not TorchTitan FSDP).
 
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
@@ -111,6 +115,10 @@ def parallelize_qwen3_5(
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
             apply_compile(model.vision_encoder, compile_config)
+
+    # Generator inference: TP/AC/compile only, no FSDP/DP (vLLM owns DP).
+    if skip_dp:
+        return model
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]

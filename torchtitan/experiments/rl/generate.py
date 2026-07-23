@@ -34,6 +34,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
+    get_first_inner_attention_config,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
@@ -108,7 +109,9 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    inner_attn = model_spec.model.layers[0].attention.inner_attention
+    inner_attn = get_first_inner_attention_config(model_spec.model)
+    if inner_attn is None:
+        raise ValueError("No full-attention layer found in the model spec.")
     if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
         raise ValueError("Only varlen and flex attention backends are supported.")
 

@@ -11,16 +11,22 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 
+from fla.modules.convolution import causal_conv1d as _fla_causal_conv1d
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
 )
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    BaseAttention,
+    create_varlen_metadata_for_document,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -135,6 +141,61 @@ class RMSNormGated(Module):
         return x.to(input_dtype)
 
 
+class _RecurrentFwdChunkBwd(torch.autograd.Function):
+    """Batch-invariant GDN: fla RECURRENT kernel for the forward, fla CHUNK for backward.
+
+    The vLLM generator must use the recurrent kernel for decode (decode is inherently a
+    per-token recurrence). For the trainer forward to be bitwise-identical to the
+    generator it must use that SAME recurrent kernel, in fp32 and with a materialized
+    zero initial state, and with cu_seqlens (varlen) -- so the USE_INITIAL_STATE and
+    IS_VARLEN triton constexprs select the exact compiled kernel + fp reduction the
+    generator hits. A pure-recurrent backward is O(seqlen) sequential and slow, so the
+    backward recomputes the fla CHUNK kernel for efficient parallel gradients (chunk and
+    recurrent compute the same function; only the forward value is swapped to recurrent).
+
+    Inputs are the flattened [1, T, ...] varlen layout; cu_seqlens marks the packed
+    per-sample boundaries so the recurrence resets per sample.
+    """
+
+    @staticmethod
+    def forward(ctx, q, k, v, g, beta, cu_seqlens):  # pyrefly: ignore[bad-override]
+        ctx.save_for_backward(q, k, v, g, beta)
+        ctx.cu_seqlens = cu_seqlens
+        n_seq = int(cu_seqlens.numel()) - 1
+        h0 = q.new_zeros(n_seq, q.shape[2], q.shape[3], v.shape[3], dtype=torch.float32)
+        with torch.no_grad():
+            out, _ = _fla_fused_recurrent_gated_delta_rule(
+                q.float(),
+                k.float(),
+                v.float(),
+                g.float(),
+                beta=beta.float(),
+                initial_state=h0,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+            )
+        return out.to(q.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_out):  # pyrefly: ignore[bad-override]
+        q, k, v, g, beta = ctx.saved_tensors
+        # Recompute the chunk kernel with grad enabled and backprop through it.
+        with torch.enable_grad():
+            ins = [t.detach().requires_grad_(True) for t in (q, k, v, g, beta)]
+            out_chunk = _fla_chunk_gated_delta_rule(
+                ins[0],
+                ins[1],
+                ins[2],
+                ins[3],
+                ins[4],
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=ctx.cu_seqlens,
+            )[0]
+            grads = torch.autograd.grad(out_chunk, ins, grad_out)
+        return grads[0], grads[1], grads[2], grads[3], grads[4], None
+
+
 class GatedDeltaKernel(Module):
     """Stateless dispatch to FLA kernel or pure-torch fallback.
 
@@ -164,6 +225,7 @@ class GatedDeltaKernel(Module):
         v: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Expand Q/K heads to match V when n_value_heads > n_key_heads
         if q.shape[2] != v.shape[2]:
@@ -171,6 +233,12 @@ class GatedDeltaKernel(Module):
             repeat = v.shape[2] // q.shape[2]
             q = q.repeat_interleave(repeat, dim=2)
             k = k.repeat_interleave(repeat, dim=2)
+
+        # Batch-invariant: recurrent-everywhere so the trainer forward matches the
+        # vLLM generator's recurrent kernel bitwise (recurrent fwd, chunk bwd). The
+        # BI caller passes the flattened [1, T] varlen layout + cu_seqlens.
+        if is_in_batch_invariant_mode() and cu_seqlens is not None:
+            return _RecurrentFwdChunkBwd.apply(q, k, v, g, beta, cu_seqlens)
 
         if self.backend == "torch_native":
             return _torch_native_gated_delta(q, k, v, g, beta)
@@ -182,6 +250,7 @@ class GatedDeltaKernel(Module):
                 v,
                 g,
                 beta,
+                cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
             )
         elif self.backend == "fla_fused_recurrent":
@@ -191,6 +260,7 @@ class GatedDeltaKernel(Module):
                 v,
                 g,
                 beta=beta,
+                cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
             )
         else:
@@ -201,6 +271,116 @@ class GatedDeltaKernel(Module):
 
         # FLA kernels return (output, final_state); we only need output
         return result[0]
+
+
+class GatedDeltaNetCore(Module):
+    """Dense training GDN core: fused conv + gate + gated-delta recurrence.
+
+    Parameterless; shares the flattened ``[T, ...]`` + ``cu_seqlens`` call
+    signature with the paged ``VLLMGatedDeltaNetCore`` so ``GatedDeltaNet.core``
+    can be swapped for it inside vLLM. Bitwise vs the pre-core dense path: non-BI
+    uses a fused depthwise ``F.conv1d`` (exact vs separate convs) + fla chunk
+    kernel; BI uses the fla fused conv + recurrent kernel (matching the generator).
+
+    Legend: T = flattened tokens, C = 2*key_dim + value_dim, Hv = value heads,
+    Dk = head_k_dim, Dv = head_v_dim.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        key_head_dim: int
+        value_head_dim: int
+        key_dim: int
+        value_dim: int
+        conv_kernel_size: int = 4
+        activation: str = "silu"
+        kernel: GatedDeltaKernel.Config
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.key_head_dim = config.key_head_dim
+        self.value_head_dim = config.value_head_dim
+        self.key_dim = config.key_dim
+        self.value_dim = config.value_dim
+        self.conv_kernel_size = config.conv_kernel_size
+        self.activation = config.activation
+        self.n_value_heads = config.value_dim // config.value_head_dim
+        self.kernel = config.kernel.build()
+
+    def forward(
+        self,
+        mixed_qkv_TC: torch.Tensor,
+        a_THv: torch.Tensor,
+        b_THv: torch.Tensor,
+        conv_weight: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        """conv + gated-delta recurrence. 3D [B, L, ...] in/out.
+
+        Two paths, sharing the parameterized inputs (mixed_qkv_TC [B, L, C] pre-conv,
+        a/b [B, L, Hv], conv_weight [C, W], A_log/dt_bias [Hv], cu_seqlens [n_seg+1]
+        Replicate). Returns [B, L, Hv, Dv]. The q/k split + value-head reshape use the
+        LOCAL channel/head counts (under TP mixed_qkv holds only this rank's heads;
+        the q:k:v proportion is TP-invariant). No conv bias (config bias=False).
+
+          - non-BI (pretraining): batched [B, L] depthwise F.conv1d + chunk kernel --
+            BITWISE-identical to the dense pretraining path. The batch dim resets the
+            recurrent state between rows and pretraining is unpacked, so cu_seqlens is
+            unused (kept off the fla conv). This is the common model.py path.
+          - BI (RL): flatten [B, L] -> [1, T] and run the fla VARLEN conv + recurrent
+            kernel with cu_seqlens, so the conv window and recurrent state RESET at
+            packed-sample boundaries (positions restart per sample) and match the
+            paged generator bitwise.
+
+        Under TP the sharding config (sharding.py) wraps this forward in local_map, so
+        every input arrives LOCAL (per-rank) and both paths run head-parallel on local
+        shards. Single-GPU: inputs are already plain tensors.
+        """
+        bs, seqlen, c = mixed_qkv_TC.shape
+        # LOCAL q/k boundary (== global self.key_dim on a single GPU).
+        key_dim = c * self.key_dim // (2 * self.key_dim + self.value_dim)
+
+        if is_in_batch_invariant_mode():
+            t = bs * seqlen
+            mixed = mixed_qkv_TC.reshape(t, c)
+            conv_out = _fla_causal_conv1d(
+                mixed.unsqueeze(0),
+                weight=conv_weight,
+                bias=None,
+                activation=self.activation,
+                cu_seqlens=cu_seqlens,
+            )
+            if isinstance(conv_out, tuple):
+                conv_out = conv_out[0]
+            conv_out = conv_out.reshape(t, c)
+            xq = conv_out[:, :key_dim].reshape(1, t, -1, self.key_head_dim)
+            xk = conv_out[:, key_dim : 2 * key_dim].reshape(1, t, -1, self.key_head_dim)
+            xv = conv_out[:, 2 * key_dim :].reshape(1, t, -1, self.value_head_dim)
+            a = a_THv.reshape(t, -1)
+            b = b_THv.reshape(t, -1)
+            g = (-torch.exp(A_log.float()) * F.softplus(a.float() + dt_bias)).reshape(
+                1, t, -1
+            )
+            beta = torch.sigmoid(b).reshape(1, t, -1)
+            out = self.kernel(xq, xk, xv, g, beta, cu_seqlens=cu_seqlens)
+            return out.reshape(bs, seqlen, -1, self.value_head_dim)
+
+        # non-BI (pretraining): batched depthwise F.conv1d (preserves numerics).
+        x = mixed_qkv_TC.transpose(1, 2)  # [B, C, L]
+        x = F.pad(x, [self.conv_kernel_size - 1, 0])  # causal left pad
+        x = F.conv1d(x, conv_weight.unsqueeze(1), None, groups=c)
+        conv_out = F.silu(x).transpose(1, 2)  # [B, L, C]
+        xq = conv_out[..., :key_dim].reshape(bs, seqlen, -1, self.key_head_dim)
+        xk = conv_out[..., key_dim : 2 * key_dim].reshape(
+            bs, seqlen, -1, self.key_head_dim
+        )
+        xv = conv_out[..., 2 * key_dim :].reshape(bs, seqlen, -1, self.value_head_dim)
+        g = -torch.exp(A_log.float()) * F.softplus(a_THv.float() + dt_bias)
+        beta = torch.sigmoid(b_THv)
+        out = self.kernel(xq, xk, xv, g, beta)  # chunk [B, L], no cu_seqlens
+        return out.reshape(bs, seqlen, -1, self.value_head_dim)
 
 
 class GatedDeltaNet(Module):
@@ -227,7 +407,7 @@ class GatedDeltaNet(Module):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        kernel: GatedDeltaKernel.Config
+        core: GatedDeltaNetCore.Config
         norm: RMSNormGated.Config
         out_proj: Linear.Config
 
@@ -254,75 +434,131 @@ class GatedDeltaNet(Module):
         self.A_log = nn.Parameter(torch.empty(n_value_heads))
         self.dt_bias = nn.Parameter(torch.empty(n_value_heads))
 
-        self.kernel = config.kernel.build()
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
 
-    def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
-        x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
-        if isinstance(x, DTensor):
-            # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
-            # groups lands in a released torch. local_map runs the conv on
-            # local shards (channel-sharded input + Shard(0) weight) and
-            # restores DTensor-ness, with explicit gradient placements.
-            x_plc = x.placements
-            w = conv.weight
-            w_plc = w.placements  # pyrefly: ignore [missing-attribute]
+        self.n_value_heads = n_value_heads
+        self.key_dim = config.in_proj_q.out_features
+        self.value_dim = value_dim
+        # The stateful conv + gated-delta recurrence live in a swappable core.
+        # Training: a dense GatedDeltaNetCore (built here). Inside vLLM the generation
+        # wrapper (_attach_gdn_cores) replaces it with a paged-cache
+        # VLLMGatedDeltaNetCore -- same call signature -- for the unified model path.
+        self.core = config.core.build()
 
-            def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
-                # groups == local out-channels (depthwise, channel-sharded)
-                # pyrefly: ignore [no-matching-overload]
-                return F.conv1d(
-                    x_local,
-                    w_local,
-                    None,
-                    conv.stride,
-                    conv.padding,
-                    conv.dilation,
-                    w_local.size(0),
-                )
+    def _fused_conv_weight_bias(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Fuse conv_q/k/v (depthwise, weight [C_i, 1, W]) into one [C, W] weight (+
+        [C] bias) in q|k|v order, matching cat([xq, xk, xv]). Depthwise -> channel-wise
+        concat is exact (one fused conv == three separate depthwise convs).
 
-            conv_dt = local_map(
-                _conv,
-                out_placements=(x_plc,),
-                in_placements=(x_plc, w_plc),
-                in_grad_placements=(x_plc, w_plc),
-                device_mesh=x.device_mesh,
+        Under TP the conv weights are Shard(0) (out-channels); a plain DTensor cat
+        collapses to Replicate, so fuse on LOCAL shards via local_map -- each rank's
+        fused weight is [convq_r|convk_r|convv_r], aligned per-channel with the
+        similarly locally-fused mixed_qkv. squeeze(1) drops the size-1 in-channel dim
+        (not sharded), so the Shard(0) placement carries through unchanged."""
+        wq, wk, wv = self.conv_q.weight, self.conv_k.weight, self.conv_v.weight
+        if isinstance(wq, DTensor):
+            plc = wq.placements
+            w = local_map(
+                lambda a, b, c: torch.cat([a, b, c], dim=0).squeeze(1),
+                out_placements=(plc,),
+                in_placements=(plc, wk.placements, wv.placements),
+                in_grad_placements=(plc, wk.placements, wv.placements),
+                device_mesh=wq.device_mesh,
+            )(
+                wq,
+                wk,  # pyrefly: ignore[bad-argument-count]
+                wv,
             )
-            x = conv_dt(x, w)  # pyrefly: ignore
         else:
-            x = conv(x)
-        return F.silu(x).transpose(1, 2)
+            w = torch.cat([wq, wk, wv], dim=0).squeeze(1)
+        biases = [self.conv_q.bias, self.conv_k.bias, self.conv_v.bias]
+        b = torch.cat(biases, dim=0) if all(x is not None for x in biases) else None
+        return w, b
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Gated DeltaNet, split into three parts for piecewise-cudagraph / TP.
+
+        ``cu_seqlens`` marks packed-sample boundaries (from ``Qwen35Model`` via
+        ``positions``) so the recurrent state + causal conv reset per sample; None
+        for a single unpacked row.
+
+
+          1. Input projections (compilable, captured in cudagraph).
+          2. Core: conv + gated-delta recurrence via ``self.core`` -- a dense
+             ``GatedDeltaNetCore`` in training, or the paged ``VLLMGatedDeltaNetCore``
+             custom op inside vLLM (the eager graph-split boundary).
+          3. Output gating + projection (compilable, captured in cudagraph).
+
+        Both cores share the flattened ``[T, ...]`` + ``cu_seqlens`` signature, so
+        the slot is swapped (``_attach_gdn_cores``) without changing this forward.
+        """
         bs, seqlen, _ = x.shape
 
-        # Shapes:
-        #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
-        #   xv, xz: (bs, seqlen, n_value_heads * value_head_dim)
-        #   xa, xb: (bs, seqlen, n_value_heads)
-        xq = self._causal_conv(self.in_proj_q(x), self.conv_q)
-        xk = self._causal_conv(self.in_proj_k(x), self.conv_k)
-        xv = self._causal_conv(self.in_proj_v(x), self.conv_v)
+        # 1. Input projections (head-sharded under TP). mixed_qkv is PRE-conv: the
+        #    core owns the conv (paged conv_state in the generation path). Keep the
+        #    3D [B, L, ...] layout so DP/CP/TP map to distinct dims; the core
+        #    flattens [B, L] -> [T] internally for the varlen kernels.
+        q, k, v = self.in_proj_q(x), self.in_proj_k(x), self.in_proj_v(x)
+        if isinstance(q, DTensor):
+            # A plain DTensor cat collapses head-sharding to Replicate, so fuse
+            # q|k|v on LOCAL shards via local_map -- each rank's mixed_qkv is
+            # [q_r|k_r|v_r], aligned with the locally-fused conv weight; cat on the
+            # last dim preserves the Shard placement.
+            plc = q.placements
+            mixed_qkv = local_map(
+                lambda a, b, c: torch.cat([a, b, c], dim=-1),
+                out_placements=(plc,),
+                in_placements=(plc, k.placements, v.placements),
+                in_grad_placements=(plc, k.placements, v.placements),
+                device_mesh=q.device_mesh,
+            )(
+                q,
+                k,  # pyrefly: ignore[bad-argument-count]
+                v,
+            )
+        else:
+            mixed_qkv = torch.cat([q, k, v], dim=-1)
         xz = self.in_proj_z(x)
-        xa = self.in_proj_a(x)
-        xb = self.in_proj_b(x)
+        a = self.in_proj_a(x)
+        b = self.in_proj_b(x)
+        conv_weight, _ = self._fused_conv_weight_bias()
+        # cu_seqlens marks packed-sample boundaries over the flattened [B*L] tokens.
+        # None (mrope-only path) -> fall back to row boundaries (each rectangular
+        # row is one segment); this also keeps a real tensor so batch-invariant mode
+        # takes its recurrent route and TP has a shardable arg. Under TP pass it as a
+        # Replicate DTensor so it carries a shard layout through the core's local_map
+        # boundary. The paged generation core ignores it (reads vLLM attn_metadata).
+        if cu_seqlens is None:
+            cu_seqlens = torch.arange(
+                0, (bs + 1) * seqlen, seqlen, device=x.device, dtype=torch.int32
+            )
+        if isinstance(mixed_qkv, DTensor):
+            cu_seqlens = DTensor.from_local(
+                cu_seqlens,
+                mixed_qkv.device_mesh,
+                [Replicate()] * mixed_qkv.device_mesh.ndim,
+            )
 
-        xq = xq.view(bs, seqlen, -1, self.key_head_dim)
-        xk = xk.view(bs, seqlen, -1, self.key_head_dim)
-        xv = xv.view(bs, seqlen, -1, self.value_head_dim)
+        # 2. Core: conv + gated-delta recurrence -> [B, L, n_value_heads, value_head_dim].
+        # (The depthwise conv has no bias.)
+        core_attn_out = self.core(
+            mixed_qkv,
+            a,
+            b,
+            conv_weight,
+            self.A_log,
+            self.dt_bias,
+            cu_seqlens,
+        )
 
-        # Gating signals, shape (bs, seqlen, n_value_heads):
-        #   g:    decay rate per head, always negative
-        #   beta: update gate ∈ (0, 1)
-        g = -torch.exp(self.A_log.float()) * F.softplus(xa.float() + self.dt_bias)
-        beta = torch.sigmoid(xb)
-
-        output = self.kernel(xq, xk, xv, g, beta)
-
-        xz = xz.view(bs, seqlen, -1, self.value_head_dim)
-        output = self.norm(output, xz)
-
+        # 3. Output gating (RMSNormGated with z) + projection.
+        xz = xz.reshape(bs, seqlen, -1, self.value_head_dim)
+        output = self.norm(core_attn_out, xz)
         output = output.reshape(bs, seqlen, -1)
         return self.out_proj(output)
 
@@ -462,12 +698,16 @@ class Qwen35TransformerBlock(Module):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = self.attention_norm(x)
         if self.full_attn:
             h = self.attn(h, attention_masks, positions)
         else:
-            h = self.attn(h)
+            # GatedDeltaNet: cu_seqlens marks packed-sample boundaries so its
+            # recurrent state + causal conv reset per sample (full attention uses
+            # the block-diagonal mask in attention_masks for the same purpose).
+            h = self.attn(h, cu_seqlens)
         x = x + h
 
         h = self.ffn_norm(x)
@@ -551,6 +791,7 @@ class Qwen35Model(Decoder):
 
             set_qwen35_sharding_config(
                 self,
+                enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
@@ -683,14 +924,12 @@ class Qwen35Model(Decoder):
         Returns:
             (batch, seq_len, dim) embeddings with vision tokens scattered in
         """
-        image_token_id = special_tokens["image_id"]
-        video_token_id = special_tokens["video_id"]
-
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
 
         if pixel_values is not None and grid_thw is not None:
+            image_token_id = special_tokens["image_id"]
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
@@ -705,6 +944,7 @@ class Qwen35Model(Decoder):
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
+            video_token_id = special_tokens["video_id"]
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )
@@ -748,8 +988,19 @@ class Qwen35Model(Decoder):
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
+        # cu_seqlens marks packed-sample boundaries (the RL trainer packs several
+        # samples per row, restarting positions at 0). Computed once from positions
+        # (reusing the document-varlen helper the full-attention masks use) and
+        # shared across GatedDeltaNet layers so their recurrent state + causal conv
+        # reset per sample. None for a single unpacked sequence. Not CP-aware (CP is
+        # unsupported for GatedDeltaNet).
+        cu_seqlens = None
+        if positions is not None:
+            cu_seqlens = create_varlen_metadata_for_document(positions).cu_seq_q
+            if cu_seqlens.numel() <= 2:  # single unpacked sample -> non-varlen path
+                cu_seqlens = None
         for layer in self.layers.values():
-            x = layer(x, attention_masks, rope_positions)
+            x = layer(x, attention_masks, rope_positions, cu_seqlens)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

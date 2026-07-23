@@ -66,9 +66,11 @@ from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
+    rl_grpo_qwen3_5_9b_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
+    get_first_inner_attention_config,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
@@ -192,11 +194,21 @@ def _set_generator_determinism(debug) -> None:
         torch.manual_seed(debug.seed)
 
 
-def build_inference_engine(config: Controller.Config) -> LLMEngine:
-    """Create a vLLM LLMEngine with torchtitan model from the RL config."""
+def build_inference_engine(
+    config: Controller.Config, *, enable_prefix_caching: bool = False
+) -> LLMEngine:
+    """Create a vLLM LLMEngine with torchtitan model from the RL config.
+
+    ``enable_prefix_caching`` turns on vLLM prefix caching. For hybrid GDN models
+    this selects the "align" mamba cache mode (framework-managed block-boundary
+    state snapshots) and lets vLLM auto-align ``mamba_block_size`` to the
+    attention block size; otherwise ``mamba_block_size`` is pinned to
+    ``max_model_len`` (one block per sequence, prefix caching inert), which is the
+    layout the default parity checks use.
+    """
     gen_config = config.generator
 
-    inner_attn = config.model_spec.model.layers[0].attention.inner_attention
+    inner_attn = get_first_inner_attention_config(config.model_spec.model)
     use_flex = isinstance(inner_attn, FlexAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
@@ -241,6 +253,8 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
+        # GDN promotes its paged conv+ssm states to fp32 under batch-invariant mode
+        # inside VLLMGatedDeltaNetCore, so no mamba cache-dtype engine args are needed.
     )
 
     from torchtitan.tools.utils import has_cuda_capability
@@ -249,6 +263,22 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
+    if enable_prefix_caching:
+        # Prefix caching on: for hybrid GDN this needs the "align" mamba cache
+        # mode, which requires chunked prefill and derives mamba_block_size from
+        # the attention block size. Leave mamba_block_size unset so vLLM aligns it
+        # (models/config.py MambaModelConfig); pinning it to max_model_len would
+        # keep one block per sequence and make prefix caching inert.
+        engine_kwargs["enable_prefix_caching"] = True
+        engine_kwargs["enable_chunked_prefill"] = True
+    else:
+        # Hybrid (attention + GDN/mamba) models: vLLM only auto-derives
+        # mamba_block_size for HF-recognized hybrid architectures, which the
+        # torchtitan custom config bypasses. Set it explicitly, mirroring vLLM's
+        # default (models/config.py): one block per sequence (max_model_len).
+        # (Leaving enable_prefix_caching at the vLLM default keeps this path
+        # byte-identical to the previously validated one-block parity run.)
+        engine_kwargs["mamba_block_size"] = config.model_spec.model.max_seq_len
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop
@@ -655,6 +685,12 @@ class BitwiseParityTestBase(unittest.TestCase):
                 initial_load_path=config.hf_assets_path,
             )
 
+        # The graph-break decorator reads this env var at import time, and
+        # register_to_vllm below triggers that import, so set it first.
+        gen_cudagraph = config.generator.cudagraph
+        if gen_cudagraph.enable and gen_cudagraph.mode == "FULL_AND_PIECEWISE":
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+
         register_to_vllm(
             config.model_spec,
             parallelism=config.generator.parallelism,
@@ -822,6 +858,15 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant)
     attn_backend = "flex"
+
+
+class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
+    """Test Qwen3.5 trainer/generator parity with head-sharded GDN at TP=2."""
+
+    __test__ = True
+    config_fn = staticmethod(rl_grpo_qwen3_5_9b_varlen_batch_invariant)
+    attn_backend = "varlen"
+    min_world_size = 2
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):

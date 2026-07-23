@@ -29,6 +29,7 @@ from torchtitan.experiments.rl.batch_invariance import (
     patch_bmm_for_batch_invariance,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
+    get_first_inner_attention_config,
     InferenceParallelismConfig,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -795,7 +796,7 @@ class VLLMGenerator(Actor, Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        inner_attn = get_first_inner_attention_config(model_spec.model)
         assert isinstance(
             inner_attn,
             (VarlenAttention.Config, FlexAttention.Config),
@@ -844,6 +845,8 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
+            # GDN promotes its paged conv+ssm states to fp32 under batch-invariant mode
+            # inside VLLMGatedDeltaNetCore; no mamba cache-dtype engine args are needed.
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION

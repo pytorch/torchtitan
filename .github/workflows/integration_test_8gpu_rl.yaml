@@ -83,10 +83,15 @@ jobs:
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match
 
-        # 4. Make the checkout importable for subprocesses spawned by the test.
+        # 4. Install the pinned GDN kernels without replacing nightly PyTorch.
+        uv pip install einops
+        uv pip install --no-deps \
+          "git+https://github.com/fla-org/flash-linear-attention.git@ebf3a0cff2be3e6f2b2f99820b8fe4e28855ced0"
+
+        # 5. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-        # 5. Download HF model checkpoint for tests
+        # 6. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

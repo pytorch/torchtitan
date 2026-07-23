@@ -43,6 +43,19 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
 
+def get_first_inner_attention_config(model_config) -> Any | None:
+    """Return the first full-attention backend config in a hybrid model."""
+    attention_config = next(
+        (
+            attention
+            for layer in model_config.layers
+            if (attention := getattr(layer, "attention", None)) is not None
+        ),
+        None,
+    )
+    return attention_config.inner_attention if attention_config is not None else None
+
+
 @dataclass(kw_only=True, slots=True)
 class InferenceParallelismConfig:
     """Parallelism for vLLM inference — a focused subset of the training
@@ -119,7 +132,14 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     # Some models mix dense and MoE layers (e.g. deepseek_v3 has dense
     # first layers, MoE later); scan the layer list for a representative
     # of each component rather than relying on layer 0.
-    attn = cfg.layers[0].attention
+    attn = next(
+        (
+            attention
+            for layer in cfg.layers
+            if (attention := getattr(layer, "attention", None)) is not None
+        ),
+        None,
+    )
     ffn = next(
         (
             ff
@@ -177,6 +197,71 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         hf.setdefault("norm_topk_prob", True)
 
     return hf
+
+
+def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
+    """Attach vLLM's hybrid-state interface when the model contains GDN layers."""
+    gdn_configs = [
+        layer.delta_net
+        for layer in model_spec.model.layers
+        if getattr(layer, "delta_net", None) is not None
+    ]
+    if not gdn_configs:
+        return
+
+    state_shapes = [
+        (
+            gdn_config.in_proj_q.out_features // gdn_config.key_head_dim,
+            gdn_config.in_proj_v.out_features // gdn_config.value_head_dim,
+            gdn_config.key_head_dim,
+            gdn_config.value_head_dim,
+            gdn_config.conv_kernel_size,
+        )
+        for gdn_config in gdn_configs
+    ]
+    state_shape = state_shapes[0]
+    if any(shape != state_shape for shape in state_shapes[1:]):
+        raise ValueError("All GDN layers must use the same state shape")
+
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFuncCalculator,
+        MambaStateDtypeCalculator,
+        MambaStateShapeCalculator,
+    )
+
+    num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size = state_shape
+
+    def get_state_shape(cls, vllm_config):
+        speculative_config = vllm_config.speculative_config
+        num_speculative_tokens = (
+            speculative_config.num_speculative_tokens if speculative_config else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            vllm_config.parallel_config.tensor_parallel_size,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_kernel_size,
+            num_speculative_tokens,
+        )
+
+    def get_state_dtype(cls, vllm_config):
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    def get_state_copy_func(cls):
+        # Align-mode prefix caching copies both the convolution and SSM state at
+        # block boundaries, matching vLLM's native GDN models.
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
+    model_cls.is_hybrid = True
+    model_cls.get_mamba_state_shape_from_config = classmethod(get_state_shape)
+    model_cls.get_mamba_state_dtype_from_config = classmethod(get_state_dtype)
+    model_cls.get_mamba_state_copy_func = classmethod(get_state_copy_func)
 
 
 def register_to_vllm(
@@ -252,6 +337,10 @@ def register_to_vllm(
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
     VLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
+    # vLLM needs a model-level state contract to allocate shared attention/GDN
+    # cache pages before individual layers are constructed.
+    _configure_gdn_hybrid_model(VLLMModelFromSpec, model_spec)
+
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing ModelSpec in the closure. This
