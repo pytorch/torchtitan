@@ -167,7 +167,7 @@ class TestBaseEPTokenDispatcher(unittest.TestCase):
             self.assertIsInstance(dispatcher_cfg, MinimalAsyncEPTokenDispatcher.Config)
             self.assertEqual(dispatcher_cfg.hidden_dim, model_config.dim)
             self.assertEqual(
-                dispatcher_cfg.tokens_per_rank,
+                dispatcher_cfg.num_tokens_per_rank,
                 config.training.local_batch_size * config.training.seq_len,
             )
             self.assertEqual(

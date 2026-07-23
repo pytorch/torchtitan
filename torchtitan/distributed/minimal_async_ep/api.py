@@ -52,7 +52,7 @@ class _MinimalAsyncEPBufferState:
     """Process-local symmetric-memory state initialized as one unit."""
 
     group: dist.ProcessGroup
-    tokens_per_rank: int
+    num_tokens_per_rank: int
     hidden_recv_buffers: list[torch.Tensor]
     hidden_recv_handles: list[Any]
     hidden_recv_peer_buffers: list[list[torch.Tensor]]
@@ -113,7 +113,7 @@ class MinimalAsyncEPDispatchMetadata:
 def init_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
-    tokens_per_rank: int,
+    num_tokens_per_rank: int,
     num_local_experts: int,
     top_k: int,
     dtype: torch.dtype,
@@ -126,7 +126,7 @@ def init_buffer(
     buffer_key = (
         group,
         hidden_dim,
-        tokens_per_rank,
+        num_tokens_per_rank,
         num_local_experts,
         top_k,
         dtype,
@@ -140,14 +140,16 @@ def init_buffer(
             )
         return
 
-    max_routed_tokens = group.size() * tokens_per_rank * min(top_k, num_local_experts)
+    max_routed_tokens = (
+        group.size() * num_tokens_per_rank * min(top_k, num_local_experts)
+    )
     num_experts = group.size() * num_local_experts
 
     logger.info(
-        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
+        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, num_tokens_per_rank=%d, "
         "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d",
         hidden_dim,
-        tokens_per_rank,
+        num_tokens_per_rank,
         top_k,
         num_local_experts,
         group.size(),
@@ -218,7 +220,7 @@ def init_buffer(
 
     _buffer_state = _MinimalAsyncEPBufferState(
         group=group,
-        tokens_per_rank=tokens_per_rank,
+        num_tokens_per_rank=num_tokens_per_rank,
         hidden_recv_buffers=hidden_recv_buffers,
         hidden_recv_handles=hidden_recv_handles,
         hidden_recv_peer_buffers=hidden_recv_peer_buffers,
@@ -367,7 +369,7 @@ def _compute_direct_metadata(
         local_count_starts_E,
         num_routed_tokens=num_routed_rows,
         num_local_experts=num_local_experts,
-        max_tokens_per_segment=_buffer_state.tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.num_tokens_per_rank,
     )
 
     segment_lens = counts_sde[:, rank, :].t().reshape(-1)
@@ -388,7 +390,7 @@ def _compute_direct_metadata(
         ep_size=ep_size,
         num_local_experts=num_local_experts,
         receive_capacity=receive_capacity,
-        max_tokens_per_segment=_buffer_state.tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.num_tokens_per_rank,
     )
 
     return (
