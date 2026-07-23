@@ -1345,6 +1345,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     if not dispatcher_cfgs:
         return
 
+    # Checks shared by communication-backed EP dispatchers.
     if parallelism.expert_parallel_degree == 1:
         dispatcher_name = type(dispatcher_cfgs[0]).__qualname__
         raise ValueError(
@@ -1352,6 +1353,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
             "(expert_parallel_degree > 1)."
         )
 
+    # MinimalAsyncEP-specific checks.
     minimal_async_cfgs = [
         cfg
         for cfg in dispatcher_cfgs
