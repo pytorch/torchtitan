@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 
 import grain.python as grain
+import pytest
 import torch
 
 from torchtitan.components.data.dataset import (
@@ -15,10 +16,13 @@ from torchtitan.components.data.dataset import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MMSamplePackingConfig,
+    MultiModalProcessor,
 )
+from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
 
 
 class _Tokenizer:
@@ -87,6 +91,57 @@ class _RowsSourceConfig:
 
 def test_multimodal_registry_does_not_enable_packing():
     assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
+
+
+@pytest.mark.parametrize(
+    "recipe_name",
+    [
+        "qwen35_debugmodel",
+        "qwen35_debugmodel_moe",
+        "qwen35_0_8b",
+        "qwen35_2b",
+        "qwen35_4b",
+        "qwen35_9b",
+        "qwen35_27b",
+        "qwen35_35b_a3b",
+        "qwen35_122b_a10b",
+        "qwen35_397b_a17b",
+    ],
+)
+def test_qwen35_recipe_geometry_matches_dataset_processor(recipe_name):
+    registry_state = {
+        name: (
+            id(dataset),
+            id(dataset.processor),
+            dataset.processor.patch_size,
+            dataset.processor.temporal_patch_size,
+            dataset.processor.spatial_merge_size,
+        )
+        for name, dataset in MM_DATASETS.items()
+        if isinstance(dataset.processor, MultiModalProcessor.Config)
+    }
+
+    config = getattr(qwen35_configs, recipe_name)()
+    dataset = config.dataloader.dataset
+    collator = config.dataloader.collator
+
+    assert isinstance(dataset, SingleDatasetConfig)
+    assert isinstance(dataset.processor, MultiModalProcessor.Config)
+    assert isinstance(collator, MultiModalCollator.Config)
+    assert collator.patch_size == dataset.processor.patch_size
+    assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
+    assert collator.spatial_merge_size == dataset.processor.spatial_merge_size
+    assert {
+        name: (
+            id(dataset),
+            id(dataset.processor),
+            dataset.processor.patch_size,
+            dataset.processor.temporal_patch_size,
+            dataset.processor.spatial_merge_size,
+        )
+        for name, dataset in MM_DATASETS.items()
+        if isinstance(dataset.processor, MultiModalProcessor.Config)
+    } == registry_state
 
 
 def test_packing_preserves_ordered_images_when_merging_rows():

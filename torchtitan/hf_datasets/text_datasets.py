@@ -129,6 +129,8 @@ class ChatProcessor(SampleProcessor):
             messages[:1], add_generation_prompt=True
         )
         prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+        # TODO(data-chat-loss-boundary): Validate prompt tokens are an exact prefix
+        # of full-conversation tokens before masking on prompt_len.
         prompt_len = len(prompt_tokens)
 
         # Labels are shifted by one token, so the first assistant token is
@@ -156,16 +158,17 @@ DATASETS: dict[str, SingleDatasetConfig] = {
     "c4": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="allenai/c4",
-            load_dataset_kwargs={"name": "en", "split": "train"},
+            name="en",
+            split="train",
         ),
         processor=TextProcessor.Config(),
     ),
     "c4_test": SingleDatasetConfig(
         source=HuggingFaceRandomAccessSource.Config(
             path="json",
+            split="train",
             load_dataset_kwargs={
                 "data_files": "tests/assets/c4_test/data.json",
-                "split": "train",
             },
         ),
         processor=TextProcessor.Config(),
@@ -173,7 +176,8 @@ DATASETS: dict[str, SingleDatasetConfig] = {
     "c4_validation": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="allenai/c4",
-            load_dataset_kwargs={"name": "en", "split": "validation"},
+            name="en",
+            split="validation",
         ),
         processor=TextProcessor.Config(),
     ),

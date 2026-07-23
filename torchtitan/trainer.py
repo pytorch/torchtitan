@@ -915,13 +915,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         last_step=(self.step == config.training.steps),
                     )
 
-                    # Run validation if validator is available
-                    # TODO(checkpoint-validation-rng): Make validation RNG-neutral so a
-                    # checkpoint taken before validation restores the same training RNG.
                     if self.config.validator.enable and self.validator.should_validate(
                         self.step
                     ):
-                        self.validator.validate(self.model_parts, self.step)
+                        with dist_utils.preserve_rng_state():
+                            self.validator.validate(self.model_parts, self.step)
 
                     # signal the profiler that the next profiling step has started
                     profiler.step()
@@ -977,6 +975,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             utils.device_module.set_rng_state(rng_state["accelerator"])
 
     def close(self) -> None:
+        if hasattr(self, "dataloader") and self.dataloader:
+            self.dataloader.close()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:

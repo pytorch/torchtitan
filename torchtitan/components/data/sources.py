@@ -64,6 +64,9 @@ class IndexedJsonlSource(Configurable):
         self._paths = _expand_patterns(config.patterns)
         self._path_ids = array("I")
         self._byte_offsets = array("Q")
+        # TODO(data-jsonl-sidecar): Persist and mmap offsets so ranks and process
+        # workers do not rescan or duplicate the full index; needs atomic publication
+        # and stale-index validation.
         for path_id, path in enumerate(self._paths):
             with open(path, "rb") as file:
                 while True:
@@ -95,13 +98,37 @@ class HuggingFaceRandomAccessSource(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         path: str
+        split: str
+        name: str | None = None
+        revision: str | None = None
         load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
+
+        def __post_init__(self) -> None:
+            duplicated = {"split", "name", "revision", "streaming"} & (
+                self.load_dataset_kwargs.keys()
+            )
+            if duplicated:
+                raise ValueError(
+                    "first-class Hugging Face fields repeated in kwargs: "
+                    f"{sorted(duplicated)}"
+                )
 
     def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int) -> None:
         del dp_rank, dp_world_size
-        self._dataset = datasets.load_dataset(
-            config.path, streaming=False, **config.load_dataset_kwargs
+        dataset = datasets.load_dataset(
+            config.path,
+            name=config.name,
+            split=config.split,
+            revision=config.revision,
+            streaming=False,
+            **config.load_dataset_kwargs,
         )
+        if not isinstance(dataset, datasets.Dataset):
+            raise TypeError(
+                "random-access Hugging Face source requires one Dataset; "
+                f"got {type(dataset).__qualname__}"
+            )
+        self._dataset = dataset
 
     def __len__(self) -> int:
         return len(self._dataset)
@@ -130,18 +157,41 @@ class _HuggingFaceCursorIterator(grain.DatasetIterator):
 
 
 class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
-    """Provides a DP-sharded Hugging Face stream with exact cursor resume."""
+    """Provides a DP-sharded Hugging Face stream with cursor checkpointing."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         path: str
+        split: str
+        name: str | None = None
+        revision: str | None = None
         load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
+
+        def __post_init__(self) -> None:
+            duplicated = {"split", "name", "revision", "streaming"} & (
+                self.load_dataset_kwargs.keys()
+            )
+            if duplicated:
+                raise ValueError(
+                    "first-class Hugging Face fields repeated in kwargs: "
+                    f"{sorted(duplicated)}"
+                )
 
     def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int) -> None:
         super().__init__()
         dataset = datasets.load_dataset(
-            config.path, streaming=True, **config.load_dataset_kwargs
+            config.path,
+            name=config.name,
+            split=config.split,
+            revision=config.revision,
+            streaming=True,
+            **config.load_dataset_kwargs,
         )
+        if not isinstance(dataset, datasets.IterableDataset):
+            raise TypeError(
+                "streaming Hugging Face source requires one IterableDataset; "
+                f"got {type(dataset).__qualname__}"
+            )
         if not hasattr(dataset, "state_dict") or not hasattr(
             dataset, "load_state_dict"
         ):

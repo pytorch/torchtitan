@@ -71,9 +71,9 @@ class TestDatasetCheckpointing(unittest.TestCase):
                 dataset=SingleDatasetConfig(
                     source=source_type.Config(
                         path="json",
+                        split="train",
                         load_dataset_kwargs={
                             "data_files": _DATA_PATH,
-                            "split": "train",
                         },
                     ),
                     processor=TextProcessor.Config(

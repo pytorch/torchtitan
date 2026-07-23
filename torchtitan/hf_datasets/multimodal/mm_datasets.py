@@ -320,35 +320,35 @@ MM_DATASETS: dict[str, SingleDatasetConfig] = {
     "obelics": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="HuggingFaceM4/OBELICS",
-            load_dataset_kwargs={"split": "train"},
+            split="train",
         ),
         processor=MultiModalProcessor.Config(
             sample_processor=_process_obelics_sample,
         ),
-        filters=(lambda sample: sample is not None,),
+        post_filters=(lambda sample: sample is not None,),
     ),
     "cc12m": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="pixparse/cc12m-wds",
-            load_dataset_kwargs={"split": "train"},
+            split="train",
         ),
         processor=MultiModalProcessor.Config(
             sample_processor=_process_cc12_wd_sample,
         ),
-        filters=(lambda sample: sample is not None,),
+        post_filters=(lambda sample: sample is not None,),
     ),
     "cc12m-test": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="tests/assets/cc12m_test",
+            split="train",
             load_dataset_kwargs={
-                "split": "train",
                 "data_files": {"train": "*.tar"},
             },
         ),
         processor=MultiModalProcessor.Config(
             sample_processor=_process_cc12_wd_sample,
         ),
-        filters=(lambda sample: sample is not None,),
+        post_filters=(lambda sample: sample is not None,),
     ),
 }
 
@@ -390,6 +390,8 @@ class _MMSamplePackingIterator(grain.DatasetIterator[dict[str, Any]]):
         self._flushed = False
 
     def __next__(self) -> dict[str, Any]:
+        # TODO(data-mm-packer-liveness): Exact-fill packing can retain rows
+        # indefinitely on repeated input; emit on buffer pressure instead.
         while not self._packer.packed_samples:
             if self._parent_exhausted:
                 if not self._flushed:

@@ -174,6 +174,8 @@ class MultiModalCollator(Collator):
         Returns:
             (batch, seq_len, 3) MRoPE position IDs.
         """
+        # TODO(data-qwen-video-mrope): Per-frame grid expansion here conflicts with
+        # the one-video/one-placeholder-run contract; reconcile before video input.
         # Expand each video [T, H, W] into T rows of [1, H, W] so each frame is
         # treated like an image; temporal position comes from frame ordering.
         if grid_thw_videos is not None:
@@ -320,6 +322,8 @@ class MultiModalCollator(Collator):
             images_per_sample.append(num_images)
 
         total_images = sum(images_per_sample)
+        # TODO(data-mm-collator-admission): batch.pop() here drops rows the loader
+        # already consumed; enforce media budgets before batching instead.
         while total_images > self.max_images_per_batch and batch:
             removed_images = images_per_sample.pop()
             total_images -= removed_images
@@ -335,6 +339,8 @@ class MultiModalCollator(Collator):
             if "pixel_values" in sample
             for img in sample["pixel_values"]
         ]
+        # TODO(data-mm-padded-budget): Bound padded patch allocation
+        # (len(items) * max(per-item patches)), not only media count.
         patches, grids = self.collate_images(all_images) if all_images else (None, None)
 
         all_videos = [

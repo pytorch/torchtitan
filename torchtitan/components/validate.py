@@ -306,6 +306,9 @@ class Validator(BaseValidator):
             accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
             num_steps += 1
 
+        # Release the temporary validation loader's prefetch workers.
+        validation_dataloader.close()
+
         # Compute average loss
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps

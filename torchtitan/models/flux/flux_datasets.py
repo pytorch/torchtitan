@@ -201,8 +201,8 @@ DATASETS: dict[str, SingleDatasetConfig] = {
     "cc12m-test": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="tests/assets/cc12m_test",
+            split="train",
             load_dataset_kwargs={
-                "split": "train",
                 "data_files": {"train": "*.tar"},
             },
         ),
@@ -210,13 +210,13 @@ DATASETS: dict[str, SingleDatasetConfig] = {
             data_processor=_cc12m_wds_data_processor,
             prompt_dropout_prob=0.447,
         ),
-        filters=(lambda sample: sample is not None,),
+        post_filters=(lambda sample: sample is not None,),
     ),
     "cc12m-test-validation": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="tests/assets/cc12m_test",
+            split="train",
             load_dataset_kwargs={
-                "split": "train",
                 "data_files": {"train": "*.tar"},
             },
         ),
@@ -224,29 +224,29 @@ DATASETS: dict[str, SingleDatasetConfig] = {
             data_processor=_cc12m_wds_data_processor,
             prompt_dropout_prob=0.0,
         ),
-        filters=(lambda sample: sample is not None,),
+        post_filters=(lambda sample: sample is not None,),
     ),
     "cc12m-wds": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="pixparse/cc12m-wds",
-            load_dataset_kwargs={"split": "train"},
+            split="train",
         ),
         processor=FluxSampleProcessor.Config(
             data_processor=_cc12m_wds_data_processor,
             prompt_dropout_prob=0.447,
         ),
-        filters=(lambda sample: sample is not None,),
+        post_filters=(lambda sample: sample is not None,),
     ),
     "coco-validation": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
             path="howard-hou/COCO-Text",
-            load_dataset_kwargs={"split": "validation"},
+            split="validation",
         ),
         processor=FluxSampleProcessor.Config(
             data_processor=_coco_data_processor,
             prompt_dropout_prob=0.0,
         ),
-        filters=(lambda sample: sample is not None,),
+        post_filters=(lambda sample: sample is not None,),
     ),
 }
 

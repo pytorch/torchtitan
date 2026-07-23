@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import replace
+
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.data import GrainDataLoader
+from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -15,11 +17,27 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    MM_DATASETS,
+    MultiModalProcessor,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry, QWEN3_5_SPECIAL_TOKENS
+
+
+def _multimodal_collator_config(
+    dataset_config: SingleDatasetConfig,
+) -> MultiModalCollator.Config:
+    processor_config = dataset_config.processor
+    assert isinstance(processor_config, MultiModalProcessor.Config)
+    return replace(
+        MultiModalCollator.Config(build_mrope_positions=True),
+        patch_size=processor_config.patch_size,
+        temporal_patch_size=processor_config.temporal_patch_size,
+        spatial_merge_size=processor_config.spatial_merge_size,
+    )
 
 
 def qwen35_debugmodel() -> Trainer.Config:
@@ -36,9 +54,7 @@ def qwen35_debugmodel() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-3),
@@ -75,9 +91,7 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-3),
@@ -114,9 +128,7 @@ def qwen35_0_8b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-3),
@@ -150,9 +162,7 @@ def qwen35_2b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-3),
@@ -186,9 +196,7 @@ def qwen35_4b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
@@ -221,9 +229,7 @@ def qwen35_9b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
@@ -258,9 +264,7 @@ def qwen35_27b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
@@ -295,9 +299,7 @@ def qwen35_35b_a3b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
@@ -333,9 +335,7 @@ def qwen35_122b_a10b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
@@ -371,9 +371,7 @@ def qwen35_397b_a17b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(
-                build_mrope_positions=True,
-            ),
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
             streaming_shuffle_window_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),

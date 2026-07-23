@@ -13,6 +13,7 @@ import time
 import unittest
 import uuid
 from concurrent.futures import Future
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -29,6 +30,7 @@ from torchtitan.components.checkpoint import (
     purge_thread,
     Terminate,
 )
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.trainer import Trainer
 
 
@@ -1053,6 +1055,136 @@ class TestTrainerRNGState(unittest.TestCase):
             state = trainer.state_dict()
 
         self.assertIn("rng_state_3", state)
+
+    def test_validation_scope_preserves_ambient_rng(self):
+        random.seed(17)
+        np.random.seed(17)
+        torch.manual_seed(17)
+        accelerator_state = torch.tensor([3], dtype=torch.uint8)
+
+        with (
+            mock.patch.object(
+                dist_utils.device_module, "is_available", return_value=True
+            ),
+            mock.patch.object(
+                dist_utils.device_module,
+                "get_rng_state",
+                return_value=accelerator_state,
+            ),
+            mock.patch.object(dist_utils.device_module, "set_rng_state") as set_state,
+        ):
+            with dist_utils.preserve_rng_state():
+                random.random()
+                np.random.random()
+                torch.rand(1)
+
+            actual = (random.random(), np.random.random(), torch.rand(1))
+
+        random.seed(17)
+        np.random.seed(17)
+        torch.manual_seed(17)
+        expected = (random.random(), np.random.random(), torch.rand(1))
+
+        self.assertEqual(actual[0], expected[0])
+        self.assertEqual(actual[1], expected[1])
+        self.assertTrue(torch.equal(actual[2], expected[2]))
+        set_state.assert_called_once_with(accelerator_state)
+
+    def test_validation_scope_restores_rng_when_validation_raises(self):
+        random.seed(23)
+        np.random.seed(23)
+        torch.manual_seed(23)
+
+        with (
+            mock.patch.object(
+                dist_utils.device_module, "is_available", return_value=False
+            ),
+            self.assertRaisesRegex(RuntimeError, "validation failed"),
+        ):
+            with dist_utils.preserve_rng_state():
+                random.random()
+                np.random.random()
+                torch.rand(1)
+                raise RuntimeError("validation failed")
+
+        actual = (random.random(), np.random.random(), torch.rand(1))
+        random.seed(23)
+        np.random.seed(23)
+        torch.manual_seed(23)
+        expected = (random.random(), np.random.random(), torch.rand(1))
+
+        self.assertEqual(actual[0], expected[0])
+        self.assertEqual(actual[1], expected[1])
+        self.assertTrue(torch.equal(actual[2], expected[2]))
+
+    def test_train_preserves_rng_consumed_by_validation(self):
+        trainer = Trainer.__new__(Trainer)
+        profiler = mock.Mock()
+        trainer.config = SimpleNamespace(
+            checkpoint=SimpleNamespace(load_step=None),
+            profiler=SimpleNamespace(
+                build=mock.Mock(return_value=nullcontext(profiler))
+            ),
+            training=SimpleNamespace(steps=1),
+            comm=SimpleNamespace(train_timeout_seconds=1),
+            validator=SimpleNamespace(enable=True),
+            dump_folder=".",
+        )
+        trainer.checkpointer = SimpleNamespace(
+            load=mock.Mock(),
+            save=mock.Mock(),
+        )
+        trainer.step = 0
+        trainer.dataloader = ()
+        trainer.batch_generator = mock.Mock(return_value=iter(()))
+        trainer.gc_handler = SimpleNamespace(run=mock.Mock())
+        trainer.train_step = mock.Mock(
+            side_effect=lambda _: (
+                random.random(),
+                np.random.random(),
+                torch.rand(1),
+            )
+        )
+        trainer.validator = SimpleNamespace(
+            should_validate=mock.Mock(return_value=True),
+            validate=mock.Mock(
+                side_effect=lambda *_: (
+                    random.random(),
+                    np.random.random(),
+                    torch.rand(1),
+                )
+            ),
+        )
+        trainer.model_parts = []
+        trainer.parallel_dims = mock.Mock()
+
+        random.seed(31)
+        np.random.seed(31)
+        torch.manual_seed(31)
+        random.random()
+        np.random.random()
+        torch.rand(1)
+        expected = (random.random(), np.random.random(), torch.rand(1))
+
+        random.seed(31)
+        np.random.seed(31)
+        torch.manual_seed(31)
+        with (
+            mock.patch("torchtitan.trainer.sl"),
+            mock.patch("torchtitan.trainer.dist_utils.set_pg_timeouts"),
+            mock.patch("torchtitan.trainer.torch.distributed.get_rank", return_value=0),
+            mock.patch("torchtitan.trainer.time.sleep"),
+            mock.patch.object(
+                dist_utils.device_module, "is_available", return_value=False
+            ),
+        ):
+            trainer.train()
+        actual = (random.random(), np.random.random(), torch.rand(1))
+
+        self.assertEqual(actual[0], expected[0])
+        self.assertEqual(actual[1], expected[1])
+        self.assertTrue(torch.equal(actual[2], expected[2]))
+        trainer.validator.validate.assert_called_once_with([], 1)
 
 
 if __name__ == "__main__":

@@ -417,10 +417,11 @@ def sft_qwen3_8b_math() -> Trainer.Config:
                 dataset=SingleDatasetConfig(
                     source=HuggingFaceRandomAccessSource.Config(
                         path="openai/gsm8k",
-                        load_dataset_kwargs={"name": "main", "split": "train"},
+                        name="main",
+                        split="train",
                     ),
                     processor=ChatProcessor.Config(messages_fn=process_sample),
-                    filters=(lambda sample: sample is not None,),
+                    post_filters=(lambda sample: sample is not None,),
                 ),
             ),
         ),
