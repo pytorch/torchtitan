@@ -65,6 +65,9 @@ class _MinimalAsyncEPBufferState:
 
 
 _buffer_state: _MinimalAsyncEPBufferState | None = None
+# MinimalAsyncEP has one process-global buffer: the first dispatcher initializes
+# it, same-configuration dispatchers reuse it, and differing metadata is invalid
+# because the buffer layout would not match.
 _buffer_key: (
     tuple[
         object,

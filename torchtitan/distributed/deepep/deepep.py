@@ -62,8 +62,9 @@ _buffer: ElasticBuffer | None = None
 _handle_cache: dict = {}
 _handle_counter: int = 0
 
-# Pending combine event used to make the current stream wait for combine completion.
-# Process-local + single-threaded, so a module variable suffices.
+# Pending combine event for deferred synchronization. The caller MUST call
+# sync_combine() before using the result. Process-local + single-threaded, so a
+# module var suffices.
 _pending_combine_event = None
 
 
