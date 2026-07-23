@@ -21,14 +21,8 @@ from torchtitan.tools.logging import logger
 
 
 _WRAPPED_ATTR = "_torchtitan_module_profiler_wrapped"
-_LABEL_ATTR = "_torchtitan_module_profiler_label"
-_KIND_ATTR = "_torchtitan_module_profiler_kind"
 
 MarkKernelsFactory = Callable[[dict[str, Any]], contextlib.AbstractContextManager]
-
-_MARK_KERNELS_UNSET = object()
-_mark_kernels_factory: MarkKernelsFactory | object | None = _MARK_KERNELS_UNSET
-_mark_kernels_warned = False
 
 
 def apply_module_profiler(
@@ -110,8 +104,6 @@ def wrap_module_forward(
 
     module.forward = wrapped_forward
     setattr(module, _WRAPPED_ATTR, True)
-    setattr(module, _LABEL_ATTR, label)
-    setattr(module, _KIND_ATTR, module_kind)
     return True
 
 
@@ -119,32 +111,19 @@ def is_profiler_active() -> bool:
     return bool(getattr(autograd_profiler, "_is_profiler_enabled", False))
 
 
+@functools.cache
 def get_mark_kernels() -> MarkKernelsFactory | None:
-    global _mark_kernels_factory
-    if _mark_kernels_factory is not _MARK_KERNELS_UNSET:
-        return cast(MarkKernelsFactory | None, _mark_kernels_factory)
-
     try:
         from torch.cuda._graph_annotations import mark_kernels
     except (AttributeError, ImportError) as exc:
-        warn_mark_kernels_unavailable(exc)
-        _mark_kernels_factory = None
-    else:
-        _mark_kernels_factory = mark_kernels
-    return cast(MarkKernelsFactory | None, _mark_kernels_factory)
-
-
-def warn_mark_kernels_unavailable(exc: Exception) -> None:
-    global _mark_kernels_warned
-    if _mark_kernels_warned:
-        return
-    _mark_kernels_warned = True
-    logger.warning(
-        "Module profiler was enabled, but CUDA graph kernel annotations are "
-        "unavailable because importing torch.cuda._graph_annotations.mark_kernels "
-        "failed: "
-        f"{type(exc).__name__}: {exc}"
-    )
+        logger.warning(
+            "Module profiler was enabled, but CUDA graph kernel annotations are "
+            "unavailable because importing "
+            "torch.cuda._graph_annotations.mark_kernels failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+    return cast(MarkKernelsFactory, mark_kernels)
 
 
 def mark_kernels_context(

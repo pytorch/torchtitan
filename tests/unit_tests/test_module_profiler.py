@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import builtins
 import contextlib
 import unittest
 from unittest import mock
@@ -106,16 +107,25 @@ class TestModuleProfiler(unittest.TestCase):
         )
 
     def test_mark_kernels_unavailable_warns_once(self):
-        original_warned = module_profiler._mark_kernels_warned
-        module_profiler._mark_kernels_warned = False
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "torch.cuda._graph_annotations":
+                raise ImportError("missing")
+            return real_import(name, *args, **kwargs)
+
+        module_profiler.get_mark_kernels.cache_clear()
         try:
-            with mock.patch.object(module_profiler.logger, "warning") as warning:
-                module_profiler.warn_mark_kernels_unavailable(ImportError("missing"))
-                module_profiler.warn_mark_kernels_unavailable(ImportError("missing"))
+            with (
+                mock.patch("builtins.__import__", side_effect=fake_import),
+                mock.patch.object(module_profiler.logger, "warning") as warning,
+            ):
+                self.assertIsNone(module_profiler.get_mark_kernels())
+                self.assertIsNone(module_profiler.get_mark_kernels())
 
             self.assertEqual(warning.call_count, 1)
         finally:
-            module_profiler._mark_kernels_warned = original_warned
+            module_profiler.get_mark_kernels.cache_clear()
 
 
 if __name__ == "__main__":
