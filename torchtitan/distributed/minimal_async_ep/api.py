@@ -52,7 +52,7 @@ class _MinimalAsyncEPBufferState:
     """Process-local symmetric-memory state initialized as one unit."""
 
     group: dist.ProcessGroup
-    tokens_per_rank: int
+    num_tokens_per_rank: int
     hidden_recv_buffers: list[torch.Tensor]
     hidden_recv_handles: list[Any]
     hidden_recv_peer_buffers: list[list[torch.Tensor]]
@@ -65,6 +65,21 @@ class _MinimalAsyncEPBufferState:
 
 
 _buffer_state: _MinimalAsyncEPBufferState | None = None
+# MinimalAsyncEP has one process-global buffer: the first dispatcher initializes
+# it, same-configuration dispatchers reuse it, and differing metadata is invalid
+# because the buffer layout would not match.
+_buffer_key: (
+    tuple[
+        object,
+        int,
+        int,
+        int,
+        int,
+        torch.dtype,
+        torch.device,
+    ]
+    | None
+) = None
 
 
 def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None:
@@ -72,7 +87,6 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
     from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
     from torchtitan.distributed.activation_checkpoint import FullAC
     from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
-    from torchtitan.trainer import Trainer
 
     assert hasattr(
         config, "parallelism"
@@ -102,6 +116,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             "MinimalAsyncEPTokenDispatcher.Config requires expert parallelism "
             "(expert_parallel_degree > 1)."
         )
+    # TODO: Add TP/SP, CP, and PP support to MinimalAsyncEP.
     if parallelism.tensor_parallel_degree != 1:
         raise ValueError(
             "MinimalAsyncEP does not support tensor or sequence parallelism."
@@ -118,10 +133,11 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
                 f"({parallelism.expert_parallel_degree})."
             )
 
-    if not isinstance(config, Trainer.Config):
+    training = getattr(config, "training", None)
+    if training is None:
         raise ValueError(
-            "MinimalAsyncEP requires a Trainer.Config-compatible runtime config "
-            "to set hidden_dim, tokens_per_rank, and dtype."
+            "MinimalAsyncEP requires a training runtime config to set "
+            "hidden_dim, num_tokens_per_rank, and dtype."
         )
 
     memory_policy = getattr(config.compile, "memory_policy", None)
@@ -137,12 +153,10 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
 
     for token_dispatcher_cfg in dispatcher_cfgs:
         token_dispatcher_cfg.hidden_dim = model_config.dim
-        token_dispatcher_cfg.tokens_per_rank = (
-            config.training.local_batch_size * config.training.seq_len
+        token_dispatcher_cfg.num_tokens_per_rank = (
+            training.local_batch_size * training.seq_len
         )
-        token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
-            config.training.mixed_precision_param
-        ]
+        token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
 
 
 @dataclass
@@ -176,25 +190,43 @@ class MinimalAsyncEPDispatchMetadata:
 def init_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
-    tokens_per_rank: int,
+    num_tokens_per_rank: int,
     num_local_experts: int,
     top_k: int,
     dtype: torch.dtype,
     device: torch.device,
 ) -> None:
-    """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
-    global _buffer_state
+    """Initialize or reuse the process-local MinimalAsyncEP communication buffer."""
+    global _buffer_key, _buffer_state
 
     device = torch.device(device)
-    max_routed_tokens = group.size() * tokens_per_rank * min(top_k, num_local_experts)
+    buffer_key = (
+        group,
+        hidden_dim,
+        num_tokens_per_rank,
+        num_local_experts,
+        top_k,
+        dtype,
+        device,
+    )
+    if _buffer_key is not None:
+        if _buffer_key != buffer_key:
+            raise ValueError(
+                "MinimalAsyncEP buffer was already initialized with a "
+                "different configuration."
+            )
+        return
+
+    max_routed_tokens = (
+        group.size() * num_tokens_per_rank * min(top_k, num_local_experts)
+    )
     num_experts = group.size() * num_local_experts
-    assert _buffer_state is None
 
     logger.info(
-        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
+        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, num_tokens_per_rank=%d, "
         "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d",
         hidden_dim,
-        tokens_per_rank,
+        num_tokens_per_rank,
         top_k,
         num_local_experts,
         group.size(),
@@ -265,7 +297,7 @@ def init_buffer(
 
     _buffer_state = _MinimalAsyncEPBufferState(
         group=group,
-        tokens_per_rank=tokens_per_rank,
+        num_tokens_per_rank=num_tokens_per_rank,
         hidden_recv_buffers=hidden_recv_buffers,
         hidden_recv_handles=hidden_recv_handles,
         hidden_recv_peer_buffers=hidden_recv_peer_buffers,
@@ -275,6 +307,7 @@ def init_buffer(
         counts_recv_peer_buffers=counts_recv_peer_buffers,
         counts_recv_peer_ptrs=counts_recv_peer_ptrs,
     )
+    _buffer_key = buffer_key
 
 
 def _copy_rows_to_peers_and_wait_cuda(
@@ -413,7 +446,7 @@ def _compute_direct_metadata(
         local_count_starts_E,
         num_routed_tokens=num_routed_rows,
         num_local_experts=num_local_experts,
-        max_tokens_per_segment=_buffer_state.tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.num_tokens_per_rank,
     )
 
     segment_lens = counts_sde[:, rank, :].t().reshape(-1)
@@ -434,7 +467,7 @@ def _compute_direct_metadata(
         ep_size=ep_size,
         num_local_experts=num_local_experts,
         receive_capacity=receive_capacity,
-        max_tokens_per_segment=_buffer_state.tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.num_tokens_per_rank,
     )
 
     return (
@@ -1001,5 +1034,4 @@ __all__ = [
     "combine_op",
     "dispatch_op",
     "init_buffer",
-    "maybe_update_minimal_async_ep_config",
 ]

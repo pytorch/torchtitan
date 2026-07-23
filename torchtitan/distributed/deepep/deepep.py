@@ -62,9 +62,9 @@ _buffer: ElasticBuffer | None = None
 _handle_cache: dict = {}
 _handle_counter: int = 0
 
-# Pending combine event for deferred synchronization, so shared_experts compute can
-# overlap with the combine communication (the caller MUST call sync_combine() before
-# using the combine result). Process-local + single-threaded, so a module var suffices.
+# Pending combine event for deferred synchronization. The caller MUST call
+# sync_combine() before using the result. Process-local + single-threaded, so a
+# module var suffices.
 _pending_combine_event = None
 
 
@@ -267,7 +267,7 @@ def _combine_op_impl(
         topk_weights=None,
         async_with_compute_stream=True,
     )
-    # Defer the sync so shared_experts compute can overlap the combine communication.
+    # Record completion so the dispatcher can synchronize before returning.
     _pending_combine_event = after_event
     return combined
 
@@ -478,8 +478,8 @@ def dispatch_tokens(
             expand mode (cudagraphable=True): it fixes the static slab shape, and it is a
             CAPACITY -- tokens a rank sends beyond it are DROPPED (masked layout), so set it
             >= the max per-rank token count to stay dropless. Compact mode
-            (cudagraphable=False) ignores it (may be None) and auto-sizes from the per-rank
-            token count (always dropless).
+            (cudagraphable=False) ignores it and auto-sizes from the current per-rank token
+            count.
         cudagraphable: If True, use the static, no-host-sync expand layout so the forward is
             cudagraph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -498,14 +498,6 @@ def dispatch_tokens(
     # safely falls back to compact rather than hitting the no-backward kernel error.
     cudagraphable = cudagraphable and not torch.is_grad_enabled()
 
-    # Compact (training) does NOT need a user-set num_max_tokens_per_rank: the per-rank
-    # dispatch count is exactly this forward's token count, so size the buffer from it
-    # (= local_batch * seq_len, already divided by the SP degree since hidden_states is
-    # the SP-local shard). get_buffer only grows the buffer when a larger size is needed,
-    # so a fixed seq_len allocates once. Expand (inference) keeps the configured value:
-    # there it is the per-rank capacity that fixes the static output-slab shape, and tokens
-    # beyond it are dropped, so it must be supplied (set >= the max per-rank count for
-    # dropless inference).
     if not cudagraphable:
         num_max_tokens_per_rank = hidden_states.shape[0]
     elif num_max_tokens_per_rank is None:
@@ -521,8 +513,8 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
 
-    # Hide buffer setup (all_gather_object -> aten._to_copy, a MUST_SAVE op in our SAC
-    # policy) from SAC's __torch_dispatch__: it is infrastructure, not model compute.
+    # Buffer setup is infrastructure, not model compute. At a fixed training shape or
+    # during CUDA graph capture this is a no-op because init_buffer() allocated it.
     with _disable_current_modes():
         get_buffer(
             group,

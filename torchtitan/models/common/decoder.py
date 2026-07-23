@@ -14,7 +14,6 @@ from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, Bl
 from torchtitan.distributed.minimal_async_ep.api import (
     maybe_update_minimal_async_ep_config,
 )
-
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -171,6 +170,19 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            training = getattr(config, "training", None)
+            num_tokens_per_rank = None
+            if training is not None:
+                # CP and TP/SP shard the token axis before MoE, so this is the
+                # fixed number of input tokens dispatched by each rank.
+                num_token_shards = (
+                    parallelism.context_parallel_degree
+                    * parallelism.tensor_parallel_degree
+                )
+                num_tokens_per_rank = training.local_batch_size * (
+                    training.seq_len // num_token_shards
+                )
+
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
                     from torchtitan.models.common.token_dispatcher import (
@@ -194,6 +206,33 @@ class Decoder(BaseModel):
                             "requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
+
+                    if isinstance(token_dispatcher_cfg, DeepEPTokenDispatcher.Config):
+                        token_dispatcher_cfg.hidden_dim = self.dim
+                        # Compact mode derives the buffer capacity from the input shape.
+                        if (
+                            not token_dispatcher_cfg.cudagraphable
+                            and num_tokens_per_rank is not None
+                        ):
+                            token_dispatcher_cfg.num_max_tokens_per_rank = (
+                                num_tokens_per_rank
+                            )
+                        elif (
+                            token_dispatcher_cfg.cudagraphable
+                            and token_dispatcher_cfg.num_max_tokens_per_rank is None
+                        ):
+                            raise ValueError(
+                                "DeepEP cudagraphable dispatch requires "
+                                "num_max_tokens_per_rank."
+                            )
+                    elif isinstance(
+                        token_dispatcher_cfg, HybridEPTokenDispatcher.Config
+                    ):
+                        token_dispatcher_cfg.hidden_dim = self.dim
+                        if num_tokens_per_rank is not None:
+                            token_dispatcher_cfg.num_tokens_per_rank = (
+                                num_tokens_per_rank
+                            )
 
             maybe_update_minimal_async_ep_config(self, config)
 
