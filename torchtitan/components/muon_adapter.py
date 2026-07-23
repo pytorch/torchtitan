@@ -14,10 +14,10 @@ import torch
 from torch import Tensor
 from torch.distributed.tensor import (
     DTensor,
-    Partial as DtPartial,
-    Placement as DtPlacement,
-    Replicate as DtReplicate,
-    Shard as DtShard,
+    Partial,
+    Placement,
+    Replicate,
+    Shard,
 )
 from torch.optim._muon import muon
 
@@ -39,27 +39,27 @@ class MuonAdapter(torch.optim.Muon):
     def _compute_placements(
         tensor: DTensor,
         matrix_shape: tuple[int, int] | None,
-    ) -> tuple[DtPlacement, ...]:
+    ) -> tuple[Placement, ...]:
         """Choose a physical DTensor layout containing complete Muon matrices."""
         compute_placements = []
         first_matrix_dim = tensor.ndim - 2
         for placement in tensor.placements:
-            if isinstance(placement, DtPartial):
+            if isinstance(placement, Partial):
                 raise spmd.SpmdTypeError(
                     "MuonAdapter requires gradients to be reduced before the "
                     "optimizer step; Partial storage is not a valid input"
                 )
-            if isinstance(placement, DtShard):
+            if isinstance(placement, Shard):
                 shard_dim = placement.dim % tensor.ndim
                 # A logical reshape makes every physical shard boundary
                 # ambiguous. Native [..., M, N] tensors may retain shards only
                 # on their leading matrix-batch dimensions.
                 if (
                     matrix_shape is not None
-                    or type(placement) is not DtShard
+                    or type(placement) is not Shard
                     or shard_dim >= first_matrix_dim
                 ):
-                    placement = DtReplicate()
+                    placement = Replicate()
             compute_placements.append(placement)
         return tuple(compute_placements)
 
