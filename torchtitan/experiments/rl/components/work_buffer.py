@@ -12,38 +12,12 @@ NOTE: The buffer holds work slots, and not the finalized RolloutGroups necessari
 import asyncio
 import collections
 import enum
-import math
 from dataclasses import dataclass, field
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.observability import structured_logger as sl
-
-
-def derive_window_size(
-    *,
-    num_prompts_per_train_step: int,
-    target_offpolicy_steps: int,
-    window_fifo_fraction: float,
-) -> int:
-    """Derive the fixed FIFO look-ahead window from the configured fraction.
-
-    Symbols:
-        ``P``: prompts per train step (``num_prompts_per_train_step``).
-        ``S``: target mean offpolicy steps (``target_offpolicy_steps``).
-        ``f``: fraction of the active buffer used as the FIFO window
-            (``window_fifo_fraction``).
-        ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
-        ``W``: FIFO look-ahead window size, ``W = floor(f * B)``.
-
-    This window implies a worst case consume-time offpolicy bound of
-    ``(B + W - 2) // P``.
-    """
-    max_active_rollout_groups = (
-        target_offpolicy_steps + 1
-    ) * num_prompts_per_train_step
-    return math.floor(window_fifo_fraction * max_active_rollout_groups)
 
 
 class _RolloutGroupWorkState(enum.Enum):

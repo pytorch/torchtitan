@@ -179,7 +179,8 @@ def compute_policy_age_metrics(
     Args:
         trainer_policy_version: Policy version that will consume this batch.
         min_policy_versions: Oldest sampled policy version for each packed training sample.
-        target_offpolicy_steps: Target mean offpolicy steps.
+        target_offpolicy_steps: Target steady-state offpolicy steps used to size
+            the active buffer.
         max_offpolicy_steps: Hard consume-time offpolicy step limit derived from
             ``window_fifo_fraction``.
 

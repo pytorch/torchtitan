@@ -13,7 +13,6 @@ import pytest
 
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
-    derive_window_size,
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
@@ -250,42 +249,6 @@ async def _admit(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
 
 async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
     await buffer.finalize_work(RolloutGroup(group_id=group_id, rollouts=[]))
-
-
-def test_derive_window_size_from_window_fifo_fraction() -> None:
-    # P=3, S=2 -> B=9.
-    assert (
-        derive_window_size(
-            num_prompts_per_train_step=3,
-            target_offpolicy_steps=2,
-            window_fifo_fraction=4 / 9,
-        )
-        == 4
-    )
-    assert (
-        derive_window_size(
-            num_prompts_per_train_step=3,
-            target_offpolicy_steps=2,
-            window_fifo_fraction=1 / 9,
-        )
-        == 1
-    )
-    assert (
-        derive_window_size(
-            num_prompts_per_train_step=3,
-            target_offpolicy_steps=2,
-            window_fifo_fraction=1.0,
-        )
-        == 9
-    )
-    assert (
-        derive_window_size(
-            num_prompts_per_train_step=8,
-            target_offpolicy_steps=3,
-            window_fifo_fraction=1.0,
-        )
-        == 32
-    )
 
 
 def test_windowed_fifo_takes_within_anchored_window() -> None:

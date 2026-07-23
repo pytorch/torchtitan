@@ -92,6 +92,7 @@ import logging
 import math
 import os
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Annotated
@@ -113,7 +114,6 @@ from torchtitan.experiments.rl.components.training_sample_builder import (
 )
 from torchtitan.experiments.rl.components.weight_sync import WeightSyncManager
 from torchtitan.experiments.rl.components.work_buffer import (
-    derive_window_size,
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
@@ -165,11 +165,12 @@ class AsyncLoopConfig(Configurable.Config):
     """Sibling rollouts sampled per prompt (the GRPO group)."""
 
     target_offpolicy_steps: int = 3
-    """Target mean offpolicy steps. Sets active buffer size to `(S + 1) * P`.
-    This target is honored strictly when `window_fifo_fraction` is unset. With
-    windowed FIFO, consume-time offpolicy steps may exceed this target.
-    `max_offpolicy_steps` is the derived hard consume-time bound and is
-    strictly enforced before the trainer consumes each batch."""
+    """Target steady-state offpolicy steps used to set the active buffer size to
+    `(S + 1) * P`. Observed offpolicy steps are not guaranteed to equal this
+    target: when rollout generation is the bottleneck, the buffer may not fill
+    and observed offpolicy steps will be lower. With strict FIFO, observed
+    offpolicy steps cannot exceed this target. With windowed FIFO, it may exceed
+    this target, up to `max_offpolicy_steps`."""
 
     window_fifo_fraction: float | None = None
     """Fraction `f` of the active buffer used as the FIFO look-ahead window.
@@ -204,11 +205,15 @@ class AsyncLoopConfig(Configurable.Config):
                 "window_fifo_fraction must be None or in (0, 1], got "
                 f"{self.window_fifo_fraction}"
             )
-        if self.window_size < 1:
-            raise ValueError(
-                "window_fifo_fraction is too small; derived window_size must be >= 1, got "
-                f"window_size={self.window_size}, "
-                f"active_buffer_size={self.max_active_rollout_groups}"
+        if (
+            self.window_fifo_fraction is not None
+            and self.window_fifo_fraction * self.max_active_rollout_groups < 1
+        ):
+            warnings.warn(
+                f"window_fifo_fraction={self.window_fifo_fraction} is too small for "
+                f"active_buffer_size={self.max_active_rollout_groups}; forcing "
+                "window_size=1 (strict FIFO)",
+                stacklevel=2,
             )
 
     @property
@@ -217,16 +222,31 @@ class AsyncLoopConfig(Configurable.Config):
 
     @property
     def window_size(self) -> int:
+        """Derive the fixed FIFO look-ahead window from the configured fraction.
+
+        Symbols:
+            ``P``: prompts per train step (``num_prompts_per_train_step``).
+            ``S``: target steady-state offpolicy steps (``target_offpolicy_steps``).
+            ``f``: fraction of the active buffer used as the FIFO window
+                (``window_fifo_fraction``).
+            ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
+            ``W``: FIFO look-ahead window size, ``W = max(1, floor(f * B))``.
+                ``W = 1`` is strict FIFO.
+        """
         if self.window_fifo_fraction is None:
             return 1
-        return derive_window_size(
-            num_prompts_per_train_step=self.num_prompts_per_train_step,
-            target_offpolicy_steps=self.target_offpolicy_steps,
-            window_fifo_fraction=self.window_fifo_fraction,
+        return max(
+            1,
+            math.floor(self.window_fifo_fraction * self.max_active_rollout_groups),
         )
 
     @property
     def max_offpolicy_steps(self) -> int:
+        """Return the worst case consume-time offpolicy bound.
+
+        For active buffer size ``B``, FIFO window size ``W``, and prompts per
+        train step ``P``, the bound is ``(B + W - 2) // P``.
+        """
         return (
             self.max_active_rollout_groups + self.window_size - 2
         ) // self.num_prompts_per_train_step
