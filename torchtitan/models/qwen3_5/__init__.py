@@ -40,9 +40,9 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import (
     GatedDeltaBackend,
-    GatedDeltaCore,
     GatedDeltaKernel,
     GatedDeltaNet,
+    GatedDeltaNetCore,
     OffsetRMSNorm,
     Qwen35Attention,
     Qwen35Model,
@@ -304,7 +304,7 @@ def _qwen35_deltanet_config(
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
-        core=GatedDeltaCore.Config(
+        core=GatedDeltaNetCore.Config(
             key_head_dim=key_head_dim,
             value_head_dim=value_head_dim,
             key_dim=key_dim,

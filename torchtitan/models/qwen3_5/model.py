@@ -317,7 +317,7 @@ class GatedDeltaKernel(Module):
         return result[0]
 
 
-class GatedDeltaCore(Module):
+class GatedDeltaNetCore(Module):
     """Dense GDN core shared with the paged vLLM core call boundary.
 
     The core owns the depthwise convolution and gated-delta recurrence. Varlen
@@ -472,7 +472,7 @@ class GatedDeltaNet(Module):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        core: GatedDeltaCore.Config
+        core: GatedDeltaNetCore.Config
         norm: RMSNormGated.Config
         out_proj: Linear.Config
 
@@ -882,6 +882,7 @@ class Qwen35Model(Decoder):
 
             set_qwen35_sharding_config(
                 self,
+                enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
