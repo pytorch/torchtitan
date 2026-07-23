@@ -246,6 +246,9 @@ class AsyncLoopConfig(Configurable.Config):
 
         For active buffer size ``B``, FIFO window size ``W``, and prompts per
         train step ``P``, the bound is ``(B + W - 2) // P``.
+
+        See ``torchtitan/experiments/rl/docs/windowed_fifo.md`` for the proof and
+        a worked example.
         """
         return (
             self.max_active_rollout_groups + self.window_size - 2
