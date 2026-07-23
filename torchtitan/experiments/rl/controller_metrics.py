@@ -182,7 +182,7 @@ def compute_policy_age_metrics(
         target_offpolicy_steps: Target steady-state offpolicy steps used to size
             the active buffer.
         max_offpolicy_steps: Hard consume-time offpolicy step limit derived from
-            ``window_fifo_fraction``.
+            ``windowed_fifo_fraction``.
 
     Example:
         # trainer at v=10; training samples' oldest versions [8, 9] -> ages [2, 1]

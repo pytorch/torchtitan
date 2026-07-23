@@ -100,7 +100,7 @@ def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
     async_loop = AsyncLoopConfig(
         num_prompts_per_train_step=3,
         target_offpolicy_steps=2,
-        window_fifo_fraction=4 / 9,
+        windowed_fifo_fraction=4 / 9,
     )
     assert async_loop.max_active_rollout_groups == 9
     assert async_loop.window_size == 4
@@ -110,7 +110,7 @@ def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
         AsyncLoopConfig(
             num_prompts_per_train_step=3,
             target_offpolicy_steps=2,
-            window_fifo_fraction=1 / 9,
+            windowed_fifo_fraction=1 / 9,
         ).window_size
         == 1
     )
@@ -118,7 +118,7 @@ def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
         AsyncLoopConfig(
             num_prompts_per_train_step=3,
             target_offpolicy_steps=2,
-            window_fifo_fraction=1.0,
+            windowed_fifo_fraction=1.0,
         ).window_size
         == 9
     )
@@ -126,22 +126,22 @@ def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
         AsyncLoopConfig(
             num_prompts_per_train_step=8,
             target_offpolicy_steps=3,
-            window_fifo_fraction=1.0,
+            windowed_fifo_fraction=1.0,
         ).window_size
         == 32
     )
 
 
-def test_async_loop_config_handles_window_fifo_fraction_bounds() -> None:
-    with pytest.raises(ValueError, match="window_fifo_fraction"):
-        AsyncLoopConfig(window_fifo_fraction=0)
-    with pytest.raises(ValueError, match="window_fifo_fraction"):
-        AsyncLoopConfig(window_fifo_fraction=1.1)
+def test_async_loop_config_handles_windowed_fifo_fraction_bounds() -> None:
+    with pytest.raises(ValueError, match="windowed_fifo_fraction"):
+        AsyncLoopConfig(windowed_fifo_fraction=0)
+    with pytest.raises(ValueError, match="windowed_fifo_fraction"):
+        AsyncLoopConfig(windowed_fifo_fraction=1.1)
     with pytest.warns(UserWarning, match="forcing window_size=1"):
         async_loop = AsyncLoopConfig(
             num_prompts_per_train_step=8,
             target_offpolicy_steps=0,
-            window_fifo_fraction=0.01,
+            windowed_fifo_fraction=0.01,
         )
     assert async_loop.window_size == 1
 

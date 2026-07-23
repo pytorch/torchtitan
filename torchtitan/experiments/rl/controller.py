@@ -172,7 +172,7 @@ class AsyncLoopConfig(Configurable.Config):
     offpolicy steps cannot exceed this target. With windowed FIFO, it may exceed
     this target, up to `max_offpolicy_steps`."""
 
-    window_fifo_fraction: float | None = None
+    windowed_fifo_fraction: float | None = None
     """Fraction `f` of the active buffer used as the FIFO look-ahead window.
 
     None means strict FIFO (`window_size=1`). If set, must be in `(0, 1]`.
@@ -198,19 +198,19 @@ class AsyncLoopConfig(Configurable.Config):
             raise ValueError(
                 f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
             )
-        if self.window_fifo_fraction is not None and not (
-            0 < self.window_fifo_fraction <= 1
+        if self.windowed_fifo_fraction is not None and not (
+            0 < self.windowed_fifo_fraction <= 1
         ):
             raise ValueError(
-                "window_fifo_fraction must be None or in (0, 1], got "
-                f"{self.window_fifo_fraction}"
+                "windowed_fifo_fraction must be None or in (0, 1], got "
+                f"{self.windowed_fifo_fraction}"
             )
         if (
-            self.window_fifo_fraction is not None
-            and self.window_fifo_fraction * self.max_active_rollout_groups < 1
+            self.windowed_fifo_fraction is not None
+            and self.windowed_fifo_fraction * self.max_active_rollout_groups < 1
         ):
             warnings.warn(
-                f"window_fifo_fraction={self.window_fifo_fraction} is too small for "
+                f"windowed_fifo_fraction={self.windowed_fifo_fraction} is too small for "
                 f"active_buffer_size={self.max_active_rollout_groups}; forcing "
                 "window_size=1 (strict FIFO)",
                 stacklevel=2,
@@ -228,16 +228,16 @@ class AsyncLoopConfig(Configurable.Config):
             ``P``: prompts per train step (``num_prompts_per_train_step``).
             ``S``: target steady-state offpolicy steps (``target_offpolicy_steps``).
             ``f``: fraction of the active buffer used as the FIFO window
-                (``window_fifo_fraction``).
+                (``windowed_fifo_fraction``).
             ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
             ``W``: FIFO look-ahead window size, ``W = max(1, floor(f * B))``.
                 ``W = 1`` is strict FIFO.
         """
-        if self.window_fifo_fraction is None:
+        if self.windowed_fifo_fraction is None:
             return 1
         return max(
             1,
-            math.floor(self.window_fifo_fraction * self.max_active_rollout_groups),
+            math.floor(self.windowed_fifo_fraction * self.max_active_rollout_groups),
         )
 
     @property
