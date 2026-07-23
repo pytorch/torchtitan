@@ -190,6 +190,41 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
     )
     return config
 
+def deepseek_v3_16b_chat() -> Trainer.Config:
+    model_spec = model_registry("16B", attn_backend="flex")
+    return Trainer.Config(
+        loss = ChunkedLossWrapper.Config(
+            loss_fn = CrossEntropyLoss.Config(
+                global_vocab_size = decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path = "./assets/hf/deepseek-moe-16b-chat",
+        model_spec = model_spec,
+        dataloader = HuggingFaceTextDataLoader.Config(
+            dataset = "c4",
+        ),
+        optimizer = default_adamw(lr=2.2e-4),
+        lr_scheduler = LRSchedulersContainer.Config(
+            decay_ratio = 0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=4,
+            seq_len=4096,
+            steps=1000,
+        ),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="InterleavedF1B",
+            expert_parallel_degree=8,
+        ),
+        checkpoint=CheckpointManager.Config(interval=10),
+        activation_checkpoint=SelectiveAC.Config(),
+        compile=CompileConfig(
+            enable=True,components=["loss"]
+        ),
+    )
+
 
 def deepseek_v3_671b() -> Trainer.Config:
     model_spec = model_registry(
