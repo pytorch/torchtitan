@@ -9,7 +9,7 @@
 import os
 import pickle
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated
 
 import torch
@@ -122,6 +122,21 @@ class Profiler(Configurable):
     class Config(Configurable.Config):
         enable_profiling: bool = False
         """Whether to enable pytorch profiler."""
+
+        enable_module_profiler: bool = False
+        """Whether to add coarse model-module instrumentation to profiler traces."""
+
+        enable_module_record_function: bool = True
+        """Whether module profiler instrumentation emits record_function contexts."""
+
+        enable_module_mark_kernels: bool = False
+        """Whether module profiler instrumentation emits CUDA graph annotations."""
+
+        module_profiler_include: list[str] = field(default_factory=list)
+        """FQN glob patterns to add to the coarse module profiler target set."""
+
+        module_profiler_exclude: list[str] = field(default_factory=list)
+        """FQN glob patterns to remove from the module profiler target set."""
 
         save_traces_folder: str = PROFILE_DIR
         """Trace files location."""
