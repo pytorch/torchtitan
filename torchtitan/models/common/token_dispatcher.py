@@ -149,7 +149,7 @@ class LocalTokenDispatcher(Configurable):
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
-        """Combine routed expert outputs.
+        """Score and scatter_add routed expert outputs.
 
         Args:
             routed_output_RD: ``(R, D)`` expert outputs
@@ -161,7 +161,7 @@ class LocalTokenDispatcher(Configurable):
                 a shared dispatcher combine signature.
 
         Returns:
-            Combined output with shape ``(T, D)``.
+            out_TD: ``(T, D)`` combined output.
         """
         del num_local_tokens_after_padding, local_seq_len_after_padding
         out_TD = torch.zeros_like(x_TD)
@@ -606,7 +606,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         When sp_size > 1, dispatch uses local token indices.
         Combine offsets them to global positions so scatter_add
-        into the full output is correct.
+        into full x_TD is correct.
 
         Args:
             routed_output_RD: ``(R, D)`` expert outputs in expert-major order
@@ -620,11 +620,9 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 positions.
 
         Returns:
-            Combined output with shape
-            ``(num_local_tokens_after_padding * sp_size, D)`` with SP and
-            ``(T, D)`` otherwise.
+            out_TD: Combined output. With SP, shape is
+                ``(num_local_tokens_after_padding * sp_size, D)``.
         """
-        D = x_TD.shape[-1]
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
             return LocalTokenDispatcher.combine(
@@ -667,7 +665,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         # from all SP ranks can be placed at global positions.
         out_TD = torch.zeros(
             num_local_tokens_after_padding * self.sp_size,
-            D,
+            x_TD.shape[-1],
             device=x_TD.device,
             dtype=x_TD.dtype,
         )
@@ -846,7 +844,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
 @dataclass(frozen=True, kw_only=True)
 class EPDispatchMetadata:
-    """Opaque backend metadata passed from dispatch to combine."""
+    """Metadata for DeepEP, HybridEP, and MinimalAsyncEP token dispatch."""
 
     state: object  # Backend-specific dispatch state.
 
@@ -890,7 +888,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def init_buffer(self) -> None:
-        """Eagerly create the static inference buffer before CUDA graph capture."""
+        """Create the inference buffer before CUDA graph capture.
+
+        The cudagraph path creates the ElasticBuffer eagerly so its construction
+        barrier runs during parallelization, never inside capture. Compact training
+        skips this and sizes the buffer from the first dispatch's token count.
+        """
         if self.cudagraphable and self.ep_mesh is not None:
             # Inference (expand) path: num_max_tokens_per_rank fixes the static dispatch slab,
             # so it must be set here; the compact/training path auto-sizes and leaves it None.

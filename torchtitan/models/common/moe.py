@@ -131,12 +131,11 @@ class RoutedExperts(Module):
         *,
         num_local_tokens_after_seq_dim_padding: int,
     ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, and combine.
+        """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
-
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
@@ -167,8 +166,8 @@ class RoutedExperts(Module):
             num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
             local_seq_len_after_padding=local_seq_len_after_padding,
         )
-        # Reshape before local_map wraps the output as a DTensor. Reshaping the
-        # sharded DTensor afterward can introduce a _StridedShard placement.
+        # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
+        # won't cause _StridedShard in the downstream view (e.g., CP is used).
         return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
