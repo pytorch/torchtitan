@@ -185,7 +185,7 @@ class GraphTrainerCompileConfig(CompileConfig):
 
 
 def validate_fp8_graph_config(compile_config: GraphTrainerCompileConfig) -> None:
-    """Validate the Phase 1 FP8 GraphTrainer execution contract."""
+    """Validate the supported FP8 GraphTrainer execution contracts."""
     if not compile_config.fp8.enabled:
         return
     if not compile_config.enable:
@@ -194,19 +194,22 @@ def validate_fp8_graph_config(compile_config: GraphTrainerCompileConfig) -> None
         raise ValueError("--compile.fp8.enabled requires --compile.enable_passes")
     if compile_config.mode != "aot_fx_trace":
         raise ValueError("--compile.fp8.enabled requires --compile.mode aot_fx_trace")
-    if compile_config.inductor_compilation != "full":
+    if compile_config.inductor_compilation not in {"full", "regional"}:
         raise ValueError(
-            "--compile.fp8.enabled requires --compile.inductor_compilation full"
+            "--compile.fp8.enabled requires --compile.inductor_compilation full "
+            "or regional"
         )
     if "cudagraph_pass" not in compile_config.disable_passes:
         raise ValueError(
             "--compile.fp8.enabled requires cudagraph_pass in "
-            "--compile.disable_passes during Phase 1"
+            "--compile.disable_passes until dense FP8 CUDA Graph capture is validated"
         )
-    if compile_config.precompile_artifact_dir:
+    if (
+        compile_config.precompile_artifact_dir
+        and compile_config.inductor_compilation != "regional"
+    ):
         raise ValueError(
-            "--compile.fp8.enabled does not support --compile.precompile_artifact_dir "
-            "during Phase 1"
+            "FP8 precompile requires --compile.inductor_compilation regional"
         )
 
 
