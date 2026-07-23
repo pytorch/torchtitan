@@ -620,8 +620,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 positions.
 
         Returns:
-            Combined output with shape ``(T_global, D)`` with SP, where
-            ``T_global = num_local_tokens_after_padding * sp_size``, and
+            Combined output with shape
+            ``(num_local_tokens_after_padding * sp_size, D)`` with SP and
             ``(T, D)`` otherwise.
         """
         D = x_TD.shape[-1]
