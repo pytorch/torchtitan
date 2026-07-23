@@ -288,7 +288,8 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertEqual(len(mock_save.call_args_list), 3)
         manager.close()
 
-    def test_load_returns_false_when_no_checkpoint_folder(self):
+    @mock.patch("torchtitan.components.checkpoint.logger")
+    def test_load_returns_false_when_no_checkpoint_folder(self, mock_logger):
         cfg = self.trainer_config.checkpoint
         cfg.folder = "nonexistent"
         manager = CheckpointManager(
@@ -302,6 +303,26 @@ class TestCheckpointManager(unittest.TestCase):
             base_folder=self.trainer_config.dump_folder,
         )
         self.assertFalse(manager.load(step=-1))
+        mock_logger.info.assert_any_call(
+            "No checkpoint was provided, this is a fresh start."
+        )
+        manager.close()
+
+    def test_explicit_load_step_raises_when_checkpoint_folder_missing(self):
+        cfg = self.trainer_config.checkpoint
+        cfg.folder = "nonexistent"
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        with self.assertRaisesRegex(FileNotFoundError, "--checkpoint.load_step=5"):
+            manager.load(step=5)
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
@@ -328,9 +349,106 @@ class TestCheckpointManager(unittest.TestCase):
         res = manager.load(step=-1)
         expected = os.path.join(ckpt_folder, "step-5")
         mock_load.assert_called_once()
-        args, kwargs = mock_load.call_args
+        _, kwargs = mock_load.call_args
         self.assertEqual(kwargs.get("checkpoint_id"), expected)
         self.assertTrue(res)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_initial_load_path_used_when_folder_has_no_valid_checkpoints(
+        self, mock_load, mock_rank
+    ):
+        initial_load_path = os.path.join(self.base_temp_dir, "initial", "step-100")
+        os.makedirs(initial_load_path, exist_ok=True)
+
+        cfg = self.trainer_config.checkpoint
+        cfg.initial_load_path = initial_load_path
+        cfg.initial_load_model_only = True
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        res = manager.load(step=-1)
+
+        mock_load.assert_called_once()
+        _, kwargs = mock_load.call_args
+        self.assertEqual(kwargs.get("checkpoint_id"), initial_load_path)
+        self.assertTrue(res)
+        manager.close()
+
+    @mock.patch("torchtitan.components.checkpoint.logger")
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_initial_load_path_ignored_when_folder_has_valid_checkpoints(
+        self, mock_load, mock_rank, mock_logger
+    ):
+        # Resuming from checkpoint.folder is the fault-tolerance path: all
+        # initial_* options are silently ignored so a job can keep the same
+        # arguments across automatic restarts.
+        initial_load_path = os.path.join(self.base_temp_dir, "initial", "step-100")
+        os.makedirs(initial_load_path, exist_ok=True)
+        ckpt_folder = os.path.join(self.test_folder, "checkpoints")
+        step_dir = os.path.join(ckpt_folder, "step-5")
+        os.makedirs(step_dir, exist_ok=True)
+        open(os.path.join(step_dir, ".metadata"), "w").close()
+
+        cfg = self.trainer_config.checkpoint
+        cfg.folder = "checkpoints"
+        cfg.initial_load_path = initial_load_path
+        cfg.initial_load_model_only = True
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        res = manager.load(step=-1)
+
+        self.assertTrue(res)
+        mock_load.assert_called_once()
+        _, kwargs = mock_load.call_args
+        self.assertEqual(kwargs.get("checkpoint_id"), step_dir)
+        mock_logger.warning.assert_not_called()
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_explicit_load_step_raises_when_checkpoint_step_missing(
+        self, mock_load, mock_rank
+    ):
+        ckpt_folder = os.path.join(self.test_folder, "checkpoints")
+        os.makedirs(ckpt_folder, exist_ok=True)
+
+        cfg = self.trainer_config.checkpoint
+        cfg.folder = "checkpoints"
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        with self.assertRaisesRegex(FileNotFoundError, "--checkpoint.load_step=5"):
+            manager.load(step=5)
+
+        mock_load.assert_not_called()
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
@@ -397,7 +515,7 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.last_save_model_only = False
         cfg.initial_load_model_only = True
         cfg.initial_load_path = path1
-        cfg.folder = ""
+        cfg.folder = "new_checkpoints"
         self.trainer_config.dump_folder = self.test_folder
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
@@ -409,16 +527,17 @@ class TestCheckpointManager(unittest.TestCase):
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
-        r1 = manager2.load(step=1)
+        r1 = manager2.load(step=-1)
         self.assertTrue(r1)
         mock_load.assert_called_once()
-        args1, kwargs1 = mock_load.call_args
+        _, kwargs1 = mock_load.call_args
         self.assertEqual(kwargs1.get("checkpoint_id"), path1)
-        # Phase 3: save new step under default folder, then load that
+        # Phase 3: save a new run checkpoint, then load it from the current folder.
         manager2.save(curr_step=2, last_step=True)
-        # Default folder is test_folder, so step-2 under that
-        step2_dir = os.path.join(self.test_folder, "step-2")
+        # New run checkpoints are saved under the configured output folder.
+        step2_dir = os.path.join(self.test_folder, "new_checkpoints", "step-2")
         self.assertTrue(os.path.isdir(step2_dir))
+        manager2.initial_load_path = None
         r2 = manager2.load(step=2)
         self.assertTrue(r2)
         self.assertEqual(mock_load.call_count, 2)
