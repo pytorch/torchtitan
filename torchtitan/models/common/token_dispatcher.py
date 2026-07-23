@@ -841,7 +841,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     DeepEP v2 (>= 2.0.0) collapses the v1 high-throughput (HT) and low-latency (LL)
     paths into a single ``buffer.dispatch``/``combine``. The compact, expert-grouped
     layout feeds the grouped-GEMM expert path directly (no permute). Combine is
-    asynchronous -- callers must wait for the combine before using the result.
+    synchronized before returning its result.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -1139,8 +1139,8 @@ def maybe_update_hybrid_ep_config(model_config: Any, config: Any) -> None:
 class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using MinimalAsyncEP for constrained EP communication.
 
-    This first integration supports EP with SP degree 1 only. TP/SP, CP,
-    PP, padding, and async combine overlap are intentionally out of scope.
+    This first integration supports EP with ``sp_size == 1`` only. TP/SP, CP,
+    PP, and padding are intentionally out of scope.
     """
 
     ep_mesh: DeviceMesh | None

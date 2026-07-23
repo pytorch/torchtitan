@@ -360,12 +360,10 @@ class MoE(Module):
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
           - LocalTokenDispatcher (no EP): scatter_add only.
           - AllToAll: all-to-all communication, then scatter_add.
-          - DeepEP: async combine_tokens; sync deferred to step 4.
+          - DeepEP: combine_tokens followed by backend synchronization.
           - HybridEP: synchronous combine_tokens.
-    3. Shared experts run on DTensor. Overlaps with DeepEP async combine
-       when the DeepEP dispatcher is used.
-    4. DeepEP combine is synced if needed, then routed and shared expert
-       outputs are summed.
+    3. Shared experts run on DTensor.
+    4. Routed and shared expert outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
