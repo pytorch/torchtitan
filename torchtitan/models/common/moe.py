@@ -38,7 +38,6 @@ class GroupedExperts(Module):
         dim: int
         hidden_dim: int
         num_experts: int
-        token_dispatcher: LocalTokenDispatcher.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -52,9 +51,8 @@ class GroupedExperts(Module):
         self.w3_EFD = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
-        self.token_dispatcher = config.token_dispatcher.build()
 
-    def _experts_forward(
+    def forward(
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
@@ -109,6 +107,21 @@ class GroupedExperts(Module):
             h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
 
+
+class RoutedExperts(Module):
+    """Routed-expert ``local_map`` region: composes token_dispatcher + inner_experts
+    as sibling nodes so each can be overridden independently."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        inner_experts: GroupedExperts.Config
+        token_dispatcher: LocalTokenDispatcher.Config
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.inner_experts = config.inner_experts.build()
+        self.token_dispatcher = config.token_dispatcher.build()
+
     def forward(
         self,
         x_BLD: torch.Tensor,
@@ -143,7 +156,7 @@ class GroupedExperts(Module):
             num_local_tokens_per_expert_E,
         )
         with maybe_set_sparse_mesh():
-            routed_output_RD = self._experts_forward(
+            routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
         out_TD = self.token_dispatcher.combine(
@@ -158,8 +171,8 @@ class GroupedExperts(Module):
         return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
-        so dispatch/combine see the right meshes at runtime."""
+        """Parallelize the grouped experts, then wire EP/TP meshes on the
+        dispatcher so dispatch/combine see the right meshes at runtime."""
         super().parallelize(parallel_dims)
         # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
         # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
@@ -328,11 +341,11 @@ class MoE(Module):
 
     The forward pass proceeds as:
     1. Router computes expert assignments (stays on DTensor)
-    2. GroupedExperts.forward() converts DTensor to local, then handles:
+    2. RoutedExperts.forward() converts DTensor to local, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
-       b. expert computation (local tensors)
+       b. expert computation (GroupedExperts, local tensors)
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
           - LocalTokenDispatcher (no EP): scatter_add only.
           - AllToAll: all-to-all communication, then scatter_add.
@@ -347,7 +360,7 @@ class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
-        experts: GroupedExperts.Config
+        routed_experts: RoutedExperts.Config
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
@@ -360,7 +373,7 @@ class MoE(Module):
 
         num_experts = config.num_experts
         self.seq_dim_tp_sharded = config.seq_dim_tp_sharded
-        self.experts = config.experts.build()
+        self.routed_experts = config.routed_experts.build()
         self.router = config.router.build()
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
@@ -411,7 +424,7 @@ class MoE(Module):
         # Virtual padding then pads each batch's sequence length up to a multiple
         # of ``sp_size`` without materializing padded tokens.
         B, L, D = x_BLD.shape
-        sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
+        sp_size = getattr(self.routed_experts.token_dispatcher, "sp_size", 1)
         if not isinstance(x_BLD, DTensor) and self.seq_dim_tp_sharded:
             # Local dense activation with SP enabled guarantees even CP*TP
             # sequence sharding, so L is already the local TP sequence length
@@ -464,7 +477,7 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
-        out_BLD = self.experts(
+        out_BLD = self.routed_experts(
             x_BLD,
             topk_scores_BLK,
             topk_expert_ids_BLK,
@@ -480,8 +493,8 @@ class MoE(Module):
         )
 
         if (
-            isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher)
-            and self.experts.token_dispatcher.sp_size == 1
+            isinstance(self.routed_experts.token_dispatcher, DeepEPTokenDispatcher)
+            and self.routed_experts.token_dispatcher.sp_size == 1
         ):
             # Sync the combine operation before using routed_output.
             # This inserts a CUDA stream wait, ensuring combine is complete before
@@ -517,9 +530,9 @@ class MoE(Module):
 
         with torch.device(buffer_device):
             self.tokens_per_expert_E = torch.zeros(
-                self.experts.num_experts, dtype=torch.float32
+                self.routed_experts.inner_experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
                 self.expert_bias_E = torch.zeros(
-                    self.experts.num_experts, dtype=torch.float32
+                    self.routed_experts.inner_experts.num_experts, dtype=torch.float32
                 )
