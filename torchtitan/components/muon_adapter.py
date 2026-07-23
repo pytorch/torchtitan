@@ -251,33 +251,32 @@ class MuonAdapter(torch.optim.Muon):
         for group in self.param_groups:
             # Scope gathered parameter/gradient/state buffers to one group so a
             # model-wide step does not retain every temporary compute layout.
-            with ExitStack() as compute_views:
+            with ExitStack() as compute_views, spmd.local():
                 # Multi-leading-dimension flatten/unflatten is not yet
                 # representable by global PartitionSpec propagation. The
                 # entry assertion retains the global safety proof.
-                with spmd.local():
-                    params_with_grad: list[Tensor] = []
-                    grads: list[Tensor] = []
-                    muon_momentum_bufs: list[Tensor] = []
-                    has_complex = self._init_group(
-                        group,
-                        params_with_grad,
-                        grads,
-                        muon_momentum_bufs,
-                        compute_views=compute_views,
-                    )
-                    muon(
-                        params_with_grad,
-                        grads,
-                        muon_momentum_bufs,
-                        lr=group["lr"],
-                        weight_decay=group["weight_decay"],
-                        momentum=group["momentum"],
-                        nesterov=group["nesterov"],
-                        ns_coefficients=group["ns_coefficients"],
-                        eps=group["eps"],
-                        ns_steps=group["ns_steps"],
-                        adjust_lr_fn=group["adjust_lr_fn"],
-                        has_complex=has_complex,
-                    )
+                params_with_grad: list[Tensor] = []
+                grads: list[Tensor] = []
+                muon_momentum_bufs: list[Tensor] = []
+                has_complex = self._init_group(
+                    group,
+                    params_with_grad,
+                    grads,
+                    muon_momentum_bufs,
+                    compute_views=compute_views,
+                )
+                muon(
+                    params_with_grad,
+                    grads,
+                    muon_momentum_bufs,
+                    lr=group["lr"],
+                    weight_decay=group["weight_decay"],
+                    momentum=group["momentum"],
+                    nesterov=group["nesterov"],
+                    ns_coefficients=group["ns_coefficients"],
+                    eps=group["eps"],
+                    ns_steps=group["ns_steps"],
+                    adjust_lr_fn=group["adjust_lr_fn"],
+                    has_complex=has_complex,
+                )
         return loss
