@@ -13,6 +13,7 @@ import torch
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -81,8 +82,8 @@ class PolicyTrainer(Actor, Configurable):
             default_factory=CheckpointManager.Config
         )
         override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied to
-        this trainer's model spec after ``update_from_config`` and before build.
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu.fused_swiglu``)
+        applied to this trainer's model spec after ``update_from_config`` and before build.
         Separate from the generator's override so the two can differ."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
@@ -98,6 +99,8 @@ class PolicyTrainer(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
+        # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
+        logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
         if not config.dump_folder:
             config.dump_folder = output_dir
         sl.init_structured_logger(
@@ -438,7 +441,7 @@ class PolicyTrainer(Actor, Configurable):
         if len(current_lrs) != 1:
             raise ValueError(
                 "RL metrics only support a single optimizer LR for "
-                f"train/lr; got {current_lrs}"
+                f"trainer/lr; got {current_lrs}"
             )
         current_lr = float(current_lrs[0])
 
@@ -466,9 +469,9 @@ class PolicyTrainer(Actor, Configurable):
         return OptimStepOutput(
             policy_version=self.policy_version,
             metrics={
-                "train/grad_norm/mean": float(grad_norm.item()),
-                "train/lr": current_lr,
-                "train/policy_version": float(self.policy_version),
+                "trainer/grad_norm/mean": float(grad_norm.item()),
+                "trainer/lr": current_lr,
+                "trainer/policy_version": float(self.policy_version),
             },
         )
 
@@ -498,10 +501,21 @@ class PolicyTrainer(Actor, Configurable):
         if self._transfer_dtype is not None:
             # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
             # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
+            # Exclude buffers from the cast: FSDP mixed precision casts params to the compute dtype but
+            # leaves buffers at their registered dtype (same as pretraining), e.g. the fp32
+            # expert_bias_E load-balance bias in MoE. The generator keeps those buffers at the same
+            # registered dtype, so casting them here would mismatch its state dict and fail torchstore's
+            # dtype check on weight sync.
+            # Strip the AC wrapper's `_checkpoint_wrapped_module` segment so buffer FQNs match state_dict() keys.
             # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
             #   CPU-staged path.
+            buffer_names = {
+                canonical_fqn(name) for name, _ in self.model.named_buffers()
+            }
             state_dict = {
-                name: tensor.to(self._transfer_dtype)
+                name: (
+                    tensor if name in buffer_names else tensor.to(self._transfer_dtype)
+                )
                 for name, tensor in state_dict.items()
             }
 

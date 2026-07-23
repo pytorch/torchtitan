@@ -349,6 +349,10 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "jit_deepseekv3_auto_bucketing",
             ngpu=8,
+            # JIT mode is deprecated; gate with the other JIT flavors. It also
+            # currently hits an upstream inductor bug (control_deps lowering
+            # calls realize() on an ir.Subgraph: "realize NYI on Subgraph").
+            disabled=_JIT_DISABLED,
         ),
         # === aot_fx_trace mode tests ===
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
@@ -439,6 +443,57 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             )
             for inductor_compilation, mode, modules, variant in ep_overlap_flex_tests
         ],
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.inductor_compilation full",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 GraphPP Interleaved1F1B full_inductor",
+            "aot_fx_trace_deepseek_v3_graph_pp_interleaved_1f1b_full_inductor",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.inductor_compilation full",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 GraphPP ZBVZeroBubble full_inductor",
+            "aot_fx_trace_deepseek_v3_graph_pp_zbv_zero_bubble_full_inductor",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.inductor_compilation full",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule DualPipeV",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 GraphPP DualPipeV full_inductor",
+            "aot_fx_trace_deepseek_v3_graph_pp_dual_pipe_v_full_inductor",
+            ngpu=8,
+        ),
         OverrideDefinitions(
             [
                 [

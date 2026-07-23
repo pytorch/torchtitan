@@ -64,8 +64,13 @@ class MetricsProcessor(Configurable):
                 # --- learning signals (not perf, but you want them in the same glance) ---
                 "loss/mean",
                 "rollout_reward/_mean",
-                "train/grad_norm/mean",
-                "train/lr",
+                "trainer/entropy/mean",
+                "trainer/grad_norm/mean",
+                "trainer/lr",
+                # trainer-vs-generator logprob diff; 0 under batch-invariant mode.
+                # Printed so batch-invariance is visible in logs even with no
+                # TensorBoard/W&B backend (e.g. the CI batch-invariant E2E test).
+                "bit_wise/logprob_diff/max",
             ]
         )
         """Regex search patterns selecting console keys for train log lines.

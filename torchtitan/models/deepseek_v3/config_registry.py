@@ -12,6 +12,8 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
+    MXFP8GroupedExpertsConverter,
+    MXFP8LinearConverter,
 )
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
@@ -23,9 +25,14 @@ from . import model_registry
 
 
 def enable_fused_swiglu(config: Trainer.Config) -> None:
-    override = "torchtitan.overrides.fused_swiglu"
-    assert override not in config.override.imports
-    config.override.imports.append(override)
+    # fused_swiglu.py registers two overrides (dense FeedForward + MoE grouped
+    # experts); activate both by naming each factory.
+    for override in (
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+    ):
+        assert override not in config.override.imports
+        config.override.imports.append(override)
 
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
@@ -61,6 +68,33 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    # Quantize the MoE expert grouped GEMMs to MXFP8, plus the dense Linear
+    # layers in attention, the shared experts, and the dense-layer feed-forward.
+    # fqns is an include-list (substring match), so the MoE router gate
+    # (moe.router.gate) and lm_head (output) are left in bf16.
+    # pad_multiple=128 is required by the CuTeDSL quantization kernel
+    # on sm_100 (e.g. B200)
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                fqns=["attention", "shared_experts", "feed_forward"],
+            ),
+            MXFP8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                pad_multiple=128,
+            ),
+        ],
+    )
+    return config
 
 
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
@@ -158,22 +192,9 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
 
 
 def deepseek_v3_671b() -> Trainer.Config:
-    compile_config = CompileConfig(enable=True, components=["loss"])
-    model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
-    )
     model_spec = model_registry(
         "671B",
         attn_backend="flex",
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["output", "router.gate"],
-                model_compile_enabled=model_compile_enabled,
-            ),
-            Float8GroupedExpertsConverter.Config(
-                model_compile_enabled=model_compile_enabled
-            ),
-        ],
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -204,5 +225,30 @@ def deepseek_v3_671b() -> Trainer.Config:
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=SelectiveAC.Config(),
-        compile=compile_config,
+        compile=CompileConfig(enable=True, components=["loss"]),
     )
+
+
+def deepseek_v3_671b_float8() -> Trainer.Config:
+    config = deepseek_v3_671b()
+    # Quantize the dense Linear layers and the MoE expert grouped GEMMs to
+    # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
+    # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
+    # build time, so use the plain deepseek_v3_671b config there.
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "671B",
+        attn_backend="flex",
+        converters=[
+            Float8LinearConverter.Config(
+                filter_fqns=["output", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+            Float8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled
+            ),
+        ],
+    )
+    return config

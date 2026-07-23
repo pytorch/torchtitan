@@ -20,9 +20,10 @@ import torch
 import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
-from torchtitan.distributed.utils import set_batch_invariance
+from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
     patch_bmm_for_batch_invariance,
@@ -37,9 +38,14 @@ from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
 )
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import (
+    FlexAttention,
+    FusedQKVLinear,
+    VarlenAttention,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.sharding import resolve_placements, SpmdLayout
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -672,8 +678,8 @@ class VLLMGenerator(Actor, Configurable):
         """Default sampling parameters for generation."""
 
         override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied to
-        this generator's model spec after ``update_from_config`` and before build.
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu.fused_swiglu``)
+        applied to this generator's model spec after ``update_from_config`` and before build.
         Separate from the trainer's override so the two can differ."""
 
         model_dtype: str = "bfloat16"
@@ -757,6 +763,8 @@ class VLLMGenerator(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
+        # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
+        logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
         sl.init_structured_logger(
             source="rl_generator",
             output_dir=output_dir,
@@ -900,7 +908,7 @@ class VLLMGenerator(Actor, Configurable):
 
         self._pull_model_state_dict_future: asyncio.Future[int] | None = None
 
-        # Background asyncio.Task running _engine_loop; None until the first generate/pull starts it.
+        # Background asyncio.Task running _engine_loop; None until start_engine_loop starts it.
         self._engine_loop_task: asyncio.Task | None = None
 
         logger.info("Generator initialized with vLLM engine")
@@ -935,6 +943,21 @@ class VLLMGenerator(Actor, Configurable):
         sl.set_step(step, relative_step=relative_step)
 
     @endpoint
+    async def start_engine_loop(self) -> None:
+        """Start the background engine loop on every rank (one-time, idempotent)."""
+        if self._engine_loop_task is None:
+            self._engine_loop_task = asyncio.create_task(self._engine_loop())
+
+    def _rank0_check_engine_loop_running(self, endpoint_name: str) -> None:
+        """Guard for the rank-0-only endpoints"""
+        assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
+        if self._engine_loop_task is None:
+            raise RuntimeError(
+                "engine loop not started; call start_engine_loop on all ranks "
+                f"before {endpoint_name}"
+            )
+
+    @endpoint
     @sl.log_trace_span("generate")
     async def generate(
         self,
@@ -944,12 +967,13 @@ class VLLMGenerator(Actor, Configurable):
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
-    ) -> Completion | None:
+    ) -> Completion:
         """Generates one completion for one prompt.
 
-        Returns the `Completion` on rank 0 and `None` on followers. The completion carries its
-        own per-generation metrics (`Completion.metrics`), which the controller attaches to the
-        rollout turn.
+        Can be accepted by rank 0 only (rank 0 owns the queue + futures and
+        drives the followers through the engine loop). Returns the `Completion`,
+        which carries its own per-generation metrics (`Completion.metrics`) that
+        the controller attaches to the rollout turn.
 
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
@@ -963,20 +987,11 @@ class VLLMGenerator(Actor, Configurable):
 
         Example:
 
-            completion = await generator.generate.call(
+            completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
                 [1, 2, 3], request_id="step=3/group=0/sample=0/turn=0",
             )
-            # rank 0 -> Completion(token_ids=[...], metrics=[Metric("generator/queue_time_ms", ...)]);
-            # followers -> None
         """
-
-        # Starting requires asyncio, which isn't available in the sync __init__.
-        # Start on first call; no-op after.
-        await self._ensure_engine_loop()
-
-        # Only rank 0 owns the queue + futures moving forward.
-        if self._rank != 0:
-            return None
+        self._rank0_check_engine_loop_running("generate")
 
         sampling = (
             sampling_config if sampling_config is not None else self.config.sampling
@@ -1003,11 +1018,6 @@ class VLLMGenerator(Actor, Configurable):
 
         # Await outside the lock so other generate / pull calls can proceed meanwhile.
         return await generation_future
-
-    async def _ensure_engine_loop(self) -> None:
-        """Start the single background engine loop on first use (idempotent); runs until `close()`."""
-        if self._engine_loop_task is None:
-            self._engine_loop_task = asyncio.create_task(self._engine_loop())
 
     @sl.log_trace_span("engine_loop")
     async def _engine_loop(self) -> None:
@@ -1193,13 +1203,7 @@ class VLLMGenerator(Actor, Configurable):
         # TODO: if an incoming request is received while another pull request is queued
         # we should drop the older request and pull the latest version instead
 
-        # Starting requires asyncio, which isn't available in the sync __init__.
-        # Start on first call; no-op after.
-        await self._ensure_engine_loop()
-
-        # Only rank 0 owns the queue + futures moving forward.
-        if self._rank != 0:
-            return
+        self._rank0_check_engine_loop_running("pull_model_state_dict")
 
         # A placeholder future for the engine loop to resolve once the pull has been applied.
         pull_model_state_dict_future: asyncio.Future[
@@ -1224,22 +1228,24 @@ class VLLMGenerator(Actor, Configurable):
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        # TODO(async-rl): use 2 version keys so trainer can push a new version
-        # without being blocked by a generator's ongoing pull.
-        model_sd = self._get_model().model.state_dict()
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=model_sd,
-            strict=False,
-            direct_rdma=False,
-        )
+        model = self._get_model()
+        model_sd = model.model.state_dict()
+        if get_spmd_backend() == "spmd_types":
+            await self._get_spmd_state_dict(model_sd, model=model)
+        else:
+            await ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=model_sd,
+                strict=False,
+                direct_rdma=False,
+            )
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
         # reaches the real param. Re-apply via load_state_dict to run the merge hook.
         # Non-fused params share storage with model_sd, so reloading them is a
         # harmless self-copy; only the fused wqkv is actually rebuilt.
         # TODO: investigate can we avoid the copy and properly load fused qkv weights
-        self._get_model().model.load_state_dict(model_sd, strict=False)
+        model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
@@ -1257,6 +1263,110 @@ class VLLMGenerator(Actor, Configurable):
             self._pull_model_state_dict_future.set_result(version)
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
+
+    async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
+        """Fetch trainer-pushed weights into a spmd_types generator state dict.
+
+        spmd_types generators hold plain local tensors, but TorchStore already
+        knows how to fill DTensor state-dict entries. Wrap each local tensor as
+        a DTensor using its declared SPMD layout, fetch through the normal
+        state-dict path, then put the local tensors back before load_state_dict.
+        """
+
+        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
+            layouts: dict[str, SpmdLayout] = {}
+
+            for module_fqn, module in model.named_modules():
+                sharding_config = getattr(module, "_sharding_config", None)
+                if sharding_config is not None:
+                    for state_name, layout in sharding_config.state_shardings.items():
+                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
+                        layouts[fqn] = layout
+
+                    # FusedSwiGLU keeps its sharding on the fused w13 parameter,
+                    # but its state dict exposes split w1.weight/w3.weight
+                    # (_split_w13_on_save). Mirror w13's layout onto the split
+                    # keys -- slicing the gate/up dim of an S(0) w13 yields S(0)
+                    # w1/w3, which is what the DTensor path gets implicitly.
+                    w13_layout = sharding_config.state_shardings.get("w13")
+                    if w13_layout is not None:
+                        for proj_name in ("w1", "w3"):
+                            layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
+
+                if isinstance(module, FusedQKVLinear):
+                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+                    # the sharding layout lives on the fused wqkv parameter.
+                    # TODO: This assumes fused and split QKV layouts stay
+                    # equivalent. The load hook all-gathers anyway, so replace
+                    # this with a less fragile fused-QKV state-dict path.
+                    wqkv_sharding_config = getattr(
+                        module.wqkv, "_sharding_config", None
+                    )
+                    if wqkv_sharding_config is None:
+                        continue
+                    for (
+                        state_name,
+                        layout,
+                    ) in wqkv_sharding_config.state_shardings.items():
+                        for proj_name in ("wq", "wk", "wv"):
+                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
+
+            return layouts
+
+        layouts = _fqn_to_spmd_layout(model.model)
+
+        dtensor_model_sd = dict(model_sd)
+        with torch.no_grad():
+            for name, target in model_sd.items():
+                if not isinstance(target, torch.Tensor):
+                    continue
+
+                layout = layouts.get(name)
+                if layout is None:
+                    if name.endswith(
+                        (
+                            ".vllm_attn._k_scale",
+                            ".vllm_attn._prob_scale",
+                            ".vllm_attn._q_scale",
+                            ".vllm_attn._v_scale",
+                        )
+                    ):
+                        # vLLM attention scale buffers are backend-owned plain
+                        # replicated state with no TorchTitan ShardingConfig.
+                        continue
+                    raise KeyError(f"{name} is missing SPMD layout metadata")
+
+                mesh = model.parallel_dims.resolve_mesh(layout.axes())
+                if mesh is None:
+                    active_axes = [
+                        axis
+                        for axis in layout.axes()
+                        if model.parallel_dims.get_optional_mesh(axis) is not None
+                    ]
+                    if active_axes:
+                        raise RuntimeError(
+                            f"{name} has active SPMD layout axes but no resolved mesh"
+                        )
+                    continue
+
+                dtensor_model_sd[name] = DTensor.from_local(
+                    target,
+                    mesh,
+                    resolve_placements(layout, mesh),
+                    run_check=False,
+                )
+
+        await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=dtensor_model_sd,
+            strict=False,
+            direct_rdma=False,
+        )
+
+        with torch.no_grad():
+            for name, value in dtensor_model_sd.items():
+                if isinstance(value, DTensor):
+                    model_sd[name] = value.to_local()
 
     @endpoint
     async def close(self) -> None:

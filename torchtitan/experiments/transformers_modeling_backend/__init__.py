@@ -4,12 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass
+from typing import Literal
 
+from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import HFTransformerModel
-
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
+from .state_dict_adapter import HFTransformerStateDictAdapter
 
 __all__ = [
     "HFTransformerModel",
@@ -17,35 +19,143 @@ __all__ = [
 
 
 @dataclass
-class TitanDenseModelConfig:
-    """Arguments for the base TorchTitan model."""
+class TitanModelConfig:
+    """Arguments for the base TorchTitan model.
 
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
+    Two kinds of fields (see the groups below): those that mirror an HF config
+    key default to None so AutoConfig's value is used; TorchTitan-only fields
+    keep concrete defaults since they don't override anything from the HF config.
+    """
+
+    # Fields that map to an HF config key: default None so the value from
+    # AutoConfig.from_pretrained is kept. A non-None default would be injected
+    # over the HF config and force the wrong architecture (e.g. rope_theta).
+    # Set explicitly only to intentionally override (e.g. debugmodel sizes).
+    dim: int | None = None
+    n_layers: int | None = None
+    n_heads: int | None = None
     n_kv_heads: int | None = None
     vocab_size: int | None = None
+    intermediate_size: int | None = None
+    norm_eps: float | None = None
+    rope_theta: float | None = None
+
+    # TorchTitan-only fields with no HF equivalent: they don't override anything
+    # from the HF config, so they keep concrete defaults. (multiple_of and
+    # ffn_dim_multiplier are only used when deriving FFN size from an explicitly
+    # overridden dim; max_seq_len is set from training.seq_len.)
     multiple_of: int = 256
     ffn_dim_multiplier: float | None = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 10000
     max_seq_len: int = 2048
     depth_init: bool = True
-    use_flex_attn: bool = False
     attn_mask_type: str = "causal"
+    """Attention mask for the flex attention path: "causal" (plain causal) or
+    "block_causal" (causal AND same-document, for packed sequences)."""
+
+
+@dataclass
+class TitanMoeModelConfig(TitanModelConfig):
+    """MoE model config — extends the base config with routed-expert parameters.
+
+    HF-mapped fields default to None (AutoConfig's value is used); the
+    TorchTitan-only knobs below keep concrete defaults.
+    """
+
+    num_experts: int | None = None
+    """Total number of routed experts in each MoE layer."""
+
+    num_experts_per_tok: int | None = None
+    """Top-k routing: number of experts each token is dispatched to."""
+
+    moe_intermediate_size: int | None = None
+    """Hidden dimension of each expert's MLP (per-expert intermediate size)."""
+
+    decoder_sparse_step: int | None = None
+    """Replace the dense MLP with an MoE block every N decoder layers (1 = every layer is MoE)."""
+
+    norm_topk_prob: bool | None = None
+    """Normalize the top-k routing scores to sum to 1 (HF `norm_topk_prob` convention)."""
+
+    num_nextn_predict_layers: int | None = None
+    """
+    DeepSeek V3-style multi-token prediction: number of MTP heads.
+    None or 0 disables MTP.
+    """
+
+    experts_implementation: Literal[
+        "grouped_mm", "batched_mm", "eager", "native"
+    ] = "grouped_mm"
+    """
+    Selects the HF experts forward kernel via `PretrainedConfig._experts_implementation`.
+    "grouped_mm" is the fused fast path; "eager" is HF's original for-loop
+    (numerical reference for debugging). "grouped_mm"/"batched_mm"/"eager" require
+    a model that supports a settable experts implementation (the
+    `@use_experts_implementation` decorator) — requesting one on a model that does
+    not raises. "native" uses the HF model's own built-in experts kernel
+    unchanged (the only valid choice for non-settable models).
+    """
+
+    load_balance_coeff: float | None = 1e-3
+    """Step size for auxiliary-loss-free MoE load balancing. None disables it."""
+
+    comm_backend: str = "standard"
+    """Token dispatch backend for expert parallelism.
+    "standard" uses PyTorch all-to-all collectives, "deepep" uses DeepEP
+    kernels for H100/NVLink, "hybridep" uses HybridEP for GB200/NVLink72.
+    """
 
 
 flavors = {
     "debugmodel": HFTransformerModel.Config(
-        titan_dense_config=TitanDenseModelConfig(
+        model_config=TitanModelConfig(
             dim=256,
             n_layers=2,
             n_heads=16,
             n_kv_heads=16,
         ),
     ),
+    "sft_debugmodel": HFTransformerModel.Config(
+        model_config=TitanModelConfig(
+            dim=256,
+            n_layers=2,
+            n_heads=16,
+            n_kv_heads=16,
+            attn_mask_type="block_causal",
+        ),
+    ),
+    "debugmodel_moe": HFTransformerModel.Config(
+        model_config=TitanMoeModelConfig(
+            dim=2048,
+            n_layers=4,
+            n_heads=16,
+            n_kv_heads=8,
+            intermediate_size=512,
+            num_experts=8,
+            num_experts_per_tok=2,
+            moe_intermediate_size=128,
+            num_nextn_predict_layers=0,
+        ),
+    ),
     "full": HFTransformerModel.Config(
-        titan_dense_config=TitanDenseModelConfig(),
+        model_config=TitanModelConfig(),
+    ),
+    "full_moe": HFTransformerModel.Config(
+        model_config=TitanMoeModelConfig(
+            dim=2048,
+            n_layers=48,
+            n_heads=32,
+            n_kv_heads=4,
+            norm_eps=1e-6,
+            num_experts=128,
+            num_experts_per_tok=8,
+            moe_intermediate_size=768,
+            norm_topk_prob=True,
+        ),
+    ),
+    "sft_full": HFTransformerModel.Config(
+        model_config=TitanModelConfig(
+            attn_mask_type="block_causal",
+        ),
     ),
 }
 
@@ -57,6 +167,6 @@ def model_registry(flavor: str) -> ModelSpec:
         model=flavors[flavor],
         parallelize_fn=parallelize_hf_transformers,
         pipelining_fn=pipeline_hf_transformers,
-        post_optimizer_build_fn=None,
-        state_dict_adapter=None,
+        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        state_dict_adapter=HFTransformerStateDictAdapter,
     )

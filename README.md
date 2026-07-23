@@ -112,6 +112,8 @@ pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly
 
 > **Note:** The nightly build of `torchdata` is required when using a PyTorch nightly. Install it from the nightly index as shown above.
 
+> **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `pip install -e . --no-deps`.
+
 ### Nightly builds
 
 This method requires the nightly build of PyTorch. You can replace `cu130` with another version of cuda or an AMD GPU (e.g. `rocm6.3`).

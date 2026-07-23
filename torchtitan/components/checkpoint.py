@@ -10,7 +10,6 @@ import enum
 import os
 import queue
 import re
-import shutil
 import threading
 import time
 from concurrent.futures import Future
@@ -38,6 +37,7 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -154,7 +154,16 @@ def purge_thread(purge_queue: queue.Queue):
             assert isinstance(path, str)
             logger.info("Checkpointer is deleting %s.", path)
             begin = time.monotonic()
-            shutil.rmtree(path, ignore_errors=True)
+            # A single failed deletion (e.g. a transient remote error) must not
+            # kill this daemon thread; otherwise keep_latest_k would silently
+            # stop purging for the rest of the run.
+            try:
+                filesystem.rmtree(path)
+            except Exception as e:
+                logger.warning(
+                    "Checkpointer failed to delete %s: %s. Skipping.", path, e
+                )
+                continue
             logger.info(
                 "Checkpointer deleted %s in %.2f seconds.",
                 path,
@@ -389,9 +398,13 @@ class CheckpointManager(Configurable):
 
             if self.initial_load_path:
                 self.initial_load_path = self.initial_load_path.strip()
-                if not self.initial_load_path.startswith("/"):
+                if not (
+                    self.initial_load_path.startswith("/")
+                    or filesystem.is_remote(self.initial_load_path)
+                ):
                     raise ValueError(
-                        f"initial_load_path must be absolute: {self.initial_load_path}"
+                        "initial_load_path must be an absolute path or a remote "
+                        f"URI (e.g. gs://...): {self.initial_load_path}"
                     )
             if self.initial_load_in_hf and not self.initial_load_model_only:
                 raise ValueError("initial_load_in_hf requires initial_load_model_only.")
@@ -404,6 +417,24 @@ class CheckpointManager(Configurable):
                 )
             if self.last_save_in_hf and not self.last_save_model_only:
                 raise ValueError("last_save_in_hf requires last_save_model_only=True.")
+
+            # Remote (fsspec) checkpoint IO supports only the native DCP format.
+            # HF safetensors read/write to a remote URI is not implemented, so
+            # reject the combination up front instead of failing deep in DCP.
+            if self.last_save_in_hf and filesystem.is_remote(self.folder):
+                raise ValueError(
+                    "last_save_in_hf is not supported with a remote "
+                    f"checkpoint.folder: {self.folder}"
+                )
+            if (
+                self.initial_load_in_hf
+                and self.initial_load_path
+                and filesystem.is_remote(self.initial_load_path)
+            ):
+                raise ValueError(
+                    "initial_load_in_hf is not supported with a remote "
+                    f"initial_load_path: {self.initial_load_path}"
+                )
 
             async_lowered = self.async_mode.lower()
             if async_lowered in ("disabled", "async", "async_with_pinned_mem"):
@@ -439,7 +470,7 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return
 
-        self.folder = os.path.join(base_folder, config.folder)
+        self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
 
         self.states = states
@@ -771,11 +802,11 @@ class CheckpointManager(Configurable):
         """Load the checkpoint for the given step.
 
         This function orchestrates the states loading process.
-        If the local checkpoint folder does not yet exist, it attempts an initial load
-        from a specified path (in either native or HF format) or performs loading using
-        provided HF assets path from the state dict adapter. Otherwise, it retrieves
-        the checkpoint corresponding to the specified step, defaulting to the latest
-        available if the `step` is -1.
+        If the local checkpoint folder contains a valid checkpoint, it retrieves the
+        checkpoint corresponding to the specified step, defaulting to the latest
+        available if the `step` is -1. Otherwise, it attempts an initial load from a
+        specified path (in either native or HF format) or performs loading using
+        provided HF assets path from the state dict adapter.
 
         Args:
             step (int, optional): The training step to restore.
@@ -792,7 +823,18 @@ class CheckpointManager(Configurable):
         from_hf = False
         from_quantized = False
 
-        if not os.path.exists(self.folder):
+        has_checkpoint_folder = filesystem.exists(self.folder)
+        load_step = -1
+        if has_checkpoint_folder:
+            load_step = self._find_load_step() if step == -1 else step
+
+        if step != -1 and not has_checkpoint_folder:
+            raise FileNotFoundError(
+                f"--checkpoint.load_step={step} not found because "
+                f"checkpoint.folder {self.folder} does not exist"
+            )
+
+        if load_step == -1:
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
@@ -807,7 +849,7 @@ class CheckpointManager(Configurable):
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
-                if not os.path.isdir(checkpoint_id):
+                if not filesystem.isdir(checkpoint_id):
                     raise ValueError(
                         f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
                     )
@@ -822,7 +864,7 @@ class CheckpointManager(Configurable):
                     self.sd_adapter and self.sd_adapter.hf_assets_path
                 ), "from_hf=True requires sd_adapter and hf_assets_path."
                 checkpoint_id = self.sd_adapter.hf_assets_path
-                if not os.path.isdir(checkpoint_id):
+                if not filesystem.isdir(checkpoint_id):
                     raise ValueError(
                         "model.hf_assets_path is being used to load HF weights "
                         "but the path is not valid. Either make sure hf_assets_path is "
@@ -834,29 +876,20 @@ class CheckpointManager(Configurable):
                 )
 
             else:
+                logger.info("No checkpoint was provided, this is a fresh start.")
                 return False
 
         else:
-            if self.initial_load_path:
-                logger.warning(
-                    "checkpoint.initial_load_path is provided but the "
-                    "checkpoint.folder exists. Checkpointer will use the checkpoints "
-                    f"from the checkpoint.folder {self.folder}."
-                )
-            if self.initial_load_in_hf:
-                logger.warning(
-                    "checkpoint.initial_load_in_hf is True but the checkpoint.folder "
-                    "exists. Checkpointer will not load from HF safetensors"
-                )
-
-            step = self._find_load_step() if step == -1 else step
-            if step == -1:
-                return False
-
+            # This is the fault-tolerance branch: checkpoint.folder already
+            # contains valid checkpoints from a previous run, so we resume from
+            # it and all initial_* options are ignored by design. This allows a
+            # job to keep the same arguments across automatic restarts after
+            # failures.
+            step = load_step
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
 
-            if not os.path.isdir(checkpoint_id):
+            if not filesystem.isdir(checkpoint_id):
                 raise FileNotFoundError(
                     f"--checkpoint.load_step={step} not found at {checkpoint_id}"
                 )
@@ -946,25 +979,31 @@ class CheckpointManager(Configurable):
         Returns:
             int: The maximum step number found among valid checkpoints,
                 or -1 if no valid checkpoints are detected.
+
+        Note:
+            This function is not remote friendly: it issues one listdir plus
+            up to two isfile probes per step folder, each a network round trip
+            on remote (fsspec) storage instead of a single batched listing.
+            Acceptable for now since it only runs once at load time.
         """
 
         folder = folder or self.folder
-        if not os.path.isdir(folder):
+        if not filesystem.isdir(folder):
             return -1
 
         pattern = r"step-(\d+)"
         valid_steps = []
 
-        for filename in os.listdir(folder):
+        for filename in filesystem.listdir(folder):
             match = re.search(pattern, filename)
             if not match:
                 continue
 
             # A checkpoint is valid only if it contains core metadata
-            checkpoint_path = os.path.join(folder, filename)
-            is_dcp = os.path.isfile(os.path.join(checkpoint_path, ".metadata"))
-            is_hf = os.path.isfile(
-                os.path.join(checkpoint_path, "model.safetensors.index.json")
+            checkpoint_path = filesystem.join(folder, filename)
+            is_dcp = filesystem.isfile(filesystem.join(checkpoint_path, ".metadata"))
+            is_hf = filesystem.isfile(
+                filesystem.join(checkpoint_path, "model.safetensors.index.json")
             )
 
             if is_dcp or is_hf:
@@ -976,7 +1015,7 @@ class CheckpointManager(Configurable):
         """Generate the standardized filesystem path for a checkpoint
         (e.g., 'checkpoints/step-100')."""
         folder = folder or self.folder
-        return os.path.join(folder, f"step-{step}")
+        return filesystem.join(folder, f"step-{step}")
 
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
@@ -1102,7 +1141,7 @@ class CheckpointManager(Configurable):
         return (
             self.keep_latest_k > 0
             and dist.get_rank() == 0
-            and os.path.isdir(self.folder)
+            and filesystem.isdir(self.folder)
         )
 
     def _purge_stale_checkpoints(self):
@@ -1110,10 +1149,10 @@ class CheckpointManager(Configurable):
         only the most recent 'k' copies."""
         if self._should_purge():
             discovered_checkpoints = []
-            for filename in os.listdir(self.folder):
+            for filename in filesystem.listdir(self.folder):
                 match = re.search(r"step-(\d+)", filename)
                 if match:
-                    path = os.path.join(self.folder, filename)
+                    path = filesystem.join(self.folder, filename)
                     discovered_checkpoints.append((int(match.group(1)), path))
 
             discovered_checkpoints.sort()

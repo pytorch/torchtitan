@@ -32,6 +32,9 @@ from torchtitan.experiments.rl.actors.generator import (
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.training_sample_builder import (
+    TrainingSampleBuilder,
+)
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -191,6 +194,10 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
 def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
+
+    Trainer keeps fp32 master weights; FSDP mixed precision
+    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
     """
     config = rl_grpo_qwen3_0_6b_flex()
     config.model_spec = _qwen3_rl_model_registry(
@@ -202,9 +209,15 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
+    # Batch invariance requires strict on-policy: the generator must run the
+    # latest weights before generating so trainer/generator logprobs stay
+    # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
+    config.async_loop.max_offpolicy_steps = 0
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
+        # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
+        training=TrainingConfig(),
         parallelism=dataclasses.replace(
             config.trainer.parallelism, enable_sequence_parallel=False
         ),
@@ -293,6 +306,9 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -332,7 +348,12 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
 
 
 def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
-    """Small GPT-OSS debug config in deterministic + batch-invariant mode."""
+    """Small GPT-OSS debug config in deterministic + batch-invariant mode.
+
+    Trainer keeps fp32 master weights; FSDP mixed precision
+    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
+    """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
     return Controller.Config(
@@ -340,11 +361,17 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=5,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -360,7 +387,9 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            # fp32 master weights; FSDP mixed precision casts to bf16 for the
+            # forward (mixed_precision_param="bfloat16" is the default).
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
@@ -517,6 +546,9 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
         ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
@@ -564,6 +596,66 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     )
 
 
+def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
+    """Debug MoE config on the DeepEP v2 backend with a cudagraph-capturable generator
+    (8 GPUs: 4 gen + 4 train).
+
+    Same EP/TP/DP layout as ``rl_grpo_qwen3_moe_debug_varlen`` (trainer FSDP=2/TP=2/EP=4,
+    generator DP=2/TP=2/EP=4), but the MoE uses the DeepEP v2 comm backend. Unlike the
+    standard all-to-all -- whose unpinned D2H split-size copy blocks CUDA graph capture, so
+    that config disables it -- DeepEP v2's inference dispatch is a static, host-sync-free
+    EXPAND layout, so this generator enables CUDA graph capture.
+
+    Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
+    host-synced, backward-able DeepEP path), while the generator applies per-actor
+    overrides (``generator.override``) to its own copy (``fused_swiglu`` +
+    ``deepep_override`` with ``cudagraphable=True``) to switch its dispatchers to the
+    cudagraph-able EXPAND layout. The overrides touch only the generator's spec, so the
+    trainer and weight sync are unaffected.
+    """
+    config = rl_grpo_qwen3_moe_debug_varlen()
+    config.model_spec = model_registry(
+        "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
+    )
+    # Generator-only overrides -> cudagraph-able DeepEP EXPAND dispatch; trainer keeps compact.
+    # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
+    config.generator.override = OverrideConfig(
+        imports=[
+            "torchtitan.overrides.fused_swiglu.fused_swiglu",
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+            (
+                "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+                {"cudagraphable": True},
+            ),
+        ]
+    )
+    config.generator.cudagraph = VLLMCudagraphConfig(
+        enable=True, mode="FULL_AND_PIECEWISE"
+    )
+    # Two inference knobs to set per workload (no golden default; here EP=4):
+    #  * max_num_batched_tokens: vLLM's per-step token budget. We expose the knob (default
+    #    None -> vLLM's own default of 2048). Decide it from your input/rollout sequence
+    #    length -- it is effectively the longest input sequence length the engine batches
+    #    (vLLM's 2048 default is just a stand-in for knowing that).
+    #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
+    #    deepep_override. For a dropless model (highest memory) set it to
+    #    longest_sequence_length // sp == max_num_batched_tokens // sp; lower it gradually to
+    #    save memory (trading off dropped tokens).
+    config.generator.max_num_batched_tokens = 2048
+    num_max_tokens_per_rank = (
+        config.generator.max_num_batched_tokens
+        // config.generator.parallelism.expert_parallel_degree
+    )
+    for block in config.model_spec.model.layers:
+        moe = getattr(block, "moe", None)
+        if moe is None:
+            continue
+        moe.routed_experts.token_dispatcher.num_max_tokens_per_rank = (
+            num_max_tokens_per_rank
+        )
+    return config
+
+
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
@@ -572,10 +664,11 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     MoE layers use EP=4.
 
     Parity: trainer FSDP2 TP2 EP4 matches generator DP2 TP2 EP4 bitwise
-    (verified ``bit_wise/logprob_diff/max == 0``). Plain FSDP works ONLY because the FSDP all-gather runs in bf16
-    (``training.mixed_precision_param == "bfloat16"``, the default): it gathers
-    the full bf16 params before the forward, so the dense forward is numerically
-    identical to the generator's replicated bf16 dense DP.
+    (verified ``bit_wise/logprob_diff/max == 0``). The trainer holds fp32 master
+    weights; FSDP mixed precision (``training.mixed_precision_param ==
+    "bfloat16"``, the default) all-gathers the full params in bf16 before the
+    forward, so the forward is numerically identical to the generator's
+    replicated bf16 dense DP.
 
     """
     group_size = 8
@@ -586,11 +679,17 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
             ),
         ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
@@ -605,7 +704,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            # fp32 master weights; FSDP mixed precision casts to bf16 for the
+            # forward (mixed_precision_param="bfloat16" is the default).
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
@@ -707,7 +808,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     """Qwen3-30B-A3B GRPO with throughput overrides (8 GPUs: 4 gen + 4 train).
 
     Same model/parallelism/data as ``rl_grpo_qwen3_30b_a3b_varlen``, but applies
-    two opt-in overrides (per-actor) to both the trainer and generator:
+    opt-in overrides (per-actor) to both the trainer and generator:
 
     * ``fused_swiglu`` fuses the dense and grouped-experts gate+up projections
       into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
@@ -723,8 +824,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # OverrideConfig instances keep the trainer and generator overrides
     # independent (they run in different actors).
     perf_imports = [
-        "torchtitan.overrides.fused_swiglu",
-        "torchtitan.overrides.helion_rope",
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(
         config.trainer, override=OverrideConfig(imports=list(perf_imports))
@@ -737,17 +839,27 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
 
 
 def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
-    """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
+    """On-policy GRPO config for Qwen3-0.6B (8 GPUs: trainer TP=2 + 3 generators TP=2).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
+
+    Trainer keeps fp32 master weights; FSDP mixed precision
+    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    forward (the cast happens even at data_parallel_shard_degree=1, where FSDP
+    wraps the model purely as a mixed-precision boundary), so the trainer
+    forward is bitwise identical to the bf16 generator.
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
     return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_generators=3,
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
+            # Batch invariance: strict on-policy so trainer/generator logprobs
+            # stay bitwise-identical every step.
+            max_offpolicy_steps=0,
             num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
@@ -765,9 +877,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            # bfloat16 is needed for trainer to align with generator dtype
-            # TODO: replace bfloat16 enablement with FSDP2+TP2
-            training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,

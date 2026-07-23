@@ -14,7 +14,7 @@ from tests.integration_tests import OverrideDefinitions
 def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
     """True when the variant has PP > 1 and no other SPMD parallelism > 1.
 
-    full_dtensor requires at least one SPMD axis > 1; PP-only runs collapse
+    SPMD backends require at least one SPMD axis > 1; PP-only runs collapse
     every dense SPMD axis to size 1 and trip DTensor's reshape / flatten
     rejection of Shard-on-degenerate-axis. Detected by parsing the explicit
     ``--parallelism.*_degree`` flags and back-computing ``dp_shard`` (default
@@ -82,13 +82,15 @@ def _supports_spmd_typechecking(test_name: str, variant: tuple[str, ...]) -> boo
 
 
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Inject ``--parallelism.spmd_backend`` into every variant.
+    """Inject ``--parallelism.spmd_backend {backend}`` into every variant and
+    suffix the test name with ``backend``.
 
-    All features.py tests run under SPMD backends except PP-only variants
-    (see ``_is_pp_only``) and CP + compile variants (upstream symint
-    limitation); legacy non-full_dtensor coverage lives in models.py.
+    PP-only variants (see ``_is_pp_only``) and CP + compile variants (upstream
+    symint limitation) skip the backend override. For ``spmd_types``,
+    ``--debug.spmd_typechecking`` is enabled where supported. Plain (no-backend)
+    coverage lives in models.py.
     """
-    test_name = t.test_name if backend == "full_dtensor" else f"{t.test_name}_{backend}"
+    test_name = f"{t.test_name}_{backend}"
     new_args = []
     for variant in t.override_args:
         prefix: list[str] = []
@@ -105,10 +107,9 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
             ):
                 prefix.append("--debug.spmd_typechecking")
                 suffix.append("activation-checkpoint:none")
-        if test_name != t.test_name:
-            variant = tuple(
-                arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
-            )
+        variant = tuple(
+            arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
+        )
         new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
     return dataclasses.replace(
         t,
@@ -561,7 +562,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--override.imports torchtitan.overrides.fused_swiglu",
+                    "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
@@ -573,7 +574,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
-                    "--override.imports torchtitan.overrides.fused_swiglu",
+                    "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu,"
+                    "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                 ],
@@ -671,6 +673,5 @@ def build_features_test_list() -> list[OverrideDefinitions]:
     ]
 
     return [
-        *[_enable_spmd_backend(t, "full_dtensor") for t in integration_tests_flavors],
         *[_enable_spmd_backend(t, "spmd_types") for t in integration_tests_flavors],
     ]
