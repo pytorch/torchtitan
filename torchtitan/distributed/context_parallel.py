@@ -118,6 +118,7 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     device: torch.device,
     load_balancer_type: str | None = "headtail",
+    ptrr_mask_key: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Shard inputs, labels, positions, and attention masks for Context Parallel.
@@ -135,6 +136,9 @@ def prepare_context_parallel_input(
         device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
+        ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and the attention
+            masks are a dict[str, BlockMask], selects which mask the
+            PTRRLoadBalancer is built from. Ignored otherwise.
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -150,6 +154,7 @@ def prepare_context_parallel_input(
         (inputs, labels, positions),
         attention_masks,
         load_balancer_type,
+        ptrr_mask_key=ptrr_mask_key,
     )
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
@@ -164,6 +169,7 @@ def cp_shard(
     attention_masks: AttentionMasksType | None,
     load_balancer_type: str | None = "headtail",
     input_seq_dim: int = 1,
+    ptrr_mask_key: str | None = None,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.
@@ -188,6 +194,11 @@ def cp_shard(
             [batch_size, seq_len]. Can be changed by passing a
             different value if your tensors use a different sequence
             dimension layout.
+        ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and
+            ``attention_masks`` is a dict[str, BlockMask], selects which mask in
+            the dict the PTRRLoadBalancer is built from. The resulting balancer
+            is used to shard every mask in the dict as well as the inputs.
+            Required (must be a valid key) in that case; ignored otherwise.
 
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
@@ -198,7 +209,7 @@ def cp_shard(
 
     Raises:
         ValueError: If load_balancer_type is "ptrr" and attention_masks
-            is None or a dict
+            is None, or is a dict and ``ptrr_mask_key`` is not a valid key
     """
     seq_len = inputs[0].size(input_seq_dim)
     cp_world_size = cp_mesh.size(0)
@@ -213,20 +224,39 @@ def cp_shard(
                 )
             case "ptrr":
                 # For FlexAttention, we use _PTRRLoadBalancer.
-                # _PTRRLoadBalancer requires attention_masks to be a BlockMask.
-                # For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
-                # support the case where there are multiple masks.
-                if attention_masks is None or isinstance(attention_masks, dict):
+                # _PTRRLoadBalancer is built from a single BlockMask. When the
+                # attention masks are a dict[str, BlockMask], the caller must
+                # specify which mask to build the balancer from via
+                # ``ptrr_mask_key``; the resulting balancer is then used to
+                # shard every mask in the dict as well as the inputs.
+                if attention_masks is None:
                     raise ValueError(
                         "PTRRLoadBalancer requires attention_masks to be a "
-                        "BlockMask, but got None or dict[str, BlockMask]"
+                        "BlockMask, but got None"
                     )
-                if not isinstance(attention_masks, BlockMask):
+                if isinstance(attention_masks, dict):
+                    if ptrr_mask_key is None:
+                        raise ValueError(
+                            "PTRRLoadBalancer received a dict[str, BlockMask] "
+                            "but no mask key was specified. Set "
+                            "--parallelism.context_parallel_ptrr_mask_key to "
+                            f"one of: {sorted(attention_masks.keys())}"
+                        )
+                    if ptrr_mask_key not in attention_masks:
+                        raise ValueError(
+                            f"context_parallel_ptrr_mask_key '{ptrr_mask_key}' "
+                            f"is not a key in attention_masks. Available keys: "
+                            f"{sorted(attention_masks.keys())}"
+                        )
+                    ptrr_mask = attention_masks[ptrr_mask_key]
+                else:
+                    ptrr_mask = attention_masks
+                if not isinstance(ptrr_mask, BlockMask):
                     raise ValueError(
-                        f"PTRRLoadBalancer requires attention_masks to be a "
-                        f"BlockMask, but got {type(attention_masks)}"
+                        f"PTRRLoadBalancer requires the mask to be a "
+                        f"BlockMask, but got {type(ptrr_mask)}"
                     )
-                load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+                load_balancer = _PTRRLoadBalancer(ptrr_mask, cp_world_size)
             case _:
                 raise ValueError(
                     f"Invalid load_balancer_type '{load_balancer_type}'. "
