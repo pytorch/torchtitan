@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, cast, Protocol
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -24,48 +24,6 @@ from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_spars
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.tools.utils import device_module, device_type
-
-
-class EPTokenDispatcher(Protocol):
-    @property
-    def overlap_combine_with_shared_experts(self) -> bool:
-        """Whether combine can overlap shared-expert computation."""
-        ...
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        ...
-
-    def init_buffer(self) -> None:
-        ...
-
-    def dispatch(
-        self,
-        x_TD: torch.Tensor,
-        topk_scores_TK: torch.Tensor,
-        topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, object]:
-        ...
-
-    def combine(
-        self,
-        routed_output_RD: torch.Tensor,
-        metadata: object,
-        x_TD: torch.Tensor,
-        *,
-        num_local_tokens_after_padding: int,
-        local_seq_len_after_padding: int,
-    ) -> torch.Tensor:
-        ...
-
-    def wait_combine(self) -> None:
-        """Make the most recent combine output safe to consume."""
-        ...
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -100,11 +58,6 @@ class LocalTokenDispatcher(Configurable):
     def __init__(self, config: Config):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
-
-    @property
-    def overlap_combine_with_shared_experts(self) -> bool:
-        """Local combine completes before returning."""
-        return False
 
     def wire_meshes(
         self,
@@ -226,11 +179,8 @@ class LocalTokenDispatcher(Configurable):
         )
         return out_TD
 
-    def wait_combine(self) -> None:
-        """Local combine is complete when ``combine`` returns."""
 
-
-class BaseEPTokenDispatcher(LocalTokenDispatcher, EPTokenDispatcher, ABC):
+class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
     """Base class for EP token dispatchers.
 
     Owns EP mesh wiring and SP coordinate helpers shared by EP implementations.
@@ -670,7 +620,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 positions.
 
         Returns:
-            Combined output with shape ``(T_global, D)`` with SP and
+            Combined output with shape ``(T_global, D)`` with SP, where
+            ``T_global = num_local_tokens_after_padding * sp_size``, and
             ``(T, D)`` otherwise.
         """
         D = x_TD.shape[-1]
@@ -938,11 +889,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
-    @property
-    def overlap_combine_with_shared_experts(self) -> bool:
-        """Whether this topology permits combine/shared-expert overlap."""
-        return self.sp_size == 1
-
     def init_buffer(self) -> None:
         """Eagerly create the static inference buffer before CUDA graph capture."""
         if self.cudagraphable and self.ep_mesh is not None:
@@ -1011,20 +957,14 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
-        """Combine tokens via DeepEP.
-
-        When sp_size == 1, combine is async; sync_combine() is deferred
-        to MoE.forward, enabling overlap with shared_experts.
-        When sp_size > 1, there is no overlap: sync is forced here because
-        the SP expansion must read the combine result before returning.
-        """
+        """Combine tokens via DeepEP and wait for completion."""
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
         # pyrefly: ignore [bad-argument-type]
         combined_TD = combine_tokens(routed_output_RD, metadata.state)
+        sync_combine()
 
         if self.sp_size > 1:
-            sync_combine()
             out_TD = torch.zeros(
                 num_local_tokens_after_padding * self.sp_size,
                 combined_TD.shape[-1],
@@ -1042,13 +982,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             return out_TD
 
         return combined_TD
-
-    def wait_combine(self) -> None:
-        """Wait for the asynchronous DeepEP combine on the current stream."""
-        if self.sp_size == 1:
-            from torchtitan.distributed.deepep.deepep import sync_combine
-
-            sync_combine()
 
 
 class HybridEPTokenDispatcher(BaseEPTokenDispatcher):

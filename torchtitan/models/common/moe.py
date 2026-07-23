@@ -137,8 +137,6 @@ class RoutedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
 
-        The returned tensor may have an asynchronous combine in flight. The
-        caller must invoke ``wait_combine`` before consuming it.
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
@@ -490,13 +488,9 @@ class MoE(Module):
             ),
         )
 
-        # Backends with a deferred combine can overlap its communication with
-        # shared-expert computation. Other backends finish combine before returning.
         shared_out_BLD = (
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
-        if self.routed_experts.token_dispatcher.overlap_combine_with_shared_experts:
-            self.routed_experts.token_dispatcher.wait_combine()
 
         if seq_dim_pad_tokens:
             # Combine constructs a sequence-dim padded SP view for each batch
