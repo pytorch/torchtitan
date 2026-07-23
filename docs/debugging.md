@@ -21,8 +21,8 @@ MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh \
 ```
 
 This adds `record_function` contexts for major module regions such as
-`TT::block::layers.0`, `TT::attention::layers.0.attention`,
-`TT::ffn::layers.0.feed_forward`, and `TT::moe::layers.0.moe`.
+`block::layers.0`, `attention::layers.0.attention`,
+`ffn::layers.0.feed_forward`, and `moe::layers.0.moe`.
 
 The same labels are also emitted as best-effort CUDA graph kernel annotations
 when PyTorch/CUDA support for `torch.cuda._graph_annotations.mark_kernels` is

@@ -90,7 +90,7 @@ def wrap_module_forward(
         return False
 
     original_forward = module.forward
-    label = f"TT::{module_kind}::{module_fqn}"
+    label = f"{module_kind}::{module_fqn}"
     annotation: dict[str, Any] = {
         "name": label,
         "module_fqn": module_fqn,

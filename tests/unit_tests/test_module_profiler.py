@@ -11,6 +11,7 @@ from unittest import mock
 import torch
 from torch import nn
 
+from torchtitan.tools import module_profiler
 from torchtitan.tools.module_profiler import apply_module_profiler
 
 
@@ -53,9 +54,9 @@ class TestModuleProfiler(unittest.TestCase):
 
         self.assertTrue(torch.allclose(actual, expected))
         keys = {event.key for event in prof.key_averages()}
-        self.assertIn("TT::block::layers.0", keys)
-        self.assertIn("TT::attention::layers.0.attention", keys)
-        self.assertIn("TT::ffn::layers.0.feed_forward", keys)
+        self.assertIn("block::layers.0", keys)
+        self.assertIn("attention::layers.0.attention", keys)
+        self.assertIn("ffn::layers.0.feed_forward", keys)
 
     def test_wrapping_is_idempotent(self):
         model = _Model()
@@ -98,11 +99,23 @@ class TestModuleProfiler(unittest.TestCase):
         self.assertEqual(
             {annotation["name"] for annotation in annotations},
             {
-                "TT::block::layers.0",
-                "TT::attention::layers.0.attention",
-                "TT::ffn::layers.0.feed_forward",
+                "block::layers.0",
+                "attention::layers.0.attention",
+                "ffn::layers.0.feed_forward",
             },
         )
+
+    def test_mark_kernels_unavailable_warns_once(self):
+        original_warned = module_profiler._mark_kernels_warned
+        module_profiler._mark_kernels_warned = False
+        try:
+            with mock.patch.object(module_profiler.logger, "warning") as warning:
+                module_profiler.warn_mark_kernels_unavailable(ImportError("missing"))
+                module_profiler.warn_mark_kernels_unavailable(ImportError("missing"))
+
+            self.assertEqual(warning.call_count, 1)
+        finally:
+            module_profiler._mark_kernels_warned = original_warned
 
 
 if __name__ == "__main__":
