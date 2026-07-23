@@ -341,8 +341,9 @@ def make_token_dispatcher_config(
         # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
         # selects the static no-host-sync expand layout (set on the generator by the
         # deepep_override). ``num_max_tokens_per_rank`` is the per-rank EXPAND
-        # capacity: training infers it (the compact path auto-sizes), inference must set it
-        # >= the largest per-rank token count for droplessness.
+        # capacity. Trainer config derives the compact-mode initial capacity from its
+        # fixed input shape. Expand-mode callers must set it to the largest per-rank
+        # token count for droplessness.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,

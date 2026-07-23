@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -869,12 +869,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # EXPAND (cudagraphable=True, inference) ONLY: the per-rank dispatch CAPACITY. It
         # fixes the static output-slab shape; tokens a rank sends beyond it are DROPPED
         # (masked layout), so set it >= the largest per-rank token count for droplessness
-        # (e.g. max_num_batched_tokens / sp). None = unset: REQUIRED for the expand path, but IGNORED in compact
-        # (cudagraphable=False) mode. training auto-sizes from the per-rank token count at
-        # dispatch (always dropless), so it is left None there.
+        # (e.g. max_num_batched_tokens / sp). Trainer config derives the compact-mode
+        # value from its fixed input shape.
         num_max_tokens_per_rank: int | None = None
-        # Model hidden dim, threaded by the builder so the expand buffer can be created
-        # eagerly at wire_meshes (before any cudagraph capture). None until the builder sets it.
+        # Model hidden dim, threaded by the builder for eager buffer initialization.
         hidden_dim: int | None = None
 
     def __init__(self, config: Config):
@@ -888,33 +886,25 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def init_buffer(self) -> None:
-        """Create the inference buffer before CUDA graph capture.
+        """Eagerly create the DeepEP buffer."""
+        assert self.ep_mesh is not None
+        assert self.hidden_dim is not None
 
-        The cudagraph path creates the ElasticBuffer eagerly so its construction
-        barrier runs during parallelization, never inside capture. Compact training
-        skips this and sizes the buffer from the first dispatch's token count.
-        """
-        if self.cudagraphable and self.ep_mesh is not None:
-            # Inference (expand) path: num_max_tokens_per_rank fixes the static dispatch slab,
-            # so it must be set here; the compact/training path auto-sizes and leaves it None.
-            if self.num_max_tokens_per_rank is None:
+        if self.num_max_tokens_per_rank is None:
+            if self.cudagraphable:
                 raise ValueError(
-                    "DeepEP cudagraphable (expand) dispatch requires num_max_tokens_per_rank "
-                    " but it is None."
+                    "DeepEP cudagraphable dispatch requires num_max_tokens_per_rank."
                 )
-            if self.hidden_dim is None:
-                raise ValueError(
-                    "DeepEP cudagraphable (expand) dispatch requires hidden_dim, but it is "
-                    "None; the builder must thread it through the dispatcher config."
-                )
-            from torchtitan.distributed.deepep.deepep import get_buffer
+            return
 
-            get_buffer(
-                self.ep_mesh.get_group(),
-                hidden=self.hidden_dim,
-                num_max_tokens_per_rank=self.num_max_tokens_per_rank,
-                num_topk=self.top_k,
-            )
+        from torchtitan.distributed.deepep.deepep import get_buffer
+
+        get_buffer(
+            self.ep_mesh.get_group(),
+            hidden=self.hidden_dim,
+            num_max_tokens_per_rank=self.num_max_tokens_per_rank,
+            num_topk=self.top_k,
+        )
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -1020,12 +1010,9 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
                   Safe in practice when forced load balancing (e.g. aux-loss /
                   round-robin) keeps distribution roughly uniform.
 
-                Note: this factor has no lasting effect on the all-to-all
-                communication buffer.  HybridEP's dispatch_with_permute
-                internally passes the actual num_tokens to
-                update_template_config, which auto-grows the buffer to the
-                full token count on the first dispatch regardless of this
-                setting.
+                This factor does not affect the all-to-all communication
+                buffer, which is initialized separately from
+                num_tokens_per_rank.
         """
 
         non_blocking_capacity_factor: float | None = None
@@ -1048,7 +1035,9 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         """Eagerly create the HybridEP buffer."""
         assert self.ep_mesh is not None
         assert self.hidden_dim is not None
-        assert self.num_tokens_per_rank is not None
+
+        if self.num_tokens_per_rank is None:
+            return
 
         from torchtitan.distributed.deepep.hybridep import get_buffer
 
@@ -1314,101 +1303,3 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             state.top_k,
         )
         return combined_TD
-
-
-def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
-    """Validate and fill EP token dispatcher configs from runtime config."""
-    from torchtitan.config import TORCH_DTYPE_MAP
-    from torchtitan.distributed.activation_checkpoint import FullAC
-    from torchtitan.trainer import Trainer
-
-    parallelism = config.parallelism
-    dispatcher_cfgs = []
-    for layer_cfg in model_config.layers:
-        moe_cfg = getattr(layer_cfg, "moe", None)
-        if moe_cfg is None:
-            continue
-        dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
-        if isinstance(
-            dispatcher_cfg,
-            (
-                DeepEPTokenDispatcher.Config,
-                HybridEPTokenDispatcher.Config,
-                MinimalAsyncEPTokenDispatcher.Config,
-            ),
-        ):
-            dispatcher_cfgs.append(dispatcher_cfg)
-
-    if not dispatcher_cfgs:
-        return
-
-    # Checks shared by communication-backed EP dispatchers.
-    if parallelism.expert_parallel_degree == 1:
-        dispatcher_name = type(dispatcher_cfgs[0]).__qualname__
-        raise ValueError(
-            f"{dispatcher_name} requires expert parallelism "
-            "(expert_parallel_degree > 1)."
-        )
-
-    # MinimalAsyncEP-specific checks.
-    minimal_async_cfgs = [
-        cfg
-        for cfg in dispatcher_cfgs
-        if isinstance(cfg, MinimalAsyncEPTokenDispatcher.Config)
-    ]
-    # TODO: Add TP/SP, CP, and PP support to MinimalAsyncEP.
-    if minimal_async_cfgs:
-        if parallelism.spmd_backend == "full_dtensor":
-            raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
-        if parallelism.tensor_parallel_degree != 1:
-            raise ValueError(
-                "MinimalAsyncEP does not support tensor or sequence parallelism."
-            )
-        if parallelism.context_parallel_degree != 1:
-            raise ValueError("MinimalAsyncEP does not support context parallelism.")
-        if parallelism.pipeline_parallel_degree != 1:
-            raise ValueError("MinimalAsyncEP does not support pipeline parallelism.")
-        for num_experts in {cfg.num_experts for cfg in minimal_async_cfgs}:
-            if num_experts % parallelism.expert_parallel_degree != 0:
-                raise ValueError(
-                    f"MinimalAsyncEP num_experts ({num_experts}) must be "
-                    "divisible by expert_parallel_degree "
-                    f"({parallelism.expert_parallel_degree})."
-                )
-
-        if not isinstance(config, Trainer.Config):
-            raise ValueError(
-                "MinimalAsyncEP requires a Trainer.Config-compatible runtime config "
-                "to set hidden_dim, num_tokens_per_rank, and dtype."
-            )
-
-        memory_policy = getattr(config.compile, "memory_policy", None)
-        if (
-            not isinstance(config.activation_checkpoint, FullAC.Config)
-            and memory_policy != "full"
-        ):
-            raise ValueError(
-                "MinimalAsyncEP requires full recompute: set "
-                "activation-checkpoint:full for eager training or "
-                "--compile.memory_policy full for graph_trainer."
-            )
-
-    for dispatcher_cfg in dispatcher_cfgs:
-        dispatcher_cfg.hidden_dim = model_config.dim
-
-    if not isinstance(config, Trainer.Config):
-        return
-
-    num_tokens_per_rank = config.training.local_batch_size * config.training.seq_len
-    dtype = TORCH_DTYPE_MAP[config.training.mixed_precision_param]
-    for dispatcher_cfg in dispatcher_cfgs:
-        if isinstance(
-            dispatcher_cfg,
-            (
-                HybridEPTokenDispatcher.Config,
-                MinimalAsyncEPTokenDispatcher.Config,
-            ),
-        ):
-            dispatcher_cfg.num_tokens_per_rank = num_tokens_per_rank
-        if isinstance(dispatcher_cfg, MinimalAsyncEPTokenDispatcher.Config):
-            dispatcher_cfg.dtype = dtype
