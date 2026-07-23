@@ -16,6 +16,7 @@ from torchtitan.models.common import (  # noqa: F401
     Conv1d,
     Embedding,
     Linear,
+    ScaledBiasRowwiseLinear,
     SigmoidGatedFeedForward,
 )
 from torchtitan.models.common.config_utils import (
@@ -116,6 +117,20 @@ def _linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
+def _scaled_bias_rowwise_linear(
+    in_features: int, out_features: int
+) -> ScaledBiasRowwiseLinear.Config:
+    """Rowwise-with-bias vision linear; local bias is scaled by TP degree so
+    per-rank bias addition sums correctly through the TP all-reduce (same
+    pattern as gpt_oss attention wo)."""
+    return ScaledBiasRowwiseLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        param_init=_LINEAR_INIT,
+    )
+
+
 def _offset_norm(dim: int) -> OffsetRMSNorm.Config:
     return OffsetRMSNorm.Config(dim=dim, eps=_EPS, param_init=_OFFSET_NORM_INIT)
 
@@ -177,11 +192,11 @@ def _qwen35_vision_encoder_config(
                 wq=_linear(dim, dim),
                 wk=_linear(dim, dim),
                 wv=_linear(dim, dim),
-                proj=_linear(dim, dim),
+                proj=_scaled_bias_rowwise_linear(dim, dim),
             ),
             mlp=VisionMLP.Config(
                 fc1=_linear(dim, ffn_dim),
-                fc2=_linear(ffn_dim, dim),
+                fc2=_scaled_bias_rowwise_linear(ffn_dim, dim),
             ),
         ),
         rotary_pos_emb=VisionRotaryEmbedding.Config(
@@ -192,7 +207,7 @@ def _qwen35_vision_encoder_config(
             merged_hidden_size=merged_hidden_size,
             norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
             fc1=_linear(merged_hidden_size, merged_hidden_size),
-            fc2=_linear(merged_hidden_size, out_hidden_size),
+            fc2=_scaled_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
         ),
         param_init=_POS_EMBED_INIT,
     )
