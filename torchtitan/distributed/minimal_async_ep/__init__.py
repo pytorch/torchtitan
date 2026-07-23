@@ -8,7 +8,6 @@ from torchtitan.distributed.minimal_async_ep.api import (
     combine_op,
     dispatch_op,
     init_buffer,
-    maybe_update_minimal_async_ep_config,
     MinimalAsyncEPDispatchMetadata,
 )
 
@@ -17,5 +16,4 @@ __all__ = [
     "combine_op",
     "dispatch_op",
     "init_buffer",
-    "maybe_update_minimal_async_ep_config",
 ]

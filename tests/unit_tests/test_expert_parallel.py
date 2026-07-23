@@ -120,6 +120,61 @@ class TestBaseEPTokenDispatcher(unittest.TestCase):
                 config.training.local_batch_size * config.training.seq_len,
             )
 
+    def test_deepep_runtime_config_preserves_explicit_capacity(self):
+        from torchtitan.models.deepseek_v3 import model_registry
+        from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
+
+        config = deepseek_v3_debugmodel()
+        config.model_spec = model_registry("debugmodel", moe_comm_backend="deepep")
+        config.parallelism.expert_parallel_degree = 2
+        model_config = config.model_spec.model
+        dispatcher_cfgs = [
+            layer.moe.routed_experts.token_dispatcher
+            for layer in model_config.layers
+            if layer.moe is not None
+        ]
+        for dispatcher_cfg in dispatcher_cfgs:
+            dispatcher_cfg.num_max_tokens_per_rank = 123
+
+        model_config.update_from_config(config=config)
+
+        self.assertTrue(dispatcher_cfgs)
+        for dispatcher_cfg in dispatcher_cfgs:
+            self.assertIsInstance(dispatcher_cfg, DeepEPTokenDispatcher.Config)
+            self.assertEqual(dispatcher_cfg.hidden_dim, model_config.dim)
+            self.assertEqual(dispatcher_cfg.num_max_tokens_per_rank, 123)
+
+    def test_minimal_async_ep_runtime_config_sets_buffer_shape_and_dtype(self):
+        from torchtitan.config import TORCH_DTYPE_MAP
+        from torchtitan.distributed.activation_checkpoint import FullAC
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_minimal_async_ep,
+        )
+
+        config = deepseek_v3_debugmodel_minimal_async_ep()
+        config.parallelism.expert_parallel_degree = 2
+        config.activation_checkpoint = FullAC.Config()
+        model_config = config.model_spec.model
+        model_config.update_from_config(config=config)
+
+        dispatcher_cfgs = [
+            layer.moe.routed_experts.token_dispatcher
+            for layer in model_config.layers
+            if layer.moe is not None
+        ]
+        self.assertTrue(dispatcher_cfgs)
+        for dispatcher_cfg in dispatcher_cfgs:
+            self.assertIsInstance(dispatcher_cfg, MinimalAsyncEPTokenDispatcher.Config)
+            self.assertEqual(dispatcher_cfg.hidden_dim, model_config.dim)
+            self.assertEqual(
+                dispatcher_cfg.tokens_per_rank,
+                config.training.local_batch_size * config.training.seq_len,
+            )
+            self.assertEqual(
+                dispatcher_cfg.dtype,
+                TORCH_DTYPE_MAP[config.training.mixed_precision_param],
+            )
+
 
 class TestPermute(unittest.TestCase):
     """Test AllToAllTokenDispatcher._permute which reorders tokens from rank-major to expert-major layout.
