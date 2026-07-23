@@ -39,57 +39,25 @@ from .vision_encoder import Qwen35VisionEncoder
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
 
 
-def _torch_native_causal_conv1d_varlen(
-    x_BTD: torch.Tensor,
-    weight: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    conv_kernel_size: int,
-    cu_seqlens_cpu: torch.Tensor,
-) -> torch.Tensor:
-    out_segments_BTD: list[torch.Tensor] = []
-    cu_seqlens_list = cu_seqlens_cpu.tolist()
-    for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
-        x_segment_BDT = F.pad(
-            x_BTD[:, start:end].transpose(1, 2),
-            [conv_kernel_size - 1, 0],
-        )
-        out_segment_BTD = F.conv1d(
-            x_segment_BDT,
-            weight,
-            None,
-            groups=weight.size(0),
-        ).transpose(1, 2)
-        out_segments_BTD.append(out_segment_BTD)
-    return F.silu(torch.cat(out_segments_BTD, dim=1))
-
-
 def _causal_conv1d_varlen(
     x_BTD: torch.Tensor,
     weight: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    conv_kernel_size: int,
-    cu_seqlens_cpu: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.Tensor | None,
 ) -> torch.Tensor:
-    # FLA's causal conv is a triton kernel; fall back to per-document
-    # F.conv1d on non-CUDA tensors.
-    if not x_BTD.is_cuda:
-        if cu_seqlens_cpu is None:
-            raise ValueError(
-                "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
-                "metadata. Build VarlenMetadata with include_host_offsets=True."
-            )
-        return _torch_native_causal_conv1d_varlen(
-            x_BTD,
-            weight,
-            cu_seqlens,
-            conv_kernel_size,
-            cu_seqlens_cpu,
+    """FLA depthwise causal conv with per-document resets (CUDA-only).
+
+    A pure-torch per-document reference lives in
+    ``tests/unit_tests/test_qwen3_5_deltanet.py``.
+    """
+    if cu_seqlens_cpu is None:
+        raise ValueError(
+            "Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor. "
+            "Build VarlenMetadata with include_host_offsets=True."
         )
 
     from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
 
-    if cu_seqlens_cpu is None:
-        raise ValueError("Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor.")
     out_BTD, _ = _fla_causal_conv1d(
         x=x_BTD,
         weight=weight.squeeze(1),
@@ -332,11 +300,6 @@ class GatedDeltaNet(Module):
         cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if cu_seqlens is not None:
-            if cu_seqlens_cpu is None:
-                raise ValueError(
-                    "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
-                    "metadata. Build VarlenMetadata with include_host_offsets=True."
-                )
             if isinstance(x_BLD, DTensor):
 
                 def _conv_varlen(
@@ -348,7 +311,6 @@ class GatedDeltaNet(Module):
                         x_local_BLD,
                         w_local,
                         cu_seqlens_local,
-                        self.conv_kernel_size,
                         cu_seqlens_cpu,
                     )
 
@@ -357,7 +319,6 @@ class GatedDeltaNet(Module):
                 x_BLD,
                 conv.weight,
                 cu_seqlens,
-                self.conv_kernel_size,
                 cu_seqlens_cpu,
             )
 
@@ -737,6 +698,11 @@ class Qwen35Model(Decoder):
         if attn_config is not None and isinstance(
             attn_config.inner_attention, VarlenAttention.Config
         ):
+            # Host offsets are a GatedDeltaNet-only need: the FLA varlen
+            # kernels take cu_seqlens as a CPU tensor to size their launches,
+            # whereas quadratic attention (torch.nn.attention.varlen) consumes
+            # the device tensor directly. They are stored as Python ints so
+            # SelectiveAC checkpoint metadata stays tensor-free.
             return create_varlen_metadata_for_document(
                 positions,
                 include_host_offsets=True,

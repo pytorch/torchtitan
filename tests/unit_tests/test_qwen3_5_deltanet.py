@@ -5,8 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest import mock
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
 
@@ -90,6 +92,34 @@ def _torch_native_gated_delta_varlen(
             )
         )
     return torch.cat(out_segments_BLNV, dim=1)
+
+
+def _reference_causal_conv1d_varlen(
+    x_BTD: torch.Tensor,
+    weight: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_cpu: torch.Tensor,
+) -> torch.Tensor:
+    """Per-document depthwise causal conv + silu, matching the model's FLA
+    varlen conv (which is triton/CUDA-only). Patched over
+    ``model._causal_conv1d_varlen`` for CPU runs.
+    """
+    conv_kernel_size = weight.shape[-1]
+    out_segments_BTD: list[torch.Tensor] = []
+    cu_seqlens_list = cu_seqlens_cpu.tolist()
+    for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
+        x_segment_BDT = F.pad(
+            x_BTD[:, start:end].transpose(1, 2),
+            [conv_kernel_size - 1, 0],
+        )
+        out_segment_BTD = F.conv1d(
+            x_segment_BDT,
+            weight,
+            None,
+            groups=weight.size(0),
+        ).transpose(1, 2)
+        out_segments_BTD.append(out_segment_BTD)
+    return F.silu(torch.cat(out_segments_BTD, dim=1))
 
 
 class ReferenceGatedDeltaKernel(nn.Module):
@@ -234,7 +264,14 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             positions,
             include_host_offsets=True,
         )
-        actual = model(x, attention_masks)
+        # The model's varlen conv is FLA (triton/CUDA-only); substitute the
+        # per-document torch reference for this CPU run. The per-document
+        # forwards below take the non-varlen conv path, which runs on CPU.
+        with mock.patch(
+            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
+            _reference_causal_conv1d_varlen,
+        ):
+            actual = model(x, attention_masks)
 
         expected = torch.empty_like(actual)
         for batch_idx in range(positions.shape[0]):
