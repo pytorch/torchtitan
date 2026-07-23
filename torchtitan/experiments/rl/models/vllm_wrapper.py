@@ -258,9 +258,16 @@ class VLLMModelWrapper(Module):
         @dataclass(kw_only=True, slots=True)
         class _InferenceConfig:
             parallelism: ParallelismConfig
+            training: TrainingConfig
 
         self.config.update_from_config(
-            config=_InferenceConfig(parallelism=training_parallelism)
+            config=_InferenceConfig(
+                parallelism=training_parallelism,
+                training=TrainingConfig(
+                    local_batch_size=1,
+                    seq_len=vllm_config.scheduler_config.max_num_batched_tokens,
+                ),
+            )
         )
 
         # Apply config overrides (e.g. the fused gate+up SwiGLU) after
