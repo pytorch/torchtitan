@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch.nn as nn
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
@@ -89,3 +91,23 @@ def has_quantization(model_config) -> bool:
         for _fqn, config, _parent, _attr in model_config.traverse(GroupedExperts.Config)
     )
     return has_quant_linear or has_quant_moe
+
+
+def get_quantization_kind(module: nn.Module) -> str | None:
+    """Return the stable quantization category for a runtime module."""
+    from torchtitan.components.quantization.float8 import (
+        _float8_experts_cache,
+        Float8Linear,
+    )
+    from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
+
+    if Float8Linear is not None and isinstance(module, Float8Linear):
+        return "float8_linear"
+    if MXFP8Linear is not None and isinstance(module, MXFP8Linear):
+        return "mxfp8_linear"
+
+    if any(isinstance(module, cls) for cls in _float8_experts_cache.values()):
+        return "float8_grouped_experts"
+    if any(isinstance(module, cls) for cls in _mxfp8_experts_cache.values()):
+        return "mxfp8_grouped_experts"
+    return None

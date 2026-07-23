@@ -6,6 +6,7 @@
 
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
+    FP8GraphConfig,
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
@@ -16,6 +17,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_70b,
     llama3_8b,
     llama3_debugmodel,
+    llama3_debugmodel_float8,
 )
 
 from . import model_registry
@@ -24,6 +26,19 @@ from . import model_registry
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_llama3_debugmodel_float8() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(
+        llama3_debugmodel_float8(model_compile_enabled=True), model_registry
+    )
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        inductor_compilation="full",
+        disable_passes=["cudagraph_pass"],
+        fp8=FP8GraphConfig(enabled=True),
+    )
     return config
 
 
