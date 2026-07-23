@@ -178,7 +178,7 @@ class Decoder(BaseModel):
                         HybridEPTokenDispatcher,
                     )
 
-                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
+                    token_dispatcher_cfg = layer_cfg.moe.routed_experts.token_dispatcher
                     if (
                         isinstance(
                             token_dispatcher_cfg,
