@@ -71,7 +71,7 @@ class RolloutGroupWorkBuffer(Configurable):
         active slot:  charged by add_work() ............ freed by release_active_groups()
 
     Example:
-        # max_offpolicy_steps=1, num_groups_per_train_step=2 -> capacity=4
+        # max_offpolicy_steps=1, num_prompts_per_train_step=2 -> capacity=4
         await buffer.add_work(g0); await buffer.add_work(g1)   # 2/4 active
         await buffer.add_work(g2); await buffer.add_work(g3)   # 4/4 active (cap)
         g0 = await buffer.take_finalized()                     # g0 leaves the dict; still 4/4 active
