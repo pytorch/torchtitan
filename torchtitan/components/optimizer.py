@@ -110,10 +110,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
         """
-        Optimizer implementation mode applied to optimizer instances that
-        support ``fused`` and ``foreach``. Muon uses its built-in implementation
-        and ignores this setting. Per-param-group ``optimizer_kwargs`` can
-        override the generated implementation kwargs.
+        Optimizer implementation mode applied to all optimizer instances.
+        Muon does not support ``fused`` or ``foreach``; select ``for-loop``
+        globally or disable both in the Muon group's ``optimizer_kwargs``.
+        Per-param-group ``optimizer_kwargs`` can override this setting.
 
         - 'fused': Use fused implementation (CUDA only) for best performance.
         - 'foreach': Use some horizontal fusion of tensors for better performance.
@@ -178,6 +178,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         claimed: set[str] = set()  # first-match-wins
 
         for pg in param_group_configs:
+            if pg.optimizer_name == "Muon" and (
+                pg.optimizer_kwargs.get("fused", impl_kwargs["fused"])
+                or pg.optimizer_kwargs.get("foreach", impl_kwargs["foreach"])
+            ):
+                raise NotImplementedError(
+                    "Muon does not support fused or foreach implementations. "
+                    "Set implementation='for-loop' or explicitly disable both "
+                    "options in this Muon parameter group."
+                )
             pattern = re.compile(pg.pattern)
             params: list[nn.Parameter] = []
             param_names: list[str] = []
@@ -197,8 +206,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 {
                     "params": params,
                     "param_names": param_names,
-                    # Muon does not accept fused/foreach options.
-                    **(impl_kwargs if pg.optimizer_name != "Muon" else {}),
+                    **impl_kwargs,
                     **pg.optimizer_kwargs,
                 }
             )

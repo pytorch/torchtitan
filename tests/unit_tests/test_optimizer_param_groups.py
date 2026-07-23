@@ -513,11 +513,15 @@ class TestMixedOptimizers(unittest.TestCase):
             ],
         )
 
+        with self.assertRaisesRegex(NotImplementedError, "implementation='for-loop'"):
+            config.build(model_parts=[model])
+
+        config.param_groups[0].optimizer_kwargs.update(fused=False, foreach=False)
         container = config.build(model_parts=[model])
         muon = next(opt for opt in container.optimizers if isinstance(opt, MuonAdapter))
         self.assertIs(muon.param_groups[0]["params"][0], model.output.weight)
-        self.assertNotIn("fused", muon.param_groups[0])
-        self.assertNotIn("foreach", muon.param_groups[0])
+        self.assertFalse(muon.param_groups[0]["fused"])
+        self.assertFalse(muon.param_groups[0]["foreach"])
 
     def test_mixed_optimizer_types(self):
         """Different optimizer for a param group."""
