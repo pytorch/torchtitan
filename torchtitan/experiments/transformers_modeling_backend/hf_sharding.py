@@ -472,10 +472,9 @@ def _rope_config(
         state_shardings[name] = dense_param_placement(tp=spmd.R)
 
     if use_spmd:
-        # Under spmd typechecking, asserting an in_src on the hidden_states arg
-        # mismatches the actual activation type at the root rotary boundary.
-        # The rotary only reads hidden_states for dtype/device; leave it
-        # unasserted and let the replicated cos/sin computation run checked.
+        # The rotary only reads hidden_states for dtype/device, so its config is
+        # state-only (no in_src on hidden_states): there is no activation to
+        # redistribute at the root rotary boundary.
         return ShardingConfig(state_shardings=state_shardings)
 
     sig = inspect.signature(type(module).forward)

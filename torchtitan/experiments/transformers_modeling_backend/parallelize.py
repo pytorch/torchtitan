@@ -31,14 +31,14 @@ from torchtitan.tools.logging import logger
 def _install_native_embedding(model: nn.Module) -> None:
     """Swap the HF token embedding for titan's vocab-parallel ``Embedding``.
 
-    Under the spmd_types backend every op is type-checked, and
-    HF's plain ``nn.Embedding.forward`` (``F.embedding`` on a vocab-sharded
-    ``S(0)`` weight) triggers an implicit redistribution that the checker
-    rejects ("No valid sharding strategy for embedding"). The native
-    ``Embedding`` (models/common/embedding.py) does a masked local lookup on the
-    local vocab shard (``weight.to_local()`` + index mask), producing a Partial
-    output with no implicit redistribution -- the same construction native
-    models use, and needed for TP correctness regardless. Only the class is
+    Under spmd_types + TP the embedding weight is vocab-sharded (``S(0)``) while
+    activations are plain local tensors, so HF's ``nn.Embedding.forward``
+    (``F.embedding`` over the full vocab on a local weight shard) would look up
+    the wrong rows -- it needs an implicit weight redistribution that spmd_types
+    does not perform. The native ``Embedding`` (models/common/embedding.py) does
+    a masked local lookup on the local vocab shard (``weight.to_local()`` + index
+    mask), producing a Partial output with no implicit redistribution -- the same
+    construction native models use, so it is correct for TP under spmd_types. Only the class is
     swapped (weight/padding_idx preserved, state_dict keys unchanged); the
     embedding's ``_sharding_config`` is still set by set_hf_sharding_configs.
     Runs before convert_hf_to_module so it is skipped there (already a Module).
@@ -62,7 +62,8 @@ def _install_native_embedding(model: nn.Module) -> None:
     else:
         logger.warning(
             f"tok_embeddings is {type(emb).__name__}, not nn.Embedding; leaving "
-            "as-is (may not be typecheck-clean under spmd_types + TP)."
+            "as-is (vocab-parallel local lookup not applied -- may be incorrect "
+            "under spmd_types + TP)."
         )
 
 
@@ -319,7 +320,8 @@ def parallelize_hf_transformers(
         )
 
         # Under spmd_types, replace the HF embedding with the native
-        # vocab-parallel Embedding before conversion (typecheck-clean lookup).
+        # vocab-parallel Embedding before conversion (correct local vocab lookup
+        # under TP on plain local shards).
         if use_spmd:
             _install_native_embedding(model)
 
