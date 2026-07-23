@@ -245,7 +245,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "eps",
             "momentum",
             "nesterov",
-            "matrix_shape",
             "fused",
             "foreach",
         }
