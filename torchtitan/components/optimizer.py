@@ -193,16 +193,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     f"matched no parameters"
                 )
 
-            # Muon does not expose fused/foreach constructor options. Selection
-            # remains entirely regex-driven; tensor rank does not affect routing.
-            optimizer_impl_kwargs = (
-                {} if pg.optimizer_name == "Muon" else impl_kwargs
-            )
             groups[pg.optimizer_name].append(
                 {
                     "params": params,
                     "param_names": param_names,
-                    **optimizer_impl_kwargs,
+                    # Muon does not accept fused/foreach options.
+                    **(impl_kwargs if pg.optimizer_name != "Muon" else {}),
                     **pg.optimizer_kwargs,
                 }
             )
