@@ -87,9 +87,10 @@ def _nvfp4_linear_cls():
     return NVFP4Linear
 
 
-def _stub_parallel_dims(*, tp_enabled, tp=4, spmd_backend="default"):
+def _stub_parallel_dims(*, tp_enabled, tp=4, spmd_backend="spmd_types"):
     # NVFP4Linear._validate only reads these scalar fields; a stub keeps the test
-    # off the mesh so the divisibility/backend gates run on CPU.
+    # off the mesh so the divisibility/backend gates run on CPU. NVFP4 TP requires
+    # spmd_types, so default the stub to it to reach the divisibility checks.
     return SimpleNamespace(tp_enabled=tp_enabled, tp=tp, spmd_backend=spmd_backend)
 
 
@@ -123,21 +124,20 @@ def test_nvfp4_validate_rejects_bad_tp_dims(in_features, out_features, style, ma
         module._validate(_stub_parallel_dims(tp_enabled=True))
 
 
-def test_nvfp4_validate_accepts_good_dims_and_rejects_spmd_types():
+def test_nvfp4_validate_requires_spmd_types_for_tp():
     NVFP4Linear = _nvfp4_linear_cls()
     module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
-    # colwise 512x1024 under TP=4: local (512, 256), both multiples of 128.
+    # colwise 512x1024 under TP=4 + spmd_types: local (512, 256), both %128.
     module._tp_style = "colwise"
     module._validate(_stub_parallel_dims(tp_enabled=True))  # no raise
-    # TP disabled (single GPU / FSDP-only): dims checked at TP=1, style irrelevant.
+    # TP disabled (single GPU / FSDP-only): backend irrelevant, dims at TP=1.
     module._tp_style = None
-    module._validate(_stub_parallel_dims(tp_enabled=False))  # no raise
-    # The bf16 DTensor bridge cannot wrap outputs under the spmd_types backend.
+    module._validate(_stub_parallel_dims(tp_enabled=False, spmd_backend="default"))
+    # The nvfp4 GEMM is opaque to DTensor: TP requires the spmd_types backend.
     module._tp_style = "colwise"
-    with pytest.raises(ValueError, match="spmd_types"):
-        module._validate(
-            _stub_parallel_dims(tp_enabled=True, spmd_backend="spmd_types")
-        )
+    for backend in ("default", "full_dtensor"):
+        with pytest.raises(ValueError, match="spmd_types"):
+            module._validate(_stub_parallel_dims(tp_enabled=True, spmd_backend=backend))
 
 
 def test_nvfp4_module_exposes_weight_and_two_buffers():
@@ -153,7 +153,8 @@ def test_nvfp4_module_exposes_weight_and_two_buffers():
 
 
 def test_nvfp4_native_checkpoint_roundtrip_keeps_buffers():
-    """Native NVFP4 checkpoints persist and restore the RNG/RHT runtime buffers."""
+    """Native NVFP4 checkpoints persist and restore the RHT buffer. The SR seed is
+    a per-rank, non-persistent buffer, so it is intentionally absent."""
     NVFP4Linear = _nvfp4_linear_cls()
 
     def _built():
@@ -162,9 +163,10 @@ def test_nvfp4_native_checkpoint_roundtrip_keeps_buffers():
         return module
 
     src, dst = _built(), _built()
-    assert set(src.state_dict()) == {"weight", "_sr_seed", "_rht_sign_vector"}
-    dst.load_state_dict(src.state_dict())
-    assert torch.equal(dst._sr_seed, src._sr_seed)
+    sd = src.state_dict()
+    assert set(sd) == {"weight", "_rht_sign_vector"}
+    assert "_sr_seed" not in sd  # non-persistent
+    dst.load_state_dict(sd)
     assert torch.equal(dst._rht_sign_vector, src._rht_sign_vector)
 
 
@@ -201,11 +203,13 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     assert isinstance(model.get_submodule("layers.0.feed_forward.w1"), NVFP4Linear)
 
     sd = model.state_dict()
-    assert any(k.endswith("feed_forward.w1._sr_seed") for k in sd)
+    # The persistent RHT buffer is present natively; the per-rank SR seed is
+    # non-persistent, so it is absent from the state dict entirely.
+    assert any(k.endswith("feed_forward.w1._rht_sign_vector") for k in sd)
+    assert not any("_sr_seed" in k for k in sd)
 
     hf_sd = Llama3StateDictAdapter(model_config, hf_assets_path=None).to_hf(sd)
     assert "model.layers.0.mlp.gate_proj.weight" in hf_sd
-    assert not any("_sr_seed" in k for k in hf_sd)
     assert not any("_rht_sign_vector" in k for k in hf_sd)
 
 
