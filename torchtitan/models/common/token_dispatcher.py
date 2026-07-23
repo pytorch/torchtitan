@@ -1145,21 +1145,21 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
     ep_mesh: DeviceMesh | None
     sp_size: int
     hidden_dim: int | None
-    tokens_per_rank: int | None
+    num_tokens_per_rank: int | None
     dtype: torch.dtype | None
     buffer_device: torch.device
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
         hidden_dim: int | None = None
-        tokens_per_rank: int | None = None
+        num_tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.hidden_dim = config.hidden_dim
-        self.tokens_per_rank = config.tokens_per_rank
+        self.num_tokens_per_rank = config.num_tokens_per_rank
         self.dtype = config.dtype
         if config.device is None:
             buffer_device = torch.device(device_type, device_module.current_device())
@@ -1190,7 +1190,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             field
             for field, value in (
                 ("hidden_dim", self.hidden_dim),
-                ("tokens_per_rank", self.tokens_per_rank),
+                ("num_tokens_per_rank", self.num_tokens_per_rank),
                 ("dtype", self.dtype),
                 ("device", self.buffer_device),
             )
@@ -1204,7 +1204,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             )
 
         assert self.hidden_dim is not None
-        assert self.tokens_per_rank is not None
+        assert self.num_tokens_per_rank is not None
         assert self.dtype is not None
         assert self.buffer_device is not None
 
@@ -1215,7 +1215,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         minimal_async_ep_init_buffer(
             group=ep_group,
             hidden_dim=self.hidden_dim,
-            tokens_per_rank=self.tokens_per_rank,
+            num_tokens_per_rank=self.num_tokens_per_rank,
             num_local_experts=num_local_experts,
             top_k=self.top_k,
             dtype=self.dtype,
@@ -1381,7 +1381,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
         if not isinstance(config, Trainer.Config):
             raise ValueError(
                 "MinimalAsyncEP requires a Trainer.Config-compatible runtime config "
-                "to set hidden_dim, tokens_per_rank, and dtype."
+                "to set hidden_dim, num_tokens_per_rank, and dtype."
             )
 
         memory_policy = getattr(config.compile, "memory_policy", None)
@@ -1404,8 +1404,13 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     num_tokens_per_rank = config.training.local_batch_size * config.training.seq_len
     dtype = TORCH_DTYPE_MAP[config.training.mixed_precision_param]
     for dispatcher_cfg in dispatcher_cfgs:
-        if isinstance(dispatcher_cfg, HybridEPTokenDispatcher.Config):
+        if isinstance(
+            dispatcher_cfg,
+            (
+                HybridEPTokenDispatcher.Config,
+                MinimalAsyncEPTokenDispatcher.Config,
+            ),
+        ):
             dispatcher_cfg.num_tokens_per_rank = num_tokens_per_rank
-        elif isinstance(dispatcher_cfg, MinimalAsyncEPTokenDispatcher.Config):
-            dispatcher_cfg.tokens_per_rank = num_tokens_per_rank
+        if isinstance(dispatcher_cfg, MinimalAsyncEPTokenDispatcher.Config):
             dispatcher_cfg.dtype = dtype
