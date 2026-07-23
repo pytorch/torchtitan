@@ -575,9 +575,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module llama3 --config llama3_debugmodel_nvfp4",
                     "--parallelism.tensor_parallel_degree 2",
+                    # NVFP4 TP requires the spmd_types backend; run under SPMD
+                    # type checking to validate the local_map colwise/rowwise
+                    # output and input-gradient types. Typechecking is
+                    # incompatible with SAC + FlexAttention, so disable AC.
+                    "--parallelism.spmd_backend spmd_types",
+                    "--debug.spmd_typechecking",
+                    "activation-checkpoint:none",
                 ],
             ],
-            "NVFP4 converter: dense in-layer linears (FSDP2 + TP2)",
+            "NVFP4 converter: dense in-layer linears (FSDP2 + TP2, spmd_types)",
             "nvfp4_converter",
             ngpu=4,
             skip_rocm_test=True,
