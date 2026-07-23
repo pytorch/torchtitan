@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -12,6 +15,7 @@ from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     BaseEPTokenDispatcher,
     DeepEPTokenDispatcher,
+    EPDispatchMetadata,
     HybridEPTokenDispatcher,
     LocalDispatchMetadata,
     LocalTokenDispatcher,
@@ -19,8 +23,8 @@ from torchtitan.models.common.token_dispatcher import (
 )
 
 
-class TestDispatcherProtocol(unittest.TestCase):
-    def test_all_ep_dispatchers_share_base_protocol(self):
+class TestBaseEPTokenDispatcher(unittest.TestCase):
+    def test_all_ep_dispatchers_share_base(self):
         for dispatcher_cls in (
             AllToAllTokenDispatcher,
             DeepEPTokenDispatcher,
@@ -54,7 +58,6 @@ class TestDispatcherProtocol(unittest.TestCase):
         dispatcher = LocalTokenDispatcher(
             LocalTokenDispatcher.Config(num_experts=1, top_k=1)
         )
-        self.assertFalse(dispatcher.overlap_combine_with_shared_experts)
         result = dispatcher.combine(
             torch.tensor([[1.0]]),
             LocalDispatchMetadata(
@@ -67,7 +70,31 @@ class TestDispatcherProtocol(unittest.TestCase):
         )
 
         torch.testing.assert_close(result, torch.tensor([[1.0]]))
-        self.assertIsNone(dispatcher.wait_combine())
+
+    def test_deepep_combine_waits_before_returning(self):
+        combined_TD = torch.tensor([[1.0]])
+        sync_combine = Mock()
+        deepep = SimpleNamespace(
+            combine_tokens=Mock(return_value=combined_TD),
+            sync_combine=sync_combine,
+        )
+        dispatcher = object.__new__(DeepEPTokenDispatcher)
+        dispatcher.sp_size = 1
+
+        with patch.dict(
+            sys.modules,
+            {"torchtitan.distributed.deepep.deepep": deepep},
+        ):
+            result = dispatcher.combine(
+                torch.tensor([[2.0]]),
+                EPDispatchMetadata(state=object()),
+                torch.tensor([[0.0]]),
+                num_local_tokens_after_padding=1,
+                local_seq_len_after_padding=1,
+            )
+
+        self.assertIs(result, combined_TD)
+        sync_combine.assert_called_once_with()
 
     def test_hybridep_runtime_config_sets_eager_buffer_shape(self):
         from torchtitan.models.deepseek_v3.config_registry import (
