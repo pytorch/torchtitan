@@ -9,7 +9,6 @@
 """
 
 import logging
-import math
 from dataclasses import dataclass, field, replace
 
 import torch
@@ -152,7 +151,7 @@ class Batcher(Configurable):
             num_rollout_groups,
             num_metric_only_groups,
         ) = self._take_groups_for_train_step()
-        # Next-fit all taken training_samples into rows.
+        # Greedily pack training_samples into rows (grouped into microbatches), then deal to ranks.
         rows = self._assign_training_samples_to_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
         return TrainingBatch(
@@ -209,33 +208,52 @@ class Batcher(Configurable):
     def _assign_training_samples_to_rows(
         self, training_samples: list[TrainingSample]
     ) -> list[list[TrainingSample]]:
-        """Next-fit training_samples into rows of <= ``seq_len`` tokens (the caller already capped the count).
+        """Greedily pack training_samples into rows of <= ``seq_len`` tokens, grouped into microbatches.
+
+        Keep ``local_batch_size * dp_degree`` open rows for the current microbatch. Walking samples
+        longest-first, add each to the lowest-cost open row (cost = sum of per-sample ``len**2``, the
+        block-diagonal attention cost) that still has room; when a sample fits no open row the
+        microbatch is full, so flush it and open a fresh one. This keeps each microbatch's rows
+        cost-balanced, so any even deal to DP ranks balances them.
+
+        Returns a flat list of rows in microbatch order; every microbatch has exactly
+        ``local_batch_size * dp_degree`` rows (unfilled ones are empty and padded later), so
+        `_build_microbatch_grid` can chunk it back into microbatches.
 
         Example:
 
-            # seq_len=10, training_sample effective lengths [5, 5, 5]
-            _assign_training_samples_to_rows([e5, e5, e5])  # -> [[e5, e5], [e5]]
+            # 2 rows/microbatch, seq_len=10, effective lengths [6, 5, 5, 4] -> [[e6, e4], [e5, e5]]
         """
-        # TODO(async-rl): assignment is greedy next-fit. Swap in smarter algorithms here -- e.g. best-fit,
-        #   DP/CP/PP load balancing, or balancing tokens across DP rows on a seq_len**2 budget.
-        rows: list[list[TrainingSample]] = []
-        current_row: list[TrainingSample] = []
-        current_len = 0
-        for training_sample in training_samples:
-            num_tokens_to_pack = self.num_tokens_to_pack(training_sample)
+        rows_per_microbatch = self.local_batch_size * self._dp_degree
+        all_rows: list[list[TrainingSample]] = []
+        rows: list[list[TrainingSample]] = [[] for _ in range(rows_per_microbatch)]
+        row_len = [0] * rows_per_microbatch
+        row_cost = [0] * rows_per_microbatch
 
-            # doesn't fit, close the row
-            if current_row and current_len + num_tokens_to_pack > self.seq_len:
-                rows.append(current_row)
-                current_row, current_len = [], 0
+        for training_sample in sorted(
+            training_samples, key=self.num_tokens_to_pack, reverse=True
+        ):
+            length = self.num_tokens_to_pack(training_sample)
+            # Lowest-cost open row that still has capacity.
+            best = -1
+            for i in range(rows_per_microbatch):
+                if row_len[i] + length <= self.seq_len and (
+                    best == -1 or row_cost[i] < row_cost[best]
+                ):
+                    best = i
+            if best == -1:  # fits no open row -> current microbatch is full, flush it
+                all_rows.extend(rows)
+                rows = [[] for _ in range(rows_per_microbatch)]
+                row_len = [0] * rows_per_microbatch
+                row_cost = [0] * rows_per_microbatch
+                best = 0  # fresh microbatch: every row empty, row 0 is lowest-cost
+            rows[best].append(training_sample)
+            row_len[best] += length
+            row_cost[best] += length * length
 
-            current_row.append(training_sample)
-            current_len += num_tokens_to_pack
-
-        if current_row:
-            rows.append(current_row)
-
-        return rows
+        # Emit the final microbatch (always emit one, so the trainer steps even with no samples).
+        all_rows.extend(rows)
+        return all_rows
 
     def num_tokens_to_pack(self, training_sample: TrainingSample) -> int:
         """Tokens this training_sample contributes to a packed row.
@@ -257,34 +275,24 @@ class Batcher(Configurable):
     def _build_microbatch_grid(
         self, packed_rows: list[dict]
     ) -> list[list[TrainingMicrobatch]]:
-        """Build `[num_microbatches][dp_degree]` from however many rows packing produced (variable count).
-
-        Each (microbatch, rank) takes its rows round-robin. Pad-only rows are appended last, so dealing them round-robin
-        spreads them across microbatches/ranks instead of all landing on the last one.
-
-        Example:
-            # local_batch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
-            # The 3 pad rows land on 3 different (microbatch, rank) pairs; none is all padding.
+        """Chunk the flat rows into microbatches of `local_batch_size * dp_degree` rows and deal each
+        microbatch's rows round-robin across `dp_degree` ranks, collating each rank into a
+        `[local_batch_size, seq_len]` TrainingMicrobatch. Rows are cost-balanced by the packer, so
+        round-robin keeps DP ranks balanced. Returns `[num_microbatches][dp_degree]`.
         """
         rows_per_microbatch = self.local_batch_size * self._dp_degree
-        num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
-
-        # Pad up to a full grid
-        while len(packed_rows) < num_microbatches * rows_per_microbatch:
-            packed_rows.append(self._pack_training_sample_row([]))
-
-        # [num_rows] -> [num_microbatches][dp_degree], dealing rows round-robin so padding spreads out
+        num_microbatches = len(packed_rows) // rows_per_microbatch
         grid: list[list[TrainingMicrobatch]] = []
         for microbatch in range(num_microbatches):
+            chunk = packed_rows[
+                microbatch
+                * rows_per_microbatch : (microbatch + 1)
+                * rows_per_microbatch
+            ]
             ranks: list[TrainingMicrobatch] = []
             for rank in range(self._dp_degree):
-                start = microbatch * self._dp_degree + rank
-                # this (microbatch, rank)'s rows: every (num_microbatches * dp_degree)-th row from `start`
-                ranks.append(
-                    self.collate(
-                        packed_rows[start :: num_microbatches * self._dp_degree]
-                    )
-                )
+                # this microbatch's rows dealt round-robin across ranks
+                ranks.append(self.collate(chunk[rank :: self._dp_degree]))
             grid.append(ranks)
         return grid
 
@@ -368,6 +376,32 @@ class Batcher(Configurable):
             advantages=torch.cat([row["advantages"] for row in rows]),
         )
 
+    def _cost_imbalance(self, packed_rows: list[dict]) -> float:
+        """Mean over microbatches of (max rank cost / mean rank cost), where a rank's cost is the
+        block-diagonal attention cost sum(seq_len**2) of its rows.
+
+        1.0 is perfect DP-rank balance; higher means a straggler rank gates the (lockstep)
+        forward/backward. This is the quantity the packing drives down. Rows are chunked and dealt
+        exactly as in `_build_microbatch_grid`.
+        """
+        rows_per_microbatch = self.local_batch_size * self._dp_degree
+        dp_degree = self._dp_degree
+        ratios: list[float] = []
+        for start in range(0, len(packed_rows), rows_per_microbatch):
+            chunk = packed_rows[start : start + rows_per_microbatch]
+            rank_costs = [
+                sum(
+                    seq_len * seq_len
+                    for row in chunk[rank::dp_degree]
+                    for seq_len in row["seq_lens"]
+                )
+                for rank in range(dp_degree)
+            ]
+            total = sum(rank_costs)
+            if total > 0:
+                ratios.append(max(rank_costs) * dp_degree / total)
+        return sum(ratios) / len(ratios) if ratios else 1.0
+
     def _packing_metrics(
         self,
         packed_rows: list[dict],
@@ -382,6 +416,10 @@ class Batcher(Configurable):
             m.Metric(
                 "train_batch/padding_frac",
                 m.NoReduce((total_slots - non_padded) / total_slots),
+            ),
+            m.Metric(
+                "train_batch/cost_imbalance",
+                m.NoReduce(self._cost_imbalance(packed_rows)),
             ),
             m.Metric(
                 "train_batch/num_microbatches",
