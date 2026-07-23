@@ -1045,13 +1045,10 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
     def init_buffer(self) -> None:
-        """Eagerly create the HybridEP buffer when runtime dimensions are known."""
-        if (
-            self.ep_mesh is None
-            or self.hidden_dim is None
-            or self.num_tokens_per_rank is None
-        ):
-            return
+        """Eagerly create the HybridEP buffer."""
+        assert self.ep_mesh is not None
+        assert self.hidden_dim is not None
+        assert self.num_tokens_per_rank is not None
 
         from torchtitan.distributed.deepep.hybridep import get_buffer
 
@@ -1359,6 +1356,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
         for cfg in dispatcher_cfgs
         if isinstance(cfg, MinimalAsyncEPTokenDispatcher.Config)
     ]
+    # TODO: Add TP/SP, CP, and PP support to MinimalAsyncEP.
     if minimal_async_cfgs:
         if parallelism.spmd_backend == "full_dtensor":
             raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
