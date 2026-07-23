@@ -31,17 +31,14 @@ from torchtitan.tools.logging import logger
 def _install_native_embedding(model: nn.Module) -> None:
     """Swap the HF token embedding for titan's vocab-parallel ``Embedding``.
 
-    Under spmd_types + TP the embedding weight is vocab-sharded (``S(0)``) while
-    activations are plain local tensors, so HF's ``nn.Embedding.forward``
-    (``F.embedding`` over the full vocab on a local weight shard) would look up
-    the wrong rows -- it needs an implicit weight redistribution that spmd_types
-    does not perform. The native ``Embedding`` (models/common/embedding.py) does
-    a masked local lookup on the local vocab shard (``weight.to_local()`` + index
-    mask), producing a Partial output with no implicit redistribution -- the same
-    construction native models use, so it is correct for TP under spmd_types. Only the class is
-    swapped (weight/padding_idx preserved, state_dict keys unchanged); the
-    embedding's ``_sharding_config`` is still set by set_hf_sharding_configs.
-    Runs before convert_hf_to_module so it is skipped there (already a Module).
+    Under spmd_types + TP the embedding weight is vocab-sharded (``S(0)``) and
+    activations are plain local tensors, so HF's ``nn.Embedding.forward`` looks up
+    the wrong rows -- it needs a weight redistribution spmd_types does not
+    perform. The native ``Embedding`` (models/common/embedding.py) does a masked
+    local lookup on the local vocab shard and produces a Partial output, correct
+    for TP. Only the class is swapped (weight/padding_idx preserved, state_dict
+    keys unchanged); ``_sharding_config`` is still set by set_hf_sharding_configs.
+    Runs before convert_hf_to_module.
     """
     from torchtitan.models.common.embedding import Embedding as _NativeEmbedding
 
@@ -51,12 +48,11 @@ def _install_native_embedding(model: nn.Module) -> None:
     if type(emb) is nn.Embedding:
         emb.__class__ = _NativeEmbedding
         emb.tp_group = None  # set by Embedding.parallelize; forward reads it
-        # Native Embedding's vocab-parallel forward passes the global padding_idx
-        # to F.embedding on the local vocab shard, which asserts it is < the local
-        # num_embeddings -- so a non-None padding_idx (e.g. GLM-5) crashes under
-        # TP. Drop it: the masked local lookup already zeros out-of-shard tokens,
-        # and causal-LM padding is handled by attention/loss masking, so the
-        # padding_idx row-zeroing is vestigial here.
+        # Native Embedding's forward passes the global padding_idx to F.embedding
+        # on the local vocab shard, which asserts it is < the local
+        # num_embeddings, so a non-None padding_idx (e.g. GLM-5) crashes under TP.
+        # Drop it: the masked lookup already zeros out-of-shard tokens, and
+        # causal-LM padding is handled by attention/loss masking.
         if emb.padding_idx is not None:
             emb.padding_idx = None
     else:
@@ -68,30 +64,17 @@ def _install_native_embedding(model: nn.Module) -> None:
 
 
 def _wrap_moe_experts_contiguous(model: nn.Module) -> None:
-    """Make the native MoE experts tolerate a non-contiguous local input.
+    """Contiguous-ify the native MoE experts' local input under SP.
 
     ``RoutedExperts.forward`` flattens its input with ``x_BLD.view(T, D)``, which
-    requires a contiguous tensor. Under sequence parallelism (enabled whenever
-    TP>1), the attention output projection's rowwise reduce-scatter to the SP
-    activation layout produces a *seq-major* (non-contiguous) local shard. This
-    is NOT specific to this backend or a difference in our sharding: native
-    ``GQAttention``'s wo output has the identical seq-major stride under the same
-    ``rowwise_config(output_sp=True)`` reduce-scatter (verified). Native models
-    just never route it into the experts ``.view``: native GQA models are dense
-    (no MoE), and native MoE models use non-GQA attention (deepseek MLA, gpt_oss
-    custom) whose experts input happens to land contiguous. This HF backend is
-    the first to pair GQA-style attention (seq-major SP wo output) with the native
-    MoE experts, so it is the first to feed that ``.view`` a non-contiguous shard.
-
-    The layout is left as-is (it is correct SP behavior, matching native); we only
-    make the experts tolerate it by wrapping ``RoutedExperts.forward`` (the
-    routed-expert local_map region that owns the ``.view``) -- before
-    ``model.parallelize`` so the wrap sits inside the local_map region and sees
-    local tensors -- to ``.contiguous()`` the tensor args. This is a no-op view
-    (no copy) when the input is already contiguous, so it only copies for the
-    seq-major shard. The clean long-term fix is upstream (``RoutedExperts.forward``
-    using ``.reshape`` instead of ``.view``); this is the experiment-side
-    workaround until then. Guarded to spmd + TP+EP at the call site.
+    requires contiguity. Under sequence parallelism (TP>1) the attention wo
+    projection's rowwise reduce-scatter yields a seq-major (non-contiguous) local
+    shard -- correct SP behavior, matching native, but native never routes it
+    into the experts ``.view`` (its GQA models are dense; its MoE models use
+    non-GQA attention). Wrap ``RoutedExperts.forward`` (before ``model.parallelize``
+    so it sees local tensors) to ``.contiguous()`` its tensor args; a no-op when
+    already contiguous. Guarded to spmd + TP+EP at the call site. The clean fix is
+    upstream (``.reshape`` instead of ``.view``).
     """
     from torchtitan.models.common.moe import RoutedExperts
 
@@ -112,24 +95,21 @@ def _wrap_moe_experts_contiguous(model: nn.Module) -> None:
 def _wrap_flat_qk_norm_tp(model: nn.Module, tp_mesh: DeviceMesh) -> None:
     """Make an OLMoE-style flat q/k RMSNorm TP-aware at runtime.
 
-    Some models (OLMoE) apply q/k RMSNorm over the full projection
-    (``n_heads*head_dim``) *before* the head reshape. Under TP the projection is
-    column-sharded, so each rank holds only ``1/tp`` of that dim -- HF's RMSNorm
-    then normalizes over the wrong (local) dim and its replicated weight
-    shape-mismatches the local shard (2048 vs 1024). The default (DTensor)
-    backend fixes this by all-reducing the variance and redistributing the
-    weight; under spmd_types the activations are plain local shards with no
-    auto-redistribution, so we replicate that math here: wrap the flat
-    q_norm/k_norm forward to all-reduce the local sum-of-squares across the TP
-    group, divide by the full dim, normalize the local shard, and multiply by the
-    local weight slice (the projection is column-sharded contiguously, weight
-    ``S(0)``, so rank ``r`` owns ``weight[r*local : (r+1)*local]``).
+    OLMoE norms q/k over the full projection (``n_heads*head_dim``) before the
+    head reshape. Under TP the projection is column-sharded, so HF's RMSNorm
+    normalizes over the local shard and its replicated weight shape-mismatches it.
+    The default backend gets this right via DTensor auto-redistribution; under
+    spmd_types the activations are plain local shards, so replicate that math
+    here: wrap the flat q_norm/k_norm forward to all-reduce the local
+    sum-of-squares across TP, divide by the full dim, and multiply by the local
+    weight slice (weight is column-sharded ``S(0)``, so rank ``r`` owns
+    ``weight[r*local : (r+1)*local]``).
 
-    Runtime-only and self-contained (funcol all-reduce, no spmd typechecking).
-    Called before ``model.parallelize`` so the wrap is captured in the norm's
-    Module forward. A no-op at TP=1 (returns early -- bit-identical) and only
-    applied to *flat*-norm modules (norm width != ``head_dim``); per-head-norm
-    (Qwen3) and no-norm (Mixtral) models are untouched.
+    Runtime-only (funcol all-reduce, no typechecking). Called before
+    ``model.parallelize`` so the wrap is captured in the norm's Module forward. A
+    no-op at TP=1 (returns early, bit-identical) and only applied to flat-norm
+    modules (norm width != ``head_dim``); per-head-norm (Qwen3) and no-norm
+    (Mixtral) models are untouched.
     """
     import torch.distributed as dist
     import torch.distributed._functional_collectives as funcol
@@ -176,17 +156,14 @@ def _wrap_flat_qk_norm_tp(model: nn.Module, tp_mesh: DeviceMesh) -> None:
 def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
     """All-gather k/v across the CP axis inside each flex kernel forward.
 
-    q/k/v reach the flex kernel seq-sharded on the CP axis (tensor dim 2 of the
-    ``(b, heads, seq, dim)`` layout). Attention needs full-length k/v, so we
-    all-gather them across the CP mesh with a funcol collective (autograd-aware:
-    the backward reduce-scatters gradients back to the local shard). q stays
-    sharded, so each rank computes attention for its seq shard against the full
-    keys -- the BlockMask is Q-sharded / KV-full to match.
-
-    Called before ``model.parallelize`` so the wrap is captured inside the
-    attention module's local_map region, where the CP mesh dim is no longer
-    visible to a declarative redistribute, so the gather is done here on local
-    tensors.
+    q/k/v reach the flex kernel seq-sharded on the CP axis (dim 2 of
+    ``(b, heads, seq, dim)``). Attention needs full-length k/v, so all-gather them
+    across the CP mesh with a funcol collective (autograd-aware: the backward
+    reduce-scatters gradients back to the local shard). q stays sharded, so each
+    rank attends its seq shard against the full keys; the BlockMask is
+    Q-sharded/KV-full to match. Called before ``model.parallelize`` so the wrap
+    sits inside the attention module's local_map region, where the CP mesh axis is
+    no longer visible to a declarative redistribute.
     """
     import torch.distributed as dist
     from torch.distributed.tensor.experimental._context_parallel._attention import (
@@ -246,10 +223,9 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # The HF transformers backend supports the legacy "default" (DTensor) backend
-    # and "spmd_types". full_dtensor is a transitional core backend slated for
-    # removal upstream, so it is intentionally not wired here -- fail loud rather
-    # than silently falling through to the default path.
+    # Only "default" (DTensor) and "spmd_types" are supported. full_dtensor is a
+    # transitional core backend slated for removal, so fail loud rather than
+    # silently taking the default path.
     if parallelism.spmd_backend == "full_dtensor":
         raise NotImplementedError(
             "the HF transformers backend supports spmd_backend 'default' or "
@@ -297,13 +273,10 @@ def parallelize_hf_transformers(
         build_and_swap_native_moe(model, parallel_dims)
 
     # 2. Convert HF modules to Module protocol.
-    # TP/EP always need it. CP-only needs it too: the flex kernel's local_map is
-    # what all-gathers k/v across the CP axis, and it is only installed by the
-    # sharding pass below.
-    # Under the spmd_types backend, FSDP requires every parameter to be an spmd
-    # tensor on the SPMD mesh, which only the sharding pass + model.parallelize
-    # produces -- so run it for any parallelism (even FSDP-only), not just
-    # TP/EP/CP.
+    # TP/EP/CP need it (the flex kernel installed by the sharding pass is what
+    # handles the CP k/v all-gather). spmd_types needs it for any parallelism,
+    # even FSDP-only: every parameter must be an spmd tensor on the SPMD mesh,
+    # which only the sharding pass + model.parallelize produce.
     use_spmd = parallelism.spmd_backend == "spmd_types"
     needs_module_protocol = (
         parallel_dims.tp_enabled
@@ -377,10 +350,10 @@ def parallelize_hf_transformers(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    # Resolve the FSDP mesh. Under the spmd_types backend the DP mesh is a
-    # submesh of the multi-axis SPMD storage mesh, selected via resolve_fsdp_mesh
-    # + a DataParallelMeshDims that fully_shard flattens out; the legacy
-    # "fsdp"/"efsdp" named axes only exist under the default backend. (The core
+    # Resolve the FSDP mesh. Under spmd_types the DP mesh is a submesh of the
+    # multi-axis SPMD storage mesh, picked via resolve_fsdp_mesh + a
+    # DataParallelMeshDims that fully_shard flattens out; the legacy
+    # "fsdp"/"efsdp" named axes exist only under the default backend. (The core
     # helpers live in distributed/full_dtensor.py but apply to spmd_types too.)
     dp_mesh_dims = None
     edp_mesh_dims = None
