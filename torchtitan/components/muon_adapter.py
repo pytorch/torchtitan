@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Muon policy and logical views over generic SPMD compute tensors."""
+"""Adapt core Muon to persistent storage layouts and logical matrix views."""
 
 from collections.abc import MutableMapping
 from contextlib import ExitStack
@@ -22,16 +22,17 @@ from torch.distributed.tensor import (
 from torch.optim._muon import muon
 
 
-__all__ = ["SPMDMuon"]
+__all__ = ["MuonAdapter"]
 
 
-class SPMDMuon(torch.optim.Muon):
-    """Run Muon on typed local views while retaining persistent state identity.
+class MuonAdapter(torch.optim.Muon):
+    """Run core Muon through optional storage and logical-view adaptation.
 
     DTensor parameters and momentum remain the objects owned by the optimizer
     and checkpoint path. Only the tensors passed to Muon's functional update
     are plain, storage-sharing local views. Every view must prove that its final
-    two matrix dimensions are complete on the current rank.
+    two matrix dimensions are complete on the current rank. Ordinary untyped
+    tensors retain the behavior of ``torch.optim.Muon``.
     """
 
     @staticmethod
@@ -45,7 +46,7 @@ class SPMDMuon(torch.optim.Muon):
         for placement in tensor.placements:
             if isinstance(placement, DtPartial):
                 raise spmd.SpmdTypeError(
-                    "SPMDMuon requires gradients to be reduced before the "
+                    "MuonAdapter requires gradients to be reduced before the "
                     "optimizer step; Partial storage is not a valid input"
                 )
             if isinstance(placement, DtShard):
@@ -74,7 +75,7 @@ class SPMDMuon(torch.optim.Muon):
             stack = getattr(self, "_compute_view_stack", None)
             if stack is None:
                 raise RuntimeError(
-                    "SPMDMuon compute views must be opened inside step()"
+                    "MuonAdapter compute views must be opened inside step()"
                 )
             return stack.enter_context(
                 spmd.dtensor_compute_view(
@@ -83,14 +84,13 @@ class SPMDMuon(torch.optim.Muon):
                     writeback=writeback,
                 )
             )
-        if not spmd.has_local_type(tensor):
-            if source is None:
-                raise spmd.SpmdTypeError(
-                    "SPMDMuon requires an SPMD-annotated plain parameter or a "
-                    "DTensor; an untyped parameter cannot prove complete matrix "
-                    "ownership"
-                )
+        tensor_is_typed = spmd.has_local_type(tensor)
+        if source is not None and spmd.has_local_type(source):
             spmd.assert_type_like(tensor, source)
+        elif source is not None and tensor_is_typed:
+            raise spmd.SpmdTypeError(
+                "MuonAdapter received a typed tensor whose parameter is untyped"
+            )
         return tensor
 
     @staticmethod
@@ -105,19 +105,19 @@ class SPMDMuon(torch.optim.Muon):
             or not all(isinstance(dim, int) and dim > 0 for dim in matrix_shape)
         ):
             raise ValueError(
-                "SPMDMuon matrix_shape must be a tuple of two positive integers, "
+                "MuonAdapter matrix_shape must be a tuple of two positive integers, "
                 f"got {matrix_shape!r}"
             )
         matrix_numel = matrix_shape[0] * matrix_shape[1]
         if tensor.numel() % matrix_numel != 0:
             raise ValueError(
-                f"SPMDMuon cannot view shape {tuple(tensor.shape)} as a batch of "
+                f"MuonAdapter cannot view shape {tuple(tensor.shape)} as a batch of "
                 f"{matrix_shape}: {tensor.numel()} elements is not divisible by "
                 f"{matrix_numel}"
             )
         if not tensor.is_contiguous():
             raise ValueError(
-                "SPMDMuon matrix_shape requires a contiguous storage-sharing view"
+                "MuonAdapter matrix_shape requires a contiguous storage-sharing view"
             )
         batch_size = tensor.numel() // matrix_numel
         return tensor.view(batch_size, *matrix_shape)
@@ -151,12 +151,13 @@ class SPMDMuon(torch.optim.Muon):
                 matrix_shape=matrix_shape,
                 writeback=False,
             )
-            spmd.assert_type_like(grad, param)
-            for compute_tensor in (param, grad):
-                spmd.assert_local_block(compute_tensor, trailing_dims=2)
+            if spmd.has_local_type(param):
+                spmd.assert_type_like(grad, param)
+                for compute_tensor in (param, grad):
+                    spmd.assert_local_block(compute_tensor, trailing_dims=2)
             if param.shape != grad.shape:
                 raise RuntimeError(
-                    "SPMDMuon parameter and gradient local views must have the "
+                    "MuonAdapter parameter and gradient local views must have the "
                     f"same shape, got {param.shape} and {grad.shape}"
                 )
 
@@ -178,12 +179,13 @@ class SPMDMuon(torch.optim.Muon):
                 matrix_shape=matrix_shape,
                 writeback=True,
             )
-            spmd.assert_type_like(momentum, storage_param)
-            spmd.assert_local_block(momentum, trailing_dims=2)
+            if spmd.has_local_type(storage_param):
+                spmd.assert_type_like(momentum, storage_param)
+                spmd.assert_local_block(momentum, trailing_dims=2)
             momentum = self._logical_matrix_view(momentum, matrix_shape)
             if momentum.shape != param.shape:
                 raise RuntimeError(
-                    "SPMDMuon momentum local view must match the parameter shape, "
+                    "MuonAdapter momentum local view must match the parameter shape, "
                     f"got {momentum.shape} and {param.shape}"
                 )
 

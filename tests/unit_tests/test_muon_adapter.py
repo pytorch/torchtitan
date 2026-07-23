@@ -12,8 +12,8 @@ from spmd_types._test_utils import FakeProcessGroupTestCase
 from spmd_types.checker import typecheck
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.debug import CommDebugMode
+from torchtitan.components.muon_adapter import MuonAdapter
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
-from torchtitan.components.spmd_muon import SPMDMuon
 
 
 def _has_batched_muon() -> bool:
@@ -24,7 +24,7 @@ def _has_batched_muon() -> bool:
     return True
 
 
-class TestSPMDMuon(FakeProcessGroupTestCase):
+class TestMuonAdapter(FakeProcessGroupTestCase):
     WORLD_SIZE = 2
 
     def _dtensor_parameter(self, local, placement, global_shape):
@@ -41,10 +41,7 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
         return param
 
     def test_resolver_is_explicit(self):
-        self.assertIs(OptimizersContainer._resolve_optimizer_cls("SPMDMuon"), SPMDMuon)
-        self.assertIs(
-            OptimizersContainer._resolve_optimizer_cls("Muon"), torch.optim.Muon
-        )
+        self.assertIs(OptimizersContainer._resolve_optimizer_cls("Muon"), MuonAdapter)
 
     def test_param_group_carries_explicit_matrix_shape(self):
         model = torch.nn.Module()
@@ -54,7 +51,7 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"^head_weight$",
-                    optimizer_name="SPMDMuon",
+                    optimizer_name="Muon",
                     optimizer_kwargs={
                         "lr": 0.02,
                         "matrix_shape": (3, 4),
@@ -70,29 +67,29 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
 
         container = config.build(model_parts=[model])
         optimizer = next(
-            item for item in container.optimizers if isinstance(item, SPMDMuon)
+            item for item in container.optimizers if isinstance(item, MuonAdapter)
         )
         self.assertEqual(optimizer.param_groups[0]["matrix_shape"], (3, 4))
         self.assertNotIn("fused", optimizer.param_groups[0])
         self.assertNotIn("foreach", optimizer.param_groups[0])
 
-    def test_matrix_shape_requires_spmd_muon(self):
+    def test_plain_untyped_muon_uses_adapter(self):
         model = torch.nn.Linear(4, 6, bias=False)
         config = OptimizersContainer.Config(
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"^weight$",
                     optimizer_name="Muon",
-                    optimizer_kwargs={
-                        "lr": 0.02,
-                        "matrix_shape": (3, 4),
-                    },
+                    optimizer_kwargs={"lr": 0.02, "ns_steps": 1},
                 )
             ]
         )
 
-        with self.assertRaisesRegex(ValueError, "only supported by SPMDMuon"):
-            config.build(model_parts=[model])
+        container = config.build(model_parts=[model])
+        optimizer = next(iter(container.optimizers))
+        self.assertIsInstance(optimizer, MuonAdapter)
+        model.weight.grad = torch.randn_like(model.weight)
+        optimizer.step()
 
     def test_replicated_dtensor_step_keeps_persistent_state(self):
         param = self._dtensor_parameter(
@@ -107,7 +104,7 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
             stride=(4, 1),
         )
         before = param.to_local().clone()
-        optimizer = SPMDMuon([param], lr=0.02, ns_steps=1)
+        optimizer = MuonAdapter([param], lr=0.02, ns_steps=1)
 
         comm_mode = CommDebugMode()
         with comm_mode, typecheck():
@@ -132,7 +129,7 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
             shape=(6, 4),
             stride=(4, 1),
         )
-        optimizer = SPMDMuon([param], lr=0.02, ns_steps=1)
+        optimizer = MuonAdapter([param], lr=0.02, ns_steps=1)
         reference = torch.nn.Parameter(torch.cat([local_param, local_param], dim=0))
         reference.grad = torch.cat([local_grad, local_grad], dim=0)
         reference_optimizer = torch.optim.Muon([reference], lr=0.02, ns_steps=1)
@@ -167,7 +164,7 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
         before = param.to_local().clone()
 
         try:
-            optimizer = SPMDMuon([param], lr=0.02, ns_steps=1)
+            optimizer = MuonAdapter([param], lr=0.02, ns_steps=1)
             comm_mode = CommDebugMode()
             with comm_mode, typecheck():
                 optimizer.step()
@@ -195,14 +192,14 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
             shape=(3, 4),
             stride=(4, 1),
         )
-        optimizer = SPMDMuon([param], lr=0.02, ns_steps=1)
+        optimizer = MuonAdapter([param], lr=0.02, ns_steps=1)
         optimizer.step()
         state_dict = optimizer.state_dict()
 
         restored_param = self._dtensor_parameter(
             torch.randn(3, 4), Replicate(), global_shape=(3, 4)
         )
-        restored_optimizer = SPMDMuon([restored_param], lr=0.02, ns_steps=1)
+        restored_optimizer = MuonAdapter([restored_param], lr=0.02, ns_steps=1)
         restored_optimizer.load_state_dict(state_dict)
 
         momentum = restored_optimizer.state[restored_param]["momentum_buffer"]
@@ -230,7 +227,7 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
         reference.grad = grad.clone()
 
         try:
-            optimizer = SPMDMuon(
+            optimizer = MuonAdapter(
                 [
                     {
                         "params": [flat_param],
@@ -277,7 +274,7 @@ class TestSPMDMuon(FakeProcessGroupTestCase):
             shape=(2 * head_dim, model_dim),
             stride=(model_dim, 1),
         )
-        optimizer = SPMDMuon(
+        optimizer = MuonAdapter(
             [{"params": [param], "matrix_shape": (head_dim, model_dim)}],
             lr=0.02,
             ns_steps=1,

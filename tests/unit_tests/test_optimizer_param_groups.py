@@ -9,6 +9,7 @@ import unittest
 import torch
 import torch.nn as nn
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.muon_adapter import MuonAdapter
 from torchtitan.components.optimizer import (
     default_adamw,
     OptimizersContainer,
@@ -531,9 +532,7 @@ class TestMixedOptimizers(unittest.TestCase):
         )
 
         container = config.build(model_parts=[model])
-        muon = next(
-            opt for opt in container.optimizers if type(opt) is torch.optim.Muon
-        )
+        muon = next(opt for opt in container.optimizers if isinstance(opt, MuonAdapter))
         adamw = next(
             opt for opt in container.optimizers if type(opt) is torch.optim.AdamW
         )
@@ -574,9 +573,7 @@ class TestMixedOptimizers(unittest.TestCase):
         )
 
         container = config.build(model_parts=[model])
-        muon = next(
-            opt for opt in container.optimizers if type(opt) is torch.optim.Muon
-        )
+        muon = next(opt for opt in container.optimizers if isinstance(opt, MuonAdapter))
         self.assertEqual(len(muon.param_groups), 2)
         self.assertIs(muon.param_groups[0]["params"][0], model.expert_weight)
         self.assertIs(

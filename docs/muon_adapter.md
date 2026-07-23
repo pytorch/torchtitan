@@ -1,14 +1,16 @@
-# SPMD-Typed Muon
+# Muon Adapter
 
-`SPMDMuon` runs PyTorch Muon on temporary plain local tensors while retaining
+`MuonAdapter` runs PyTorch Muon on temporary plain local tensors while retaining
 DTensor parameters and momentum as the persistent optimizer and checkpoint
 objects. It requires the batched-matrix behavior from PyTorch PR #190597.
+It is an internal execution adapter, not a separate optimizer name; users
+continue to configure `optimizer_name="Muon"`.
 
 The implementation has two independent layers:
 
 1. `spmd.dtensor_compute_view()` performs generic physical
    storage-to-compute redistribution and writeback.
-2. `SPMDMuon` optionally views the resulting physical tensor as a logical
+2. `MuonAdapter` optionally views the resulting physical tensor as a logical
    matrix batch such as `[H, Dh, D]`.
 
 The first layer contains no optimizer or head/expert semantics and can also be
@@ -21,7 +23,7 @@ OptimizersContainer.Config(
     param_groups=[
         ParamGroupConfig(
             pattern=r"routed_experts\.(w1_EFD|w2_EDF|w3_EFD)$",
-            optimizer_name="SPMDMuon",
+            optimizer_name="Muon",
             optimizer_kwargs={"lr": 0.02, "momentum": 0.95},
         ),
         ParamGroupConfig(
@@ -33,7 +35,7 @@ OptimizersContainer.Config(
 )
 ```
 
-Every selected tensor must logically have shape `[..., M, N]`. `SPMDMuon`
+Every selected tensor must logically have shape `[..., M, N]`. `MuonAdapter`
 chooses a physical compute placement containing complete matrices. Leading
 matrix-batch shards are retained; shards that split `M` or `N` are temporarily
 redistributed to `Replicate` and written back to storage after the update.
@@ -49,7 +51,7 @@ matrix shape explicitly:
 ```python
 ParamGroupConfig(
     pattern=r"attention\.wq\.weight$",
-    optimizer_name="SPMDMuon",
+    optimizer_name="Muon",
     optimizer_kwargs={
         "lr": 0.02,
         "matrix_shape": (head_dim, model_dim),
@@ -58,6 +60,6 @@ ParamGroupConfig(
 ```
 
 `matrix_shape` is applied only after the generic storage-to-compute transition.
-For a physically sharded flattened tensor, `SPMDMuon` first requests a
+For a physically sharded flattened tensor, `MuonAdapter` first requests a
 replicated physical compute tensor and then applies the storage-sharing logical
 view. The reshape itself never owns communication or persistent storage.

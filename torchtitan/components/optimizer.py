@@ -23,7 +23,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.spmd_muon import SPMDMuon
+from torchtitan.components.muon_adapter import MuonAdapter
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -31,7 +31,6 @@ from torchtitan.tools.logging import logger
 __all__ = [
     "OptimizersContainer",
     "ParamGroupConfig",
-    "SPMDMuon",
     "default_adamw",
     "register_moe_load_balancing_hook",
 ]
@@ -134,8 +133,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         optimizer_classes = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
-            "Muon": torch.optim.Muon,
-            "SPMDMuon": SPMDMuon,
+            "Muon": MuonAdapter,
         }
         if name not in optimizer_classes:
             raise NotImplementedError(f"Optimizer {name} not added.")
@@ -197,16 +195,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
             # Muon does not expose fused/foreach constructor options. Selection
             # remains entirely regex-driven; tensor rank does not affect routing.
-            if (
-                "matrix_shape" in pg.optimizer_kwargs
-                and pg.optimizer_name != "SPMDMuon"
-            ):
-                raise ValueError(
-                    "matrix_shape is only supported by SPMDMuon; ordinary Muon "
-                    "uses the parameter's physical [..., M, N] shape"
-                )
             optimizer_impl_kwargs = (
-                {} if pg.optimizer_name in ("Muon", "SPMDMuon") else impl_kwargs
+                {} if pg.optimizer_name == "Muon" else impl_kwargs
             )
             groups[pg.optimizer_name].append(
                 {
