@@ -294,9 +294,7 @@ def _set_layer_sharding_configs(
     # attention forward (GQA/MHA reshape+RoPE, MLA nope/pe split, DSA indexer +
     # dense mask) runs on plain local spmd tensors, then routes through this
     # kernel for the flex HOP; under CP ``_wrap_flex_kernel_cp`` folds the k/v
-    # all-gather into the kernel forward. (Typecheck-clean flex core kernels that
-    # reimplement those HF forwards live on the hf-backend-spmd-types-typecheck
-    # branch; runtime spmd_types does not need them.)
+    # all-gather into the kernel forward.
     _attach_flex_kernel(attn)
 
     # Query projection. Detected independently of the KV path: a model may
