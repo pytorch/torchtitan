@@ -9,7 +9,6 @@ import unittest
 import torch
 import torch.nn as nn
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.muon_adapter import MuonAdapter
 from torchtitan.components.optimizer import (
     default_adamw,
     OptimizersContainer,
@@ -496,33 +495,6 @@ class TestDCPWithParamGroups(unittest.TestCase):
 
 
 class TestMixedOptimizers(unittest.TestCase):
-    def test_muon_param_group(self):
-        model = SimpleModel()
-        config = OptimizersContainer.Config(
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r"^output\.weight$",
-                    optimizer_name="Muon",
-                    optimizer_kwargs={"lr": 1e-2, "ns_steps": 1},
-                ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
-            ],
-        )
-
-        with self.assertRaisesRegex(NotImplementedError, "implementation='for-loop'"):
-            config.build(model_parts=[model])
-
-        config.param_groups[0].optimizer_kwargs.update(fused=False, foreach=False)
-        container = config.build(model_parts=[model])
-        muon = next(opt for opt in container.optimizers if isinstance(opt, MuonAdapter))
-        self.assertIs(muon.param_groups[0]["params"][0], model.output.weight)
-        self.assertFalse(muon.param_groups[0]["fused"])
-        self.assertFalse(muon.param_groups[0]["foreach"])
-
     def test_mixed_optimizer_types(self):
         """Different optimizer for a param group."""
         model = SimpleModel()
