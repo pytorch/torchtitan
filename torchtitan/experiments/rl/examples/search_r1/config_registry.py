@@ -159,7 +159,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     a HybridEP generator (whose all-to-all is intra-node only) this generator may span
     nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
     keeps the compact (host-synced, backward-able) DeepEP path; the generator applies the
-    ``deepep_inference`` override to switch its dispatchers to the cudagraph-able EXPAND
+    ``deepep_override`` to switch its dispatchers to the cudagraph-able EXPAND
     layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
     as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
     """
@@ -170,8 +170,9 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     # Same opt-in throughput overrides as rl_grpo_qwen3_30b_a3b_varlen_perf, applied
     # independently to the trainer and generator actors.
     perf_imports = [
-        "torchtitan.overrides.fused_swiglu",
-        "torchtitan.overrides.helion_rope",
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
 
     config = Controller.Config(
@@ -226,12 +227,14 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            # Generator-only: the DeepEP cudagraph EXPAND override on top of the perf
-            # overrides; the trainer keeps the compact path.
+            # Generator-only: DeepEP cudagraph EXPAND dispatch on top of the perf overrides.
             override=OverrideConfig(
                 imports=[
                     *perf_imports,
-                    "torchtitan.distributed.deepep.inference_override",
+                    (
+                        "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+                        {"cudagraphable": True},
+                    ),
                 ]
             ),
         ),
@@ -240,7 +243,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     #  * max_num_batched_tokens: vLLM's per-step token budget (default None -> vLLM's own
     #    default of 2048). Decide it from your input/rollout sequence length.
     #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
-    #    deepep_inference override. For a dropless model (highest memory) set it to
+    #    deepep_override. For a dropless model (highest memory) set it to
     #    max_num_batched_tokens // ep; lower it gradually to save memory (trading off
     #    dropped tokens).
     config.generator.max_num_batched_tokens = 2048  # TODO: TBD
@@ -252,5 +255,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         moe = getattr(block, "moe", None)
         if moe is None:
             continue
-        moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
+        moe.routed_experts.token_dispatcher.num_max_tokens_per_rank = (
+            num_max_tokens_per_rank
+        )
     return config

@@ -176,7 +176,7 @@ def _dispatch_op_impl(
     if cudagraphable:
         # Expand mode: no host sync allowed. Recover per-expert counts from the
         # device-side inclusive prefix sum (expert_alignment defaults to 1, so this is
-        # a plain prefix sum). _experts_forward cumsums these back into grouped-mm offs.
+        # a plain prefix sum). GroupedExperts.forward cumsums these back into grouped-mm offs.
         psum = handle.psum_num_recv_tokens_per_expert
         num_recv_per_expert = torch.diff(psum, prepend=psum.new_zeros(1)).to(
             torch.int32
