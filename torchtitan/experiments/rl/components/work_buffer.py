@@ -144,11 +144,6 @@ class RolloutGroupWorkBuffer(Configurable):
         # TODO(async-rl): warm start — admit a small number of groups at first and grow the effective cap as the
         # batcher consumes, so a cold start doesn't fill the whole FIFO window at policy version 0.
 
-    @property
-    def window_size(self) -> int:
-        """Prompt-group look-ahead window anchored at the oldest prompt group in the buffer."""
-        return self._window_size
-
     def _has_active_slot_available(self) -> bool:
         return self._active_rollout_groups < self._max_active_rollout_groups
 

@@ -166,9 +166,9 @@ class AsyncLoopConfig(Configurable.Config):
 
     target_offpolicy_steps: int = 3
     """Target mean offpolicy steps. Sets active buffer size to `(S + 1) * P`.
-    With windowed FIFO, consume-time offpolicy steps may exceed this target;
-    `max_offpolicy_steps` is derived from the resulting window size.
-    0 = fully on-policy (sync): generator and trainer alternate in lockstep."""
+    This target is honored strictly when `window_fifo_fraction` is unset. With
+    windowed FIFO, consume-time offpolicy steps may exceed this target, and
+    `max_offpolicy_steps` is derived from the resulting window size."""
 
     window_fifo_fraction: float | None = None
     """Fraction `f` of the active buffer used as the FIFO look-ahead window.
