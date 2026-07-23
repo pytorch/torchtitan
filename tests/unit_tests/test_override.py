@@ -18,7 +18,7 @@ from torchtitan.config import (
 from torchtitan.config.override import _REGISTRY, Override
 
 # Overrides registered in this module have ``origin_module == __name__``; tests
-# pass ``imports=[__name__]`` so the provenance filter activates them.
+# activate them by ``module.function`` target (see ``TestOverride._imports``).
 
 
 class ComponentA(Configurable):
@@ -108,15 +108,22 @@ class TestOverride(unittest.TestCase):
         clear_overrides()
 
     def _imports(self) -> OverrideConfig:
-        """OverrideConfig that activates overrides defined in this module."""
-        return OverrideConfig(imports=[__name__])
+        """OverrideConfig naming (as ``module.function``) every override this
+        module registers -- i.e. the test's local factories."""
+        return OverrideConfig(
+            imports=[
+                f"{__name__}.{ov.factory.__name__}"
+                for ov in _REGISTRY.values()
+                if ov.origin_module == __name__
+            ]
+        )
 
     def test_register_and_apply(self):
-        @override("test_swap", target=ComponentA.Config, description="test swap")
+        @override(target=ComponentA.Config, description="test swap")
         def swap_a_to_b(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=256)
 
-        self.assertIn("test_swap", _REGISTRY)
+        self.assertIn(f"{__name__}.swap_a_to_b", _REGISTRY)
 
         parent_cfg = ParentComponent.Config()
         replacements = apply_overrides(self._imports(), parent_cfg)
@@ -129,7 +136,7 @@ class TestOverride(unittest.TestCase):
             self.assertIsInstance(child_cfg, ComponentB.Config)
 
     def test_fqns_glob(self):
-        @override("by_glob", target=ComponentA.Config, fqns=["children.*"])
+        @override(target=ComponentA.Config, fqns=["children.*"])
         def by_glob(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
@@ -142,7 +149,7 @@ class TestOverride(unittest.TestCase):
             self.assertIsInstance(child_cfg, ComponentB.Config)
 
     def test_fqns_glob_list(self):
-        @override("by_globs", target=ComponentA.Config, fqns=["child", "nomatch.*"])
+        @override(target=ComponentA.Config, fqns=["child", "nomatch.*"])
         def by_globs(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
@@ -156,11 +163,11 @@ class TestOverride(unittest.TestCase):
 
     def test_same_class_disjoint_fqns_ok(self):
         # Two overrides of the SAME class, but disjoint FQNs -> no conflict.
-        @override("on_child", target=ComponentA.Config, fqns=["child"])
+        @override(target=ComponentA.Config, fqns=["child"])
         def on_child(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=1)
 
-        @override("on_children", target=ComponentA.Config, fqns=["children.*"])
+        @override(target=ComponentA.Config, fqns=["children.*"])
         def on_children(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=2)
 
@@ -173,7 +180,7 @@ class TestOverride(unittest.TestCase):
             self.assertEqual(child_cfg.extra, 2)
 
     def test_exact_target_skips_subclasses(self):
-        @override("exact_a", target=ComponentA.Config, exact=True)
+        @override(target=ComponentA.Config, exact=True)
         def exact_a(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=10)
 
@@ -193,11 +200,11 @@ class TestOverride(unittest.TestCase):
         self.assertIs(type(parent_cfg.children[1]), DerivedComponent.Config)
 
     def test_exact_target_does_not_conflict_with_subclass_override(self):
-        @override("exact_a", target=ComponentA.Config, exact=True)
+        @override(target=ComponentA.Config, exact=True)
         def exact_a(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=10)
 
-        @override("derived", target=DerivedComponent.Config)
+        @override(target=DerivedComponent.Config)
         def derived(cfg: DerivedComponent.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=20)
 
@@ -220,17 +227,17 @@ class TestOverride(unittest.TestCase):
         # ModelSpec) or non-type is rejected at registration.
         with self.assertRaisesRegex(TypeError, "Configurable.Config subclass"):
 
-            @override("bad_target", target=dict)
+            @override(target=dict)
             def bad(cfg):
                 return cfg
 
     def test_conflict_same_node_raises(self):
         # Two overrides claim the same nodes (both target ComponentA, no `where`).
-        @override("swap1", target=ComponentA.Config)
+        @override(target=ComponentA.Config)
         def swap1(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
-        @override("swap2", target=ComponentA.Config)
+        @override(target=ComponentA.Config)
         def swap2(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
@@ -241,11 +248,11 @@ class TestOverride(unittest.TestCase):
     def test_parent_child_disjoint_subtrees_ok(self):
         # A targets the parent class on subtree "a"; B targets the child class
         # on subtree "b". Disjoint nodes -> both apply, no conflict.
-        @override("on_parent", target=ParentComponent.Config, fqns=["a"])
+        @override(target=ParentComponent.Config, fqns=["a"])
         def on_parent(cfg: ParentComponent.Config) -> ComponentB.Config:
             return ComponentB.Config()
 
-        @override("on_child", target=ComponentA.Config, fqns=["b.*"])
+        @override(target=ComponentA.Config, fqns=["b.*"])
         def on_child(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
@@ -261,11 +268,11 @@ class TestOverride(unittest.TestCase):
 
     def test_conflict_nested_node_raises(self):
         # One override claims an ancestor node of another's node.
-        @override("on_parent", target=ParentComponent.Config)
+        @override(target=ParentComponent.Config)
         def on_parent(cfg: ParentComponent.Config) -> ComponentB.Config:
             return ComponentB.Config()  # never built; error is raised first
 
-        @override("on_leaf", target=ComponentA.Config)
+        @override(target=ComponentA.Config)
         def on_leaf(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
@@ -274,7 +281,7 @@ class TestOverride(unittest.TestCase):
             apply_overrides(self._imports(), root_cfg)
 
     def test_provenance_only_listed_modules_apply(self):
-        @override("local", target=ComponentA.Config)
+        @override(target=ComponentA.Config)
         def local(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=256)
 
@@ -284,8 +291,7 @@ class TestOverride(unittest.TestCase):
         def foreign_factory(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim, extra=999)
 
-        _REGISTRY["foreign"] = Override(
-            name="foreign",
+        _REGISTRY["vendor.unlisted.foreign_factory"] = Override(
             target_cls=ComponentA.Config,
             factory=foreign_factory,
             fqns=None,
@@ -302,19 +308,65 @@ class TestOverride(unittest.TestCase):
         self.assertTrue(all("foreign" not in line for line in replacements))
         self.assertTrue(all("local" in line for line in replacements))
 
-    def test_duplicate_name_raises(self):
-        @override("dup", target=ComponentA.Config)
-        def first(cfg):
+    def test_function_target_activates_single_override(self):
+        # ``module.function`` activates only that override; a sibling override in
+        # the same module is registered but not applied.
+        @override(target=ComponentA.Config, fqns=["child"])
+        def swap_child(cfg: ComponentA.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=1)
+
+        @override(target=ComponentA.Config, fqns=["children.*"])
+        def swap_children(cfg: ComponentA.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=2)
+
+        parent_cfg = ParentComponent.Config()
+        replacements = apply_overrides(
+            OverrideConfig(imports=[f"{__name__}.swap_child"]), parent_cfg
+        )
+
+        self.assertEqual(len(replacements), 1)
+        self.assertIsInstance(parent_cfg.child, ComponentB.Config)
+        self.assertEqual(parent_cfg.child.extra, 1)
+        for child_cfg in parent_cfg.children:  # sibling override not applied
+            self.assertIsInstance(child_cfg, ComponentA.Config)
+
+    def test_duplicate_target_raises(self):
+        # Naming the same override twice claims it twice.
+        @override(target=ComponentA.Config)
+        def only(cfg: ComponentA.Config) -> ComponentB.Config:
+            return _to_b(cfg)
+
+        with self.assertRaisesRegex(ValueError, "named by two entries"):
+            apply_overrides(
+                OverrideConfig(imports=[f"{__name__}.only", f"{__name__}.only"]),
+                ParentComponent.Config(),
+            )
+
+    def test_unknown_function_target_raises(self):
+        # A ``module.function`` target that names no registered override is a
+        # mistake, even without kwargs.
+        @override(target=ComponentA.Config)
+        def present(cfg: ComponentA.Config) -> ComponentB.Config:
+            return _to_b(cfg)
+
+        with self.assertRaisesRegex(ValueError, "names no registered"):
+            apply_overrides(
+                OverrideConfig(imports=[f"{__name__}.absent"]),
+                ParentComponent.Config(),
+            )
+
+    def test_duplicate_registration_raises(self):
+        # A function may carry only one @override; registering the same import
+        # path twice raises.
+        @override(target=ComponentA.Config)
+        def dup(cfg):
             return _to_b(cfg)
 
         with self.assertRaisesRegex(ValueError, "already registered"):
-
-            @override("dup", target=ComponentA.Config)
-            def second(cfg):
-                return _to_b(cfg)
+            override(target=ComponentB.Config)(dup)
 
     def test_clear_overrides(self):
-        @override("temp", target=ComponentA.Config)
+        @override(target=ComponentA.Config)
         def temp(cfg):
             return _to_b(cfg)
 
@@ -330,7 +382,7 @@ class TestOverride(unittest.TestCase):
 
     def test_unlisted_imports_is_noop(self):
         # Override exists in the registry but the user lists no imports.
-        @override("present", target=ComponentA.Config)
+        @override(target=ComponentA.Config)
         def present(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
@@ -346,7 +398,7 @@ class TestOverride(unittest.TestCase):
             apply_overrides(override_cfg, parent_cfg)
 
     def test_logging_format(self):
-        @override("fmt_test", target=ComponentA.Config, description="format test")
+        @override(target=ComponentA.Config, description="format test")
         def fmt_swap(cfg: ComponentA.Config) -> ComponentB.Config:
             return _to_b(cfg)
 
@@ -354,8 +406,83 @@ class TestOverride(unittest.TestCase):
         replacements = apply_overrides(self._imports(), parent_cfg)
         for line in replacements:
             self.assertIn("[Override]", line)
-            self.assertIn("fmt_test", line)
+            self.assertIn("fmt_swap", line)
             self.assertIn("->", line)
+
+
+class TestOverrideKwargs(unittest.TestCase):
+    """``override.imports`` entries may carry kwargs forwarded to the factory."""
+
+    def setUp(self):
+        clear_overrides()
+
+    def tearDown(self):
+        clear_overrides()
+
+    def test_same_override_different_kwargs_per_actor(self):
+        # The motivating case: two config trees share one override but pass
+        # different kwargs (e.g. RL trainer vs. generator capacity factor).
+        @override(target=ComponentA.Config, fqns=["child"])
+        def per_actor(cfg: ComponentA.Config, *, extra: int) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=extra)
+
+        target = f"{__name__}.per_actor"
+        trainer_cfg = ParentComponent.Config()
+        generator_cfg = ParentComponent.Config()
+        apply_overrides(OverrideConfig(imports=[(target, {"extra": 1})]), trainer_cfg)
+        apply_overrides(OverrideConfig(imports=[(target, {"extra": 2})]), generator_cfg)
+
+        self.assertEqual(trainer_cfg.child.extra, 1)
+        self.assertEqual(generator_cfg.child.extra, 2)
+
+    def test_bare_string_entry_calls_factory_without_kwargs(self):
+        # A bare-string target (no kwargs) calls the factory with none passed.
+        @override(target=ComponentA.Config, fqns=["child"])
+        def no_kw(cfg: ComponentA.Config, *, extra: int = 9) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=extra)
+
+        parent_cfg = ParentComponent.Config()
+        apply_overrides(OverrideConfig(imports=[f"{__name__}.no_kw"]), parent_cfg)
+        self.assertEqual(parent_cfg.child.extra, 9)
+
+    def test_unknown_kwarg_raises(self):
+        @override(target=ComponentA.Config)
+        def strict_kw(cfg: ComponentA.Config, *, extra: int) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=extra)
+
+        # A kwarg the factory does not accept is a plain TypeError from the call.
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument"):
+            apply_overrides(
+                OverrideConfig(imports=[(f"{__name__}.strict_kw", {"typo": 1})]),
+                ParentComponent.Config(),
+            )
+
+    def test_kwargs_for_no_matching_override_raises(self):
+        # kwargs on a target naming no registered override is a misconfiguration,
+        # not a silent no-op (there is no factory 'nope' in that module).
+        with self.assertRaisesRegex(ValueError, "names no registered"):
+            apply_overrides(
+                OverrideConfig(imports=[("torchtitan.config.override.nope", {"x": 1})]),
+                ParentComponent.Config(),
+            )
+
+    def test_parse_cli_imports(self):
+        from torchtitan.config.override import parse_cli_imports
+
+        # Plain modules (comma- or space-separated) and modules whose kwargs are
+        # attached to the name as ``module=<json>`` -- the CLI grammar backing
+        # ``--override.imports``.
+        self.assertEqual(parse_cli_imports(["a.b,c.d"]), ["a.b", "c.d"])
+        self.assertEqual(
+            parse_cli_imports(['mod={"block_size": 256, "flag": null}']),
+            [("mod", {"block_size": 256, "flag": None})],
+        )
+        self.assertEqual(
+            parse_cli_imports(["plain", 'mod={"x": 1}']),
+            ["plain", ("mod", {"x": 1})],
+        )
+        with self.assertRaisesRegex(ValueError, "must be a JSON object"):
+            parse_cli_imports(["mod=123"])
 
 
 class TestDerive(unittest.TestCase):
@@ -451,13 +578,15 @@ class TestModelSpecTraversal(unittest.TestCase):
         self.assertEqual(comp_fqns, ["model_spec.model.block"])
 
     def test_component_override_through_model_spec(self):
-        @override("blk", target=ComponentA.Config)
+        @override(target=ComponentA.Config)
         def blk(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim)
 
         spec = _make_spec()
         root = _TrainerCfgHolder.Config(model_spec=spec)
-        replacements = apply_overrides(OverrideConfig(imports=[__name__]), root)
+        replacements = apply_overrides(
+            OverrideConfig(imports=[f"{__name__}.blk"]), root
+        )
         self.assertEqual(len(replacements), 1)
         self.assertIsInstance(spec.model.block, ComponentB.Config)
 
@@ -465,17 +594,20 @@ class TestModelSpecTraversal(unittest.TestCase):
         # Regression: a whole-model override (FQN "model_spec.model") and a
         # component override ("model_spec.model.block") must be flagged as an
         # ancestor conflict, not silently lose the component override.
-        @override("whole_model", target=_Model.Config)
+        @override(target=_Model.Config)
         def whole(cfg: _Model.Config) -> _Model.Config:
             return _Model.Config()
 
-        @override("blk", target=ComponentA.Config)
+        @override(target=ComponentA.Config)
         def blk(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim)
 
         root = _TrainerCfgHolder.Config(model_spec=_make_spec())
         with self.assertRaisesRegex(ValueError, "ancestor"):
-            apply_overrides(OverrideConfig(imports=[__name__]), root)
+            apply_overrides(
+                OverrideConfig(imports=[f"{__name__}.whole", f"{__name__}.blk"]),
+                root,
+            )
 
 
 if __name__ == "__main__":

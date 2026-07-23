@@ -87,6 +87,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
+            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -146,6 +147,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
+            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -213,6 +215,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
+    config.async_loop.window_fifo_fraction = 1 / config.async_loop.max_active_rollout_groups
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -242,6 +245,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=5,
+            window_fifo_fraction=1 / 20,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -301,6 +305,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
             num_prompts_per_train_step=5,
+            window_fifo_fraction=1 / 20,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -365,6 +370,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
             num_prompts_per_train_step=5,
+            window_fifo_fraction=1 / 5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -428,6 +434,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
+            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -482,6 +489,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
+            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -541,6 +549,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
             num_prompts_per_train_step=8,
+            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -607,20 +616,27 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     EXPAND layout, so this generator enables CUDA graph capture.
 
     Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
-    host-synced, backward-able DeepEP path), while the generator applies the per-actor
-    ``deepep_inference`` override (``generator.override``) to its own copy, switching its
-    DeepEP dispatchers to the cudagraph-able EXPAND layout (``cudagraphable=True``). The
-    override touches only the generator's spec, so the trainer and weight sync are unaffected.
-    (This mirrors how converters are config-time/shared while overrides are per-actor.)
+    host-synced, backward-able DeepEP path), while the generator applies per-actor
+    overrides (``generator.override``) to its own copy (``fused_swiglu`` +
+    ``deepep_override`` with ``cudagraphable=True``) to switch its dispatchers to the
+    cudagraph-able EXPAND layout. The overrides touch only the generator's spec, so the
+    trainer and weight sync are unaffected.
     """
     config = rl_grpo_qwen3_moe_debug_varlen()
     config.model_spec = model_registry(
         "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
     )
-    # Generator-only override -> DeepEP cudagraph-able EXPAND dispatch; trainer keeps compact.
+    # Generator-only overrides -> cudagraph-able DeepEP EXPAND dispatch; trainer keeps compact.
     # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
     config.generator.override = OverrideConfig(
-        imports=["torchtitan.distributed.deepep.inference_override"]
+        imports=[
+            "torchtitan.overrides.fused_swiglu.fused_swiglu",
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+            (
+                "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+                {"cudagraphable": True},
+            ),
+        ]
     )
     config.generator.cudagraph = VLLMCudagraphConfig(
         enable=True, mode="FULL_AND_PIECEWISE"
@@ -631,7 +647,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     #    length -- it is effectively the longest input sequence length the engine batches
     #    (vLLM's 2048 default is just a stand-in for knowing that).
     #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
-    #    deepep_inference override. For a dropless model (highest memory) set it to
+    #    deepep_override. For a dropless model (highest memory) set it to
     #    longest_sequence_length // sp == max_num_batched_tokens // sp; lower it gradually to
     #    save memory (trading off dropped tokens).
     config.generator.max_num_batched_tokens = 2048
@@ -643,7 +659,9 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         moe = getattr(block, "moe", None)
         if moe is None:
             continue
-        moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
+        moe.routed_experts.token_dispatcher.num_max_tokens_per_rank = (
+            num_max_tokens_per_rank
+        )
     return config
 
 
@@ -674,6 +692,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
             num_prompts_per_train_step=8,
+            window_fifo_fraction=1 / 8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -746,6 +765,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_prompts_per_train_step=8,
+            window_fifo_fraction=1 / 32,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -799,7 +819,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     """Qwen3-30B-A3B GRPO with throughput overrides (8 GPUs: 4 gen + 4 train).
 
     Same model/parallelism/data as ``rl_grpo_qwen3_30b_a3b_varlen``, but applies
-    two opt-in overrides (per-actor) to both the trainer and generator:
+    opt-in overrides (per-actor) to both the trainer and generator:
 
     * ``fused_swiglu`` fuses the dense and grouped-experts gate+up projections
       into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
@@ -815,8 +835,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # OverrideConfig instances keep the trainer and generator overrides
     # independent (they run in different actors).
     perf_imports = [
-        "torchtitan.overrides.fused_swiglu",
-        "torchtitan.overrides.helion_rope",
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(
         config.trainer, override=OverrideConfig(imports=list(perf_imports))
@@ -851,6 +872,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
             num_prompts_per_train_step=8,
+            window_fifo_fraction=1 / 8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(

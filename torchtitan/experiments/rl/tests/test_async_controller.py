@@ -208,10 +208,11 @@ def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
             trainer_policy_version=4,
             min_policy_versions=[0],
             target_offpolicy_steps=3,
+            max_offpolicy_steps=3,
         )
 
 
-def test_compute_policy_age_metrics_uses_hard_off_policy_limit() -> None:
+def test_compute_policy_age_metrics_uses_hard_offpolicy_limit() -> None:
     metrics = compute_policy_age_metrics(
         trainer_policy_version=4,
         min_policy_versions=[0],
@@ -251,13 +252,13 @@ async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
     await buffer.finalize_work(RolloutGroup(group_id=group_id, rollouts=[]))
 
 
-def test_derive_window_size_from_off_policy_limit() -> None:
-    # P=3, S=2, M=3 -> W = P * (M - S) + 1 = 4.
+def test_derive_window_size_from_window_fifo_fraction() -> None:
+    # P=3, S=2 -> B=9.
     assert (
         derive_window_size(
             num_prompts_per_train_step=3,
             target_offpolicy_steps=2,
-            max_offpolicy_steps=3,
+            window_fifo_fraction=4 / 9,
         )
         == 4
     )
@@ -265,7 +266,7 @@ def test_derive_window_size_from_off_policy_limit() -> None:
         derive_window_size(
             num_prompts_per_train_step=3,
             target_offpolicy_steps=2,
-            max_offpolicy_steps=2,
+            window_fifo_fraction=1 / 9,
         )
         == 1
     )
@@ -273,7 +274,7 @@ def test_derive_window_size_from_off_policy_limit() -> None:
         derive_window_size(
             num_prompts_per_train_step=3,
             target_offpolicy_steps=2,
-            max_offpolicy_steps=5,
+            window_fifo_fraction=1.0,
         )
         == 9
     )
@@ -281,7 +282,7 @@ def test_derive_window_size_from_off_policy_limit() -> None:
         derive_window_size(
             num_prompts_per_train_step=8,
             target_offpolicy_steps=3,
-            max_offpolicy_steps=7,
+            window_fifo_fraction=1.0,
         )
         == 32
     )

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Run-ahead buffer of RolloutGroupWork shared between the data-input, rollout, and batcher loops.
+"""Active work buffer shared between the data-input, rollout, and batcher loops.
 NOTE: The buffer holds work slots, and not the finalized RolloutGroups necessarily.
 
 """
@@ -12,6 +12,7 @@ NOTE: The buffer holds work slots, and not the finalized RolloutGroups necessari
 import asyncio
 import collections
 import enum
+import math
 from dataclasses import dataclass, field
 
 from torchtitan.config import Configurable
@@ -24,31 +25,25 @@ def derive_window_size(
     *,
     num_prompts_per_train_step: int,
     target_offpolicy_steps: int,
-    max_offpolicy_steps: int,
+    window_fifo_fraction: float,
 ) -> int:
-    """Derive the fixed FIFO look-ahead window from the hard off-policy-step bound.
+    """Derive the fixed FIFO look-ahead window from the configured fraction.
 
     Symbols:
         ``P``: prompts per train step (``num_prompts_per_train_step``).
-        ``S``: target mean off-policy steps (``target_offpolicy_steps``).
-        ``M``: maximum off-policy steps tolerated; larger values allow a wider FIFO
-        window for better performance (``max_offpolicy_steps``).
+        ``S``: target mean offpolicy steps (``target_offpolicy_steps``).
+        ``f``: fraction of the active buffer used as the FIFO window
+            (``window_fifo_fraction``).
         ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
-        ``W``: FIFO look-ahead window size to derive.
+        ``W``: FIFO look-ahead window size, ``W = floor(f * B)``.
 
-    For a fixed window size ``W``, the worst case number of off-policy steps is
-    ``(B + W - 2) // P``. Solving for the largest safe look-ahead window gives
-    ``P * (M - S) + 1``. The final window is capped at ``B`` because looking
-    beyond the active buffer has no additional effect.
+    For a fixed window size ``W``, the worst case number of offpolicy steps is
+    ``(B + W - 2) // P``.
     """
     max_active_rollout_groups = (
         target_offpolicy_steps + 1
     ) * num_prompts_per_train_step
-    window_size = (
-        num_prompts_per_train_step * (max_offpolicy_steps - target_offpolicy_steps)
-        + 1
-    )
-    return min(window_size, max_active_rollout_groups)
+    return math.floor(window_fifo_fraction * max_active_rollout_groups)
 
 
 class _RolloutGroupWorkState(enum.Enum):
@@ -86,10 +81,9 @@ class RolloutGroupWorkBuffer(Configurable):
     """Run-ahead buffer of RolloutGroupWork shared by the data-input, rollout, and batcher loops.
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
-    run-ahead at `max_active_rollout_groups` active slots; the batcher takes finalized groups within
-    a fixed look-ahead window anchored at the oldest entry. Users get strict FIFO by leaving
-    `max_offpolicy_steps=-1` or setting `max_offpolicy_steps == target_offpolicy_steps`,
-    which derives `window_size=1`.
+    the pipeline at `max_active_rollout_groups` active slots; the batcher takes finalized groups within
+    a fixed look-ahead window anchored at the oldest entry. The controller derives
+    `window_size` from `window_fifo_fraction`; strict FIFO means the derived window is 1.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -148,7 +142,7 @@ class RolloutGroupWorkBuffer(Configurable):
         self._condition = asyncio.Condition()
         self._closed = False
         # TODO(async-rl): warm start — admit a small number of groups at first and grow the effective cap as the
-        # batcher consumes, so a cold start doesn't fill the whole off-policy window at policy version 0.
+        # batcher consumes, so a cold start doesn't fill the whole FIFO window at policy version 0.
 
     @property
     def window_size(self) -> int:
@@ -159,7 +153,7 @@ class RolloutGroupWorkBuffer(Configurable):
         return self._active_rollout_groups < self._max_active_rollout_groups
 
     async def wait_for_slot(self) -> bool:
-        """Wait until one more rollout group may enter the active off-policy window.
+        """Wait until one more rollout group may enter the active buffer.
 
         Example:
             # False means the buffer was closed, so the data input loop exits.
@@ -218,8 +212,8 @@ class RolloutGroupWorkBuffer(Configurable):
 
         The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
         window stay blocked even if they are finalized, so taking non-head groups does not slide
-        the window. Users get strict FIFO by leaving `max_offpolicy_steps=-1` or setting
-        `max_offpolicy_steps == target_offpolicy_steps`, which derives `window_size=1`.
+        the window. The controller derives `window_size` from `window_fifo_fraction`;
+        strict FIFO means the derived window is 1.
 
         Example:
             # window_size=1: head g0 still INFLIGHT, g1 FINALIZED -> waits for g0

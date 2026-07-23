@@ -89,17 +89,27 @@ class _FakeConfigManager:
         return self.config
 
 
-def test_async_loop_config_resolves_default_max_offpolicy_steps() -> None:
-    async_loop = AsyncLoopConfig(target_offpolicy_steps=2)
-    assert async_loop.max_offpolicy_steps == 2
+def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
+    async_loop = AsyncLoopConfig(
+        num_prompts_per_train_step=3,
+        target_offpolicy_steps=2,
+        window_fifo_fraction=4 / 9,
+    )
+    assert async_loop.max_active_rollout_groups == 9
+    assert async_loop.window_size == 4
+    assert async_loop.max_offpolicy_steps == 3
 
 
-def test_async_loop_config_rejects_max_offpolicy_steps_above_window_bound() -> None:
-    with pytest.raises(ValueError, match="max_offpolicy_steps"):
+def test_async_loop_config_rejects_invalid_window_fifo_fraction() -> None:
+    with pytest.raises(ValueError, match="window_fifo_fraction"):
+        AsyncLoopConfig(window_fifo_fraction=0)
+    with pytest.raises(ValueError, match="window_fifo_fraction"):
+        AsyncLoopConfig(window_fifo_fraction=1.1)
+    with pytest.raises(ValueError, match="derived window_size"):
         AsyncLoopConfig(
-            num_prompts_per_train_step=3,
-            target_offpolicy_steps=2,
-            max_offpolicy_steps=6,
+            num_prompts_per_train_step=8,
+            target_offpolicy_steps=0,
+            window_fifo_fraction=0.01,
         )
 
 

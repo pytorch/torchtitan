@@ -23,9 +23,9 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_experts_config,
     make_ffn_config,
     make_moe_config,
+    make_routed_experts_config,
     make_router_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -231,7 +231,7 @@ def _build_dsv3_layers(
                     route_scale=router_route_scale,
                     route_norm=router_route_norm,
                 ),
-                experts=make_experts_config(
+                routed_experts=make_routed_experts_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim,
                     num_experts=num_experts,

@@ -169,7 +169,7 @@ def compute_policy_age_metrics(
     trainer_policy_version: int,
     min_policy_versions: list[int],
     target_offpolicy_steps: int,
-    max_offpolicy_steps: int | None = None,
+    max_offpolicy_steps: int,
 ) -> list[m.Metric]:
     """Age of each packed training sample at the moment the trainer consumes the batch.
 
@@ -179,10 +179,9 @@ def compute_policy_age_metrics(
     Args:
         trainer_policy_version: Policy version that will consume this batch.
         min_policy_versions: Oldest sampled policy version for each packed training sample.
-        target_offpolicy_steps: Target mean offpolicy steps; used as the default
-            consume-time limit when ``max_offpolicy_steps`` is not provided.
-        max_offpolicy_steps: Hard consume-time offpolicy step limit. Defaults to
-            ``target_offpolicy_steps`` for strict FIFO.
+        target_offpolicy_steps: Target mean offpolicy steps.
+        max_offpolicy_steps: Hard consume-time offpolicy step limit derived from
+            ``window_fifo_fraction``.
 
     Example:
         # trainer at v=10; training samples' oldest versions [8, 9] -> ages [2, 1]
@@ -190,6 +189,7 @@ def compute_policy_age_metrics(
             trainer_policy_version=10,
             min_policy_versions=[8, 9],
             target_offpolicy_steps=3,
+            max_offpolicy_steps=3,
         )
         # -> train_batch/policy_age mean 1.5, train_batch/policy_age_max 2
     """
@@ -198,15 +198,12 @@ def compute_policy_age_metrics(
         for min_policy_version in min_policy_versions
     ]
     max_policy_age = max(policy_ages, default=0)
-    policy_age_limit = (
-        target_offpolicy_steps if max_offpolicy_steps is None else max_offpolicy_steps
-    )
-    if max_policy_age > policy_age_limit:
+    if max_policy_age > max_offpolicy_steps:
         raise RuntimeError(
             "rollout backpressure admitted stale training data: "
             f"max_policy_age={max_policy_age}, "
             f"target_offpolicy_steps={target_offpolicy_steps}, "
-            f"max_offpolicy_steps={policy_age_limit}, "
+            f"max_offpolicy_steps={max_offpolicy_steps}, "
             f"trainer_policy_version={trainer_policy_version}"
         )
     return [
