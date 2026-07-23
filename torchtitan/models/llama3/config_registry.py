@@ -9,7 +9,10 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
-from torchtitan.components.quantization import Float8LinearConverter
+from torchtitan.components.quantization import (
+    Float8LinearConverter,
+    NVFP4LinearConverter,
+)
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -83,6 +86,26 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_nvfp4() -> Trainer.Config:
+    config = llama3_debugmodel()
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    # fqns=["layers"] converts every in-layer Linear (attention + feed_forward)
+    # while leaving the lm_head stock: NVFP4 requires each GEMM dim divisible by
+    # 128, which the vocab projection does not satisfy.
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=["layers"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
 def llama3_debugmodel_float8_emulate_lora() -> Trainer.Config:
     from torchtitan.components.lora import LoRAConverter
 
@@ -145,6 +168,24 @@ def llama3_8b() -> Trainer.Config:
             steps=1200,
         ),
     )
+
+
+def llama3_8b_nvfp4() -> Trainer.Config:
+    config = llama3_8b()
+    # Enable compile so NVFP4's dynamic quantization runs at competitive perf.
+    config.compile = CompileConfig(enable=True, components=["model"])
+    # fqns=["layers"] converts every in-layer Linear while leaving the lm_head
+    # stock (NVFP4 requires each GEMM dim divisible by 128; vocab does not).
+    config.model_spec = model_registry(
+        "8B",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=["layers"],
+                model_compile_enabled=True,
+            ),
+        ],
+    )
+    return config
 
 
 def llama3_70b() -> Trainer.Config:
