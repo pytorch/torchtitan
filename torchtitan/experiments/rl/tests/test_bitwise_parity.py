@@ -70,6 +70,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
+    get_first_inner_attention_config,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
@@ -207,18 +208,7 @@ def build_inference_engine(
     """
     gen_config = config.generator
 
-    # Hybrid models (e.g. Qwen3.5) interleave linear-attention layers that have no
-    # ``.attention``; find the first full-attention layer to detect the flex backend
-    # (no full-attention layer -> not flex).
-    first_attn = next(
-        (
-            layer.attention
-            for layer in config.model_spec.model.layers
-            if getattr(layer, "attention", None) is not None
-        ),
-        None,
-    )
-    inner_attn = first_attn.inner_attention if first_attn is not None else None
+    inner_attn = get_first_inner_attention_config(config.model_spec.model)
     use_flex = isinstance(inner_attn, FlexAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
@@ -263,9 +253,8 @@ def build_inference_engine(
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
-        # GDN (linear-attention) models auto-promote BOTH paged states (conv + ssm)
-        # to fp32 under batch-invariant mode inside VLLMGatedDeltaNetCore, so no
-        # mamba cache-dtype engine args are needed here for parity.
+        # GDN promotes its paged conv+ssm states to fp32 under batch-invariant mode
+        # inside VLLMGatedDeltaNetCore, so no mamba cache-dtype engine args are needed.
     )
 
     from torchtitan.tools.utils import has_cuda_capability
@@ -696,10 +685,8 @@ class BitwiseParityTestBase(unittest.TestCase):
                 initial_load_path=config.hf_assets_path,
             )
 
-        # FULL_AND_PIECEWISE runs the attention/GDN cores eager via breakable
-        # cudagraph, whose @eager_break_during_capture decorators read
-        # VLLM_USE_BREAKABLE_CUDAGRAPH when the cores are imported. register_to_vllm
-        # below triggers that import (the rl package defers it), so set the env first.
+        # The graph-break decorator reads this env var at import time, and
+        # register_to_vllm below triggers that import, so set it first.
         gen_cudagraph = config.generator.cudagraph
         if gen_cudagraph.enable and gen_cudagraph.mode == "FULL_AND_PIECEWISE":
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
@@ -874,12 +861,7 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
 
 
 class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
-    """Bitwise parity for Qwen3.5 (hybrid GatedDeltaNet + full attention) at TP=2.
-
-    Exercises the GDN unified vLLM path head-sharded: trainer (dp_shard=1, TP=2,
-    SP off) and generator (dp=1, TP=2) run on the same 2 ranks. Set HF_ASSETS_PATH
-    to a local Qwen3.5 checkpoint.
-    """
+    """Test Qwen3.5 trainer/generator parity with head-sharded GDN at TP=2."""
 
     __test__ = True
     config_fn = staticmethod(rl_grpo_qwen3_5_9b_varlen_batch_invariant)

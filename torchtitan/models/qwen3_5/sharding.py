@@ -98,18 +98,9 @@ def set_qwen35_sharding_config(
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all Qwen3.5 sub-configs.
-
-    With ``enable_sp`` (training), decoder layers, norm and lm_head run
-    sequence-parallel (Shard(1)); tok_embeddings output stays Replicate so vision
-    scatter and MRoPE can access the full sequence, and the first attention block
-    restores SP. Without it (the vLLM generator, which processes the full sequence
-    per rank and has no SP), all decoder activations flow Replicate.
-    """
-    # SP (or Replicate) on norm, lm_head, and layers. Each full-attention layer
-    # owns its rope; its cache buffer is Replicate in _set_full_attention_sharding.
+    """Fill ``sharding_config`` on all Qwen3.5 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
-    # Override tok_embeddings: output Replicate (not Shard(1)) for vision scatter
+    # Vision scatter needs the full embedding sequence on every TP rank.
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
@@ -119,9 +110,7 @@ def set_qwen35_sharding_config(
         local_map=LocalMapConfig(in_grad_placements=None),
     )
     _set_vision_encoder_sharding(config.vision_encoder)
-    # The embedding path stays replicated through multimodal vision scatter. Under
-    # SP the first attention block restores Shard(1); later block inputs are SP.
-    # Without SP every block input is Replicate.
+    # The first layer restores sequence parallelism after replicated vision scatter.
     first_layer_input_layout = dense_activation_placement(tp=spmd.R)
     layer_input_layout = (
         dense_sequence_parallel_placement()
@@ -282,7 +271,7 @@ def _set_full_attention_sharding(
     attention_cfg.wq.sharding_config = colwise_config()
     attention_cfg.wk.sharding_config = colwise_config()
     attention_cfg.wv.sharding_config = colwise_config()
-    # RowwiseParallel: reduce-scatter to Shard(1) under SP, else all-reduce
+    # RowwiseParallel out_proj: reduce-scatter to Shard(1) under SP, else all-reduce
     # to Replicate.
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
@@ -298,18 +287,12 @@ def _set_deltanet_sharding(
     attention_input_layout: SpmdLayout,
     enable_sp: bool,
 ) -> None:
-    """Sharding for GatedDeltaNet: head-sharded TP on projections.
+    """Configure head-sharded TP for GatedDeltaNet.
 
-    Input is allgathered (Shard(1)→Replicate) so that the recurrence
-    sees the full sequence. Projections are ColwiseParallel (head-sharded
-    output). The FLA kernel runs on local tensors via local_map.
-    out_proj is RowwiseParallel (reduce-scatter back to Shard(1)).
-
-    A_log and dt_bias are per-head parameters, Shard(0) on TP.
-    Conv1d weights are Shard(0) (out-channels); the DTensor->local conversion
-    for the depthwise conv is handled in the model's ``_causal_conv``.
+    Input projections are ColwiseParallel (head-sharded output) and out_proj is
+    RowwiseParallel. Conv weights and per-head A_log/dt_bias are Shard(0). The
+    recurrence runs on rank-local heads via a single local_map boundary.
     """
-    # ColwiseParallel on all input projections
     for name in (
         "in_proj_q",
         "in_proj_k",
@@ -320,23 +303,23 @@ def _set_deltanet_sharding(
     ):
         getattr(deltanet_cfg, name).sharding_config = colwise_config()
 
-    # Depthwise Conv1d weights: Shard(0) on out-channels (head-sharded).
+    # Depthwise conv weights: Shard(0) on out-channels (head-sharded).
     deltanet_cfg.conv_q.sharding_config = _conv_weight_sharding()
     deltanet_cfg.conv_k.sharding_config = _conv_weight_sharding()
     deltanet_cfg.conv_v.sharding_config = _conv_weight_sharding()
 
-    # RowwiseParallel on output projection: reduce-scatter to Shard(1) under SP,
-    # else all-reduce to Replicate.
+    # RowwiseParallel out_proj: reduce-scatter to Shard(1) under SP, else all-reduce
+    # to Replicate.
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=enable_sp)
 
-    # Head-sharded TP placements, reused by the gated norm, the core, and the
-    # module state: activations Shard(2) (feature/head dim), per-head params
-    # Shard(0), and Replicate.
+    # Head-sharded TP placements reused by the norm, core, and module state:
+    # activations Shard(2) on the head dim (keeps DP/CP/TP on distinct dims),
+    # per-head params Shard(0), everything else Replicate. The core computes on
+    # rank-local heads after a single local_map boundary.
     activation_placement = dense_activation_placement(tp=spmd.S(2))
     parameter_placement = dense_param_placement(tp=spmd.S(0))
     replicated_placement = dense_param_placement(tp=spmd.R)
 
-    # RMSNormGated: per-head norm, weight Replicate, activations Shard(2).
     deltanet_cfg.norm.sharding_config = ShardingConfig(
         state_shardings={"weight": replicated_placement},
         in_src_shardings={"x": activation_placement, "gate": activation_placement},
@@ -344,11 +327,6 @@ def _set_deltanet_sharding(
         out_dst_shardings=activation_placement,
     )
 
-    # GatedDeltaCore: the single local_map DTensor->local boundary for the head-
-    # parallel conv + gated-delta recurrence. 3D [B, L, ...] activations are Shard(2)
-    # on the feature/head dim (so DP/CP/TP stay on distinct dims); the fused conv
-    # weight and per-head A_log/dt_bias are Shard(0); cu_seqlens is Replicate (every
-    # arg must carry a placement here). The depthwise conv has no bias.
     deltanet_cfg.core.sharding_config = ShardingConfig(
         in_dst_shardings={
             "mixed_qkv_TC": activation_placement,
@@ -361,15 +339,15 @@ def _set_deltanet_sharding(
         },
         out_src_shardings=activation_placement,
         local_map=LocalMapConfig(
+            # cu_seqlens has no gradient, but local_map still requires its
+            # replicated placement because it is a DTensor input.
             in_grad_placements=(
-                activation_placement,  # mixed_qkv_TC
-                activation_placement,  # a_THv
-                activation_placement,  # b_THv
-                parameter_placement,  # conv_weight
-                parameter_placement,  # A_log
-                parameter_placement,  # dt_bias
-                # cu_seqlens: Replicate DTensor; no grad flows, but local_map
-                # still requires a placement for a DTensor input.
+                activation_placement,
+                activation_placement,
+                activation_placement,
+                parameter_placement,
+                parameter_placement,
+                parameter_placement,
                 replicated_placement,
             ),
         ),

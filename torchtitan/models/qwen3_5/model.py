@@ -273,7 +273,7 @@ class GatedDeltaKernel(Module):
         return result[0]
 
 
-class GatedDeltaCore(Module):
+class GatedDeltaNetCore(Module):
     """Dense training GDN core: fused conv + gate + gated-delta recurrence.
 
     Parameterless; shares the flattened ``[T, ...]`` + ``cu_seqlens`` call
@@ -407,7 +407,7 @@ class GatedDeltaNet(Module):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        core: GatedDeltaCore.Config
+        core: GatedDeltaNetCore.Config
         norm: RMSNormGated.Config
         out_proj: Linear.Config
 
@@ -441,7 +441,7 @@ class GatedDeltaNet(Module):
         self.key_dim = config.in_proj_q.out_features
         self.value_dim = value_dim
         # The stateful conv + gated-delta recurrence live in a swappable core.
-        # Training: a dense GatedDeltaCore (built here). Inside vLLM the generation
+        # Training: a dense GatedDeltaNetCore (built here). Inside vLLM the generation
         # wrapper (_attach_gdn_cores) replaces it with a paged-cache
         # VLLMGatedDeltaNetCore -- same call signature -- for the unified model path.
         self.core = config.core.build()
@@ -490,7 +490,7 @@ class GatedDeltaNet(Module):
 
           1. Input projections (compilable, captured in cudagraph).
           2. Core: conv + gated-delta recurrence via ``self.core`` -- a dense
-             ``GatedDeltaCore`` in training, or the paged ``VLLMGatedDeltaNetCore``
+             ``GatedDeltaNetCore`` in training, or the paged ``VLLMGatedDeltaNetCore``
              custom op inside vLLM (the eager graph-split boundary).
           3. Output gating + projection (compilable, captured in cudagraph).
 

@@ -169,18 +169,12 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             AttentionType.ENCODER,
         ), "Encoder-only attention not supported yet."
 
-        # vLLM #44455 packs K and V into the content dim: the cache is stored as
-        # (num_blocks, num_kv_heads, block_size, 2 * head_size). Undo the packing
-        # to (num_blocks, block_size, num_kv_heads, head_size) per tensor.
         if kv_cache.dim() == 5 and kv_cache.shape[1] == 2:
-            # Separate-K/V layout (num_blocks, 2, block_size, num_kv_heads, head_size),
-            # produced by the hybrid KV-cache allocator: K and V are split on dim 1,
-            # each already (num_blocks, block_size, num_kv_heads, head_size).
+            # vLLM's hybrid KV-cache allocator stores K and V separately on dim 1.
             key_cache, value_cache = kv_cache[:, 0], kv_cache[:, 1]
         else:
-            # vLLM #44455 packs K and V into the content dim: the cache is stored as
-            # (num_blocks, num_kv_heads, block_size, 2 * head_size). Undo the packing
-            # to (num_blocks, block_size, num_kv_heads, head_size) per tensor.
+            # vLLM #44455 packs K and V into the content dimension. Restore the
+            # layout expected by varlen attention before splitting them.
             key_cache, value_cache = kv_cache.transpose(1, 2).split(
                 self.head_size, dim=-1
             )

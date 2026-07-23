@@ -124,6 +124,9 @@ from torchtitan.experiments.rl.controller_metrics import (
     MetricsTimer,
 )
 from torchtitan.experiments.rl.losses import GRPOLoss
+from torchtitan.experiments.rl.models.vllm_registry import (
+    get_first_inner_attention_config,
+)
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import RolloutGroup
@@ -339,7 +342,7 @@ class Controller(Configurable):
             ):
                 from torchtitan.models.common.attention import FlexAttention
 
-                inner_attn = self.model_spec.model.layers[0].attention.inner_attention
+                inner_attn = get_first_inner_attention_config(self.model_spec.model)
                 if not isinstance(inner_attn, FlexAttention.Config):
                     raise ValueError(
                         "cudagraph mode 'FULL' is only supported with the flex "

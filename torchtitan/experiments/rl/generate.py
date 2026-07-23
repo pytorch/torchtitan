@@ -34,6 +34,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
+    get_first_inner_attention_config,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
@@ -108,18 +109,7 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    # Hybrid models (e.g. Qwen3.5) interleave full-attention and linear-attention
-    # (GatedDeltaNet) layers, so layer 0 may have no ``attention`` (its mixer is
-    # ``delta_net``). Scan for the first full-attention layer to pick the vLLM
-    # attention backend.
-    inner_attn = next(
-        (
-            layer.attention.inner_attention
-            for layer in model_spec.model.layers
-            if getattr(layer, "attention", None) is not None
-        ),
-        None,
-    )
+    inner_attn = get_first_inner_attention_config(model_spec.model)
     if inner_attn is None:
         raise ValueError("No full-attention layer found in the model spec.")
     if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):

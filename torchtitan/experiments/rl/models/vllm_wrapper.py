@@ -349,7 +349,7 @@ class VLLMModelWrapper(Module):
             if getattr(block, "full_attn", True):
                 continue
             gdn = getattr(block, "attn", None)
-            # ``core`` is the swappable compute slot (dense GatedDeltaCore in
+            # ``core`` is the swappable compute slot (dense GatedDeltaNetCore in
             # training); replace it with the paged generation core here.
             if gdn is None or not hasattr(gdn, "core"):
                 continue

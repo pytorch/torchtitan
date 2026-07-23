@@ -217,8 +217,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--config rl_grpo_qwen3_5_debug_varlen",
                     "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
-                    # Hybrid GDN debug model (2 K/V heads, 2 GDN key heads) -> TP<=2.
-                    # trainer FSDP=2 x TP=2 (4 GPUs) + 2 generators TP=2 (4 GPUs) = 8.
+                    # The debug model has two GDN key heads, so TP cannot exceed 2.
                     "--trainer.parallelism.data_parallel_shard_degree 2",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
@@ -234,7 +233,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO Qwen3.5 hybrid GDN varlen TP=2 (unified GDN gen path)",
+            "RL GRPO Qwen3.5 hybrid GDN varlen TP=2",
             "rl_grpo_qwen3_5_debug_tp2",
             ngpu=8,
         ),
@@ -245,9 +244,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--config rl_grpo_qwen3_5_debug_varlen_batch_invariant",
                     "--async-loop.num-training-steps 3",
                     "--hf_assets_path tests/assets/tokenizer",
-                    # On-policy (max-offpolicy-steps 0) + batch-invariant: exercises
-                    # the GDN unified path bitwise end-to-end. TP=2 (debug head cap);
-                    # trainer FSDP=2 x TP=2 + 2 generators TP=2 = 8 GPUs.
+                    # The debug model has two GDN key heads, so TP cannot exceed 2.
                     "--trainer.parallelism.data_parallel_shard_degree 2",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
