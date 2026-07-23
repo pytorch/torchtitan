@@ -47,6 +47,7 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
@@ -230,6 +231,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.model_spec is not None
         ), "model_spec must be set before creating Trainer"
         model_spec = config.model_spec
+        self.model_metrics_fn = model_spec.metrics_fn
 
         device_module, device_type = utils.device_module, utils.device_type
         # pyrefly: ignore [read-only]
@@ -263,6 +265,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
         else:
             batch_degree, batch_rank = 1, 0
+
+        if config.training.global_batch_size < 0:
+            config.training.global_batch_size = (
+                config.training.local_batch_size * batch_degree
+            )
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
@@ -349,10 +356,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = config.training.local_batch_size * batch_degree
         assert global_batch_size > 0
         assert (
             global_batch_size % (config.training.local_batch_size * batch_degree) == 0
@@ -867,7 +870,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
+            **collect_aux_loss_metrics(self.model_parts, parallel_dims),
         }
+        if self.model_metrics_fn is not None:
+            extra_metrics.update(
+                self.model_metrics_fn(self.model_parts, parallel_dims)
+            )
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
