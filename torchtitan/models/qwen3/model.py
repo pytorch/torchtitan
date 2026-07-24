@@ -102,6 +102,7 @@ class Qwen3Model(Decoder):
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+                cp_method=parallelism.context_parallel_method,
             )
 
         def get_nparams_and_flops(

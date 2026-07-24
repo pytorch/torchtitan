@@ -20,6 +20,7 @@ from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.common.attention_sharding import validate_context_parallel
 from torchtitan.models.llama3.model import Llama3Model
 
 
@@ -40,6 +41,8 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    validate_context_parallel(model, parallel_dims, parallelism)
+
     if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)

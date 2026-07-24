@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
+from torchtitan.models.common.attention_sharding import set_inner_attention_config
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
     set_decoder_sharding_config,
-    set_gqa_inner_attention_local_map,
     set_qkv_linear_sharding,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
@@ -60,6 +60,7 @@ def set_gpt_oss_sharding_config(
     *,
     enable_sp: bool,
     enable_ep: bool,
+    cp_method: str = "",
 ) -> None:
     """Fill ``sharding_config`` on all GPT-OSS sub-configs.
 
@@ -72,7 +73,9 @@ def set_gpt_oss_sharding_config(
 
     set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
-        _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
+        _set_gpt_oss_layer_sharding(
+            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep, cp_method=cp_method
+        )
 
 
 def _set_gpt_oss_layer_sharding(
@@ -80,6 +83,7 @@ def _set_gpt_oss_layer_sharding(
     *,
     enable_sp: bool,
     enable_ep: bool,
+    cp_method: str = "",
 ) -> None:
     """Set sharding on one GPT-OSS transformer layer.
 
@@ -115,7 +119,7 @@ def _set_gpt_oss_layer_sharding(
     set_qkv_linear_sharding(attention.qkv_linear)
     attention.wo.sharding_config = scaled_bias_rowwise_config(output_sp=enable_sp)
 
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_inner_attention_config(attention, cp_method)
 
     # MoE FFN (all GPT-OSS blocks are MoE).
     if layer_cfg.moe is not None:

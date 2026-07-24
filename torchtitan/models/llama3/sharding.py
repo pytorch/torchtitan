@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
+from torchtitan.models.common.attention_sharding import set_inner_attention_config
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_sequence_parallel_placement,
@@ -15,7 +16,6 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
-    set_gqa_inner_attention_local_map,
 )
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ def set_llama3_sharding_config(
     config: "Llama3Model.Config",
     *,
     enable_sp: bool,
+    cp_method: str = "",
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
@@ -34,17 +35,19 @@ def set_llama3_sharding_config(
     apply. Declarations for mesh axes that aren't enabled (e.g. ``TP``
     placements under FSDP-only) are skipped at parallelize time.
 
-    ``enable_sp`` controls SequenceParallel (decoupled from TP).
+    ``enable_sp`` controls SequenceParallel (decoupled from TP). ``cp_method``
+    selects the context-parallel attention collective (see attention_sharding).
     """
     set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
-        _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp, cp_method=cp_method)
 
 
 def _set_llama3_layer_sharding(
     layer_cfg: "Llama3TransformerBlock.Config",
     *,
     enable_sp: bool,
+    cp_method: str = "",
 ) -> None:
     """Set sharding on one Llama3 transformer layer.
 
@@ -64,7 +67,7 @@ def _set_llama3_layer_sharding(
     )
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
+    set_inner_attention_config(layer_cfg.attention, cp_method)
 
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(
