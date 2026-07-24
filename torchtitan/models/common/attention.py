@@ -77,6 +77,7 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    cu_seq_q_host: tuple[int, ...] | None = None
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
@@ -601,6 +602,8 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
+    *,
+    include_host_offsets: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -610,9 +613,12 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[b, s]``. Positions
             reset to 0 at each document start.
+        include_host_offsets: Also materialize cumulative sequence offsets as
+            host metadata for kernels that need it.
 
     Returns:
-        VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
+        VarlenMetadata containing cumulative sequence length indices for q, k,
+        and max_seq_len.
     """
     batch_size, seq_len = positions.shape
     device = positions.device
@@ -637,18 +643,36 @@ def create_varlen_metadata_for_document(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
 
-    max_seqlen: int = 0
-    if len(all_seq_lengths) > 0:
+    max_seqlen: int
+    packed_cu_seqlens_host = None
+    if include_host_offsets:
+        packed_cu_seqlens_host = tuple(
+            int(offset) for offset in packed_cu_seqlens.tolist()
+        )
+        max_seqlen = max(
+            (
+                end - start
+                for start, end in zip(
+                    packed_cu_seqlens_host[:-1],
+                    packed_cu_seqlens_host[1:],
+                    strict=False,
+                )
+            ),
+            default=0,
+        )
+    elif len(all_seq_lengths) > 0:
         all_seq_lengths = torch.cat(all_seq_lengths)
         # device to host sync but only done once per model forward
-        # pyrefly: ignore[bad-assignment]
-        max_seqlen = all_seq_lengths.max().item()
+        max_seqlen = int(all_seq_lengths.max().item())
+    else:
+        max_seqlen = 0
 
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
         max_k=max_seqlen,
+        cu_seq_q_host=packed_cu_seqlens_host,
     )
 
 

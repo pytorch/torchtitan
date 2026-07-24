@@ -69,6 +69,12 @@ def qwen35_debugmodel() -> Trainer.Config:
     )
 
 
+def qwen35_debugmodel_varlen_attn() -> Trainer.Config:
+    config = qwen35_debugmodel()
+    config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+    return config
+
+
 def qwen35_debugmodel_moe() -> Trainer.Config:
     model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
     return Trainer.Config(
