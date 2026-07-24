@@ -438,7 +438,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 self.model_parts = [model]
 
-        if config.profiler.enable_module_profiler:
+        if config.profiler.enable_profiling:
             apply_module_profiler(self.model_parts)
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.

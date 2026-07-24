@@ -11,16 +11,7 @@ MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh \
 ```
 
 Profiler traces are written under `./outputs/profiling/traces/` by default.
-
-To add coarse model-module annotations to the trace, enable the module profiler:
-
-```bash
-MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh \
-  --profiler.enable_profiling \
-  --profiler.enable_module_profiler
-```
-
-This adds `record_function` contexts for major module regions such as
+They include `record_function` contexts for major module regions such as
 `block::layers.0`, `attention::layers.0.attention`,
 `ffn::layers.0.feed_forward`, and `moe::layers.0.moe`.
 
