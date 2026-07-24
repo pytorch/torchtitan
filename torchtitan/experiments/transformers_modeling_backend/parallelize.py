@@ -48,11 +48,11 @@ def _install_native_embedding(model: nn.Module) -> None:
     if type(emb) is nn.Embedding:
         emb.__class__ = _NativeEmbedding
         emb.tp_group = None  # set by Embedding.parallelize; forward reads it
-        # Native Embedding's forward passes the global padding_idx to F.embedding
-        # on the local vocab shard, which asserts it is < the local
-        # num_embeddings, so a non-None padding_idx (e.g. GLM-5) crashes under TP.
-        # Drop it: the masked lookup already zeros out-of-shard tokens, and
-        # causal-LM padding is handled by attention/loss masking.
+        # Clear padding_idx: the native Embedding passes the global padding_idx to
+        # F.embedding on the local vocab shard, where it can exceed the local
+        # num_embeddings and crash under TP (e.g. GLM-5). Safe to clear -- the
+        # masked lookup already zeros out-of-shard tokens, and causal-LM padding
+        # is handled by attention/loss masking.
         if emb.padding_idx is not None:
             emb.padding_idx = None
     else:
