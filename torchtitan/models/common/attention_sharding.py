@@ -140,15 +140,12 @@ def _validate_context_parallel(
             f"({tp} * {cp} = {div})."
         )
 
-    # headtail is the config default; only an explicit non-default balancer,
-    # which the user clearly intended, is worth a warning.
-    if load_balancer is not None and load_balancer != "headtail":
-        logger.warning(
-            "context_parallel_load_balancer='%s' is ignored when "
-            "context_parallel_method='ulysses': head-sharded attention has no "
-            "per-rank sequence imbalance to balance.",
-            load_balancer,
-        )
+    logger.info(
+        "context_parallel_load_balancer='%s' is ignored when "
+        "context_parallel_method='ulysses': head-sharded attention has no "
+        "per-rank sequence imbalance to balance.",
+        load_balancer,
+    )
 
 
 def validate_context_parallel(model, parallel_dims, parallelism) -> None:
