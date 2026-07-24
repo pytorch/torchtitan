@@ -43,7 +43,7 @@ Validation uses all 30 problems from [AIME 2025](https://huggingface.co/datasets
 
 ## Reference configurations
 
-Both configurations run 150 optimizer steps on one eight-GPU node. One TP=2 trainer uses two GPUs, and six independent TP=1 generators use the remaining GPUs. Each optimizer step consumes 8 prompt groups with 16 completions per group. `max_offpolicy_steps=4` bounds policy lag.
+Both configurations run 150 optimizer steps on one eight-GPU node. One TP=2 trainer uses two GPUs, and six independent TP=1 generators use the remaining GPUs. Each optimizer step consumes 8 prompt groups with 16 completions per group. `target_offpolicy_steps=4` sizes the active buffer.
 
 The 8K configuration is the default reference recipe:
 

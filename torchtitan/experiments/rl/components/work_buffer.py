@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Run-ahead buffer of RolloutGroupWork shared between the data-input, rollout, and batcher loops.
+"""Active work buffer shared between the data-input, rollout, and batcher loops.
 NOTE: The buffer holds work slots, and not the finalized RolloutGroups necessarily.
 
 """
@@ -55,8 +55,9 @@ class RolloutGroupWorkBuffer(Configurable):
     """Run-ahead buffer of RolloutGroupWork shared by the data-input, rollout, and batcher loops.
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
-    run-ahead at `max_active_rollout_groups` active slots; the batcher always takes the OLDEST
-    finalized group (strict FIFO), stalling if it is still in flight.
+    the pipeline at `max_active_rollout_groups` active slots; the batcher takes finalized groups within
+    a fixed look-ahead window anchored at the oldest entry. A `window_size` of 1
+    gives strict FIFO.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -71,7 +72,7 @@ class RolloutGroupWorkBuffer(Configurable):
         active slot:  charged by add_work() ............ freed by release_active_groups()
 
     Example:
-        # max_offpolicy_steps=1, num_prompts_per_train_step=2 -> capacity=4
+        # target_offpolicy_steps=1, num_prompts_per_train_step=2 -> capacity=4
         await buffer.add_work(g0); await buffer.add_work(g1)   # 2/4 active
         await buffer.add_work(g2); await buffer.add_work(g3)   # 4/4 active (cap)
         g0 = await buffer.take_finalized()                     # g0 leaves the dict; still 4/4 active
@@ -84,10 +85,19 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """No tunables: capacity is passed in by the controller from the run-ahead sizing."""
+        """No tunables: capacity and window size are derived by the controller."""
 
-    def __init__(self, config: Config, *, max_active_rollout_groups: int) -> None:
+    def __init__(
+        self, config: Config, *, max_active_rollout_groups: int, window_size: int = 1
+    ) -> None:
+        if not 1 <= window_size <= max_active_rollout_groups:
+            raise ValueError(
+                "window_size must be between 1 and max_active_rollout_groups, got "
+                f"window_size={window_size}, "
+                f"max_active_rollout_groups={max_active_rollout_groups}"
+            )
         self._max_active_rollout_groups = max_active_rollout_groups
+        self._window_size = window_size
         self._active_rollout_groups = 0
         # metric: Per-flush peak active slots; reset on `.metrics()` call.
         self._active_rollout_groups_peak_since_flush = 0
@@ -108,7 +118,7 @@ class RolloutGroupWorkBuffer(Configurable):
         return self._active_rollout_groups < self._max_active_rollout_groups
 
     async def wait_for_slot(self) -> bool:
-        """Wait until one more rollout group may enter the active off-policy window.
+        """Wait until one more rollout group may enter the active buffer.
 
         Example:
             # False means the buffer was closed, so the data input loop exits.
@@ -163,25 +173,37 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @sl.log_trace_span("take_finalized")
     async def take_finalized(self) -> RolloutGroup | None:
-        """Batcher loop: strict FIFO — return the OLDEST group once it is FINALIZED, else stall.
+        """Batcher loop: return the oldest FINALIZED group inside the anchored windowed FIFO range.
+
+        The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
+        window stay blocked even if they are finalized, so taking non-head groups does not slide
+        the window. A `window_size` of 1 gives strict FIFO.
+
+        This anchored-window policy follows MiniMax's rollout scheduling approach; see
+        Section 6.2.4 of https://arxiv.org/pdf/2605.26494.
 
         Example:
-            # head g0 still INFLIGHT, g1 FINALIZED -> WAITS for g0 (no skipping)
-            await buffer.take_finalized()
+            # window_size=3: g0 is INFLIGHT, g1 is WAITING, and g2/g3 are FINALIZED.
+            group = await buffer.take_finalized()
+            assert group.group_id == 2  # g2 is inside the anchored window [g0, g2].
+            # g3 remains blocked because taking g2 does not move the window past g0.
         """
         async with self._condition:
             while True:
                 if self._closed:
                     return None
                 if self._work_by_group_id:
-                    oldest_group_id, oldest_work = next(
-                        iter(self._work_by_group_id.items())
-                    )
-                    if oldest_work.state is _RolloutGroupWorkState.FINALIZED:
-                        del self._work_by_group_id[oldest_group_id]
+                    head_group_id = next(iter(self._work_by_group_id))
+                    window_end = head_group_id + self._window_size - 1
+                    for group_id, work in self._work_by_group_id.items():
+                        if group_id > window_end:
+                            break
+                        if work.state is not _RolloutGroupWorkState.FINALIZED:
+                            continue
+                        del self._work_by_group_id[group_id]
                         self._condition.notify_all()
-                        return oldest_work.rollout_group
-                await self._condition.wait()  # head still INFLIGHT -> STALL
+                        return work.rollout_group
+                await self._condition.wait()  # nothing finalized inside the window -> stall
 
     async def release_active_groups(self, count: int, *, reason: str) -> None:
         """Free active slots: the trainer releases trained slots after its weight pull; the batcher
