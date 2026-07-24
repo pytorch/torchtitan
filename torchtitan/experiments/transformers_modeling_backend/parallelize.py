@@ -28,21 +28,146 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
 
+def _install_native_embedding(model: nn.Module, *, enable_tp: bool) -> None:
+    """Swap the HF token embedding for titan's vocab-parallel ``Embedding``.
+
+    Under spmd_types + TP the embedding weight is vocab-sharded (``S(0)``) and
+    activations are plain local tensors, so HF's ``nn.Embedding.forward`` looks up
+    the wrong rows -- it needs a weight redistribution spmd_types does not
+    perform. The native ``Embedding`` (models/common/embedding.py) does a masked
+    local lookup on the local vocab shard and produces a Partial output, correct
+    for TP. Only the class is swapped (weight/padding_idx preserved, state_dict
+    keys unchanged); ``_sharding_config`` is still set by set_hf_sharding_configs.
+    Runs before convert_hf_to_module.
+    """
+    from torchtitan.models.common.embedding import Embedding as _NativeEmbedding
+
+    emb = model.tok_embeddings
+    if emb is None or isinstance(emb, nn.Identity):
+        return
+    if type(emb) is nn.Embedding:
+        emb.__class__ = _NativeEmbedding
+        emb.tp_group = None  # set by Embedding.parallelize; forward reads it
+        # Clear padding_idx: the native Embedding passes the global padding_idx to
+        # F.embedding on the local vocab shard, where it can exceed the local
+        # num_embeddings and crash under TP (e.g. GLM-5). Safe to clear: the
+        # masked lookup already zeros out-of-shard tokens, and causal-LM padding
+        # is handled by attention/loss masking.
+        if emb.padding_idx is not None:
+            emb.padding_idx = None
+    elif enable_tp:
+        # A non-plain embedding (e.g. Gemma4's Gemma4TextScaledWordEmbedding)
+        # can't be swapped for the vocab-parallel native Embedding, so its
+        # vocab-sharded lookup would be wrong under TP. It is correct under
+        # FSDP/EP (weight not vocab-sharded there), so fail loud only under TP.
+        raise ValueError(
+            f"tok_embeddings is {type(emb).__name__}, not nn.Embedding: it cannot "
+            "be made vocab-parallel, so spmd_types + tensor parallelism would be "
+            "numerically incorrect for this model. Run it without tensor "
+            "parallelism."
+        )
+
+
+def _wrap_moe_experts_contiguous(model: nn.Module) -> None:
+    """Contiguous-ify the native MoE experts' local input under SP.
+
+    ``RoutedExperts.forward`` flattens its input with ``x_BLD.view(T, D)``, which
+    requires contiguity. Under sequence parallelism (TP>1) the attention wo
+    projection's rowwise reduce-scatter yields a seq-major (non-contiguous) local
+    shard -- correct SP behavior, matching native, but native never routes it
+    into the experts ``.view`` (its GQA models are dense; its MoE models use
+    non-GQA attention). Wrap ``RoutedExperts.forward`` (before ``model.parallelize``
+    so it sees local tensors) to ``.contiguous()`` its tensor args; a no-op when
+    already contiguous. Guarded to spmd + TP+EP at the call site.
+    """
+    from torchtitan.models.common.moe import RoutedExperts
+
+    for module in model.modules():
+        if not isinstance(module, RoutedExperts):
+            continue
+
+        def _make_contiguous_forward(orig_forward):
+            def contiguous_forward(*args, **kwargs):
+                args = tuple(a.contiguous() if torch.is_tensor(a) else a for a in args)
+                return orig_forward(*args, **kwargs)
+
+            return contiguous_forward
+
+        module.forward = _make_contiguous_forward(module.forward)
+
+
+def _wrap_flat_qk_norm_tp(model: nn.Module, tp_mesh: DeviceMesh) -> None:
+    """Make an OLMoE-style flat q/k RMSNorm TP-aware at runtime.
+
+    OLMoE norms q/k over the full projection (``n_heads*head_dim``) before the
+    head reshape. Under TP the projection is column-sharded, so HF's RMSNorm
+    normalizes over the local shard and its replicated weight shape-mismatches it.
+    The default backend gets this right via DTensor auto-redistribution; under
+    spmd_types the activations are plain local shards, so replicate that math
+    here: wrap the flat q_norm/k_norm forward to all-reduce the local
+    sum-of-squares across TP, divide by the full dim, and multiply by the local
+    weight slice (weight is column-sharded ``S(0)``, so rank ``r`` owns
+    ``weight[r*local : (r+1)*local]``).
+
+    Runtime-only (funcol all-reduce, no typechecking). Called before
+    ``model.parallelize`` so the wrap is captured in the norm's Module forward. A
+    no-op at TP=1 (returns early, bit-identical) and only applied to flat-norm
+    modules (norm width != ``head_dim``); per-head-norm (Qwen3) and no-norm
+    (Mixtral) models are untouched.
+    """
+    import torch.distributed as dist
+    import torch.distributed._functional_collectives as funcol
+
+    tp_group = tp_mesh.get_group()
+    tp_size = dist.get_world_size(tp_group)
+    if tp_size == 1:
+        return
+    tp_rank = dist.get_rank(tp_group)
+
+    def _make_tp_norm_forward(norm):
+        def tp_norm_forward(hidden_local):
+            # RMSNorm over the FULL (column-sharded) projection: the variance
+            # must span all TP ranks, so all-reduce the local sum-of-squares.
+            input_dtype = hidden_local.dtype
+            h = hidden_local.float()
+            local_dim = h.shape[-1]
+            local_sumsq = h.pow(2).sum(-1, keepdim=True)
+            global_sumsq = funcol.all_reduce(
+                local_sumsq, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
+            )
+            variance = global_sumsq / (local_dim * tp_size)
+            h = h * torch.rsqrt(variance + norm.variance_epsilon)
+            weight_local = norm.weight.narrow(0, tp_rank * local_dim, local_dim)
+            return weight_local * h.to(input_dtype)
+
+        return tp_norm_forward
+
+    for module in model.modules():
+        head_dim = getattr(module, "head_dim", None)
+        if head_dim is None:
+            continue
+        for norm_name in ("q_norm", "k_norm"):
+            norm = getattr(module, norm_name, None)
+            # Flat norm: normalized width spans the full projection (!= head_dim).
+            if (
+                norm is not None
+                and getattr(norm, "weight", None) is not None
+                and norm.weight.shape[-1] != head_dim
+            ):
+                norm.forward = _make_tp_norm_forward(norm)
+
+
 def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
     """All-gather k/v across the CP axis inside each flex kernel forward.
 
-    q/k/v reach the flex kernel seq-sharded on the CP axis (tensor dim 2 of the
-    ``(b, heads, seq, dim)`` layout). Attention needs full-length k/v, so we
-    all-gather them across the CP mesh with a funcol collective (autograd-aware:
-    the backward reduce-scatters gradients back to the local shard). q stays
-    sharded, so each rank computes attention for its seq shard against the full
-    keys -- the BlockMask is Q-sharded / KV-full to match.
-
-    This is the explicit-collective analogue of Titan's ``flex_cp_allgather``
-    path: the kernel runs nested inside the attention module's local_map region
-    where the CP mesh dim is no longer visible to a declarative redistribute, so
-    the gather is done here on local tensors. Called before ``model.parallelize``
-    so the wrap is captured inside the local_map wrapping.
+    q/k/v reach the flex kernel seq-sharded on the CP axis (dim 2 of
+    ``(b, heads, seq, dim)``). Attention needs full-length k/v, so all-gather them
+    across the CP mesh with a funcol collective (autograd-aware: the backward
+    reduce-scatters gradients back to the local shard). q stays sharded, so each
+    rank attends its seq shard against the full keys; the BlockMask is
+    Q-sharded/KV-full to match. Called before ``model.parallelize`` so the wrap
+    sits inside the attention module's local_map region, where the CP mesh axis is
+    no longer visible to a declarative redistribute.
     """
     import torch.distributed as dist
     from torch.distributed.tensor.experimental._context_parallel._attention import (
@@ -102,14 +227,14 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # Only the "default" sharding backend is wired here.
-    # TODO: wire spmd_types (next PR) -- see the migration TODO in hf_sharding.py.
-    if parallel_dims.spmd_backend != "default":
+    # Only "default" (DTensor) and "spmd_types" are supported. Both DTensor
+    # backends (default and full_dtensor) are transitional and slated for removal
+    # in favor of spmd_types; this backend just never wires full_dtensor, so fail
+    # loud rather than silently running it as default.
+    if parallelism.spmd_backend == "full_dtensor":
         raise NotImplementedError(
-            f"The HF transformers backend only supports spmd_backend='default' "
-            f"today; got '{parallel_dims.spmd_backend}'. spmd_types/full_dtensor "
-            "are not yet wired for this backend (FSDP mesh resolution, "
-            "Titan-native embedding, and attention kernels are pending)."
+            "the HF transformers backend supports spmd_backend 'default' or "
+            "'spmd_types'; full_dtensor is not supported."
         )
 
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
@@ -153,11 +278,16 @@ def parallelize_hf_transformers(
         build_and_swap_native_moe(model, parallel_dims)
 
     # 2. Convert HF modules to Module protocol.
-    # TP/EP always need it. CP-only needs it too: the flex kernel's local_map is
-    # what all-gathers k/v across the CP axis, and it is only installed by the
-    # sharding pass below.
+    # TP/EP/CP need it (the flex kernel installed by the sharding pass is what
+    # handles the CP k/v all-gather). spmd_types needs it for any parallelism,
+    # even FSDP-only: every parameter must be an spmd tensor on the SPMD mesh,
+    # which only the sharding pass + model.parallelize produce.
+    use_spmd = parallelism.spmd_backend == "spmd_types"
     needs_module_protocol = (
-        parallel_dims.tp_enabled or parallel_dims.ep_enabled or parallel_dims.cp_enabled
+        parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+        or parallel_dims.cp_enabled
+        or use_spmd
     )
     if needs_module_protocol:
         from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
@@ -167,12 +297,19 @@ def parallelize_hf_transformers(
             convert_hf_to_module,
         )
 
+        # Under spmd_types, replace the HF embedding with the native
+        # vocab-parallel Embedding before conversion (correct local vocab lookup
+        # under TP on plain local shards).
+        if use_spmd:
+            _install_native_embedding(model, enable_tp=parallel_dims.tp_enabled)
+
         convert_hf_to_module(model)
 
         # 3. Set sharding configs on all non-MoE modules
         set_hf_sharding_configs(
             model,
             enable_sp=parallel_dims.tp_enabled,
+            spmd_backend=parallelism.spmd_backend,
         )
 
         # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
@@ -181,6 +318,20 @@ def parallelize_hf_transformers(
         # (already TP-head-sharded, CP-seq-sharded) tensors.
         if parallel_dims.cp_enabled:
             _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
+
+        # 3c. Under spmd + combined TP+EP, the experts local_map yields a
+        # non-contiguous local shard that native GroupedExperts.forward's .view
+        # rejects; wrap the experts forward (before parallelize, so it is inside
+        # the local region) to contiguous-ify its inputs.
+        if use_spmd and parallel_dims.tp_enabled and parallel_dims.ep_enabled:
+            _wrap_moe_experts_contiguous(model)
+
+        # 3d. Under spmd + TP, make an OLMoE-style flat q/k RMSNorm (normed over
+        # the full projection before the head reshape) TP-aware: the projection is
+        # column-sharded, so the RMSNorm variance must be all-reduced across TP.
+        # No-op for per-head-norm (Qwen3) and no-norm (Mixtral) models.
+        if use_spmd and parallel_dims.tp_enabled:
+            _wrap_flat_qk_norm_tp(model, parallel_dims.get_mesh("tp"))
 
         # 4. Single parallelize call -- handles TP, EP, MoE, everything
         model.parallelize(parallel_dims)
@@ -204,18 +355,39 @@ def parallelize_hf_transformers(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    dp_mesh_dim_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
+    # Resolve the FSDP mesh. Under spmd_types the DP mesh is a submesh of the
+    # multi-axis SPMD storage mesh, picked via resolve_fsdp_mesh + a
+    # DataParallelMeshDims that fully_shard flattens out; the legacy
+    # "fsdp"/"efsdp" named axes exist only under the default backend. (The core
+    # helpers live in distributed/full_dtensor.py but apply to spmd_types too.)
+    dp_mesh_dims = None
+    edp_mesh_dims = None
+    if use_spmd:
+        from torchtitan.distributed.full_dtensor import (
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
 
-    edp_mesh_names = (
-        ["dp_replicate", "efsdp"] if parallel_dims.dp_replicate_enabled else ["efsdp"]
-    )
-    edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        if parallel_dims.ep_enabled:
+            edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+        else:
+            edp_mesh = None
+    else:
+        dp_mesh_dim_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
 
     apply_fsdp(
         model,
-        parallel_dims.get_mesh(dp_mesh_dim_names),
+        dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         pp_enabled=parallel_dims.pp_enabled,
@@ -224,6 +396,8 @@ def parallelize_hf_transformers(
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
         ep_degree=parallel_dims.ep,
         dp_mod_ep_mesh=edp_mesh,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
     )
 
     if training.enable_cpu_offload:
@@ -253,6 +427,8 @@ def apply_fsdp(
     dp_mod_ep_mesh: DeviceMesh | None = None,
     gradient_divide_factor: int | None = None,
     enable_symm_mem: bool = False,
+    dp_mesh_dims=None,
+    edp_mesh_dims=None,
 ):
     """Apply data parallelism (via FSDP2) to the model.
 
@@ -261,6 +437,12 @@ def apply_fsdp(
     and other params to ``dp_mesh`` within a single ``fully_shard`` call
     per transformer block — matching Titan's approach and avoiding
     nested FSDP hooks that cause SAC op-count mismatches during recompute.
+
+    Under the spmd_types backend ``dp_mesh``/``dp_mod_ep_mesh`` are multi-axis
+    SPMD storage meshes and ``dp_mesh_dims``/``edp_mesh_dims``
+    (``DataParallelMeshDims``) tell ``fully_shard`` which axes are the DP
+    submesh to flatten. Under the default backend these are ``None`` and the
+    meshes are already the plain DP mesh.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -268,6 +450,8 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -330,17 +514,33 @@ def apply_fsdp(
             else:
                 expert_shard_placement = Shard(0)
 
-            def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
-                if mesh.ndim == 1:
-                    return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
-                if mesh.ndim == 2:
-                    return HSDPMeshInfo(
-                        mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
-                    )
-                raise ValueError(f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh.")
+            if dp_mesh_dims is not None:
+                # spmd_types: meshes are multi-axis SPMD storage meshes; let
+                # FSDP's mesh-info builder extract and flatten the DP submesh via
+                # the DataParallelMeshDims (matches native).
+                from torch.distributed.fsdp._fully_shard._fsdp_init import (
+                    _get_mesh_info,
+                )
 
-            edp_mesh_info = _get_fsdp_mesh_info(dp_mod_ep_mesh)
-            dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+                edp_mesh_info = _get_mesh_info(dp_mod_ep_mesh, edp_mesh_dims)
+                dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
+                assert isinstance(edp_mesh_info, FSDPMeshInfo)
+                assert isinstance(dp_mesh_info, FSDPMeshInfo)
+            else:
+
+                def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
+                    if mesh.ndim == 1:
+                        return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
+                    if mesh.ndim == 2:
+                        return HSDPMeshInfo(
+                            mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
+                        )
+                    raise ValueError(
+                        f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
+                    )
+
+                edp_mesh_info = _get_fsdp_mesh_info(dp_mod_ep_mesh)
+                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
 
             def _shard_placement_fn(
                 param: nn.Parameter,

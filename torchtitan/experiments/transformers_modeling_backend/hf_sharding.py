@@ -68,6 +68,7 @@ def set_hf_sharding_configs(
     model: nn.Module,
     *,
     enable_sp: bool,
+    spmd_backend: str = "default",
 ) -> None:
     """Set ``_sharding_config`` on all HF modules for TP/EP parallelization.
 
@@ -78,11 +79,28 @@ def set_hf_sharding_configs(
     Args:
         model: The HFTransformerModel with Module-converted children.
         enable_sp: Whether sequence parallelism is enabled (TP > 1).
+        spmd_backend: The sharding backend ("default" or "spmd_types"). The
+            declarative configs are backend-agnostic; a few redistribute sources
+            are only declared under spmd_types (the default DTensor backend
+            infers them).
     """
+    # spmd_types needs redistribution sources declared explicitly (the default
+    # DTensor backend infers them).
+    use_spmd = spmd_backend == "spmd_types"
+
     # Root-level modules — nn.Identity modules are skipped (no params).
     if model.tok_embeddings is not None and not isinstance(
         model.tok_embeddings, nn.Identity
     ):
+        # The native masked-lookup treatment (Partial out_src + local_map) applies
+        # only when _install_native_embedding swapped in the native Embedding.
+        # Non-plain embeddings (e.g. Gemma4's Gemma4TextScaledWordEmbedding) are
+        # left as-is and keep the plain config (no out_src/local_map), correct for
+        # FSDP/EP; such models are TP-incompatible anyway.
+        from torchtitan.models.common.embedding import Embedding as _NativeEmbedding
+
+        emb_is_native = isinstance(model.tok_embeddings, _NativeEmbedding)
+        emb_use_spmd = use_spmd and emb_is_native
         emb_state: dict = {"weight": dense_param_placement(tp=spmd.S(0))}
         for buf_name, _ in model.tok_embeddings.named_buffers(recurse=False):
             emb_state[buf_name] = dense_param_placement(tp=spmd.R)
@@ -90,7 +108,23 @@ def set_hf_sharding_configs(
             state_shardings=emb_state,
             in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
             in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
+            # Vocab-sharded (S(0)) lookup produces a Partial output on TP. The
+            # default DTensor embedding uses _MaskPartial (inferred), so declare
+            # the Partial out_src only for the swapped native Embedding. For a
+            # non-native embedding under spmd_types (Gemma4, FSDP/EP-only) the
+            # output already matches out_dst, so declare out_src == out_dst (spmd
+            # requires an explicit source; a no-op redistribution). Default: None.
+            out_src_shardings=(
+                dense_activation_placement(tp=spmd.P)
+                if emb_use_spmd
+                else _sp_activation(enable_sp=enable_sp)
+                if use_spmd
+                else None
+            ),
             out_dst_shardings=_sp_activation(enable_sp=enable_sp),
+            local_map=(
+                LocalMapConfig(in_grad_placements=None) if emb_use_spmd else None
+            ),
         )
 
     if model.norm is not None and not isinstance(model.norm, nn.Identity):
@@ -108,11 +142,12 @@ def set_hf_sharding_configs(
             in_dst_shardings={
                 "input": dense_activation_placement(tp=spmd.R),
             },
-            # Vocab-shard the lm_head output S(-1) unconditionally, mirroring
-            # core's set_decoder_sharding_config. The S(-1) TP placement is a
-            # no-op when TP is absent from the runtime mesh, so no flag is
-            # needed: core cross_entropy_loss detects the vocab-sharded pred
-            # (spmd_types: tp mesh size > 1) and runs vocab-parallel CE.
+            # Vocab-shard the lm_head output S(-1), mirroring core's
+            # set_decoder_sharding_config. S(-1) is a no-op when TP is absent;
+            # core cross_entropy_loss detects the vocab-sharded pred and runs
+            # vocab-parallel CE. Declaring out_src (S(0) weight -> S(-1) output)
+            # gives spmd_types the redistribute source it requires.
+            out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
             out_dst_shardings=dense_activation_placement(tp=spmd.S(-1)),
         )
 
@@ -121,11 +156,17 @@ def set_hf_sharding_configs(
     # plain-Tensor / DTensor ops in apply_rotary_pos_emb.
     if hasattr(model, "rotary_emb") and not isinstance(model.rotary_emb, nn.Identity):
         rope = model.rotary_emb
-        rope._sharding_config = _rope_config(rope, enable_sp=enable_sp)
+        rope._sharding_config = _rope_config(
+            rope, enable_sp=enable_sp, use_spmd=use_spmd
+        )
 
     # Per-layer modules
     for transformer_block in model.layers:
-        _set_layer_sharding_configs(transformer_block, enable_sp=enable_sp)
+        _set_layer_sharding_configs(
+            transformer_block,
+            enable_sp=enable_sp,
+            use_spmd=use_spmd,
+        )
 
     # Completeness backstop: every parameter/buffer-bearing module this function
     # is responsible for must have a sharding config, or it silently mixes a
@@ -150,22 +191,17 @@ def set_hf_sharding_configs(
 def _attach_flex_kernel(attn: nn.Module) -> None:
     """Attach the flex-attention kernel Module carrying the attention local_map.
 
-    q/k/v reach the HF attention function as ``(b, heads, seq, dim)`` with heads
-    on tensor dim 1 and seq on tensor dim 2; the flex output is
-    ``(b, seq, heads, dim)`` with seq on dim 1 and heads on dim 2. Declare those
-    as the local_map input/output placements so the Module protocol maps q/k/v
-    to local tensors around the flex HOP (see ``HFFlexKernel``).
+    q/k/v reach the HF attention function as ``(b, heads, seq, dim)`` (heads on
+    dim 1, seq on dim 2); the flex output is ``(b, seq, heads, dim)`` (seq on
+    dim 1, heads on dim 2). Declaring those as the local_map in/out placements
+    maps q/k/v to local tensors around the flex HOP (see ``HFFlexKernel``).
 
-    Under CP, q/k/v arrive seq-sharded on the CP axis. The local_map treats
-    them as seq-sharded (``S(2)`` on the input); the actual k/v all-gather across
-    the CP axis is done explicitly with a funcol collective inside the kernel
-    forward (see ``_wrap_flex_kernel_cp`` in parallelize.py), because the kernel
-    runs nested inside the attention module's local_map region where the CP mesh
-    dim is no longer visible to a declarative redistribute. The output is
-    seq-sharded on the CP axis (``S(1)`` -- seq is dim 1 after flex transposes).
-    When CP is not enabled the (tp,)-only mesh ignores the CP placement, so this
-    is a no-op for the TP/FSDP-only paths. DP stays ``R`` -- FSDP is applied
-    classically (``apply_fsdp``), not as an spmd DP axis.
+    Under CP the input k/v are seq-sharded (``S(2)``); the k/v all-gather is done
+    by a funcol collective in the kernel forward wrap (``_wrap_flex_kernel_cp``),
+    since the kernel runs inside the local_map region where the CP mesh axis is no
+    longer visible to a declarative redistribute. The output is seq-sharded
+    (``S(1)``); with CP absent the placement is ignored. DP stays ``R`` -- FSDP is
+    applied classically (``apply_fsdp``), not as an spmd DP axis.
     """
     from torchtitan.experiments.transformers_modeling_backend.model import HFFlexKernel
 
@@ -194,13 +230,19 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
     ).build()
 
 
-def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
+def _set_layer_sharding_configs(
+    layer: nn.Module,
+    *,
+    enable_sp: bool,
+    use_spmd: bool = False,
+) -> None:
     """Set ``_sharding_config`` on each sub-module of a decoder layer.
 
-    Covers norms, attention projections, and (for non-MoE layers) dense MLP.
-    MoE layers have their own ShardingConfig from the Titan MoE swap. Also
-    attaches the flex-attention kernel Module that carries the attention
-    local_map (see ``_attach_flex_kernel``).
+    Covers norms, attention projections, and (non-MoE) dense MLP; MoE layers carry
+    their own ShardingConfig from the Titan MoE swap. Attaches the flex-attention
+    kernel (see ``_attach_flex_kernel``). ``use_spmd`` gates the DSA-indexer
+    fail-loud: under the DTensor backend the indexer's scatter_/index ops cannot
+    dispatch under TP; under spmd_types (plain local shards) they do.
     """
     # --- Norms ---
     if hasattr(layer, "input_layernorm"):
@@ -232,7 +274,11 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
     )
 
     # Flex attention: attach the kernel Module that carries the attention
-    # local_map so q/k/v are computed on local (head-sharded) tensors.
+    # local_map so q/k/v are computed on local (head-sharded) tensors. HF's own
+    # attention forward (GQA/MHA reshape+RoPE, MLA nope/pe split, DSA indexer +
+    # dense mask) runs on plain local spmd tensors, then routes through this
+    # kernel for the flex HOP; under CP ``_wrap_flex_kernel_cp`` folds the k/v
+    # all-gather into the kernel forward.
     _attach_flex_kernel(attn)
 
     # Query projection. Detected independently of the KV path: a model may
@@ -285,26 +331,22 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         if norm is not None:
             norm._sharding_config = _replicate_config(norm)
 
-    # GLM-5 DSA indexer -- a small auxiliary subtree with its own nested
-    # projections (e.g. wq_b/wk). Replicating its weights is necessary but not
-    # sufficient under TP: its @torch.no_grad() forward uses in-place scatter_ and
-    # fancy-index ops (and the surrounding attention does
-    # index_mask.scatter_(topk_indices)), which DTensor has no eager dispatch
-    # rules for, so it crashes with a "mixed Tensor and DTensor" error.
-    #
-    # TODO: move transformer backend off the DTensor sharding path onto spmd_types
-    # which will eliminate the error
-    #
-    # Until then: fail loud under TP; otherwise replicate the indexer weights (a
-    # no-op that resolves to no mesh) so FSDP/EP keep working.
+    # GLM-5 DSA indexer -- an auxiliary subtree with its own projections. Its
+    # forward uses scatter_/index ops (and the surrounding attention does
+    # index_mask.scatter_(topk_indices)), which DTensor's eager dispatch cannot
+    # handle: the default backend crashes with "mixed Tensor and DTensor" under
+    # TP, so fail loud there. Under spmd_types state/activations are plain local
+    # shards, so these ops dispatch natively -- just replicate the indexer weights.
     if hasattr(attn, "indexer"):
-        if enable_sp:
+        if enable_sp and not use_spmd:
             raise NotImplementedError(
                 f"{type(attn).__name__}: the DSA indexer is currently not supported under "
                 "tensor parallelism with the DTensor sharding backend (its no_grad "
                 "forward uses scatter_/index ops that DTensor cannot dispatch). "
-                "This model only runs under FSDP/EP and no TP."
+                "This resolves under spmd_backend='spmd_types' (local tensors); "
+                "use spmd_types, or run this model with FSDP/EP and no TP."
             )
+        # Replicate the indexer weights (a no-op that resolves to no mesh).
         for sub in attn.indexer.modules():
             sub._sharding_config = _replicate_config(sub)
 
@@ -363,6 +405,7 @@ def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:
         state_shardings=state,
         in_src_shardings={"hidden_states": sp_layout},
         in_dst_shardings={"hidden_states": sp_layout},
+        out_src_shardings=sp_layout,
         out_dst_shardings=sp_layout,
     )
 
@@ -381,26 +424,27 @@ def _replicate_config(module: nn.Module) -> ShardingConfig:
     return ShardingConfig(state_shardings=state_shardings)
 
 
-def _rope_config(module: nn.Module, *, enable_sp: bool) -> ShardingConfig:
+def _rope_config(
+    module: nn.Module, *, enable_sp: bool, use_spmd: bool = False
+) -> ShardingConfig:
     """Sharding config for a rotary embedding module.
 
-    The rotary embedding's forward receives the hidden-states activation (first
-    positional arg) plus plain tensors (e.g. ``position_ids``). Its inv_freq
-    buffer is replicated so the computed cos/sin come out as DTensors, avoiding
-    mixed plain-Tensor / DTensor ops in ``apply_rotary_pos_emb``.
-
-    Core's input redistribution requires ``in_src_shardings`` to match the
-    incoming placement exactly. Under SP the hidden-states arg arrives sharded
-    on the sequence dim (the embedding output layout), so declare the first arg
-    with the SP activation placement; the remaining (plain) args are wrapped as
-    Replicate. ``in_dst`` mirrors ``in_src`` -- the rotary embedding only reads
-    hidden_states for dtype/device, so there is no need to redistribute it.
+    Replicates the inv_freq buffer. Under the default backend the rotary's first
+    positional arg (hidden_states) arrives SP-sharded on the sequence dim, so
+    declare its in_src/in_dst placement (SP for arg 0, Replicate for the plain
+    position args); the rotary only reads hidden_states for dtype/device, so
+    in_dst mirrors in_src (no real redistribution). Under spmd_types the config is
+    state-only -- there is no activation to redistribute at the rotary boundary.
     """
     state_shardings: dict = {}
     for name, _ in module.named_parameters(recurse=False):
         state_shardings[name] = dense_param_placement(tp=spmd.R)
     for name, _ in module.named_buffers(recurse=False):
         state_shardings[name] = dense_param_placement(tp=spmd.R)
+
+    if use_spmd:
+        # State-only: no activation to redistribute at the rotary boundary.
+        return ShardingConfig(state_shardings=state_shardings)
 
     sig = inspect.signature(type(module).forward)
     arg_names = [p.name for p in sig.parameters.values() if p.name != "self"]
