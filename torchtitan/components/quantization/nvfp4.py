@@ -99,7 +99,6 @@ try:
             self.register_buffer("_sr_seed", None, persistent=False)
             self._rht_sign_vector = None
             self._rht_sign_vector_tuple = None
-            self._tp_style: Literal["colwise", "rowwise"] | None = None
             self._buffer_spec: tuple | None = None
 
         # -- runtime-buffer accessors (buffers may be replicated DTensors) --
@@ -143,15 +142,17 @@ try:
 
         def parallelize(self, parallel_dims: ParallelDims) -> None:
             if self._sharding_config is not None:
-                self._tp_style = _infer_tp_style(self._sharding_config)
-                self._validate(parallel_dims)
+                tp_style = _infer_tp_style(self._sharding_config)
+                self._validate(parallel_dims, tp_style)
                 self._sharding_config = self._augment_sharding_config(
-                    self._sharding_config
+                    self._sharding_config, tp_style
                 )
                 self._cache_buffer_spec(parallel_dims)
             super().parallelize(parallel_dims)
 
-        def _augment_sharding_config(self, sc: ShardingConfig) -> ShardingConfig:
+        def _augment_sharding_config(
+            self, sc: ShardingConfig, tp_style: Literal["colwise", "rowwise"] | None
+        ) -> ShardingConfig:
             """Turn the stock colwise/rowwise Linear config into a local_map
             region for the opaque ``nvfp4_linear`` op.
 
@@ -166,7 +167,7 @@ try:
             runtime buffers are declared replicated so _distribute_states and DCP
             handle them alongside weight/bias.
             """
-            if self._tp_style == "rowwise":
+            if tp_style == "rowwise":
                 in_layout = dense_activation_placement(tp=spmd.S(-1))
                 in_grad = dense_activation_placement(tp=spmd.S(-1))
             else:
@@ -185,7 +186,11 @@ try:
                 local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
             )
 
-        def _validate(self, parallel_dims: ParallelDims) -> None:
+        def _validate(
+            self,
+            parallel_dims: ParallelDims,
+            tp_style: Literal["colwise", "rowwise"] | None,
+        ) -> None:
             if parallel_dims.tp_enabled and parallel_dims.spmd_backend != "spmd_types":
                 raise ValueError(
                     "NVFP4 tensor parallelism requires "
@@ -194,7 +199,7 @@ try:
                     "to DTensor; TP runs through the spmd_types local_map path."
                 )
             tp = parallel_dims.tp if parallel_dims.tp_enabled else 1
-            if self._tp_style == "rowwise":
+            if tp_style == "rowwise":
                 if self.in_features % tp:
                     raise ValueError(
                         f"NVFP4 rowwise TP requires in_features divisible by TP; "
@@ -211,7 +216,7 @@ try:
             if local_in % _NVFP4_BLOCK or local_out % _NVFP4_BLOCK:
                 raise ValueError(
                     f"NVFP4 requires each local GEMM dim divisible by "
-                    f"{_NVFP4_BLOCK}; {self._tp_style or 'no-TP'} linear "
+                    f"{_NVFP4_BLOCK}; {tp_style or 'no-TP'} linear "
                     f"in={self.in_features} out={self.out_features} under TP={tp} "
                     f"gives local (in={local_in}, out={local_out})."
                 )
