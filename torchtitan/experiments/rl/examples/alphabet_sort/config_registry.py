@@ -80,14 +80,14 @@ def _qwen3_rl_model_registry(
 
 def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -139,14 +139,14 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
 
 def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="flex"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -235,14 +235,14 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     layers use full causal attention; the per-layer window is baked into each
     ``VarlenAttention.window_size``.
     """
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=gpt_oss_model_registry("20b", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/gpt-oss-20b",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
-            num_groups_per_train_step=5,
-            group_size=group_size,
+            num_prompts_per_train_step=5,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -294,14 +294,14 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
 
 def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=gpt_oss_model_registry("debugmodel", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
-            num_groups_per_train_step=5,
-            group_size=group_size,
+            num_prompts_per_train_step=5,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -355,7 +355,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=gpt_oss_model_registry("debugmodel", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
@@ -364,8 +364,8 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             max_offpolicy_steps=0,
-            num_groups_per_train_step=5,
-            group_size=group_size,
+            num_prompts_per_train_step=5,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -421,14 +421,14 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
 
 def rl_grpo_qwen3_1_7b() -> Controller.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=_qwen3_rl_model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -475,14 +475,14 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
 
 def rl_grpo_qwen3_14b() -> Controller.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=_qwen3_rl_model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -534,14 +534,14 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     Generator uses data_parallel_degree=2 (vLLM pure DP), with TP=2.
     MoE layers use EP=4.
     """
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -671,7 +671,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     replicated bf16 dense DP.
 
     """
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=model_registry(
             "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
@@ -682,8 +682,8 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             max_offpolicy_steps=0,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -748,14 +748,14 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
 
     Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
     """
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=model_registry("30B-A3B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
@@ -850,7 +850,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
     forward is bitwise identical to the bf16 generator.
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
@@ -860,8 +860,8 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             max_offpolicy_steps=0,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=2, seq_len=2048),
