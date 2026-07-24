@@ -112,7 +112,7 @@ class RolloutGroupWorkBuffer(Configurable):
         self._condition = asyncio.Condition()
         self._closed = False
         # TODO(async-rl): warm start — admit a small number of groups at first and grow the effective cap as the
-        # batcher consumes, so a cold start doesn't fill the whole FIFO window at policy version 0.
+        # batcher consumes, so a cold start doesn't fill the whole windowed FIFO range at policy version 0.
 
     def _has_active_slot_available(self) -> bool:
         return self._active_rollout_groups < self._max_active_rollout_groups
@@ -173,7 +173,7 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @sl.log_trace_span("take_finalized")
     async def take_finalized(self) -> RolloutGroup | None:
-        """Batcher loop: return the oldest FINALIZED group inside the anchored windowed-FIFO.
+        """Batcher loop: return the oldest FINALIZED group inside the anchored windowed FIFO range.
 
         The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
         window stay blocked even if they are finalized, so taking non-head groups does not slide

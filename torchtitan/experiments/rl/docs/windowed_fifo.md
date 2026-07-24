@@ -23,7 +23,7 @@ The window remains anchored at the oldest active group. Consuming a younger grou
 The user configures:
 
 - `S`: target offpolicy steps (`target_offpolicy_steps`)
-- `f`: fraction of the active buffer visible to the scheduler (`windowed_fifo_fraction`), which defaults to `0.3` following the MiniMax paper
+- `f`: fraction of the active buffer visible to the scheduler (`window_fraction`), which defaults to `0.3` following the MiniMax paper
 
 Given `P` prompt groups per train step, the controller derives:
 

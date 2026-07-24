@@ -75,7 +75,7 @@ _rollout_loop[N]
     unblocked by: n/a
 
 _batcher_loop
-  consumes: the oldest FINALIZED group inside the FIFO window (group_buffer.take_finalized)
+  consumes: the oldest FINALIZED group allowed by windowed FIFO (group_buffer.take_finalized)
     waits for:    a group inside the window becoming FINALIZED
     unblocked by: _rollout_loop[N] group_buffer.finalize_work()
   produces: TrainingBatch (training_batch_queue.put)
@@ -173,7 +173,7 @@ class AsyncLoopConfig(Configurable.Config):
     this target, up to `max_offpolicy_steps`. See
     ``torchtitan/experiments/rl/docs/windowed_fifo.md`` for details."""
 
-    windowed_fifo_fraction: float | None = 0.3
+    window_fraction: float | None = 0.3
     """FIFO look-ahead window expressed as a fraction of the active buffer size.
 
     This allows the batcher to bypass an unfinished rollout group at the head of
@@ -201,19 +201,19 @@ class AsyncLoopConfig(Configurable.Config):
             raise ValueError(
                 f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
             )
-        if self.windowed_fifo_fraction is not None and not (
-            0 < self.windowed_fifo_fraction <= 1
+        if self.window_fraction is not None and not (
+            0 < self.window_fraction <= 1
         ):
             raise ValueError(
-                "windowed_fifo_fraction must be None or in (0, 1], got "
-                f"{self.windowed_fifo_fraction}"
+                "window_fraction must be None or in (0, 1], got "
+                f"{self.window_fraction}"
             )
         if (
-            self.windowed_fifo_fraction is not None
-            and self.windowed_fifo_fraction * self.max_active_rollout_groups < 1
+            self.window_fraction is not None
+            and self.window_fraction * self.max_active_rollout_groups < 1
         ):
             warnings.warn(
-                f"windowed_fifo_fraction={self.windowed_fifo_fraction} is too small for "
+                f"window_fraction={self.window_fraction} is too small for "
                 f"active_buffer_size={self.max_active_rollout_groups}; forcing "
                 "window_size=1 (strict FIFO)",
                 stacklevel=2,
@@ -230,26 +230,26 @@ class AsyncLoopConfig(Configurable.Config):
         Symbols:
             ``P``: prompts per train step (``num_prompts_per_train_step``).
             ``S``: target steady-state offpolicy steps (``target_offpolicy_steps``).
-            ``f``: fraction of the active buffer used as the FIFO window
-                (``windowed_fifo_fraction``).
+            ``f``: fraction of the active buffer visible to windowed FIFO
+                (``window_fraction``).
             ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
 
         Returns:
             The FIFO look-ahead window size, ``max(1, floor(f * B))``. A value
             of 1 is strict FIFO.
         """
-        if self.windowed_fifo_fraction is None:
+        if self.window_fraction is None:
             return 1
         return max(
             1,
-            math.floor(self.windowed_fifo_fraction * self.max_active_rollout_groups),
+            math.floor(self.window_fraction * self.max_active_rollout_groups),
         )
 
     @property
     def max_offpolicy_steps(self) -> int:
         """Return the worst case consume-time offpolicy bound.
 
-        For active buffer size ``B``, FIFO window size ``W``, and prompts per
+        For active buffer size ``B``, window size ``W``, and prompts per
         train step ``P``, the bound is ``(B + W - 2) // P``.
 
         See ``torchtitan/experiments/rl/docs/windowed_fifo.md`` for the proof and
@@ -821,7 +821,7 @@ class Controller(Configurable):
         # rollout_loop
         generate_fn = self._make_generate_fn(metrics_prefix="generator")
 
-        # One rollout worker per active buffer slot: lets generation fill the whole FIFO window,
+        # One rollout worker per active buffer slot: lets generation fill the whole windowed FIFO range,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
         # TODO: support warm start
         rollout_tasks = [
@@ -1002,7 +1002,7 @@ class Controller(Configurable):
         On a clean close/shutdown the group_buffer drains and returns None; we forward a `None` sentinel
         so the trainer stops.
 
-        consumes: the oldest FINALIZED group inside the FIFO window (group_buffer.take_finalized)
+        consumes: the oldest FINALIZED group allowed by windowed FIFO (group_buffer.take_finalized)
             waits for:    a group inside the window becoming FINALIZED
             unblocked by: _rollout_loop[N] group_buffer.finalize_work()
         produces: TrainingBatch (training_batch_queue.put)
