@@ -28,7 +28,6 @@ import functools
 import time
 import warnings
 from collections.abc import Callable
-
 import torch
 
 from torchtitan.experiments.graph_trainer.configs import (
@@ -72,7 +71,8 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     schedule_fsdp_comms_to_dense_regions_pass,
 )
 from torchtitan.experiments.graph_trainer.fp8_passes import (
-    annotate_fp8_for_regional_inductor_pass,
+    annotate_complete_fp8_regions_for_regional_inductor_pass,
+    identify_fp8_regions_for_regional_inductor_pass,
     validate_fp8_graph_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
@@ -134,6 +134,29 @@ def async_tensor_parallel_pass(
     return gm
 
 
+def graph_pp_pre_partition_fp8_passes(
+    compile_config: GraphTrainerCompileConfig,
+) -> list[Callable]:
+    """Return FP8 passes that require the complete GraphPP joint graph."""
+    if not compile_config.fp8.enabled:
+        return []
+    if compile_config.inductor_compilation == "full":
+        return [
+            functools.partial(
+                validate_fp8_graph_pass,
+                strict=compile_config.fp8.strict_validation,
+            )
+        ]
+    if compile_config.inductor_compilation == "regional":
+        return [
+            functools.partial(
+                identify_fp8_regions_for_regional_inductor_pass,
+                strict=compile_config.fp8.strict_validation,
+            )
+        ]
+    return []
+
+
 def _tensor_parallel_degree(config, parallel_dims=None) -> int:
     """Return TP degree from ``ParallelDims`` when available, else config."""
     if parallel_dims is not None and hasattr(parallel_dims, "tp"):
@@ -171,6 +194,7 @@ def compile_time_passes(
     ``include_mandatory_normalization=False`` lets GraphPP run required
     normalization unconditionally and then append only the optional passes
     controlled by ``enable_passes``.
+
     """
     from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.experiments.graph_trainer.common_utils import (
@@ -212,17 +236,6 @@ def compile_time_passes(
         else []
     )
     fp8_config = getattr(config.compile, "fp8", None)
-    if (
-        fp8_config is not None
-        and fp8_config.enabled
-        and config.compile.inductor_compilation == "full"
-    ):
-        passes.append(
-            functools.partial(
-                validate_fp8_graph_pass,
-                strict=fp8_config.strict_validation,
-            )
-        )
     ep_overlap_chunk_passes: list[Callable] = []
     ep_overlap_module_fqn: str | None = None
     ep_overlap_chunk_strategy: str | None = None
@@ -353,18 +366,6 @@ def compile_time_passes(
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
-    if (
-        fp8_config is not None
-        and fp8_config.enabled
-        and config.compile.inductor_compilation == "regional"
-    ):
-        passes.append(
-            functools.partial(
-                annotate_fp8_for_regional_inductor_pass,
-                strict=fp8_config.strict_validation,
-            )
-        )
-
     if not include_inductor:
         return passes
 
@@ -372,6 +373,7 @@ def compile_time_passes(
         final_inductor_compile_passes(
             config.compile,
             use_cudagraph=use_cudagraph,
+            include_fp8_passes=fp8_config is not None and fp8_config.enabled,
         )
     )
     return passes
@@ -382,20 +384,29 @@ def final_inductor_compile_passes(
     *,
     use_cudagraph: bool = False,
     boxed_codegen: bool = False,
+    include_fp8_passes: bool = False,
 ) -> list[Callable]:
     """Return the terminal Inductor passes for a traced graph.
 
     GraphTrainer applies these to the full train-step graph. GraphPP applies
     the same pass list to each extracted stage callable after its PP-specific
     partitioning has chosen the callable boundary. Terminal Inductor selection
-    only depends on compile config; model- and parallelism-aware rewrites stay
-    in ``compile_time_passes``.
+    only depends on compile config. GraphPP leaves ``include_fp8_passes`` false
+    because it validates and identifies the complete stage joint graph before
+    partitioning.
     """
     from torchtitan.models.common.attention import FlexAttention
 
     passes: list[Callable] = []
     inductor_compilation = compile_config.inductor_compilation
     if inductor_compilation == "full":
+        if include_fp8_passes and compile_config.fp8.enabled:
+            passes.append(
+                functools.partial(
+                    validate_fp8_graph_pass,
+                    strict=compile_config.fp8.strict_validation,
+                )
+            )
         # Compile the entire graph into optimized Triton kernels. Must be
         # terminal; the FX graph is no longer authoritative after this pass.
         passes.append(
@@ -419,6 +430,15 @@ def final_inductor_compile_passes(
             )
 
             passes.append(annotate_rmsnorm_for_regional_inductor_pass)
+        if include_fp8_passes and compile_config.fp8.enabled:
+            passes.append(
+                functools.partial(
+                    identify_fp8_regions_for_regional_inductor_pass,
+                    strict=compile_config.fp8.strict_validation,
+                )
+            )
+        if compile_config.fp8.enabled:
+            passes.append(annotate_complete_fp8_regions_for_regional_inductor_pass)
         passes.append(
             functools.partial(
                 regional_inductor_pass,
