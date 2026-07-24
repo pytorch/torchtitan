@@ -33,7 +33,7 @@ class FP8GraphConfig:
     """Enable FP8 graph analysis and validation."""
 
     strict_validation: bool = True
-    """Require a recognized FP8 GEMM for each quantized module region."""
+    """Require a supported FP8 compute operation for each quantized module region."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -194,11 +194,6 @@ def validate_fp8_graph_config(compile_config: GraphTrainerCompileConfig) -> None
         raise ValueError("--compile.fp8.enabled requires --compile.enable_passes")
     if compile_config.mode != "aot_fx_trace":
         raise ValueError("--compile.fp8.enabled requires --compile.mode aot_fx_trace")
-    if compile_config.inductor_compilation not in {"full", "regional"}:
-        raise ValueError(
-            "--compile.fp8.enabled requires --compile.inductor_compilation full "
-            "or regional"
-        )
     if "cudagraph_pass" not in compile_config.disable_passes:
         raise ValueError(
             "--compile.fp8.enabled requires cudagraph_pass in "

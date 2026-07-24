@@ -82,6 +82,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     deduplicate_fsdp_unshard_chains_pass,
     eliminate_dead_code_pass,
     final_inductor_compile_passes,
+    graph_pp_pre_partition_fp8_passes,
 )
 from torchtitan.protocols.model import BaseModel
 from torchtitan.tools.logging import logger
@@ -823,6 +824,11 @@ def _apply_graph_pp_pre_partition_passes(
         use_cudagraph=False,
         include_inductor=False,
         include_mandatory_normalization=False,
+    )
+    passes.extend(
+        graph_pp_pre_partition_fp8_passes(
+            compile_config,
+        )
     )
     traced.gm = apply_graph_passes(
         traced.gm,
