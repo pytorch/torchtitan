@@ -206,7 +206,19 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}. "
                 f"Available: {list(self._param_init.keys())}"
             )
-        self._param_init[name](param)
+        # When CPU offloading is active, params are CPU DTensors on a CUDA
+        # (NCCL) mesh. DTensor dispatch for in-place random ops (normal_,
+        # uniform_) tries NCCL collectives on CPU tensors, causing a deadlock.
+        # Init the local shard directly to bypass DTensor dispatch.
+        from torch.distributed._tensor import DTensor
+        if (
+            isinstance(param, DTensor)
+            and param.device.type == "cpu"
+            and param.device_mesh.device_type == "cuda"
+        ):
+            self._param_init[name](param._local_tensor)
+        else:
+            self._param_init[name](param)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Initialize this module's own buffers.
