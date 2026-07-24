@@ -97,8 +97,36 @@ jobs:
         # but the CI docker image only has CUDA runtime, not the toolkit.
         uv pip install nvidia-cuda-nvcc
 
-        # Run E2E RL integration tests (up to 8 GPUs).
-        # Includes the MoE TP=4 EP=4 random_init test which needs 8 GPUs.
+        # RL Loss Guard runs FIRST, in a clean container, so a lingering port from
+        # the E2E suite can't collide with the generator's distributed init
+        # (EADDRINUSE). Deterministic loss regression check on the REAL Qwen3-0.6B
+        # (--hf-assets-path=$MODEL_PATH): real weights -> varied rewards -> non-zero
+        # advantage -> meaningful, full-precision losses (random init gives all
+        # zeros). The golden is arch-specific; regenerate on A10G if it changes.
+        LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
+        # Override to trainer TP=4 + 1 generator TP=4: the config's TP=2 OOMs with
+        # batch-invariant on A10G; the golden is from TP=4.
+        python torchtitan/experiments/rl/scripts/loss_compare.py \
+          --hf-assets-path "$MODEL_PATH" \
+          --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
+          --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
+          --import-result "$LOSS_FILE" \
+          --assert-equal \
+          --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
+
+        # Bitwise trainer/generator parity tests (batch-invariant). Varlen and Flex
+        # (both TP=2) run as separate torchrun invocations so each backend gets a
+        # fresh process group and vLLM engine; nproc matches each config's
+        # tensor_parallel_degree (the test builds ParallelDims from it).
+        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
+        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
+
+        # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
+        # random-init test and the batch-invariant debug tests (both need 8 GPUs).
         python -m torchtitan.experiments.rl.tests.integration_tests \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"

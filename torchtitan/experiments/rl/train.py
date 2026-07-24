@@ -32,6 +32,9 @@ from dataclasses import dataclass
 # imports transitively importing torch.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+# TODO: Remove `_src` after monarch cuts a new release. This is already a public
+# API in monarch nightly. https://github.com/meta-pytorch/monarch/pull/4327
+from monarch._src.actor.host_mesh import default_bootstrap_cmd
 from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
@@ -50,7 +53,7 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
     makes prefill attention a cudagraph break (run eager at replay). The import happens before the
     generator actor's ``__init__`` and in the vLLM EngineCore worker subprocesses -- which do NOT
     inherit a runtime-set ``os.environ`` -- so setting it at runtime is too late. It must go in the
-    proc's LAUNCH env (the spawn bootstrap, or the MAST role.env). Without it the decorator no-ops
+    proc's LAUNCH env (the spawn ``bootstrap_command``, or the MAST role.env). Without it the decorator no-ops
     and prefill attention is captured as ``output.fill_(0)`` (zeroed) -> the model never reads the
     prompt -> coherent-but-unrelated output. FULL_DECODE_ONLY never captures prefill so it needs
     nothing. Shared so the OSS spawn path and the fbcode MAST launcher use one source of truth.
@@ -65,15 +68,53 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
     return {}
 
 
+def _preimport_torch() -> None:
+    """``bootstrap`` setup callable: pre-import torch on the spawned proc."""
+    # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
+    import torch  # noqa: F401
+
+
+def _bootstrap_generator() -> None:
+    """``bootstrap`` setup callable for VLLMGenerator."""
+    import os
+
+    # TODO: this can be removed if it is addressed upstream in: https://github.com/tile-ai/tvm/issues/55
+    # VLLMGenerator encounters the following issue:
+    # 1. vLLM's jit_monitor transitively imports readline through the following chain:
+    #      vLLM -> tilelang  -> tvm  -> tvm's base.py -> import readline
+    #      https://github.com/vllm-project/vllm/blob/b23bd73f540175f9e117eaee5029cd7d8df63964/vllm/utils/jit_monitor.py#L451
+    #      https://github.com/tile-ai/tvm/blob/28a0d34420d2fa9bc71fc891445a3f1396fca759/python/tvm/base.py#L71
+    #    readline does tcsetattr on its import, which touches the controlling terminal.
+    # 2. Monarch spawns procs in a background process group.
+    #
+    # As a result, when spawning the VLLMGenerator mesh, readline-import touches the
+    # controlling terminal in background processes, and kernel sends SIGTTOU, which stops
+    # the process.
+    #
+    # Strictly speaking this should be a tvm bug, since it should not assume the import
+    # happens in a foreground process. To workaround it, we do a proactive readline-import
+    # warmup here with SIGTTOU being temporarily blocked. Then the subsequent readline-import
+    # in tvm will not do tcsetattr again since it is already done here.
+    if os.isatty(0):
+        import signal
+
+        _prev_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+        try:
+            import readline  # noqa: F401
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, _prev_mask)
+
+    _preimport_torch()
+
+
 class PerHostProvisioner:
     """Allocates non-overlapping GPU ranges within a single host.
 
     On the same host, the trainer and generator run on separate GPU
     meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
-    call to `allocate(n)` reserves the next *n* GPUs and returns a
-    bootstrap callable that sets `CUDA_VISIBLE_DEVICES` before CUDA
-    initializes in the spawned process, ensuring each mesh only sees its
-    own devices.
+    call to `allocate(n)` reserves the next *n* GPUs and returns the launch
+    env (`CUDA_VISIBLE_DEVICES` plus any `extra_env`) for those GPUs. The
+    returned env vars are applied to the spawned process via ``bootstrap_command``.
     """
 
     def __init__(self, total_gpus: int = 8):
@@ -86,7 +127,7 @@ class PerHostProvisioner:
 
     def allocate(
         self, num_gpus: int, *, extra_env: dict[str, str] | None = None
-    ) -> Callable[[], None]:
+    ) -> dict[str, str]:
         if num_gpus > self.available:
             raise RuntimeError(
                 f"Requested {num_gpus} GPUs but only {self.available} "
@@ -95,18 +136,10 @@ class PerHostProvisioner:
         gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
         self.next_gpu += num_gpus
 
-        def _bootstrap():
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
-            # Per-proc LAUNCH env. Set here (in the bootstrap) -- not at runtime in the actor's
-            # __init__ -- because rl/models/attention.py's @eager_break_during_capture reads
-            # VLLM_USE_BREAKABLE_CUDAGRAPH at MODULE IMPORT, which happens before __init__ and
-            # in the vLLM EngineCore worker subprocs (which do not inherit a runtime-set env).
-            if extra_env:
-                os.environ.update(extra_env)
-            # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
-            import torch  # noqa: F401
-
-        return _bootstrap
+        env = {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpu_ids)}
+        if extra_env:
+            env.update(extra_env)
+        return env
 
 
 @dataclass
@@ -138,6 +171,7 @@ def _spawn_proc_mesh(
     role_world_size: int,
     gpus_per_node: int,
     *,
+    bootstrap: Callable[[], None],
     role: str,
     extra_env: dict[str, str] | None = None,
 ) -> ProcMesh:
@@ -151,9 +185,11 @@ def _spawn_proc_mesh(
     )
     role_gpus_per_node = role_world_size // nodes
     provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
+    env = provisioner.allocate(role_gpus_per_node, extra_env=extra_env)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
-        bootstrap=provisioner.allocate(role_gpus_per_node, extra_env=extra_env),
+        bootstrap=bootstrap,
+        bootstrap_command=default_bootstrap_cmd().with_env(env),
     )
 
 
@@ -197,13 +233,18 @@ def spawn_proc_mesh(
         )
 
         trainer_mesh = _spawn_proc_mesh(
-            trainer_host_mesh, trainer_world_size, gpus_per_node, role="trainer"
+            trainer_host_mesh,
+            trainer_world_size,
+            gpus_per_node,
+            bootstrap=_preimport_torch,
+            role="trainer",
         )
         generator_meshes = [
             _spawn_proc_mesh(
                 gen_host_mesh,
                 per_generator_world_size,
                 gpus_per_node,
+                bootstrap=_bootstrap_generator,
                 role="generator",
                 extra_env=generator_env,
             )
@@ -216,13 +257,19 @@ def spawn_proc_mesh(
         provisioner = PerHostProvisioner(total_gpus=total_gpus)
         trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
-            bootstrap=provisioner.allocate(trainer_world_size),
+            bootstrap=_preimport_torch,
+            bootstrap_command=default_bootstrap_cmd().with_env(
+                provisioner.allocate(trainer_world_size)
+            ),
         )
         generator_meshes = [
             host_mesh.spawn_procs(
                 per_host={"gpus": per_generator_world_size},
-                bootstrap=provisioner.allocate(
-                    per_generator_world_size, extra_env=generator_env
+                bootstrap=_bootstrap_generator,
+                bootstrap_command=default_bootstrap_cmd().with_env(
+                    provisioner.allocate(
+                        per_generator_world_size, extra_env=generator_env
+                    )
                 ),
             )
             for _ in range(num_generators)

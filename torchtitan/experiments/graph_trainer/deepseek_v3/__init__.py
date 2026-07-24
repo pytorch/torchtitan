@@ -7,7 +7,7 @@
 from dataclasses import fields
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.experiments.graph_trainer.graph_pp.pipeline import graph_pipeline_llm
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -47,7 +47,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=_parallelize_fn,
-        pipelining_fn=pipeline_llm,
+        pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )

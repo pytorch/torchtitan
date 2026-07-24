@@ -48,10 +48,74 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
 )
+from torchtitan.experiments.graph_trainer.fsdp_patterns import find_fsdp_unshard_outputs
 from torchtitan.tools.logging import logger
 
 
 _FSDP_BUCKET_META = "fsdp_bucket"
+
+
+def _chain_nodes_to_placeholder(
+    output: fx.Node,
+    placeholder: fx.Node,
+) -> set[fx.Node]:
+    """Return graph nodes in one FSDP unshard chain, excluding the placeholder."""
+    chain_nodes: set[fx.Node] = set()
+    queue = [output]
+    while queue:
+        node = queue.pop()
+        if node is placeholder or node in chain_nodes:
+            continue
+        chain_nodes.add(node)
+        queue.extend(node.all_input_nodes)
+    return chain_nodes
+
+
+def deduplicate_fsdp_unshard_chains_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Canonicalize duplicate SimpleFSDP unshard chains per flat parameter.
+
+    A traced parametrized module can read the same FSDP parameter more than
+    once. Each read materializes an equivalent all-gather/wait reconstruction
+    chain from the same flat parameter placeholder. Downstream FSDP passes
+    assume one unsharded value per flat parameter, so this pass rewrites all
+    duplicate chains to the first chain and removes the now-dead duplicate
+    collective infrastructure.
+    """
+    del example_inputs
+
+    removable_nodes: set[fx.Node] = set()
+    num_duplicate_chains = 0
+    for placeholder in gm.graph.find_nodes(op="placeholder"):
+        unshard_outputs = find_fsdp_unshard_outputs(placeholder)
+        if len(unshard_outputs) <= 1:
+            continue
+        canonical_output = unshard_outputs[0]
+        for duplicate_output in unshard_outputs[1:]:
+            removable_nodes.update(
+                _chain_nodes_to_placeholder(duplicate_output, placeholder)
+            )
+            duplicate_output.replace_all_uses_with(canonical_output)
+            num_duplicate_chains += 1
+
+    if num_duplicate_chains == 0:
+        return gm
+
+    def _is_impure_for_fsdp_dedup(node: fx.Node) -> bool:
+        if node in removable_nodes:
+            return False
+        return node.is_impure()
+
+    gm.graph.eliminate_dead_code(is_impure_node=_is_impure_for_fsdp_dedup)
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(
+        "Canonicalized %d duplicate FSDP unshard chain(s)",
+        num_duplicate_chains,
+    )
+    return gm
 
 
 def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:

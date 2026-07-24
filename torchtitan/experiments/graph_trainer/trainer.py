@@ -10,11 +10,10 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.fx.traceback import annotate_fn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
-    _maybe_materialize_grad_for_param_layout,
-    _MODULE_FQN,
+    accumulate_param_grads_,
+    compute_annotated_loss,
     log_timer,
     maybe_register_blockmask_pytree_node,
 )
@@ -43,7 +42,7 @@ from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
 
-def _maybe_apply_numa_binding(gpu_index: int, device_type: str) -> None:
+def _maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
     """Pin this process to the NUMA node of its GPU for local memory bandwidth.
 
     On multi-NUMA machines (e.g. GB200 NVLink-C2C), pinned-memory allocations
@@ -59,13 +58,13 @@ def _maybe_apply_numa_binding(gpu_index: int, device_type: str) -> None:
     )
 
     _maybe_apply_numa_binding_to_current_process(
-        gpu_index=gpu_index,
+        device_index=device_index,
         numa_options=NumaOptions(
             affinity_mode=AffinityMode.NODE,
             should_fall_back_if_binding_fails=True,
         ),
     )
-    logger.info("NUMA binding applied for GPU %d", gpu_index)
+    logger.info("NUMA binding applied for GPU %d", device_index)
 
 
 def make_fwd_bwd_step(model, loss_fn):
@@ -82,8 +81,11 @@ def make_fwd_bwd_step(model, loss_fn):
         # annotate_module_fqns won't tag it. Annotate it here so that
         # downstream passes (bucketing, SAC, kernel annotations) can
         # attribute loss nodes in the traced graph.
-        loss, _ = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)(
-            pred, labels, global_valid_tokens
+        loss = compute_annotated_loss(
+            loss_fn,
+            pred,
+            labels,
+            {"global_valid_tokens": global_valid_tokens},
         )
         params = [
             p
@@ -108,11 +110,6 @@ class GraphTrainer(Trainer):
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
-        if self.config.compile.mode == "aot_fx_trace" and self.parallel_dims.pp_enabled:
-            raise ValueError(
-                "aot_fx_trace compile mode does not support Pipeline Parallel"
-            )
-
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
 
@@ -132,17 +129,19 @@ class GraphTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
         global_valid_tokens: float,
     ) -> torch.Tensor:
-        if self.config.compile.mode != "aot_fx_trace":
+        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_step(
                 input_dict=input_dict,
                 labels=labels,
                 global_valid_tokens=global_valid_tokens,
             )
 
+        assert isinstance(input_dict, dict)
+        assert isinstance(labels, torch.Tensor)
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
@@ -246,13 +245,7 @@ class GraphTrainer(Trainer):
         loss = outputs[0]
         grads = outputs[1:]
 
-        for param, grad in zip(params, grads, strict=True):
-            grad = _maybe_materialize_grad_for_param_layout(param, grad)
-            if param.grad is None:
-                param.grad = grad
-            else:
-                param.grad += grad
-
+        accumulate_param_grads_(params, grads)
         return loss
 
     def _prepare_trace_inputs(

@@ -12,12 +12,17 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 
-from torchtitan.models.common import Conv1d, Embedding, Linear  # noqa: F401
+from torchtitan.models.common import (  # noqa: F401
+    Conv1d,
+    Embedding,
+    Linear,
+    SigmoidGatedFeedForward,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_experts_config,
     make_ffn_config,
     make_moe_config,
+    make_routed_experts_config,
     make_router_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -35,7 +40,6 @@ from .model import (
     Qwen35Model,
     Qwen35TransformerBlock,
     RMSNormGated,
-    SharedExperts,
 )
 from .parallelize import parallelize_qwen3_5, pipeline_qwen3_5
 from .rope import MRoPE
@@ -118,7 +122,7 @@ def _offset_norm(dim: int) -> OffsetRMSNorm.Config:
 
 def _shared_experts_config(
     *, dim: int, hidden_dim: int, layer_id: int
-) -> SharedExperts.Config:
+) -> SigmoidGatedFeedForward.Config:
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
     ffn = make_ffn_config(
         dim=dim,
@@ -126,7 +130,7 @@ def _shared_experts_config(
         w1_param_init=_LINEAR_INIT,
         w2w3_param_init=_depth_init(layer_id),
     )
-    return SharedExperts.Config(
+    return SigmoidGatedFeedForward.Config(
         w1=ffn.w1,
         w2=ffn.w2,
         w3=ffn.w3,
@@ -442,7 +446,7 @@ def _build_qwen35_moe_layers(
                         score_func="softmax",
                         route_norm=True,
                     ),
-                    experts=make_experts_config(
+                    routed_experts=make_routed_experts_config(
                         dim=dim,
                         hidden_dim=moe_hidden_dim,
                         num_experts=num_experts,

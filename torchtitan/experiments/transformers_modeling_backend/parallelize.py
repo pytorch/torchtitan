@@ -8,14 +8,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Replicate, Shard
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    PrepareModuleInput,
-    RowwiseParallel,
-    SequenceParallel,
-)
+from torch.distributed.tensor import Shard
 
 from torchtitan.config import (
     CompileConfig,
@@ -31,8 +24,56 @@ from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
+
+
+def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
+    """All-gather k/v across the CP axis inside each flex kernel forward.
+
+    q/k/v reach the flex kernel seq-sharded on the CP axis (tensor dim 2 of the
+    ``(b, heads, seq, dim)`` layout). Attention needs full-length k/v, so we
+    all-gather them across the CP mesh with a funcol collective (autograd-aware:
+    the backward reduce-scatters gradients back to the local shard). q stays
+    sharded, so each rank computes attention for its seq shard against the full
+    keys -- the BlockMask is Q-sharded / KV-full to match.
+
+    This is the explicit-collective analogue of Titan's ``flex_cp_allgather``
+    path: the kernel runs nested inside the attention module's local_map region
+    where the CP mesh dim is no longer visible to a declarative redistribute, so
+    the gather is done here on local tensors. Called before ``model.parallelize``
+    so the wrap is captured inside the local_map wrapping.
+    """
+    import torch.distributed as dist
+    from torch.distributed.tensor.experimental._context_parallel._attention import (
+        flex_cp_allgather,
+    )
+
+    pg_name = dist._get_process_group_name(cp_mesh.get_group())
+    seq_dim = 2  # (b, heads, seq, dim)
+
+    for module in model.modules():
+        kernel = getattr(module, "_titan_flex_kernel", None)
+        if kernel is None:
+            continue
+
+        def _make_cp_forward(orig_forward):
+            def cp_forward(query, key, value, **kwargs):
+                key = key.contiguous()
+                value = value.contiguous()
+                global_key, global_value = flex_cp_allgather(
+                    key, value, seq_dim, pg_name
+                )
+                return orig_forward(query, global_key, global_value, **kwargs)
+
+            return cp_forward
+
+        kernel.forward = _make_cp_forward(kernel.forward)
+
+
+# ---------------------------------------------------------------------------
+# Main parallelization entry point
+# ---------------------------------------------------------------------------
 
 
 def parallelize_hf_transformers(
@@ -45,16 +86,15 @@ def parallelize_hf_transformers(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    """
-    Apply tensor parallelism, activation checkpointing, torch.compile, and data
-    parallelism to the model.
+    """Apply parallelism to the HF model using the titan Module protocol.
 
-    NOTE: The passed-in model preferably should be on meta device. Otherwise,
-    the model must fit on GPU or CPU memory.
+    Flow:
+    1. Build and swap Titan MoE modules (sets _sharding_config on MoE tree)
+    2. Convert all remaining HF nn.Modules to Module protocol via __class__ swap
+    3. Set ShardingConfig on every module based on its role
+    4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
+    5. Apply AC, compile, FSDP as usual
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -62,12 +102,93 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallel_dims.tp_enabled:
-        apply_non_moe_tp(
-            model,
-            parallel_dims.get_mesh("tp"),
+    # Only the "default" sharding backend is wired here.
+    # TODO: wire spmd_types (next PR) -- see the migration TODO in hf_sharding.py.
+    if parallel_dims.spmd_backend != "default":
+        raise NotImplementedError(
+            f"The HF transformers backend only supports spmd_backend='default' "
+            f"today; got '{parallel_dims.spmd_backend}'. spmd_types/full_dtensor "
+            "are not yet wired for this backend (FSDP mesh resolution, "
+            "Titan-native embedding, and attention kernels are pending)."
         )
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+
+    # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
+    # the flex kernel's local_map redistributes
+    # k/v from seq-sharded to CP-Replicate (all-gather); see _attach_flex_kernel
+    # in hf_sharding.py. The CP-sharded BlockMask is built and sharded on its Q
+    # axis upstream (trainer, ptrr balancer). Note: the ptrr balancer requires
+    # the number of Q blocks (seq_len / flex BLOCK_SIZE) to be divisible by the
+    # CP degree; too-short sequences raise "num_tasks N must be divisible by
+    # group_size" from the balancer -- this is a CP+ptrr constraint, independent
+    # of PP.
+
+    # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
+    # Some models (Gemma4) share the embedding and lm_head weight
+    # (tie_word_embeddings=True). FSDP2 cannot handle parameters shared
+    # across FSDP groups. Un-tying here creates an independent copy for
+    # the lm_head so both can be sharded separately. Since we train from
+    # scratch, the un-tied weights will diverge during training (which is
+    # expected — the model learns independent embedding and output layers).
+    if (
+        model.tok_embeddings is not None
+        and model.lm_head is not None
+        and any(
+            p1 is p2
+            for p1 in model.tok_embeddings.parameters()
+            for p2 in model.lm_head.parameters()
+        )
+    ):
+        model.lm_head.weight = nn.Parameter(
+            model.lm_head.weight.clone(),
+            requires_grad=model.lm_head.weight.requires_grad,
+        )
+        logger.info("Un-tied embedding/lm_head weights for FSDP compatibility")
+
+    # 1. Build and swap Titan MoE (sets _sharding_config, does NOT parallelize)
+    if any(getattr(b, "moe_enabled", False) for b in model.layers):
+        from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
+            build_and_swap_native_moe,
+        )
+
+        build_and_swap_native_moe(model, parallel_dims)
+
+    # 2. Convert HF modules to Module protocol.
+    # TP/EP always need it. CP-only needs it too: the flex kernel's local_map is
+    # what all-gathers k/v across the CP axis, and it is only installed by the
+    # sharding pass below.
+    needs_module_protocol = (
+        parallel_dims.tp_enabled or parallel_dims.ep_enabled or parallel_dims.cp_enabled
+    )
+    if needs_module_protocol:
+        from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
+            set_hf_sharding_configs,
+        )
+        from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
+            convert_hf_to_module,
+        )
+
+        convert_hf_to_module(model)
+
+        # 3. Set sharding configs on all non-MoE modules
+        set_hf_sharding_configs(
+            model,
+            enable_sp=parallel_dims.tp_enabled,
+        )
+
+        # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
+        # the CP axis (on the seq dim). Must run before model.parallelize so the
+        # wrap is captured inside the local_map region and operates on the local
+        # (already TP-head-sharded, CP-seq-sharded) tensors.
+        if parallel_dims.cp_enabled:
+            _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
+
+        # 4. Single parallelize call -- handles TP, EP, MoE, everything
+        model.parallelize(parallel_dims)
+
+        if parallel_dims.tp_enabled:
+            maybe_enable_async_tp(
+                parallelism, compile_config, parallel_dims.get_mesh("tp")
+            )
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -76,13 +197,22 @@ def parallelize_hf_transformers(
     if ac_config is not None:
         ac_config.build(dump_folder=dump_folder).apply(model)
 
-    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
+    # Compile after AC wrapping and before FSDP. Compile the whole transformer
+    # block (including Titan MoE) via the shared core helper — the previous
+    # MoE-only ``apply_compile_sparse`` workaround is obsolete now that
+    # whole-block MoE compile works (pytorch/torchtitan#3409 fixed upstream).
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
     dp_mesh_dim_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
     )
+
+    edp_mesh_names = (
+        ["dp_replicate", "efsdp"] if parallel_dims.dp_replicate_enabled else ["efsdp"]
+    )
+    edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+
     apply_fsdp(
         model,
         parallel_dims.get_mesh(dp_mesh_dim_names),
@@ -92,9 +222,9 @@ def parallelize_hf_transformers(
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        ep_degree=parallel_dims.ep,
+        dp_mod_ep_mesh=edp_mesh,
     )
-
-    logger.info("Applied fully_shard to the model")
 
     if training.enable_cpu_offload:
         logger.info("Applied CPU Offloading to the model")
@@ -106,128 +236,9 @@ def parallelize_hf_transformers(
     return model
 
 
-def apply_non_moe_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-):
-    """Apply tensor parallelism."""
-    # 1. Parallelize the embedding and shard its outputs (which are the first
-    # transformer block's inputs)
-    # 2. Parallelize the root norm layer over the sequence dim
-    # 3. Parallelize the final linear output layer
-
-    # skipping nn.Identity modules (which are added by pipeline parallelism for unused modules)
-    root_plan = {}
-
-    if hasattr(model, "tok_embeddings"):
-        if isinstance(model.tok_embeddings, nn.Identity):
-            root_plan["tok_embeddings"] = NoParallel(use_local_output=True)
-        else:
-            root_plan["tok_embeddings"] = RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            )
-
-    if hasattr(model, "norm"):
-        if isinstance(model.norm, nn.Identity):
-            root_plan["norm"] = NoParallel(use_local_output=True)
-        else:
-            root_plan["norm"] = SequenceParallel()
-
-    if hasattr(model, "lm_head"):
-        if isinstance(model.lm_head, nn.Identity):
-            root_plan["lm_head"] = NoParallel(use_local_output=True)
-        else:
-            root_plan["lm_head"] = ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1),
-                use_local_output=False,
-            )
-    if root_plan:  # Only call if there's something to parallelize
-        parallelize_module(model, tp_mesh, root_plan)
-
-    # Apply tensor + sequence parallelism to every transformer block
-    for transformer_block in model.layers:
-        layer_plan = {
-            "input_layernorm": SequenceParallel(),
-            "self_attn": PrepareModuleInput(
-                input_kwarg_layouts={"hidden_states": Shard(1)},
-                desired_input_kwarg_layouts={"hidden_states": Replicate()},
-            ),
-            "post_attention_layernorm": SequenceParallel(),
-        }
-
-        if getattr(transformer_block.self_attn, "q_lora_rank", None) is None:
-            layer_plan.update(
-                {
-                    "self_attn.q_proj": ColwiseParallel(),
-                    "self_attn.k_proj": ColwiseParallel(),
-                    "self_attn.v_proj": ColwiseParallel(),
-                }
-            )
-        else:
-            layer_plan.update(
-                {
-                    "self_attn.q_a_proj": NoParallel(use_local_output=True),
-                    "self_attn.q_a_layernorm": NoParallel(use_local_output=True),
-                    "self_attn.q_b_proj": ColwiseParallel(),
-                    "self_attn.kv_a_proj_with_mqa": NoParallel(use_local_output=True),
-                    "self_attn.kv_a_layernorm": NoParallel(use_local_output=True),
-                    "self_attn.kv_b_proj": ColwiseParallel(),
-                }
-            )
-
-        # Handle different names for the output projection layer, e.g. o_proj vs dense
-        o_proj_name = (
-            "o_proj" if hasattr(transformer_block.self_attn, "o_proj") else "dense"
-        )
-        layer_plan[f"self_attn.{o_proj_name}"] = RowwiseParallel(
-            output_layouts=Shard(1)
-        )
-        # For model that uses RMSNorm on Q and K (i.e. Qwen3)
-        if hasattr(transformer_block.self_attn, "q_norm") and hasattr(
-            transformer_block.self_attn, "k_norm"
-        ):
-            layer_plan["self_attn.q_norm"] = SequenceParallel(
-                sequence_dim=2, use_local_output=True
-            )
-            layer_plan["self_attn.k_norm"] = SequenceParallel(
-                sequence_dim=2, use_local_output=True
-            )
-
-        if not transformer_block.moe_enabled:
-            mlp_plan = {
-                "mlp": PrepareModuleInput(
-                    input_layouts=(Shard(1),),
-                    desired_input_layouts=(Replicate(),),
-                ),
-            }
-            # Handle different names for MLP layers, e.g. gate_proj vs fc1
-            gate_proj_name = (
-                "gate_proj" if hasattr(transformer_block.mlp, "gate_proj") else "fc1"
-            )
-            mlp_plan[f"mlp.{gate_proj_name}"] = ColwiseParallel()
-
-            if hasattr(transformer_block.mlp, "up_proj"):
-                mlp_plan["mlp.up_proj"] = ColwiseParallel()
-
-            down_proj_name = (
-                "down_proj" if hasattr(transformer_block.mlp, "down_proj") else "fc2"
-            )
-            mlp_plan[f"mlp.{down_proj_name}"] = RowwiseParallel(output_layouts=Shard(1))
-            layer_plan.update(mlp_plan)
-
-        # Some models like Phi-2 don't have post_attention_layernorm
-        if not hasattr(transformer_block, "post_attention_layernorm"):
-            layer_plan.pop("post_attention_layernorm")
-
-        parallelize_module(
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
-        )
-
-    logger.info("Applied Tensor Parallelism to the model")
+# ---------------------------------------------------------------------------
+# FSDP
+# ---------------------------------------------------------------------------
 
 
 def apply_fsdp(
@@ -243,22 +254,13 @@ def apply_fsdp(
     gradient_divide_factor: int | None = None,
     enable_symm_mem: bool = False,
 ):
-    """
-    Apply data parallelism (via FSDP2) to the model.
+    """Apply data parallelism (via FSDP2) to the model.
 
-    Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-        reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
-
+    When EP is enabled (``ep_degree > 1``), uses flat FSDP with
+    ``shard_placement_fn`` to route expert params to ``dp_mod_ep_mesh``
+    and other params to ``dp_mesh`` within a single ``fully_shard`` call
+    per transformer block — matching Titan's approach and avoiding
+    nested FSDP hooks that cause SAC op-count mismatches during recompute.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -304,40 +306,67 @@ def apply_fsdp(
         )
 
     for transformer_block in model.layers:
-        # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
-        # - the router and the shared experts are sharded together with the TransformerBlock
-        # - the routed experts are sharded with the remaining dp_mod_ep_mesh
         if (
             hasattr(transformer_block, "moe_enabled")
             and transformer_block.moe_enabled
             and ep_degree > 1
         ):
-            fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
-            moe_block = transformer_block.mlp
-            # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
-            #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
-            #       causes inefficiency, so we choose to do FSDP sharding on dim-1.
-            #       Even when EP is not used, we may still want to shard the experts
-            #       on non-0 dim. For now it may not be worth the complexity to support
-            #       shard_placement_fn on the outer TransformerBlock-level FSDP.
-            _experts_shard_placement_fn = None
-            assert dp_mod_ep_mesh is not None
-            if dp_mod_ep_mesh.size() * ep_degree > moe_block.experts.num_experts:
-                _experts_shard_placement_fn = lambda param: Shard(1)
-
-            fully_shard(
-                moe_block.experts,
-                **fsdp_mod_ep_config,
-                reshard_after_forward=reshard_after_forward,
-                shard_placement_fn=_experts_shard_placement_fn,
+            from torch.distributed.fsdp._fully_shard._fsdp_common import (
+                FSDPMeshInfo,
+                HSDPMeshInfo,
+                ShardPlacementResult,
             )
 
-        fully_shard(
-            transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
+            assert dp_mod_ep_mesh is not None
+            moe_module = getattr(transformer_block, "mlp", None)
+            # Post-#3859 the grouped experts live under routed_experts.inner_experts
+            # (with the token_dispatcher as a sibling under routed_experts).
+            experts = moe_module.routed_experts.inner_experts
+            expert_params = set(experts.parameters())
+            num_local_experts = experts.num_experts // ep_degree
+
+            if dp_mod_ep_mesh.size() > num_local_experts:
+                expert_shard_placement = Shard(1)
+            else:
+                expert_shard_placement = Shard(0)
+
+            def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
+                if mesh.ndim == 1:
+                    return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
+                if mesh.ndim == 2:
+                    return HSDPMeshInfo(
+                        mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
+                    )
+                raise ValueError(f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh.")
+
+            edp_mesh_info = _get_fsdp_mesh_info(dp_mod_ep_mesh)
+            dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+
+            def _shard_placement_fn(
+                param: nn.Parameter,
+                _expert_params: set = expert_params,
+                _expert_placement: Shard = expert_shard_placement,
+                _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
+                _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
+            ) -> ShardPlacementResult:
+                if param in _expert_params:
+                    return ShardPlacementResult(
+                        placement=_expert_placement, mesh_info=_edp_mesh_info
+                    )
+                return ShardPlacementResult(placement=Shard(0), mesh_info=_dp_mesh_info)
+
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+                shard_placement_fn=_shard_placement_fn,
+            )
+        else:
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
 
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass. When
@@ -358,7 +387,7 @@ def apply_fsdp(
     disable_fsdp_gradient_division(model)
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
-    # in EP could interfere with implicit prefetching in FSDP
+    # in EP could interfere with implicit prefetching in FSDP.
     if ep_degree == 1:
         return
 
@@ -373,14 +402,7 @@ def apply_fsdp(
         transformer_blocks, next_transformer_blocks
     ):
         if next_transformer_block is not None:
-            if next_transformer_block.moe_enabled:
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block, next_transformer_block.mlp.experts]
-                )
-            else:
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block]
-                )
+            transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
         elif model.norm is not None and model.lm_head is not None:
             transformer_block.set_modules_to_forward_prefetch(
                 [model.norm, model.lm_head]
@@ -401,13 +423,6 @@ def apply_fsdp(
         reversed_transformer_blocks, prev_transformer_blocks
     ):
         if prev_transformer_block is not None:
-            if prev_transformer_block.moe_enabled:
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block, prev_transformer_block.mlp.experts]
-                )
-            else:
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block]
-                )
+            transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
         elif model.tok_embeddings is not None:
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])

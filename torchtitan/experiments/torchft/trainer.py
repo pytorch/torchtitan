@@ -182,6 +182,12 @@ class FaultTolerantTrainer(Trainer):
             config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
+        self.num_pipeline_parallel_microbatches = (
+            config.training.local_batch_size
+            // config.parallelism.pipeline_parallel_microbatch_size
+            if parallel_dims.pp_enabled
+            else 1
+        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -382,29 +388,15 @@ class FaultTolerantTrainer(Trainer):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
-        num_microbatches = (
-            self.config.training.local_batch_size
-            // self.config.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else 1
-        )
-
-        # Collect all microbatches on CPU and count total valid tokens
-        microbatches = []
+        batch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
-            if parallel_dims.pp_enabled:
-                input_dict = []
-                labels = []
-                for _ in range(num_microbatches):
-                    mb_input_dict, mb_labels = next(data_iterator)
-                    local_valid_tokens += (mb_labels != IGNORE_INDEX).sum()
-                    input_dict.append(mb_input_dict)
-                    labels.append(mb_labels)
-            else:
+            batch_group = []
+            for _ in range(self.num_pipeline_parallel_microbatches):
                 input_dict, labels = next(data_iterator)
                 local_valid_tokens += (labels != IGNORE_INDEX).sum()
-            microbatches.append((input_dict, labels))
+                batch_group.append((input_dict, labels))
+            batch_groups.append(batch_group)
 
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
@@ -416,29 +408,28 @@ class FaultTolerantTrainer(Trainer):
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
-        # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
-        for input_dict, labels in microbatches:
+        for batch_group in batch_groups:
+            input_dict_mbs = []
+            label_mbs = []
+            for input_dict, labels in batch_group:
+                for key, value in input_dict.items():
+                    if isinstance(value, torch.Tensor):
+                        input_dict[key] = value.to(self.device)
+                input_dict_mbs.append(input_dict)
+                label_mbs.append(labels.to(self.device))
+
             if parallel_dims.pp_enabled:
-                assert isinstance(input_dict, list)
-                assert isinstance(labels, list)
-                for mb_input_dict in input_dict:
-                    for k, v in mb_input_dict.items():
-                        if isinstance(v, torch.Tensor):
-                            mb_input_dict[k] = v.to(self.device)
-                labels = [mb_labels.to(self.device) for mb_labels in labels]
+                step_input_dict = input_dict_mbs
+                step_labels = label_mbs
             else:
-                assert isinstance(input_dict, dict)
-                assert isinstance(labels, torch.Tensor)
-                # Move tensors to GPU
-                for k, v in input_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        input_dict[k] = v.to(self.device)
-                labels = labels.to(self.device)
+                assert len(input_dict_mbs) == len(label_mbs) == 1
+                step_input_dict = input_dict_mbs[0]
+                step_labels = label_mbs[0]
 
             loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
+                input_dict=step_input_dict,
+                labels=step_labels,
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())

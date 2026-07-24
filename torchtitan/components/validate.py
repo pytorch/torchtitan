@@ -201,6 +201,7 @@ class Validator(BaseValidator):
                 self.parallel_dims.get_mesh("cp"),
                 inputs.device,
                 self.parallelism.context_parallel_load_balancer,
+                self.parallelism.context_parallel_ptrr_mask_key,
             )
 
         if self.parallelism.spmd_backend == "full_dtensor":
@@ -299,21 +300,12 @@ class Validator(BaseValidator):
 
                 with self.validation_context():
                     losses = [] if self.pp_has_last_stage else None
-                    if self.pp_has_first_stage:
-                        self.pp_schedule.eval(
-                            arg_mbs,
-                            kwargs=kwarg_mbs,
-                            target=target_mbs,
-                            losses=losses,
-                            pre_split_args_kwargs=True,
-                        )
-                    else:
-                        self.pp_schedule.eval(
-                            kwargs=kwarg_mbs,
-                            target=target_mbs,
-                            losses=losses,
-                            pre_split_args_kwargs=True,
-                        )
+                    self.pp_schedule.eval(
+                        arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                        kwarg_mbs=kwarg_mbs,
+                        target_mbs=target_mbs,
+                        losses=losses,
+                    )
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU

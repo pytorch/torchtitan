@@ -53,9 +53,9 @@ def _trainable_group(group_id: int, *, num_samples: int) -> TrainingSampleGroup:
     )
 
 
-def _build_batcher(*, num_groups_per_train_step: int) -> Batcher:
+def _build_batcher(*, num_prompts_per_train_step: int) -> Batcher:
     return Batcher.Config().build(
-        num_groups_per_train_step=num_groups_per_train_step,
+        num_prompts_per_train_step=num_prompts_per_train_step,
         dp_degree=1,
         pad_id=0,
     )
@@ -64,7 +64,7 @@ def _build_batcher(*, num_groups_per_train_step: int) -> Batcher:
 def test_batcher_counts_trainable_groups_not_rollouts() -> None:
     # Target is 2 GROUPS. A single group with many rollouts is not a full batch; two groups are,
     # regardless of how many rollouts each contributes.
-    batcher = _build_batcher(num_groups_per_train_step=2)
+    batcher = _build_batcher(num_prompts_per_train_step=2)
     assert (
         batcher.add_training_samples(
             training_sample_group=_trainable_group(0, num_samples=8)
@@ -80,7 +80,7 @@ def test_batcher_counts_trainable_groups_not_rollouts() -> None:
 def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     # Metric-only (empty) groups do not count toward the target and cannot form a zero-token batch;
     # they ride along until a trainable group completes the batch.
-    batcher = _build_batcher(num_groups_per_train_step=1)
+    batcher = _build_batcher(num_prompts_per_train_step=1)
     metric_only = TrainingSampleGroup(group_id=0, training_samples=[], metrics=[])
     assert batcher.add_training_samples(training_sample_group=metric_only) is None
     batch = batcher.add_training_samples(
@@ -94,7 +94,7 @@ def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
     # 5 real rows, local_batch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
     # Round-robin dealing spreads the pad rows so no (microbatch, rank) cell is all-pad.
     batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=2)).build(
-        num_groups_per_train_step=1,
+        num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
     )
@@ -180,7 +180,7 @@ def test_untrainable_group_releases_before_training() -> None:
     async def run() -> None:
         buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
         batcher = Batcher.Config().build(
-            num_groups_per_train_step=1,
+            num_prompts_per_train_step=1,
             dp_degree=1,
             pad_id=0,
         )
