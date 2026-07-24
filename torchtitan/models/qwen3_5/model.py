@@ -11,6 +11,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 
+from fla.modules.convolution import causal_conv1d as _fla_causal_conv1d
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
@@ -20,7 +21,11 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    BaseAttention,
+    create_varlen_metadata_for_document,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -41,16 +46,19 @@ def _torch_native_gated_delta(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Standalone math reference for the gated delta rule recurrence.
 
-    Sequential O(seqlen) loop — use FLA kernels for GPU efficiency.
+    Sequential O(seqlen) loop -- use FLA kernels for GPU efficiency.
 
     Args:
         q, k: (bs, seqlen, n_heads, key_head_dim)
         v: (bs, seqlen, n_heads, value_head_dim)
-        g: (bs, seqlen, n_heads) — log-space decay, always negative
-        beta: (bs, seqlen, n_heads) — update gate ∈ (0, 1)
+        g: (bs, seqlen, n_heads) -- log-space decay, always negative
+        beta: (bs, seqlen, n_heads) -- update gate in (0, 1)
+        cu_seqlens: optional packed-sample boundaries over the flattened
+            [1, bs*seqlen] timeline; the state resets at each one.
 
     Returns:
         output: (bs, seqlen, n_heads, value_head_dim)
@@ -59,28 +67,37 @@ def _torch_native_gated_delta(
     D_v = v.shape[-1]
     dtype = q.dtype
 
-    # Upcast to float32 — recurrence accumulates over seqlen steps
+    # Upcast to float32 -- the recurrence accumulates over seqlen steps.
     q = _l2norm(q.float(), dim=-1) * (D_k**-0.5)
     k = _l2norm(k.float(), dim=-1)
     v, g, beta = v.float(), g.float(), beta.float()
 
-    output = torch.zeros(B, L, H, D_v, dtype=torch.float32, device=q.device)
-    state = torch.zeros(B, H, D_k, D_v, dtype=torch.float32, device=q.device)
+    # Flatten [B, L] into one [1, B*L] timeline and reset the state at each sample
+    # start, so packed samples stay independent. cu_seqlens gives the boundaries;
+    # without it each row start is one (reproducing the plain batched result).
+    q, k, v, g, beta = (t.reshape(1, B * L, *t.shape[2:]) for t in (q, k, v, g, beta))
+    starts = (
+        set(cu_seqlens[:-1].tolist())
+        if cu_seqlens is not None
+        else {b * L for b in range(B)}
+    )
 
-    for t in range(L):
-        q_t = q[:, t]
-        k_t = k[:, t]
-        v_t = v[:, t]
+    output = torch.zeros(1, B * L, H, D_v, dtype=torch.float32, device=q.device)
+    state = torch.zeros(1, H, D_k, D_v, dtype=torch.float32, device=q.device)
+
+    for t in range(B * L):
+        if t in starts:  # packed-sample boundary -> fresh recurrent state
+            state = torch.zeros_like(state)
         g_t = g[:, t].exp().unsqueeze(-1).unsqueeze(-1)
         b_t = beta[:, t].unsqueeze(-1)
 
         state = state * g_t
-        kv_mem = torch.einsum("bhkv,bhk->bhv", state, k_t)
-        delta = (v_t - kv_mem) * b_t
-        state = state + torch.einsum("bhk,bhv->bhkv", k_t, delta)
-        output[:, t] = torch.einsum("bhkv,bhk->bhv", state, q_t)
+        kv_mem = torch.einsum("bhkv,bhk->bhv", state, k[:, t])
+        delta = (v[:, t] - kv_mem) * b_t
+        state = state + torch.einsum("bhk,bhv->bhkv", k[:, t], delta)
+        output[:, t] = torch.einsum("bhkv,bhk->bhv", state, q[:, t])
 
-    return output.to(dtype)
+    return output.reshape(B, L, H, D_v).to(dtype)
 
 
 class OffsetRMSNorm(Module):
@@ -164,6 +181,10 @@ class GatedDeltaKernel(Module):
         v: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
+        *,
+        # Keyword-only so the TP sharding's local_map treats it as replicated
+        # pass-through metadata (like attention_masks), not a sharded input.
+        cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Expand Q/K heads to match V when n_value_heads > n_key_heads
         if q.shape[2] != v.shape[2]:
@@ -173,7 +194,18 @@ class GatedDeltaKernel(Module):
             k = k.repeat_interleave(repeat, dim=2)
 
         if self.backend == "torch_native":
-            return _torch_native_gated_delta(q, k, v, g, beta)
+            return _torch_native_gated_delta(q, k, v, g, beta, cu_seqlens=cu_seqlens)
+
+        # The FLA varlen path takes ONE [1, total] sequence with cu_seqlens marking
+        # the sample boundaries, so the recurrent state resets per packed sample.
+        # Flatten [B, L, ...] -> [1, B*L, ...]; cu_seqlens is None when not packed.
+        bs, seqlen = q.shape[0], q.shape[1]
+        if cu_seqlens is not None:
+            q = q.reshape(1, bs * seqlen, *q.shape[2:])
+            k = k.reshape(1, bs * seqlen, *k.shape[2:])
+            v = v.reshape(1, bs * seqlen, *v.shape[2:])
+            g = g.reshape(1, bs * seqlen, *g.shape[2:])
+            beta = beta.reshape(1, bs * seqlen, *beta.shape[2:])
 
         if self.backend == "fla_chunked":
             result = _fla_chunk_gated_delta_rule(
@@ -183,6 +215,7 @@ class GatedDeltaKernel(Module):
                 g,
                 beta,
                 use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
             )
         elif self.backend == "fla_fused_recurrent":
             result = _fla_fused_recurrent_gated_delta_rule(
@@ -192,6 +225,7 @@ class GatedDeltaKernel(Module):
                 g,
                 beta=beta,
                 use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise ValueError(
@@ -200,7 +234,10 @@ class GatedDeltaKernel(Module):
             )
 
         # FLA kernels return (output, final_state); we only need output
-        return result[0]
+        out = result[0]
+        if cu_seqlens is not None:
+            out = out.reshape(bs, seqlen, *out.shape[2:])
+        return out
 
 
 class GatedDeltaNet(Module):
@@ -258,7 +295,61 @@ class GatedDeltaNet(Module):
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
 
-    def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
+    def _causal_conv1d(
+        self, x: torch.Tensor, conv: nn.Module, cu_seqlens: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Depthwise causal conv, matching the GatedDeltaKernel backend.
+
+        The causal conv window must not cross packed-sample boundaries (else the
+        first ``conv_kernel_size - 1`` tokens of each sample would see the previous
+        one). fla backends use ``fla.causal_conv1d``, which resets the window at
+        ``cu_seqlens`` (and runs batched when unpacked). ``torch_native`` uses
+        ``F.conv1d`` and, when packed, runs it per segment. The conv is depthwise
+        (per-channel), so under TP it runs on channel-local shards via local_map.
+        """
+        if self.kernel.backend == "torch_native":
+            return self._causal_conv1d_torch(x, conv, cu_seqlens)
+        return self._causal_conv1d_fla(x, conv, cu_seqlens)
+
+    def _causal_conv1d_fla(
+        self, x: torch.Tensor, conv: nn.Module, cu_seqlens: torch.Tensor | None
+    ) -> torch.Tensor:
+        bs, seqlen, _ = x.shape
+
+        def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
+            # Packed: fla wants one [1, total, C] sequence and cu_seqlens spans the
+            # flattened [bs*seqlen] layout (offsets already include batch rows).
+            # Unpacked: a plain batched [bs, seqlen, C] conv. fla applies the silu.
+            packed = cu_seqlens is not None
+            xin = x_local.reshape(1, bs * seqlen, -1) if packed else x_local
+            # fla's causal_conv1d is untyped (pyrefly reads it as a Tensor).
+            y, _ = _fla_causal_conv1d(
+                xin,
+                weight=w_local.squeeze(1),  # [C, 1, k] -> [C, k]
+                bias=None,  # GDN conv is bias-free
+                activation="silu",
+                cu_seqlens=cu_seqlens,
+            )
+            return y.reshape(bs, seqlen, -1) if packed else y
+
+        if isinstance(x, DTensor):
+            # Channel-sharded depthwise conv: run per shard, restore DTensor-ness.
+            x_plc = x.placements
+            w_plc = conv.weight.placements  # pyrefly: ignore [missing-attribute]
+            conv_dt = local_map(
+                _conv,
+                out_placements=(x_plc,),
+                in_placements=(x_plc, w_plc),
+                in_grad_placements=(x_plc, w_plc),
+                device_mesh=x.device_mesh,
+            )
+            return conv_dt(x, conv.weight)  # pyrefly: ignore
+        return _conv(x, conv.weight)  # pyrefly: ignore [bad-argument-type]
+
+    def _causal_conv1d_torch_per_sample(
+        self, x: torch.Tensor, conv: nn.Module
+    ) -> torch.Tensor:
+        # Plain depthwise causal conv via F.conv1d (left-pad k-1, then silu).
         x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x, DTensor):
             # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
@@ -294,16 +385,33 @@ class GatedDeltaNet(Module):
             x = conv(x)
         return F.silu(x).transpose(1, 2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _causal_conv1d_torch(
+        self, x: torch.Tensor, conv: nn.Module, cu_seqlens: torch.Tensor | None
+    ) -> torch.Tensor:
+        if cu_seqlens is None:
+            return self._causal_conv1d_torch_per_sample(x, conv)
+        # Packed: run F.conv1d per segment so the window never crosses a boundary.
+        bs, seqlen = x.shape[0], x.shape[1]
+        xf = x.reshape(1, bs * seqlen, *x.shape[2:])
+        bounds = cu_seqlens.tolist()
+        segs = [
+            self._causal_conv1d_torch_per_sample(xf[:, s:e], conv)
+            for s, e in zip(bounds[:-1], bounds[1:])
+        ]
+        return torch.cat(segs, dim=1).reshape(bs, seqlen, *x.shape[2:])
+
+    def forward(
+        self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None
+    ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
 
         # Shapes:
         #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
         #   xv, xz: (bs, seqlen, n_value_heads * value_head_dim)
         #   xa, xb: (bs, seqlen, n_value_heads)
-        xq = self._causal_conv(self.in_proj_q(x), self.conv_q)
-        xk = self._causal_conv(self.in_proj_k(x), self.conv_k)
-        xv = self._causal_conv(self.in_proj_v(x), self.conv_v)
+        xq = self._causal_conv1d(self.in_proj_q(x), self.conv_q, cu_seqlens)
+        xk = self._causal_conv1d(self.in_proj_k(x), self.conv_k, cu_seqlens)
+        xv = self._causal_conv1d(self.in_proj_v(x), self.conv_v, cu_seqlens)
         xz = self.in_proj_z(x)
         xa = self.in_proj_a(x)
         xb = self.in_proj_b(x)
@@ -318,7 +426,7 @@ class GatedDeltaNet(Module):
         g = -torch.exp(self.A_log.float()) * F.softplus(xa.float() + self.dt_bias)
         beta = torch.sigmoid(xb)
 
-        output = self.kernel(xq, xk, xv, g, beta)
+        output = self.kernel(xq, xk, xv, g, beta, cu_seqlens=cu_seqlens)
 
         xz = xz.view(bs, seqlen, -1, self.value_head_dim)
         output = self.norm(output, xz)
@@ -462,12 +570,13 @@ class Qwen35TransformerBlock(Module):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = self.attention_norm(x)
         if self.full_attn:
             h = self.attn(h, attention_masks, positions)
         else:
-            h = self.attn(h)
+            h = self.attn(h, cu_seqlens)
         x = x + h
 
         h = self.ffn_norm(x)
@@ -745,11 +854,16 @@ class Qwen35Model(Decoder):
         else:
             x = tokens
 
+        assert positions is not None
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
-        assert rope_positions is not None
+        # cu_seqlens holds the packed sample boundaries, None for one sample per row.
+        # NOTE: not context-parallel aware; CP is unsupported for GatedDeltaNet.
+        cu_seqlens = create_varlen_metadata_for_document(positions).cu_seq_q
+        if cu_seqlens.numel() == positions.shape[0] + 1:
+            cu_seqlens = None
         for layer in self.layers.values():
-            x = layer(x, attention_masks, rope_positions)
+            x = layer(x, attention_masks, rope_positions, cu_seqlens)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

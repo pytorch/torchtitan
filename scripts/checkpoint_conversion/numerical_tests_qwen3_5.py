@@ -306,6 +306,9 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
     for i, (tokens, pixel_values, grid_thw, mrope_positions) in enumerate(tt_inputs):
         logits = model(
             tokens.to(device),
+            positions=torch.arange(tokens.shape[1], device=device).expand(
+                tokens.shape[0], -1
+            ),
             pixel_values=pixel_values.half().to(device),
             grid_thw=grid_thw.to(device),
             mrope_positions=mrope_positions.to(device),

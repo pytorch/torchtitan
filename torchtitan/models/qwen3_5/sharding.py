@@ -286,7 +286,7 @@ def _set_deltanet_sharding(
 
     A_log and dt_bias are per-head parameters, Shard(0) on TP.
     Conv1d weights are Shard(0) (out-channels); the DTensor->local conversion
-    for the depthwise conv is handled in the model's ``_causal_conv``.
+    for the depthwise conv is handled in the model's ``_causal_conv1d``.
     """
     # ColwiseParallel on all input projections
     for name in (
