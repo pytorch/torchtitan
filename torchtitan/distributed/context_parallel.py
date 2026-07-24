@@ -232,7 +232,7 @@ def cp_shard(
                 if attention_masks is None:
                     raise ValueError(
                         "PTRRLoadBalancer requires attention_masks to be a "
-                        "BlockMask, but got None"
+                        "BlockMask or dict[str, BlockMask], but got None"
                     )
                 if isinstance(attention_masks, dict):
                     if ptrr_mask_key is None:
