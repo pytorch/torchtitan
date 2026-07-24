@@ -27,12 +27,6 @@ from torchtitan.tools.logging import logger
 _WRAPPED_ATTR = "_torchtitan_module_profiler_wrapped"
 
 MarkKernelsFactory = Callable[[dict[str, Any]], contextlib.AbstractContextManager]
-PROFILED_MODULE_TYPES: tuple[type[nn.Module], ...] = (
-    TransformerBlock,
-    BaseAttention,
-    FeedForward,
-    MoE,
-)
 
 
 def apply_module_profiler(
@@ -71,7 +65,7 @@ def apply_module_profiler(
 
 
 def should_profile_module(module: nn.Module) -> bool:
-    return isinstance(module, PROFILED_MODULE_TYPES)
+    return isinstance(module, (TransformerBlock, BaseAttention, FeedForward, MoE))
 
 
 def wrap_module_forward(
