@@ -78,6 +78,122 @@ def _qwen3_rl_model_registry(
     return spec
 
 
+def _rl_grpo_qwen3_debug_flex_trainer_parallelism(
+    *,
+    pipeline_parallel_degree: int,
+    context_parallel_degree: int,
+    data_parallel_shard_degree: int = 1,
+) -> Controller.Config:
+    local_batch_size = 2
+    model_spec = _qwen3_rl_model_registry("debugmodel", attn_backend="flex")
+    if pipeline_parallel_degree > 1:
+        model_spec.model.enable_weight_tying = False
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="tests/assets/tokenizer",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=1,
+            max_offpolicy_steps=0,
+            num_groups_per_train_step=1,
+            group_size=2 * data_parallel_shard_degree,
+            validation=ValidationConfig(num_samples=0),
+            batcher=Batcher.Config(
+                batch=BatchConfig(
+                    local_batch_size=local_batch_size,
+                    seq_len=512,
+                ),
+                per_sample_pad_multiple=(
+                    512 if data_parallel_shard_degree > 1 else None
+                ),
+            ),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False
+            ),
+        ),
+        compile=CompileConfig(enable=False),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=1,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=data_parallel_shard_degree,
+                pipeline_parallel_degree=pipeline_parallel_degree,
+                pipeline_parallel_schedule="GPipe",
+                pipeline_parallel_microbatch_size=local_batch_size,
+                context_parallel_degree=context_parallel_degree,
+                context_parallel_load_balancer="ptrr",
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=4,
+                loss_fn=GRPOLoss.Config(),
+            ),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=16,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_debug_flex_trainer_cp() -> Controller.Config:
+    """One-step RL smoke test with CP=2 on the trainer and a TP=1 generator."""
+    return _rl_grpo_qwen3_debug_flex_trainer_parallelism(
+        pipeline_parallel_degree=1,
+        context_parallel_degree=2,
+    )
+
+
+def rl_grpo_qwen3_debug_flex_trainer_pp() -> Controller.Config:
+    """One-step RL smoke test with PP=2 on the trainer and a TP=1 generator."""
+    return _rl_grpo_qwen3_debug_flex_trainer_parallelism(
+        pipeline_parallel_degree=2,
+        context_parallel_degree=1,
+    )
+
+
+def rl_grpo_qwen3_debug_flex_trainer_pp_cp() -> Controller.Config:
+    """One-step RL smoke with trainer PP=2, CP=2 and two TP=2 generators."""
+    config = _rl_grpo_qwen3_debug_flex_trainer_parallelism(
+        pipeline_parallel_degree=2,
+        context_parallel_degree=2,
+    )
+    config.num_generators = 2
+    config.generator = dataclasses.replace(
+        config.generator,
+        parallelism=dataclasses.replace(
+            config.generator.parallelism,
+            tensor_parallel_degree=2,
+        ),
+    )
+    return config
+
+
+def rl_grpo_qwen3_debug_flex_trainer_pp_dp() -> Controller.Config:
+    """One-step RL smoke test with two PP stages and two DP replicas."""
+    return _rl_grpo_qwen3_debug_flex_trainer_parallelism(
+        pipeline_parallel_degree=2,
+        context_parallel_degree=1,
+        data_parallel_shard_degree=2,
+    )
+
+
 def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     num_samples_per_prompt = 8

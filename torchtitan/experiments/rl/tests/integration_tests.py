@@ -34,6 +34,50 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_debug_flex_trainer_cp",
+                ]
+            ],
+            "RL Qwen3 debug trainer CP=2 with TorchStore weight sync",
+            "rl_qwen3_debug_trainer_cp2",
+            ngpu=3,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_debug_flex_trainer_pp",
+                ]
+            ],
+            "RL Qwen3 debug trainer PP=2 with TorchStore stage aggregation",
+            "rl_qwen3_debug_trainer_pp2",
+            ngpu=3,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_debug_flex_trainer_pp_cp",
+                ]
+            ],
+            "RL Qwen3 debug trainer PP=2 CP=2 + two TP=2 generators",
+            "rl_qwen3_debug_trainer_pp2_cp2_two_generators",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_debug_flex_trainer_pp_dp",
+                ]
+            ],
+            "RL Qwen3 debug trainer PP=2 DP=2 batch distribution",
+            "rl_qwen3_debug_trainer_pp2_dp2",
+            ngpu=5,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-loop.num-training-steps 5",
                     # trainer FSDP=2 (dp_shard=2, tp=1) + 3 generators TP=2 = 8 GPUs.

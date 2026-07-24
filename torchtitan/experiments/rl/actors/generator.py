@@ -760,6 +760,7 @@ class VLLMGenerator(Actor, Configurable):
         model_path: str,
         compile_config: CompileConfig,
         max_num_seqs: int,
+        trainer_pp_degree: int = 1,
         output_dir: str,
     ):
         init_logger()
@@ -777,6 +778,7 @@ class VLLMGenerator(Actor, Configurable):
         self.model_spec = model_spec
 
         self._max_num_seqs = max_num_seqs
+        self._trainer_pp_degree = trainer_pp_degree
 
         # FULL_AND_PIECEWISE runs prefill/mixed-batch attention eager via the
         # @eager_break_during_capture decorator in rl/models/attention.py, which
@@ -1230,15 +1232,26 @@ class VLLMGenerator(Actor, Configurable):
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
         model_sd = model.model.state_dict()
-        if get_spmd_backend() == "spmd_types":
-            await self._get_spmd_state_dict(model_sd, model=model)
-        else:
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=model_sd,
-                strict=False,
-                direct_rdma=False,
-            )
+        state_dict_keys = (
+            ["model_state_dict"]
+            if self._trainer_pp_degree == 1
+            else [
+                f"model_state_dict_pp_{pp_rank}"
+                for pp_rank in range(self._trainer_pp_degree)
+            ]
+        )
+        for state_dict_key in state_dict_keys:
+            if get_spmd_backend() == "spmd_types":
+                await self._get_spmd_state_dict(
+                    model_sd, model=model, state_dict_key=state_dict_key
+                )
+            else:
+                await ts.get_state_dict(
+                    state_dict_key,
+                    user_state_dict=model_sd,
+                    strict=False,
+                    direct_rdma=False,
+                )
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
         # reaches the real param. Re-apply via load_state_dict to run the merge hook.
@@ -1264,7 +1277,9 @@ class VLLMGenerator(Actor, Configurable):
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
 
-    async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
+    async def _get_spmd_state_dict(
+        self, model_sd: dict, *, model, state_dict_key: str
+    ) -> None:
         """Fetch trainer-pushed weights into a spmd_types generator state dict.
 
         spmd_types generators hold plain local tensors, but TorchStore already
@@ -1357,7 +1372,7 @@ class VLLMGenerator(Actor, Configurable):
                 )
 
         await ts.get_state_dict(
-            "model_state_dict",
+            state_dict_key,
             user_state_dict=dtensor_model_sd,
             strict=False,
             direct_rdma=False,
