@@ -119,25 +119,23 @@ def test_nvfp4_validate_rejects_bad_tp_dims(in_features, out_features, style, ma
     module = NVFP4Linear.Config(
         in_features=in_features, out_features=out_features
     ).build()
-    module._tp_style = style
     with pytest.raises(ValueError, match=match):
-        module._validate(_stub_parallel_dims(tp_enabled=True))
+        module._validate(_stub_parallel_dims(tp_enabled=True), style)
 
 
 def test_nvfp4_validate_requires_spmd_types_for_tp():
     NVFP4Linear = _nvfp4_linear_cls()
     module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
     # colwise 512x1024 under TP=4 + spmd_types: local (512, 256), both %128.
-    module._tp_style = "colwise"
-    module._validate(_stub_parallel_dims(tp_enabled=True))  # no raise
+    module._validate(_stub_parallel_dims(tp_enabled=True), "colwise")  # no raise
     # TP disabled (single GPU / FSDP-only): backend irrelevant, dims at TP=1.
-    module._tp_style = None
-    module._validate(_stub_parallel_dims(tp_enabled=False, spmd_backend="default"))
+    module._validate(_stub_parallel_dims(tp_enabled=False, spmd_backend="default"), None)
     # The nvfp4 GEMM is opaque to DTensor: TP requires the spmd_types backend.
-    module._tp_style = "colwise"
     for backend in ("default", "full_dtensor"):
         with pytest.raises(ValueError, match="spmd_types"):
-            module._validate(_stub_parallel_dims(tp_enabled=True, spmd_backend=backend))
+            module._validate(
+                _stub_parallel_dims(tp_enabled=True, spmd_backend=backend), "colwise"
+            )
 
 
 def test_nvfp4_module_exposes_weight_and_two_buffers():
