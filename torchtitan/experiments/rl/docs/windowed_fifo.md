@@ -1,4 +1,4 @@
-# Windowed FIFO offpolicy bound
+# Windowed FIFO design
 
 This design follows the windowed FIFO rollout scheduling described in Section 6.2.4 of the [MiniMax paper](https://arxiv.org/pdf/2605.26494).
 
