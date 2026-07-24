@@ -89,15 +89,18 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
-        # Hopper (SM 9.0) uses FA3
-        if has_cuda_capability(9, 0):
+        # Hopper (SM 9.x) uses FA3. Blackwell (SM 10.0+) is excluded: torch's FA3
+        # kernel raises "FA3 requires compute capability 9.0" there, so fall back
+        # to the default varlen path (FA2). has_cuda_capability uses >=, so the
+        # explicit not-10.0 check is required to keep FA3 Hopper-only.
+        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
             # activate_flash_attention_impl() will restore internal global state
             # and re-run register function, so we want to only call it once.
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
         else:
             warn_once(
-                logger, "FA3 not available (requires SM 9.0+), falling back to FA2. "
+                logger, "FA3 not available (requires SM 9.x), falling back to FA2. "
             )
 
     # Based on vLLM's FlashAttentionImpl.forward():
