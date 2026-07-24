@@ -257,6 +257,7 @@ class GraphTrainer(Trainer):
                     self._traced_step,
                     self.config,
                     parallel_dims=self.parallel_dims,
+                    model_parts=self.model_parts,
                 )
 
                 self._traced_step.gm = apply_graph_passes(
