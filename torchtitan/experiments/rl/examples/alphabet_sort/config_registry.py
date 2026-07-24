@@ -169,11 +169,20 @@ def rl_grpo_qwen3_debug_flex_trainer_pp() -> Controller.Config:
 
 
 def rl_grpo_qwen3_debug_flex_trainer_pp_cp() -> Controller.Config:
-    """One-step RL smoke test with PP=2 and CP=2 on the trainer."""
-    return _rl_grpo_qwen3_debug_flex_trainer_parallelism(
+    """One-step RL smoke with trainer PP=2, CP=2 and two TP=2 generators."""
+    config = _rl_grpo_qwen3_debug_flex_trainer_parallelism(
         pipeline_parallel_degree=2,
         context_parallel_degree=2,
     )
+    config.num_generators = 2
+    config.generator = dataclasses.replace(
+        config.generator,
+        parallelism=dataclasses.replace(
+            config.generator.parallelism,
+            tensor_parallel_degree=2,
+        ),
+    )
+    return config
 
 
 def rl_grpo_qwen3_debug_flex_trainer_pp_dp() -> Controller.Config:

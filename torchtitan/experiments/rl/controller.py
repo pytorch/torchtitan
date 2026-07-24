@@ -1064,9 +1064,7 @@ class Controller(Configurable):
                     for microbatch in packed.microbatches:
                         per_dp_rank_results = await asyncio.gather(
                             *[
-                                self.trainer.slice(
-                                    batch=dp_rank
-                                ).forward_backward.call(
+                                self.trainer.slice(batch=dp_rank).forward_backward.call(
                                     microbatch[dp_rank],
                                     packed.num_global_valid_tokens,
                                 )

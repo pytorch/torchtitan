@@ -457,9 +457,7 @@ class PolicyTrainer(Actor, Configurable):
 
         if self.parallel_dims.pp_enabled:
             self._pipeline_loss_metrics = []
-            targets, losses = (
-                (labels, []) if self.pp_has_last_stage else (None, None)
-            )
+            targets, losses = (labels, []) if self.pp_has_last_stage else (None, None)
             model_kwargs = {
                 "positions": positions,
                 "attention_masks": attention_masks,

@@ -59,9 +59,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--config rl_grpo_qwen3_debug_flex_trainer_pp_cp",
                 ]
             ],
-            "RL Qwen3 debug trainer PP=2 CP=2 composition",
-            "rl_qwen3_debug_trainer_pp2_cp2",
-            ngpu=5,
+            "RL Qwen3 debug trainer PP=2 CP=2 + two TP=2 generators",
+            "rl_qwen3_debug_trainer_pp2_cp2_two_generators",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
