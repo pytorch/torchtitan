@@ -2,6 +2,11 @@
 
 This enables HF transformers models to be trained with `4D parallelism + torch.compile`
 
+This backend runs on the `spmd_types` sharding path only (state and activations
+are plain local shards annotated with spmd types). The registry configs set
+`--parallelism.spmd_backend spmd_types`; the legacy DTensor `default` and
+`full_dtensor` backends are rejected.
+
 ## Quick start
 
 - Requirements `transformers==5.9.0`
@@ -63,7 +68,7 @@ combinations below. FSDP composes with every listed axis.
 | Qwen3-30B-A3B | GQA | yes | yes | yes | full matrix up to TP+EP+CP |
 | Mixtral-8x7B, OLMoE-1B-7B | GQA | yes | yes | yes | TP+EP, EP+CP |
 | DeepSeek-V2-Lite, V3, GLM-4.7 | MLA | yes | yes | yes* | TP+EP; *flex+CP verified on DeepSeek-V2-Lite (EP+CP) |
-| GLM-5 | MLA + DSA | no | yes | no | DSA indexer fails loud under TP; CP not wired -- FSDP/EP only |
+| GLM-5 | MLA + DSA | yes | yes | no | TP works (DSA indexer runs on local tensors under spmd_types); CP not wired |
 | Gemma-4-26B-A4B | GQA | no | yes | no | attention TP not viable (num_global_key_value_heads=2) -- FSDP/EP only |
 
 PP is not yet wired for the MoE path (see Further work).
@@ -78,5 +83,4 @@ PP is not yet wired for the MoE path (see Further work).
 - Missing PP support for MoE
 - Load HF weights
 - Add LORA support
-- `spmd_types` backend support (move off the DTensor sharding path)
 - Support for Titan RL

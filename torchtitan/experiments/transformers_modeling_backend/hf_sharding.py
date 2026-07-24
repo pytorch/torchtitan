@@ -7,25 +7,15 @@
 """ShardingConfig-based TP setup for HF model modules.
 
 Sets ``_sharding_config`` on every HF sub-module so that a single
-``model.parallelize(parallel_dims)`` call handles all TP distribution
-and forward wrapping via the Module protocol.
+``model.parallelize(parallel_dims)`` call handles all TP distribution and
+forward wrapping via the Module protocol. This backend runs under spmd_types:
+state and activations are plain local shards annotated with spmd types, not
+DTensor subclasses.
 
 The flex-attention kernel uses ``local_map`` (via ``_attach_flex_kernel``) to
-convert q/k/v from DTensors to local tensors around the flex HOP, mirroring
-Titan's own attention. Other HF internals (view, RoPE) operate directly on
-DTensors, which works because DTensor dispatch handles those ops transparently.
-The rotary embedding's buffers are also distributed so its computed cos/sin are
-DTensors, avoiding mixed plain-Tensor / DTensor errors in RoPE.
-
-MoE layers are already Titan Module instances with ShardingConfig and
-are handled by ``model.parallelize()`` directly.
-
-TODO: this DTensor-based sharding path is transitional. Core is migrating to
-``spmd_types`` (``spmd_backend="spmd_types"``), where state and activations are
-plain local shards rather than DTensor subclasses. Once that backend is ready,
-the DTensor-based sharding here should be deprecated in favor of it. The
-declarative ``ShardingConfig``/``SpmdLayout`` this module emits is already
-backend-agnostic, so the migration is a backend switch rather than a rewrite.
+map q/k/v to local tensors around the flex HOP, mirroring Titan's own
+attention. MoE layers are already Titan Module instances with ShardingConfig
+and are handled by ``model.parallelize()`` directly.
 """
 
 import inspect
@@ -68,26 +58,17 @@ def set_hf_sharding_configs(
     model: nn.Module,
     *,
     enable_sp: bool,
-    spmd_backend: str = "default",
 ) -> None:
     """Set ``_sharding_config`` on all HF modules for TP/EP parallelization.
 
     Root-level and per-layer modules all use ``_sharding_config``.
     MoE layers are skipped (already have ShardingConfig from Titan MoE).
-    Actual DTensor distribution happens later in ``model.parallelize()``.
+    Actual distribution happens later in ``model.parallelize()``.
 
     Args:
         model: The HFTransformerModel with Module-converted children.
         enable_sp: Whether sequence parallelism is enabled (TP > 1).
-        spmd_backend: The sharding backend ("default" or "spmd_types"). The
-            declarative configs are backend-agnostic; a few redistribute sources
-            are only declared under spmd_types (the default DTensor backend
-            infers them).
     """
-    # spmd_types needs redistribution sources declared explicitly (the default
-    # DTensor backend infers them).
-    use_spmd = spmd_backend == "spmd_types"
-
     # Root-level modules — nn.Identity modules are skipped (no params).
     if model.tok_embeddings is not None and not isinstance(
         model.tok_embeddings, nn.Identity
@@ -100,7 +81,6 @@ def set_hf_sharding_configs(
         from torchtitan.models.common.embedding import Embedding as _NativeEmbedding
 
         emb_is_native = isinstance(model.tok_embeddings, _NativeEmbedding)
-        emb_use_spmd = use_spmd and emb_is_native
         emb_state: dict = {"weight": dense_param_placement(tp=spmd.S(0))}
         for buf_name, _ in model.tok_embeddings.named_buffers(recurse=False):
             emb_state[buf_name] = dense_param_placement(tp=spmd.R)
@@ -108,22 +88,19 @@ def set_hf_sharding_configs(
             state_shardings=emb_state,
             in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
             in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-            # Vocab-sharded (S(0)) lookup produces a Partial output on TP. The
-            # default DTensor embedding uses _MaskPartial (inferred), so declare
-            # the Partial out_src only for the swapped native Embedding. For a
-            # non-native embedding under spmd_types (Gemma4, FSDP/EP-only) the
-            # output already matches out_dst, so declare out_src == out_dst (spmd
-            # requires an explicit source; a no-op redistribution). Default: None.
+            # Vocab-sharded (S(0)) lookup produces a Partial output on TP, so
+            # declare the Partial out_src for the swapped native Embedding. For a
+            # non-native embedding (Gemma4, FSDP/EP-only) the output already
+            # matches out_dst, so declare out_src == out_dst (spmd requires an
+            # explicit source; a no-op redistribution).
             out_src_shardings=(
                 dense_activation_placement(tp=spmd.P)
-                if emb_use_spmd
+                if emb_is_native
                 else _sp_activation(enable_sp=enable_sp)
-                if use_spmd
-                else None
             ),
             out_dst_shardings=_sp_activation(enable_sp=enable_sp),
             local_map=(
-                LocalMapConfig(in_grad_placements=None) if emb_use_spmd else None
+                LocalMapConfig(in_grad_placements=None) if emb_is_native else None
             ),
         )
 
@@ -151,28 +128,22 @@ def set_hf_sharding_configs(
             out_dst_shardings=dense_activation_placement(tp=spmd.S(-1)),
         )
 
-    # Rotary embedding — distribute buffers (inv_freq) and wrap inputs
-    # as DTensors so computed cos/sin are DTensors, avoiding mixed
-    # plain-Tensor / DTensor ops in apply_rotary_pos_emb.
+    # Rotary embedding -- replicate its inv_freq buffer. Under spmd_types the
+    # config is state-only; cos/sin are computed on plain local tensors.
     if hasattr(model, "rotary_emb") and not isinstance(model.rotary_emb, nn.Identity):
         rope = model.rotary_emb
-        rope._sharding_config = _rope_config(
-            rope, enable_sp=enable_sp, use_spmd=use_spmd
-        )
+        rope._sharding_config = _rope_config(rope)
 
     # Per-layer modules
     for transformer_block in model.layers:
-        _set_layer_sharding_configs(
-            transformer_block,
-            enable_sp=enable_sp,
-            use_spmd=use_spmd,
-        )
+        _set_layer_sharding_configs(transformer_block, enable_sp=enable_sp)
 
     # Completeness backstop: every parameter/buffer-bearing module this function
-    # is responsible for must have a sharding config, or it silently mixes a
-    # plain tensor with a DTensor under TP and crashes deep in forward. Covers
-    # root modules and every decoder layer; the Titan MoE subtree is configured
-    # separately by set_moe_sharding_config, so it is excluded per layer.
+    # is responsible for must have a sharding config, or it stays an unannotated
+    # plain tensor that mixes with spmd-typed activations under TP and crashes
+    # deep in forward. Covers root modules and every decoder layer; the Titan MoE
+    # subtree is configured separately by set_moe_sharding_config, so it is
+    # excluded per layer.
     for name in ("tok_embeddings", "norm", "lm_head", "rotary_emb"):
         mod = getattr(model, name, None)
         if mod is not None and not isinstance(mod, nn.Identity):
@@ -234,15 +205,12 @@ def _set_layer_sharding_configs(
     layer: nn.Module,
     *,
     enable_sp: bool,
-    use_spmd: bool = False,
 ) -> None:
     """Set ``_sharding_config`` on each sub-module of a decoder layer.
 
     Covers norms, attention projections, and (non-MoE) dense MLP; MoE layers carry
     their own ShardingConfig from the Titan MoE swap. Attaches the flex-attention
-    kernel (see ``_attach_flex_kernel``). ``use_spmd`` gates the DSA-indexer
-    fail-loud: under the DTensor backend the indexer's scatter_/index ops cannot
-    dispatch under TP; under spmd_types (plain local shards) they do.
+    kernel (see ``_attach_flex_kernel``).
     """
     # --- Norms ---
     if hasattr(layer, "input_layernorm"):
@@ -333,20 +301,10 @@ def _set_layer_sharding_configs(
 
     # GLM-5 DSA indexer -- an auxiliary subtree with its own projections. Its
     # forward uses scatter_/index ops (and the surrounding attention does
-    # index_mask.scatter_(topk_indices)), which DTensor's eager dispatch cannot
-    # handle: the default backend crashes with "mixed Tensor and DTensor" under
-    # TP, so fail loud there. Under spmd_types state/activations are plain local
-    # shards, so these ops dispatch natively -- just replicate the indexer weights.
+    # index_mask.scatter_(topk_indices)). Under spmd_types state/activations are
+    # plain local shards, so these ops dispatch natively even under TP -- just
+    # replicate the indexer weights.
     if hasattr(attn, "indexer"):
-        if enable_sp and not use_spmd:
-            raise NotImplementedError(
-                f"{type(attn).__name__}: the DSA indexer is currently not supported under "
-                "tensor parallelism with the DTensor sharding backend (its no_grad "
-                "forward uses scatter_/index ops that DTensor cannot dispatch). "
-                "This resolves under spmd_backend='spmd_types' (local tensors); "
-                "use spmd_types, or run this model with FSDP/EP and no TP."
-            )
-        # Replicate the indexer weights (a no-op that resolves to no mesh).
         for sub in attn.indexer.modules():
             sub._sharding_config = _replicate_config(sub)
 
@@ -424,17 +382,12 @@ def _replicate_config(module: nn.Module) -> ShardingConfig:
     return ShardingConfig(state_shardings=state_shardings)
 
 
-def _rope_config(
-    module: nn.Module, *, enable_sp: bool, use_spmd: bool = False
-) -> ShardingConfig:
+def _rope_config(module: nn.Module) -> ShardingConfig:
     """Sharding config for a rotary embedding module.
 
-    Replicates the inv_freq buffer. Under the default backend the rotary's first
-    positional arg (hidden_states) arrives SP-sharded on the sequence dim, so
-    declare its in_src/in_dst placement (SP for arg 0, Replicate for the plain
-    position args); the rotary only reads hidden_states for dtype/device, so
-    in_dst mirrors in_src (no real redistribution). Under spmd_types the config is
-    state-only -- there is no activation to redistribute at the rotary boundary.
+    Replicates the inv_freq buffer. State-only: under spmd_types cos/sin are
+    computed on plain local tensors, so there is no activation to redistribute
+    at the rotary boundary.
     """
     state_shardings: dict = {}
     for name, _ in module.named_parameters(recurse=False):
@@ -442,24 +395,7 @@ def _rope_config(
     for name, _ in module.named_buffers(recurse=False):
         state_shardings[name] = dense_param_placement(tp=spmd.R)
 
-    if use_spmd:
-        # State-only: no activation to redistribute at the rotary boundary.
-        return ShardingConfig(state_shardings=state_shardings)
-
-    sig = inspect.signature(type(module).forward)
-    arg_names = [p.name for p in sig.parameters.values() if p.name != "self"]
-    in_shardings = {}
-    for i, name in enumerate(arg_names):
-        in_shardings[name] = (
-            _sp_activation(enable_sp=enable_sp)
-            if i == 0
-            else dense_activation_placement(tp=spmd.R)
-        )
-    return ShardingConfig(
-        state_shardings=state_shardings,
-        in_src_shardings=in_shardings,
-        in_dst_shardings=in_shardings,
-    )
+    return ShardingConfig(state_shardings=state_shardings)
 
 
 def _first_forward_arg(module: nn.Module) -> str:

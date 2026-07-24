@@ -43,14 +43,21 @@ class HFTransformerTrainer(Trainer):
         pass
 
     def __init__(self, config: "HFTransformerTrainer.Config"):
+        if config.parallelism.spmd_backend != "spmd_types":
+            raise NotImplementedError(
+                "the HF transformers backend supports only "
+                "spmd_backend='spmd_types'; got "
+                f"'{config.parallelism.spmd_backend}'. The registry configs "
+                "default to spmd_types; do not override "
+                "--parallelism.spmd_backend."
+            )
         super().__init__(config)
         self._validate_cp_load_balancer()
-        # spmd_types loss-parallel cross entropy needs the global vocab size
-        # explicitly: the default backend infers it from the DTensor pred shape,
-        # but under spmd_types pred is a plain local (vocab-sharded) shard. Native
-        # models set this at config time; the HF backend's vocab is only known
-        # after build, so fill it in here when CrossEntropyLoss left it unset.
-        # Harmless under other backends.
+        # Loss-parallel cross entropy needs the global vocab size explicitly:
+        # under spmd_types pred is a plain local (vocab-sharded) shard, so the
+        # loss cannot infer it. Native models set this at config time; the HF
+        # backend's vocab is only known after build, so fill it in here when
+        # CrossEntropyLoss left it unset.
         loss_fn = getattr(self, "loss_fn", None)
         if loss_fn is not None and getattr(loss_fn, "global_vocab_size", None) is None:
             vocab_size = getattr(self.model_parts[0].model.config, "vocab_size", None)

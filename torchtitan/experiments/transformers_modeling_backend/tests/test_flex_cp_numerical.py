@@ -33,7 +33,7 @@ from torchtitan.experiments.transformers_modeling_backend.config_registry import
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", default="default")
+    parser.add_argument("--backend", default="spmd_types")
     parser.add_argument("--hf_model", default="Qwen/Qwen2.5-7B")
     parser.add_argument("--seq_len", type=int, default=256)
     parser.add_argument("--bs", type=int, default=1)

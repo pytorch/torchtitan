@@ -27,6 +27,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
                 [
                     "--module transformers_modeling_backend",
                     "--config transformers_modeling_backend_debugmodel_moe",
+                    "--parallelism.spmd_backend spmd_types",
                     "--parallelism.data_parallel_shard_degree -1",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
@@ -44,6 +45,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
                 [
                     "--module transformers_modeling_backend",
                     "--config transformers_modeling_backend_debugmodel",
+                    "--parallelism.spmd_backend spmd_types",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -60,6 +62,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
                 [
                     "--module transformers_modeling_backend",
                     "--config transformers_modeling_backend_debugmodel",
+                    "--parallelism.spmd_backend spmd_types",
                     "--parallelism.data_parallel_shard_degree 1",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -77,6 +80,7 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
                 [
                     "--module transformers_modeling_backend",
                     "--config transformers_modeling_backend_sft_debugmodel",
+                    "--parallelism.spmd_backend spmd_types",
                     "--training.steps 2",
                 ],
             ],
