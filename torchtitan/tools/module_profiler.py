@@ -16,6 +16,10 @@ from typing import Any, cast
 import torch.autograd.profiler as autograd_profiler
 import torch.nn as nn
 from torch._C import _profiler as torch_profiler_c
+from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.moe import MoE
 
 from torchtitan.tools.logging import logger
 
@@ -23,6 +27,12 @@ from torchtitan.tools.logging import logger
 _WRAPPED_ATTR = "_torchtitan_module_profiler_wrapped"
 
 MarkKernelsFactory = Callable[[dict[str, Any]], contextlib.AbstractContextManager]
+PROFILED_MODULE_TYPES: tuple[type[nn.Module], ...] = (
+    TransformerBlock,
+    BaseAttention,
+    FeedForward,
+    MoE,
+)
 
 
 def apply_module_profiler(
@@ -30,10 +40,14 @@ def apply_module_profiler(
 ) -> int:
     """Wrap coarse model modules with profiler annotations.
 
-    The default target policy is intentionally coarse:
-    ``layers.<N>`` blocks, attention modules, dense feed-forward modules, and
-    MoE modules. Wrapped modules emit ``record_function`` contexts while the
-    PyTorch profiler is active and best-effort CUDA graph kernel annotations.
+    The default target policy is intentionally based on shared TorchTitan module
+    types rather than FQN naming conventions. New model code gets profiler
+    ranges by reusing or subclassing common transformer block, attention,
+    feed-forward, and MoE modules. Labels use each module's FQN directly.
+
+    ``torch.profiler.profile(with_modules=True)`` does not replace this for
+    eager-mode training: PyTorch's module hierarchy support is TorchScript-only
+    today, and it does not emit CUDA graph kernel annotations.
 
     Returns:
         Number of modules newly wrapped.
@@ -43,13 +57,11 @@ def apply_module_profiler(
         for module_fqn, module in model_part.named_modules():
             if module_fqn == "":
                 continue
-            kind = coarse_module_kind(module_fqn)
-            if kind is None:
+            if not should_profile_module(module):
                 continue
             if wrap_module_forward(
                 module,
                 module_fqn=module_fqn,
-                module_kind=kind,
                 model_part_idx=model_part_idx,
             ):
                 num_wrapped += 1
@@ -58,36 +70,24 @@ def apply_module_profiler(
     return num_wrapped
 
 
-def coarse_module_kind(module_fqn: str) -> str | None:
-    parts = module_fqn.split(".")
-    name = parts[-1]
-
-    if len(parts) >= 2 and parts[-2] == "layers" and name.isdigit():
-        return "block"
-    if name in {"attention", "attn"} or name.endswith("_attn"):
-        return "attention"
-    if name == "feed_forward":
-        return "ffn"
-    if name == "moe":
-        return "moe"
-    return None
+def should_profile_module(module: nn.Module) -> bool:
+    return isinstance(module, PROFILED_MODULE_TYPES)
 
 
 def wrap_module_forward(
     module: nn.Module,
     *,
     module_fqn: str,
-    module_kind: str,
     model_part_idx: int,
 ) -> bool:
     if getattr(module, _WRAPPED_ATTR, False):
         return False
 
-    label = f"{module_kind}::{module_fqn}"
+    label = module_fqn
     annotation: dict[str, Any] = {
         "name": label,
         "module_fqn": module_fqn,
-        "module_kind": module_kind,
+        "module_type": type(module).__name__,
         "model_part_idx": model_part_idx,
     }
     stacks: list[contextlib.ExitStack] = []
