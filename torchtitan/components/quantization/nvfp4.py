@@ -163,9 +163,10 @@ try:
             consumes TP-Shard(-1)) and the input-gradient layout (colwise grad is
             TP-Partial -- a per-rank partial sum over the output shard that must
             be all-reduced; rowwise grad stays TP-Shard(-1)). ``out_src`` /
-            ``out_dst`` are inherited from colwise_config()/rowwise_config(). The
-            runtime buffers are declared replicated so _distribute_states and DCP
-            handle them alongside weight/bias.
+            ``out_dst`` are inherited from colwise_config()/rowwise_config().
+            ``_rht_sign_vector`` is declared replicated so DCP checkpoints it as a
+            single replicated state; the cross-rank broadcast that makes it truly
+            replicated happens in _materialize_buffer (see the note there).
             """
             if tp_style == "rowwise":
                 in_layout = dense_activation_placement(tp=spmd.S(-1))
@@ -229,6 +230,14 @@ try:
             )
 
         def _materialize_buffer(self, tensor: torch.Tensor) -> torch.Tensor:
+            # distribute_tensor with Replicate broadcasts rank 0's value to the
+            # whole mesh. This is load-bearing for _rht_sign_vector: it is drawn
+            # per-rank at random (_make_rht_sign_vector(None)) but the RHT basis
+            # must be identical across TP ranks -- rowwise TP shards the GEMM
+            # contraction dim, and the Hadamard transform only cancels between
+            # the two operands when both use the same sign vector. The spmd_types
+            # state path cannot stand in here: spmd_distribute_tensor only acts on
+            # Shard axes and would annotate a Replicate buffer without broadcasting.
             if self._buffer_spec is None:
                 return tensor
             mesh, placements = self._buffer_spec
