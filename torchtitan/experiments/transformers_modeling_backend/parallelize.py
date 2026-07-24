@@ -28,7 +28,7 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
 
-def _install_native_embedding(model: nn.Module) -> None:
+def _install_native_embedding(model: nn.Module, *, enable_tp: bool) -> None:
     """Swap the HF token embedding for titan's vocab-parallel ``Embedding``.
 
     Under spmd_types + TP the embedding weight is vocab-sharded (``S(0)``) and
@@ -55,11 +55,16 @@ def _install_native_embedding(model: nn.Module) -> None:
         # is handled by attention/loss masking.
         if emb.padding_idx is not None:
             emb.padding_idx = None
-    else:
-        logger.warning(
-            f"tok_embeddings is {type(emb).__name__}, not nn.Embedding; leaving "
-            "as-is (vocab-parallel local lookup not applied -- may be incorrect "
-            "under spmd_types + TP)."
+    elif enable_tp:
+        # A non-plain embedding (e.g. Gemma4's Gemma4TextScaledWordEmbedding)
+        # can't be swapped for the vocab-parallel native Embedding, so its
+        # vocab-sharded lookup would be wrong under TP. It is correct under
+        # FSDP/EP (weight not vocab-sharded there), so fail loud only under TP.
+        raise ValueError(
+            f"tok_embeddings is {type(emb).__name__}, not nn.Embedding: it cannot "
+            "be made vocab-parallel, so spmd_types + tensor parallelism would be "
+            "numerically incorrect for this model. Run it without tensor "
+            "parallelism."
         )
 
 
@@ -296,7 +301,7 @@ def parallelize_hf_transformers(
         # vocab-parallel Embedding before conversion (correct local vocab lookup
         # under TP on plain local shards).
         if use_spmd:
-            _install_native_embedding(model)
+            _install_native_embedding(model, enable_tp=parallel_dims.tp_enabled)
 
         convert_hf_to_module(model)
 
