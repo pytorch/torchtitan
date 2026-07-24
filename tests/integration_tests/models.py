@@ -206,15 +206,18 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module gpt_oss --config gpt_oss_debugmodel_flex",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--parallelism.context_parallel_ptrr_mask_key basic_mask",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.expert_parallel_degree 4",
                     "activation-checkpoint:selective",
                 ],
             ],
-            "Gpt-oss PP+FSDP+EP+SACOP",
-            "gpt_oss_pp+fsdp+ep+sacop",
+            "Gpt-oss PP+FSDP+CP+EP+SACOP",
+            "gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
         ),
     ]
