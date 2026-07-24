@@ -6,7 +6,7 @@
 
 from dataclasses import fields
 
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.experiments.graph_trainer.graph_pp.pipeline import graph_pipeline_llm
 from torchtitan.models.qwen3 import qwen3_configs
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -35,7 +35,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_qwen3,
-        pipelining_fn=pipeline_llm,
+        pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
     )

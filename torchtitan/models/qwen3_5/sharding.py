@@ -35,12 +35,12 @@ from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 if TYPE_CHECKING:
+    from torchtitan.models.common import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.model import (
         GatedDeltaNet,
         Qwen35Attention,
         Qwen35Model,
         Qwen35TransformerBlock,
-        SharedExperts,
     )
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
@@ -172,7 +172,7 @@ def _set_qwen35_layer_sharding(
 
 
 def _set_shared_expert_gate_sharding(
-    shared_experts: "SharedExperts.Config | None",
+    shared_experts: "SigmoidGatedFeedForward.Config | None",
 ) -> None:
     """Shard Qwen3.5's shared-expert sigmoid gate.
 
@@ -204,6 +204,10 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     """
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={"pos_embed": dense_param_placement(tp=spmd.R)},
+    )
+    ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
+        state_shardings={"inv_freq": dense_param_placement(tp=spmd.I)},
+        out_src_shardings=dense_param_placement(tp=spmd.I),
     )
 
     # patch_embed receives plain pixel_values — wrap as DTensor(Replicate)

@@ -11,7 +11,12 @@ from tests.integration_tests import OverrideDefinitions
 
 
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Inject ``--parallelism.spmd_backend`` into every model test variant."""
+    """Use ``backend`` for every variant, or return an unsupported test unchanged."""
+    if backend == "spmd_types" and any(
+        "--module qwen3_5" in arg for variant in t.override_args for arg in variant
+    ):
+        return t
+
     test_name = f"{t.test_name}_{backend}"
     new_args = []
     for variant in t.override_args:
@@ -34,6 +39,7 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
             prefix.append("--debug.spmd_typechecking")
             suffix.append("activation-checkpoint:none")
         new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
+
     return dataclasses.replace(
         t,
         override_args=tuple(new_args),
@@ -59,11 +65,16 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
+                    "--override.imports torchtitan.overrides.helion_rope.helion_cos_sin_rope,"
+                    "torchtitan.overrides.helion_rope.helion_complex_rope",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP+compile",
+            "DeepSeek V3 FSDP+EP+compile (+ Helion RoPE override)",
             "deepseek_v3_fsdp+ep+compile",
             ngpu=4,
+            # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
+            # H100/GB200; skip on ROCm where they are unvalidated.
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -135,7 +146,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
                     "--compile.enable",
-                    "--override.imports torchtitan.overrides.helion_rope",
+                    "--override.imports torchtitan.overrides.helion_rope.helion_cos_sin_rope",
                 ],
             ],
             "Qwen3 fused QKV FSDP+TP+CP + compile + Helion RoPE override",
@@ -195,21 +206,20 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module gpt_oss --config gpt_oss_debugmodel_flex",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_load_balancer ptrr",
+                    "--parallelism.context_parallel_ptrr_mask_key basic_mask",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.expert_parallel_degree 4",
                     "activation-checkpoint:selective",
                 ],
             ],
-            "Gpt-oss PP+FSDP+EP+SACOP",
-            "gpt_oss_pp+fsdp+ep+sacop",
+            "Gpt-oss PP+FSDP+CP+EP+SACOP",
+            "gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
         ),
     ]
 
-    return [
-        *model_tests,
-        *[_enable_spmd_backend(t, "full_dtensor") for t in model_tests],
-        *[_enable_spmd_backend(t, "spmd_types") for t in model_tests],
-    ]
+    return [_enable_spmd_backend(t, "spmd_types") for t in model_tests]

@@ -25,7 +25,7 @@ _data_input_loop                                      _rollout_loop[N] (group wo
                         v                                                     | v
 RolloutGroupWorkBuffer
 +---------------------------------------------------------------------------------------------------------------------+
-| active slots = (max_offpolicy_steps + 1) * num_groups_per_train_step                                                |
+| active slots = (max_offpolicy_steps + 1) * num_prompts_per_train_step                                                |
 |                                                                                                                     |
 | caller            group_buffer call                                            state / active slot                  |
 | _data_input_loop  add_work(RolloutGroupWork)                                   WAITING; slot acquired               |
@@ -33,7 +33,7 @@ RolloutGroupWorkBuffer
 | _rollout_loop[N]  finalize_work(RolloutGroup)                                  INFLIGHT -> FINALIZED                |
 | _batcher_loop     RolloutGroup = take_finalized()                              FINALIZED -> taken (slot still held) |
 | _batcher_loop     release_active_groups(1, "untrainable_group")                slot released                        |
-| _trainer_loop     release_active_groups(num_groups_per_train_step, "trained")  slots released after weight pull     |
+| _trainer_loop     release_active_groups(num_prompts_per_train_step, "trained")  slots released after weight pull     |
 +---------------------------------------------------------------------------------------------------------------------+
                                                   |
                                                   | group = group_buffer.take_finalized()
@@ -51,20 +51,20 @@ _batcher_loop
 Batcher                                              training_batch_queue
 +-------------------------------------------------+   +----------------------------------------------+
 | accumulated TrainingSampleGroups                |   | size 1; holds TrainingBatch | None           |
-| pack at num_groups_per_train_step               |   +---------------------+------------------------+
+| pack at num_prompts_per_train_step               |   +---------------------+------------------------+
 +-------------------------------------------------+                         |
                                                                          | packed = training_batch_queue.get()
                                                                          v
 _trainer_loop
 +----------------------------------------------------------------------------------------------------------+
-| train batch -> optim -> push/pull weights -> buffer.release_active_groups(num_groups_per_train_step)     |
+| train batch -> optim -> push/pull weights -> buffer.release_active_groups(num_prompts_per_train_step)     |
 +----------------------------------------------------------------------------------------------------------+
 
 Backpressure (each loop: what it consumes/produces, and what gates each side):
 _data_input_loop
   produces: RolloutGroupWork into group_buffer
     waits for:    a free active slot (group_buffer.wait_for_slot)
-    unblocked by: _trainer_loop release_active_groups(num_groups_per_train_step, "trained") after the pull
+    unblocked by: _trainer_loop release_active_groups(num_prompts_per_train_step, "trained") after the pull
                   (and _batcher_loop release_active_groups(1,"untrainable_group"))
 _rollout_loop[N]
   consumes: a WAITING RolloutGroupWork (group_buffer.claim_next)
@@ -156,11 +156,11 @@ class AsyncLoopConfig(Configurable.Config):
     num_training_steps: int = 10
     """Optimizer steps to run."""
 
-    num_groups_per_train_step: int = 8
+    num_prompts_per_train_step: int = 8
     """Global number of prompt groups, across all DPs, whose surviving rollouts compose
     one train step (the global_batch_size, in groups)."""
 
-    group_size: int = 8
+    num_samples_per_prompt: int = 8
     """Sibling rollouts sampled per prompt (the GRPO group)."""
 
     max_offpolicy_steps: int = 3
@@ -438,7 +438,9 @@ class Controller(Configurable):
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            result = await self.generator_router.route(
+            # Dispatches to the chosen generator's rank-0 intake via call_one, so
+            # it returns the Completion directly (no ValueMesh unwrap).
+            return await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,
@@ -453,7 +455,6 @@ class Controller(Configurable):
                     session_id=routing_session_id,
                 ),
             )
-            return self._get_rank_0_value(result)
 
         return generate
 
@@ -480,13 +481,13 @@ class Controller(Configurable):
             trainer_mesh: ProcMesh the trainer actor is spawned on.
             generator_meshes: ProcMesh objects the generator actors are spawned on.
         """
-        # Peak concurrent rollout sequences (groups * group_size, or the validation pass); sizes max_num_seqs below.
+        # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
         max_active_rollout_groups = (
             async_loop.max_offpolicy_steps + 1
-        ) * async_loop.num_groups_per_train_step
+        ) * async_loop.num_prompts_per_train_step
         rollout_concurrency = max(
-            max_active_rollout_groups * async_loop.group_size,
+            max_active_rollout_groups * async_loop.num_samples_per_prompt,
             async_loop.validation.num_samples,
         )
         # Renderer thread pool: render work is CPU-bound, so size to CPU count (decoupled from rollout concurrency).
@@ -532,11 +533,7 @@ class Controller(Configurable):
             for generator_mesh in generator_meshes:
                 await setup_torch_elastic_env_async(generator_mesh)
 
-            # Spawn the trainer first; generators wait until it is ready (see below).
-            # A generator's first MoE dispatch (vLLM warm-up in __init__) can race the
-            # trainer's model build + weight load and fault a partial-NVLink-domain
-            # HybridEP generator (cudaErrorIllegalAddress, hybrid_ep_backend.cuh:5693),
-            # so sequencing keeps that first dispatch on a quiescent system.
+            # Spawn actors on their respective meshes
             self.trainer = trainer_mesh.spawn(
                 "trainer",
                 PolicyTrainer,
@@ -548,31 +545,7 @@ class Controller(Configurable):
                 output_dir=config.dump_folder,
             )
 
-        # Initialize TorchStore for weight sync between trainer and generator.
-        # StorageVolumes are spawned on the trainer mesh so they are colocated
-        # with the weight source for faster data access in the non-RDMA path.
-        # LocalRankStrategy: routes each process to a storage volume based on
-        #   LOCAL_RANK, so colocated processes share the same volume.
-        # https://github.com/meta-pytorch/torchstore
-        with sl.log_trace_span("torchstore_init"):
-            await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
-
-        # Barrier on trainer readiness BEFORE spawning generators (see spawn comment):
-        # returns only after the trainer's __init__ (model build + checkpoint load), so
-        # generators init on a quiescent system. Also reads the restored policy_version
-        # (0 if fresh) for resume.
-        # TODO(resume): only model/optimizer/policy_version are restored; the rollout
-        #   buffer (in-flight rollouts) and dataset stream position are NOT -- a resumed
-        #   run refills the buffer and re-reads data from the start.
-        # TODO: investigate why we need to spawn generator later
-        self.start_step = self._get_rank_0_value(
-            await self.trainer.get_policy_version.call()
-        )
-        if self.start_step > 0:
-            logger.info(f"Resuming RL training from step {self.start_step}")
-
-        # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
-        with sl.log_trace_span("mesh_spawn_generators"):
+            # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
             generators = []
             for idx, generator_mesh in enumerate(generator_meshes):
                 actor_name = (
@@ -590,6 +563,32 @@ class Controller(Configurable):
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
+
+        # Initialize TorchStore for weight sync between trainer and generator.
+        # StorageVolumes are spawned on the trainer mesh so they are colocated
+        # with the weight source for faster data access in the non-RDMA path.
+        # LocalRankStrategy: routes each process to a storage volume based on
+        #   LOCAL_RANK, so colocated processes share the same volume.
+        # https://github.com/meta-pytorch/torchstore
+        with sl.log_trace_span("torchstore_init"):
+            await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
+
+        # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
+        # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
+        # TODO(resume): only model/optimizer/policy_version are restored. The active-slot rollout
+        #   buffer (in-flight rollouts) and the dataset stream position are NOT restored -- a resumed
+        #   run refills the buffer and re-reads data from the start. Need to recycle prompts.
+        self.start_step = self._get_rank_0_value(
+            await self.trainer.get_policy_version.call()
+        )
+        if self.start_step > 0:
+            logger.info(f"Resuming RL training from step {self.start_step}")
+
+        # Start each generator's engine loop on all ranks once, before any
+        # rank-0-only generate / pull (rank 0 drives the followers through this
+        # loop, so every rank must be running it first).
+        with sl.log_trace_span("generator_start_engine_loop"):
+            await self.generator_router.fanout("start_engine_loop")
 
         # Initial weight sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
@@ -709,7 +708,7 @@ class Controller(Configurable):
         # Buffer capacity caps how far generation runs ahead of the trainer (bounds off-policy staleness).
         max_active_rollout_groups = (
             async_loop.max_offpolicy_steps + 1
-        ) * async_loop.num_groups_per_train_step
+        ) * async_loop.num_prompts_per_train_step
 
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,
@@ -720,7 +719,7 @@ class Controller(Configurable):
             trainer=self.trainer,
             generator_router=self.generator_router,
             group_buffer=self._group_buffer,
-            num_groups_per_train_step=async_loop.num_groups_per_train_step,
+            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
         )
 
         # training_sample_builder
@@ -728,7 +727,7 @@ class Controller(Configurable):
 
         # batcher
         batcher = async_loop.batcher.build(
-            num_groups_per_train_step=async_loop.num_groups_per_train_step,
+            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
             dp_degree=self.trainer_dp_degree,
             pad_id=self.renderer._tokenizer.eos_token_id,
         )
@@ -742,7 +741,7 @@ class Controller(Configurable):
         generate_fn = self._make_generate_fn(metrics_prefix="generator")
 
         # One rollout worker per active buffer slot: lets generation fill the whole off-policy window,
-        # including the cold start (step 0 fills every active slot, not just num_groups_per_train_step per wave).
+        # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
         # TODO: support warm start
         rollout_tasks = [
             asyncio.create_task(
@@ -835,7 +834,7 @@ class Controller(Configurable):
     async def _data_input_loop(self, group_buffer: RolloutGroupWorkBuffer) -> None:
         """produces a RolloutGroupWork into group_buffer.
         waits for:    a free active slot (group_buffer.wait_for_slot)
-        unblocked by: _trainer_loop release_active_groups(num_groups_per_train_step, "trained")
+        unblocked by: _trainer_loop release_active_groups(num_prompts_per_train_step, "trained")
             after the pull (and _batcher_loop release_active_groups(1,"untrainable_group"))
 
         Separate from `_rollout_loop`, so slow data prep (e.g. on-the-fly question generation) overlaps
@@ -887,7 +886,7 @@ class Controller(Configurable):
                         generate_fn=generate_fn,
                         sample=work.sample,
                         group_id=work.group_id,
-                        group_size=self.config.async_loop.group_size,
+                        group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                         renderer=self.renderer,
                     )

@@ -168,7 +168,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     Input arrives at sp_layout, redistributed to desired_input_layouts;
     output is Partial, redistributed to sp_layout. MoE.forward()
     operates on DTensors — the DTensor→local conversion happens at
-    the GroupedExperts boundary.
+    the RoutedExperts boundary.
     """
     sp_layout = (
         dense_sequence_parallel_placement()
@@ -208,10 +208,9 @@ def set_moe_sharding_config(
     - ``moe.shared_experts.{w1,w2,w3}``: dense-family TP plan with
       Partial-flow grad annotations (when ``moe_cfg.shared_experts is not
       None``).
-    - ``moe.experts`` (``GroupedExperts``): sparse-family ``{EP}``
-      placements when EP is enabled; dense-family ``{TP}`` placements
-      when EP is disabled and TP is enabled; no sharding when both are
-      disabled.
+    - ``moe.routed_experts.inner_experts`` (``GroupedExperts``): expert-weight
+      ``state_shardings`` -- sparse ``{EP}`` / dense ``{TP}`` / none. The parent
+      ``routed_experts`` holds the activation in/out shardings + local_map.
 
     ``expert_param_layout`` maps each routed-expert parameter name to its
     dense in/out-dim placement (used on the EP-disabled + TP-enabled path):
@@ -265,10 +264,8 @@ def set_moe_sharding_config(
         shared.w2.sharding_config = _shared_expert_rowwise_config()
         shared.w3.sharding_config = _shared_expert_colwise_config()
 
-    # Routed experts: local_map converts DTensor inputs to local for
-    # dispatch/compute/combine, then wraps local output as DTensor(Partial).
-    # Routed experts: the three things that differ between EP and TP-only
-    # are state_shardings, input layout, and input grad layout.
+    # The three things that differ between EP and TP-only are the expert-weight
+    # state_shardings, input layout, and input grad layout.
     experts_out_layout = dense_activation_placement(tp=spmd.P)
     if enable_ep:
         pre_experts_in_layout = (
@@ -290,8 +287,8 @@ def set_moe_sharding_config(
         experts_in_layout = dense_activation_placement(tp=spmd.R)
         experts_in_grad_layout = dense_activation_placement(tp=spmd.P)
 
-    moe_cfg.experts.sharding_config = ShardingConfig(
-        state_shardings=state_shardings,
+    # RoutedExperts (local_map region): activation in/out + local_map, no params.
+    moe_cfg.routed_experts.sharding_config = ShardingConfig(
         in_src_shardings={
             "x_BLD": pre_experts_in_layout,
             "topk_scores_BLK": experts_in_layout,
@@ -312,14 +309,21 @@ def set_moe_sharding_config(
         out_dst_shardings=experts_out_layout,
         local_map=LocalMapConfig(
             in_grad_placements=(
-                experts_in_grad_layout,
-                experts_in_grad_layout,
-                experts_in_grad_layout,
-                # num_local_tokens_per_expert_E is routing metadata, but it is
-                # still a DTensor input to local_map and must have placements.
-                _tokens_per_expert_placement(enable_ep=enable_ep),
-            )
-            if enable_ep
-            else None,
+                (
+                    experts_in_grad_layout,
+                    experts_in_grad_layout,
+                    experts_in_grad_layout,
+                    # num_local_tokens_per_expert_E is routing metadata, but it is
+                    # still a DTensor input to local_map and must have placements.
+                    _tokens_per_expert_placement(enable_ep=enable_ep),
+                )
+                if enable_ep
+                else None
+            ),
         ),
+    )
+
+    # inner_experts owns the expert weights -> weight state_shardings only.
+    moe_cfg.routed_experts.inner_experts.sharding_config = ShardingConfig(
+        state_shardings=state_shardings,
     )

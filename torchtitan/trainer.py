@@ -6,6 +6,7 @@
 
 import dataclasses
 import json
+import math
 import os
 import time
 from collections.abc import Iterable, Iterator
@@ -156,6 +157,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     d["model_spec"] = {
                         "name": self.model_spec.name,
                         "flavor": self.model_spec.flavor,
+                        "model": self.model_spec.model.to_dict(),
                     }
                 else:
                     val = getattr(self, f.name)
@@ -673,6 +675,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
+                self.config.parallelism.context_parallel_ptrr_mask_key,
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual
@@ -851,6 +854,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 global_avg_loss = global_max_loss = float(loss.detach().item())
                 global_ntokens_seen = self.ntokens_seen
+
+        # Crash on invalid loss. global_avg_loss is a SUM reduction, so a infinite
+        # loss on any rank propagates here. This reuses the D2H copy already done
+        # for logging, so it adds no extra sync.
+        # TODO: make this step work even logging is off.
+        if not math.isfinite(global_avg_loss):
+            raise RuntimeError(
+                f"Loss is not finite (global_avg_loss={global_avg_loss}) at "
+                f"step {self.step}. Stopping training."
+            )
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,

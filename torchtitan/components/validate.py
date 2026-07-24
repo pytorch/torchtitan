@@ -201,6 +201,7 @@ class Validator(BaseValidator):
                 self.parallel_dims.get_mesh("cp"),
                 inputs.device,
                 self.parallelism.context_parallel_load_balancer,
+                self.parallelism.context_parallel_ptrr_mask_key,
             )
 
         if self.parallelism.spmd_backend == "full_dtensor":

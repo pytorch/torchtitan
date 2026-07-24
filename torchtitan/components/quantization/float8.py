@@ -12,8 +12,8 @@ from typing import Literal
 import torch
 import torch._inductor.config
 from torchtitan.components.quantization import QuantizationConverter
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
@@ -241,7 +241,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
 
     def convert(self, model_config):
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(config, self.PAD_MULTIPLE)
+            swap_token_dispatcher(parent, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner
             quantized_cls = _get_float8_grouped_experts_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]

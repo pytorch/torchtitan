@@ -43,9 +43,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE Module
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1_EFD",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3_EFD",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2_EDF",
+            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w1_EFD",
+            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w3_EFD",
+            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
             "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
@@ -105,7 +105,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         hf_state_dict = {}
 
         for key, value in state_dict.items():
-            if "moe.experts" in key:
+            if "moe.routed_experts.inner_experts" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)

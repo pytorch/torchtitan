@@ -6,10 +6,12 @@
 
 from dataclasses import dataclass
 
-from torchtitan.trainer import Trainer
+from torchtitan.experiments.transformers_modeling_backend.trainer import (
+    HFTransformerTrainer,
+)
 
 
 @dataclass(kw_only=True, slots=True)
-class TransformersBackendConfig(Trainer.Config):
+class TransformersBackendConfig(HFTransformerTrainer.Config):
     hf_model: str = ""
     """HuggingFace model ID (e.g., 'Qwen/Qwen2.5-7B')"""

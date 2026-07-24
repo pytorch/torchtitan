@@ -30,7 +30,7 @@ class _Endpoint:
         if not wait:
             self.release.set()
 
-    async def call(self, *args, **kwargs):
+    async def call_one(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         self.started.set()
         await self.release.wait()
@@ -40,6 +40,8 @@ class _Endpoint:
 
 
 class _Actor:
+    """A single-rank generator mesh fake."""
+
     def __init__(
         self,
         name: str,
@@ -50,6 +52,15 @@ class _Actor:
     ):
         self.generate = _Endpoint(name, wait=wait_generate)
         self.pull_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
+
+    def flatten(self, *args, **kwargs):
+        return self
+
+    def slice(self, **kwargs):
+        return self
+
+    def __len__(self):
+        return 1
 
 
 def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
@@ -339,7 +350,8 @@ def test_drain_pulls_idle_generators_while_busy_generator_drains():
         actors[1].pull_model_state_dict.release.set()
         assert (
             await asyncio.wait_for(
-                router.route("generate", routing_ctx=RoutingContext()), timeout=1.0
+                router.route("generate", routing_ctx=RoutingContext()),
+                timeout=1.0,
             )
             == "gen1"
         )

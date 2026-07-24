@@ -18,7 +18,8 @@ from torchtitan.models.common.attention import (
     FlexAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -132,7 +133,7 @@ class Attention(BaseAttention):
                 kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
             k = torch.cat([k_nope, k_pe.expand(-1, -1, k_nope.size(2), -1)], dim=-1)
-            if get_spmd_backend() == "spmd_types":
+            if get_spmd_backend() == "spmd_types" and not torch.compiler.is_compiling():
                 for t in [k, v]:
                     spmd.assert_type(
                         t,
