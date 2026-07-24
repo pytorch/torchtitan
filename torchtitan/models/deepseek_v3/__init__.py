@@ -45,7 +45,7 @@ __all__ = [
 
 
 _LINEAR_INIT = {
-    "weight": partial(nn.init.trunc_normal_, std=0.02),
+    "weight": partial(nn.init.trunc_normal_, std=0.02, a=-3 * 0.02, b=3 * 0.02),
     "bias": nn.init.zeros_,
 }
 _NORM_INIT = {"weight": nn.init.ones_}
@@ -61,17 +61,20 @@ def _output_linear_init(dim: int) -> dict[str, Callable]:
 
 
 def _depth_init(layer_id: int) -> dict[str, Callable]:
+    std = depth_scaled_std(0.02, layer_id)
     return {
-        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "weight": partial(nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std),
         "bias": nn.init.zeros_,
     }
 
 
 def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
+    # Only w2 (output projection) gets the depth-scaled std; w1/w3 are inputs.
+    std = depth_scaled_std(0.02, layer_id)
     return {
-        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
-        "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02, a=-3 * 0.02, b=3 * 0.02),
+        "w2_EDF": partial(nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02, a=-3 * 0.02, b=3 * 0.02),
     }
 
 
@@ -212,8 +215,8 @@ def _build_dsv3_layers(
             ffn_cfg = make_ffn_config(
                 dim=dim,
                 hidden_dim=dense_hidden_dim,
-                w1_param_init=_LINEAR_INIT,
-                w2w3_param_init=_depth_init(layer_id),
+                w1w3_param_init=_LINEAR_INIT,
+                w2_param_init=_depth_init(layer_id),
             )
             moe_cfg = None
         else:
@@ -243,8 +246,8 @@ def _build_dsv3_layers(
                 shared_experts=make_ffn_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
-                    w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_depth_init(layer_id),
+                    w1w3_param_init=_LINEAR_INIT,
+                    w2_param_init=_depth_init(layer_id),
                 ),
             )
 
