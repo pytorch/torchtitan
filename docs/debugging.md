@@ -1,3 +1,33 @@
+## Enable CPU/GPU Profiling
+
+Launch training with the PyTorch profiler enabled:
+
+```bash
+MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh \
+  --profiler.enable_profiling \
+  --profiler.profile_freq 10 \
+  --profiler.profiler_warmup 3 \
+  --profiler.profiler_active 1
+```
+
+Profiler traces are written under `./outputs/profiling/traces/` by default.
+
+To add coarse model-module annotations to the trace, enable the module profiler:
+
+```bash
+MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh \
+  --profiler.enable_profiling \
+  --profiler.enable_module_profiler
+```
+
+This adds `record_function` contexts for major module regions such as
+`block::layers.0`, `attention::layers.0.attention`,
+`ffn::layers.0.feed_forward`, and `moe::layers.0.moe`.
+
+The same labels are also emitted as best-effort CUDA graph kernel annotations
+when PyTorch/CUDA support for `torch.cuda._graph_annotations.mark_kernels` is
+available.
+
 ## Enable Memory Profiling
 
 Launch training job with the following command (or alternatively set configs in your config_registry function)

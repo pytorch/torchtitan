@@ -123,6 +123,9 @@ class Profiler(Configurable):
         enable_profiling: bool = False
         """Whether to enable pytorch profiler."""
 
+        enable_module_profiler: bool = False
+        """Whether to instrument coarse model modules for profiler traces."""
+
         save_traces_folder: str = PROFILE_DIR
         """Trace files location."""
 

@@ -15,6 +15,7 @@ class TestProfilerConfig(unittest.TestCase):
         cfg = Profiler.Config()
         self.assertFalse(cfg.enable_profiling)
         self.assertEqual(cfg.save_traces_folder, "profiling/traces")
+        self.assertFalse(cfg.enable_module_profiler)
         self.assertEqual(cfg.profile_freq, 10)
         self.assertEqual(cfg.profiler_active, 1)
         self.assertEqual(cfg.profiler_warmup, 3)
