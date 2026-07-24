@@ -78,8 +78,7 @@ def _wrap_moe_experts_contiguous(model: nn.Module) -> None:
     into the experts ``.view`` (its GQA models are dense; its MoE models use
     non-GQA attention). Wrap ``RoutedExperts.forward`` (before ``model.parallelize``
     so it sees local tensors) to ``.contiguous()`` its tensor args; a no-op when
-    already contiguous. Guarded to spmd + TP+EP at the call site. The clean fix is
-    upstream (``.reshape`` instead of ``.view``).
+    already contiguous. Guarded to spmd + TP+EP at the call site.
     """
     from torchtitan.models.common.moe import RoutedExperts
 
