@@ -135,8 +135,8 @@ class GatedDeltaKernel(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        # "fla_chunked": parallel within chunks, fast for training (default)
-        # "fla_fused_recurrent": token-by-token, lower memory for long sequences
+# "fla_chunked": parallel within chunks for training (default)
+# "fla_fused_recurrent": for inference only in rl, no backward
         backend: GatedDeltaBackend = "fla_chunked"
 
     def __init__(self, config: Config):
@@ -276,8 +276,6 @@ class GatedDeltaNet(Module):
         and the weight is ``Shard(0)``; DTensor-ness and gradient placements are
         restored explicitly.
 
-        TODO: Remove once the DTensor Conv1d dispatch fix for sharded groups
-        lands in a released torch.
         """
         x_plc = x.placements
         w = conv.weight
