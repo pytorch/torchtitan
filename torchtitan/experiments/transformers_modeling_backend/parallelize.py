@@ -227,9 +227,10 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # Only "default" (DTensor) and "spmd_types" are supported. full_dtensor is a
-    # transitional core backend slated for removal, so fail loud rather than
-    # silently taking the default path.
+    # Only "default" (DTensor) and "spmd_types" are supported. Both DTensor
+    # backends (default and full_dtensor) are transitional and slated for removal
+    # in favor of spmd_types; this backend just never wires full_dtensor, so fail
+    # loud rather than silently running it as default.
     if parallelism.spmd_backend == "full_dtensor":
         raise NotImplementedError(
             "the HF transformers backend supports spmd_backend 'default' or "
