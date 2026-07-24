@@ -12,7 +12,6 @@ Each saved forward activation can independently be tagged as MUST_SAVE,
 MUST_RECOMPUTE, or MUST_CPU_OFFLOAD.  The ``tag_with_memory_policy_pass``
 entry point selects a tagging strategy via ``--compile.memory_policy``.
 """
-
 from __future__ import annotations
 
 import operator
@@ -21,6 +20,11 @@ from collections.abc import Callable
 
 import torch
 from torch.utils.checkpoint import CheckpointPolicy
+from torchinsights.graph_estimation.runtime_estimator import (
+    BENCHMARK,
+    COST_MODEL,
+    INTERPRETER,
+)
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -42,6 +46,9 @@ from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
 from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
+)
+from torchtitan.experiments.graph_trainer.two_level_ilp_memory_policy_pass import (
+    two_level_ilp,
 )
 from torchtitan.tools.logging import logger
 
@@ -273,6 +280,8 @@ def _default_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC policy that saves compute-intensive ops and required FSDP unshards."""
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
@@ -295,6 +304,8 @@ def _full_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """Full recompute: only layer outputs are saved."""
     tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
@@ -306,6 +317,8 @@ def _eager_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC policy that alternates mm ops between save/recompute."""
     tag_sac_policy(gm, policy_fn=_make_eager_memory_policy())
@@ -317,8 +330,11 @@ def _sac_and_offload_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC + CPU offload: apply default SAC, then offload within budget."""
+
     _default_memory_policy_pass(gm, config=config)
     tag_all_offloadable_activations(
         gm,
@@ -327,11 +343,75 @@ def _sac_and_offload_memory_policy_pass(
     return gm
 
 
+@register_memory_policy("auto_perf_maxing")
+def two_level_ilp_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """Graph tagging with two-level ILP: the outer solves per-layer keep/recompute/
+    offload budgets under the GPU memory budget, the inner tags individual nodes
+    to realize them. Only tags the graph nodes; later apply_cpu_offload_pass
+    and selective_activation_remat_pass passes materialize the plan afterwards,
+    so do not disable them for this policy.
+
+    Budget:``config.compile.memory_budget_gb``. Runtime cost model:
+    ``config.compile.runtime_est_mode``, default: COST_MODEL (deterministic).
+    """
+
+    # Budget defaults to 1000 GB (configs.py), i.e. effectively "no budget": with
+    # that default the ILP finds budget >= all-keep peak and no-ops. Warn so a user
+    # who selected this policy but forgot --compile.memory_budget_gb isn't silently
+    # left with an untagged graph.
+    budget_gb = float(config.compile.memory_budget_gb)
+    if budget_gb >= 1000.0:  # the default case
+        logger.warning(
+            "auto_perf_maxing: memory_budget_gb=%.1f (default is 1000 = no budget); "
+            "the policy will likely no-op. Set --compile.memory_budget_gb to a real "
+            "per-rank budget.",
+            budget_gb,
+        )
+
+        return gm
+    mode = config.compile.runtime_est_mode
+    mode = mode.lower()
+    if mode == "cost_model":  # default if not provided by the user
+        mode = COST_MODEL
+    elif mode == "benchmark":
+        mode = BENCHMARK
+    elif mode == "interpreter":
+        mode = INTERPRETER
+    else:
+        raise ValueError(
+            f"Unknown runtime estimation mode: {mode}, use cost_model, benchmark, or interpreter"
+        )
+    # each_layer_separately: True -> solve one ILP per layer;
+    # False -> group layers by allocation and
+    # solve once per group. The default path will be `False` for now.
+    each_layer_separately = False  # no plan to make this configurable
+    new_gm, metrics = two_level_ilp(
+        trace,
+        int(budget_gb * 1e9),  # GB (1e9 bytes) to match units
+        config.optimizer,
+        model_parts,
+        runtime_estimation_mode=mode,
+        cpu_offload_budget_gb=config.compile.cpu_offload_budget_gb,
+        each_layer_separately=each_layer_separately,  # by default, false
+    )
+    # we can also dump the metrics to a file later
+
+    return new_gm if new_gm is not None else gm
+
+
 def tag_with_memory_policy_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
@@ -350,6 +430,8 @@ def tag_with_memory_policy_pass(
             f"Unknown memory_policy: {memory_policy!r}. "
             f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
-    gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
+    gm = MEMORY_POLICY_REGISTRY[memory_policy](
+        gm, config=config, trace=trace, model_parts=model_parts
+    )
     log_activation_memory_policy(gm)
     return gm
