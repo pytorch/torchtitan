@@ -10,10 +10,17 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed._tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed.device_mesh import init_device_mesh
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    _distribute_dtensor,
+    MixedPrecisionPolicy,
+    ReplicateComputation,
+)
 
 
 class TestApplySimpleFSDPSingleRank(unittest.TestCase):
@@ -73,6 +80,56 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         x = torch.randn(2, 8, dtype=torch.bfloat16)
         y = model(x)
         self.assertEqual(y.dtype, torch.bfloat16)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestReplicateComputationUnevenShard(unittest.TestCase):
+    def tearDown(self):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+    def _run_rms_norm_weight_replicate_compute(self, *, dp: int, tp: int) -> None:
+        dim = 256
+        dist.init_process_group("fake", rank=0, world_size=dp * tp)
+        mesh = init_device_mesh(
+            "cuda",
+            (dp, tp),
+            mesh_dim_names=("dp_shard", "tp"),
+        )
+        tp_mesh = mesh["tp"]
+        dp_mesh = mesh["dp_shard"]
+
+        param = _distribute_dtensor(
+            distribute_tensor(
+                torch.randn(dim, device="cuda"),
+                tp_mesh,
+                [Replicate()],
+            ),
+            dp_mesh,
+            [Shard(0)],
+        )
+        rc = ReplicateComputation(
+            dp_mesh,
+            (Shard(0),),
+            "fully_shard",
+            MixedPrecisionPolicy(),
+        )
+
+        weight = rc.replicate_compute(param)
+        weight_local = weight.to_local() if isinstance(weight, DTensor) else weight
+        self.assertEqual(weight_local.shape, (dim,))
+
+        input = torch.randn(4, dim, device="cuda")
+        torch.rms_norm(input, (dim,), weight_local, 1e-5)
+
+    def test_rms_norm_weight_unpads_uneven_dp_tp_shard(self):
+        for dp, tp in ((3, 2), (9, 8)):
+            with self.subTest(dp=dp, tp=tp):
+                try:
+                    self._run_rms_norm_weight_replicate_compute(dp=dp, tp=tp)
+                finally:
+                    if dist.is_initialized():
+                        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
