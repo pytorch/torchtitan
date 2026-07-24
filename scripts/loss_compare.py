@@ -61,6 +61,7 @@ Example usages:
 """
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
@@ -704,6 +705,7 @@ def assert_losses_equal(
     baseline_losses: dict[int, float],
     test_losses: dict[int, float] | None = None,
     import_result: str | None = None,
+    rtol: float = 0.0,
 ) -> None:
     """Assert that losses are equal between baseline and test using unittest.
 
@@ -712,6 +714,8 @@ def assert_losses_equal(
         test_losses: Test loss values extracted from TensorBoard. If None,
             only compares baseline against imported losses (baseline-only mode).
         import_result: Path to imported losses file for comparison.
+        rtol: Relative tolerance passed to math.isclose. 0.0 (default) requires
+            exact bitwise equality; rtol > 0 tolerates small drift.
 
     In baseline-only mode (test_losses is None), import_result must be provided.
     """
@@ -748,6 +752,15 @@ def assert_losses_equal(
 
     # Create a test case
     class LossEqualityTest(unittest.TestCase):
+        def _assert_close(self, baseline_loss, other_loss, label, step):
+            # rel_tol=0.0 means bitwise-equal; rtol>0 absorbs ROCm ~1e-6
+            # cross-layout reduction drift. Drop to 0 once root-caused.
+            self.assertTrue(
+                math.isclose(baseline_loss, other_loss, rel_tol=rtol),
+                f"Loss mismatch at step {step}: "
+                f"baseline={baseline_loss!r}, {label}={other_loss!r}",
+            )
+
         def test_losses_equal(self):
             baseline_steps = set(baseline_losses.keys())
 
@@ -777,23 +790,12 @@ def assert_losses_equal(
 
                 # Compare baseline vs test (if test exists)
                 if test_losses is not None:
-                    test_loss = test_losses[step]
-                    self.assertEqual(
-                        baseline_loss,
-                        test_loss,
-                        f"Loss mismatch at step {step}: "
-                        f"baseline={repr(baseline_loss)}, test={repr(test_loss)}",
-                    )
+                    self._assert_close(baseline_loss, test_losses[step], "test", step)
 
                 # Compare baseline vs imported (if provided)
                 if imported_losses:
-                    imported_loss = imported_losses[step]
-                    self.assertEqual(
-                        baseline_loss,
-                        imported_loss,
-                        f"Loss mismatch at step {step}: "
-                        f"baseline={repr(baseline_loss)}, "
-                        f"imported={repr(imported_loss)}",
+                    self._assert_close(
+                        baseline_loss, imported_losses[step], "imported", step
                     )
 
     # Run the test
@@ -955,6 +957,16 @@ Examples:
         help=(
             "Assert that all losses are equal (for CI testing). "
             "Script exits with error if losses differ."
+        ),
+    )
+    parser.add_argument(
+        "--rtol",
+        type=float,
+        default=0.0,
+        help=(
+            "Relative tolerance for --assert-equal (math.isclose rel_tol). "
+            "Default 0.0 requires exact bitwise equality; e.g. 1e-5 absorbs "
+            "ROCm collective reduction drift."
         ),
     )
     parser.add_argument(
@@ -1177,7 +1189,9 @@ def main() -> None:
 
         # Assert losses are equal if requested
         if args.assert_equal:
-            assert_losses_equal(baseline_losses, test_losses, args.import_result)
+            assert_losses_equal(
+                baseline_losses, test_losses, args.import_result, args.rtol
+            )
 
             # Export losses if requested (only after assertion passes)
             if args.export_result:

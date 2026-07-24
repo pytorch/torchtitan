@@ -101,17 +101,17 @@ jobs:
         export test_options="--parallelism.data_parallel_replicate_degree=4"
 
         # Set architecture-specific parameters
+        # ROCm collective reduction order differs across DP layouts / torch
+        # nightlies and shifts the loss by ~1e-6, breaking exact equality.
+        # Use a small relative tolerance on ROCm; CUDA stays exact (RTOL unset).
+        RTOL=""
         if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
           LOSS_FILE="tests/assets/losses/llama3_cuda.txt"
           STEPS=1
         elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
-          # The loss results of FSDP and HSDP start to diverge after 5th
-          # step when running with ROCm, we also need to adjust this.
-          # But this is more an unknown issue that AMD people may want to
-          # figure out the root cause or confirm that this is an expected
-          # behavior.
           LOSS_FILE="tests/assets/losses/llama3_rocm_mi350x.txt"
           STEPS=1
+          RTOL="--rtol=1e-5"
         else
           echo "Error: Unknown GPU architecture type: ${{ matrix.gpu-arch-type }}"
           exit 1
@@ -120,11 +120,11 @@ jobs:
         python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --export-result="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs/result.txt" --steps=100
 
          echo "Checking FSDP8 the first tep loss is the same as FSDP2HSDP4"
-        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=1
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal ${RTOL} --steps=1
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
          echo "Checking FSDP8 loss from a new run v.s. FSDP8 loss from text file parity"
-        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal ${RTOL} --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         # MoE loss comparison: verify Qwen3 MoE FSDP+TP+EP deterministic losses match reference
@@ -140,7 +140,7 @@ jobs:
           --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
           --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
           --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
-          --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
+          --import-result="${MOE_LOSS_FILE}" --assert-equal ${RTOL} --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
