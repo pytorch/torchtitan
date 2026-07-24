@@ -94,7 +94,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "full", "eager", "sac_and_offload"] = "default"
+    memory_policy: Literal[
+        "default", "full", "eager", "sac_and_offload", "auto_perf_maxing"
+    ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
@@ -136,6 +138,18 @@ class GraphTrainerCompileConfig(CompileConfig):
     cpu_offload_budget_gb: float = 100.0
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
+
+    memory_budget_gb: float = 1000.0
+    """Peak GPU memory budget (in GB per rank, 1 GB = 1e9 bytes to match the
+    runtime max_alloc measurement) for the ``whole_recompute_and_offload`` policy.
+    The whole-graph ILP minimizes runtime subject to peak <= this budget. The
+    default is effectively unbounded, so the policy is a no-op until a real
+    budget is set (e.g. --compile.memory_budget_gb 24)."""
+
+    runtime_est_mode: str = "cost_model"  # could be "benchmark" or "interpreter", too
+    """Runtime estimation mode for the ``auto_perf_maxing`` policy.
+    Selects the runtime estimator to use for the ILP. Options: `COST_MODEL`, `BENCHMARK`, `INTERPRETER`.
+    """
 
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
