@@ -88,9 +88,8 @@ def _nvfp4_linear_cls():
 
 
 def _stub_parallel_dims(*, tp_enabled, tp=4, spmd_backend="spmd_types"):
-    # NVFP4Linear._validate only reads these scalar fields; a stub keeps the test
-    # off the mesh so the divisibility/backend gates run on CPU. NVFP4 TP requires
-    # spmd_types, so default the stub to it to reach the divisibility checks.
+    # NVFP4Linear._validate_tp_backend only reads these scalar fields; a stub
+    # keeps the test off the mesh so the backend gate runs on CPU.
     return SimpleNamespace(tp_enabled=tp_enabled, tp=tp, spmd_backend=spmd_backend)
 
 
@@ -105,36 +104,39 @@ def test_nvfp4_infer_tp_style():
     assert _infer_tp_style(None) is None
 
 
-@pytest.mark.parametrize(
-    "in_features, out_features, style, match",
-    [
-        # colwise out // tp = 300 // 4 = 75, not a multiple of 128.
-        (512, 300, "colwise", "divisible by 128"),
-        (512, 513, "colwise", "out_features divisible by TP"),
-        (513, 512, "rowwise", "in_features divisible by TP"),
-    ],
-)
-def test_nvfp4_validate_rejects_bad_tp_dims(in_features, out_features, style, match):
+@pytest.mark.parametrize("in_features, out_features", [(512, 300), (300, 512)])
+def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
+    # The model dims are known at config-build time, so a non-128 in/out_features
+    # (e.g. the LM head) is rejected in Config.__post_init__ before any TP.
     NVFP4Linear = _nvfp4_linear_cls()
-    module = NVFP4Linear.Config(
-        in_features=in_features, out_features=out_features
-    ).build()
-    with pytest.raises(ValueError, match=match):
-        module._validate(_stub_parallel_dims(tp_enabled=True), style)
+    with pytest.raises(ValueError, match="divisible by 128"):
+        NVFP4Linear.Config(in_features=in_features, out_features=out_features)
+
+
+def test_nvfp4_rejects_local_gemm_dims_below_128():
+    # Config dims are 128-multiples but a TP shard drops a local dim below 128.
+    # Simulate the post-shard weight shape (out=64 for out_features=256 at TP=4).
+    NVFP4Linear = _nvfp4_linear_cls()
+    module = NVFP4Linear.Config(in_features=512, out_features=256).build()
+    module._validate_local_gemm_dims()  # unsharded (256, 512): both %128, no raise
+    module.weight = torch.nn.Parameter(torch.empty(64, 512, device="meta"))
+    with pytest.raises(ValueError, match="divisible by 128"):
+        module._validate_local_gemm_dims()
 
 
 def test_nvfp4_validate_requires_spmd_types_for_tp():
     NVFP4Linear = _nvfp4_linear_cls()
     module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
-    # colwise 512x1024 under TP=4 + spmd_types: local (512, 256), both %128.
-    module._validate(_stub_parallel_dims(tp_enabled=True), "colwise")  # no raise
-    # TP disabled (single GPU / FSDP-only): backend irrelevant, dims at TP=1.
-    module._validate(_stub_parallel_dims(tp_enabled=False, spmd_backend="default"), None)
+    module._validate_tp_backend(_stub_parallel_dims(tp_enabled=True))  # no raise
+    # TP disabled (single GPU / FSDP-only): backend is irrelevant.
+    module._validate_tp_backend(
+        _stub_parallel_dims(tp_enabled=False, spmd_backend="default")
+    )
     # The nvfp4 GEMM is opaque to DTensor: TP requires the spmd_types backend.
     for backend in ("default", "full_dtensor"):
         with pytest.raises(ValueError, match="spmd_types"):
-            module._validate(
-                _stub_parallel_dims(tp_enabled=True, spmd_backend=backend), "colwise"
+            module._validate_tp_backend(
+                _stub_parallel_dims(tp_enabled=True, spmd_backend=backend)
             )
 
 
