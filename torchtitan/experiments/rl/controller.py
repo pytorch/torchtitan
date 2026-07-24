@@ -25,7 +25,7 @@ _data_input_loop                                      _rollout_loop[N] (group wo
                         v                                                     | v
 RolloutGroupWorkBuffer
 +---------------------------------------------------------------------------------------------------------------------+
-| active slots = (max_offpolicy_steps + 1) * num_prompts_per_train_step                                                |
+| active slots = (target_offpolicy_steps + 1) * num_prompts_per_train_step                                                |
 |                                                                                                                     |
 | caller            group_buffer call                                            state / active slot                  |
 | _data_input_loop  add_work(RolloutGroupWork)                                   WAITING; slot acquired               |
@@ -75,8 +75,8 @@ _rollout_loop[N]
     unblocked by: n/a
 
 _batcher_loop
-  consumes: the oldest FINALIZED group (group_buffer.take_finalized)
-    waits for:    the oldest group becoming FINALIZED
+  consumes: the oldest FINALIZED group allowed by windowed FIFO (group_buffer.take_finalized)
+    waits for:    a group inside the window becoming FINALIZED
     unblocked by: _rollout_loop[N] group_buffer.finalize_work()
   produces: TrainingBatch (training_batch_queue.put)
     waits for:    a free training_batch_queue slot (maxsize=1)
@@ -92,6 +92,7 @@ import logging
 import math
 import os
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Annotated
@@ -163,9 +164,23 @@ class AsyncLoopConfig(Configurable.Config):
     num_samples_per_prompt: int = 8
     """Sibling rollouts sampled per prompt (the GRPO group)."""
 
-    max_offpolicy_steps: int = 3
-    """Max train-steps a rollout may lag the trainer. Sets the rollout buffer size and its
-    stalling behavior. 0 = fully on-policy (sync): generator and trainer alternate in lockstep."""
+    target_offpolicy_steps: int = 3
+    """Target steady-state offpolicy steps used to set the active buffer size to
+    `(S + 1) * P`. Observed offpolicy steps are not guaranteed to equal this
+    target: when rollout generation is the bottleneck, the buffer may not fill
+    and observed offpolicy steps will be lower. With strict FIFO, observed
+    offpolicy steps cannot exceed this target. With windowed FIFO, it may exceed
+    this target, up to `max_offpolicy_steps`. See
+    ``torchtitan/experiments/rl/docs/windowed_fifo.md`` for details."""
+
+    window_fraction: float | None = 0.3
+    """FIFO look-ahead window expressed as a fraction of the active buffer size.
+
+    This allows the batcher to bypass an unfinished rollout group at the head of
+    the queue and consume younger groups that are already finished. This may
+    increase the offpoliciness of the bypassed group. Defaults to 0.3 following
+    Section 6.2.4 of https://arxiv.org/pdf/2605.26494. Set to None for strict FIFO;
+    otherwise, must be in `(0, 1]`."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -175,6 +190,74 @@ class AsyncLoopConfig(Configurable.Config):
     )
     batcher: Batcher.Config = field(default_factory=Batcher.Config)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
+
+    def __post_init__(self) -> None:
+        if self.num_prompts_per_train_step < 1:
+            raise ValueError(
+                "num_prompts_per_train_step must be >= 1, got "
+                f"{self.num_prompts_per_train_step}"
+            )
+        if self.target_offpolicy_steps < 0:
+            raise ValueError(
+                f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
+            )
+        if self.window_fraction is not None and not (
+            0 < self.window_fraction <= 1
+        ):
+            raise ValueError(
+                "window_fraction must be None or in (0, 1], got "
+                f"{self.window_fraction}"
+            )
+        if (
+            self.window_fraction is not None
+            and self.window_fraction * self.max_active_rollout_groups < 1
+        ):
+            warnings.warn(
+                f"window_fraction={self.window_fraction} is too small for "
+                f"active_buffer_size={self.max_active_rollout_groups}; forcing "
+                "window_size=1 (strict FIFO)",
+                stacklevel=2,
+            )
+
+    @property
+    def max_active_rollout_groups(self) -> int:
+        return (self.target_offpolicy_steps + 1) * self.num_prompts_per_train_step
+
+    @property
+    def window_size(self) -> int:
+        """Derive the fixed FIFO look-ahead window from the configured fraction.
+
+        Symbols:
+            ``P``: prompts per train step (``num_prompts_per_train_step``).
+            ``S``: target steady-state offpolicy steps (``target_offpolicy_steps``).
+            ``f``: fraction of the active buffer visible to windowed FIFO
+                (``window_fraction``).
+            ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
+
+        Returns:
+            The FIFO look-ahead window size, ``max(1, floor(f * B))``. A value
+            of 1 is strict FIFO.
+        """
+        if self.window_fraction is None:
+            return 1
+        return max(
+            1,
+            math.floor(self.window_fraction * self.max_active_rollout_groups),
+        )
+
+    @property
+    def max_offpolicy_steps(self) -> int:
+        """Return the worst case consume-time offpolicy bound.
+
+        For active buffer size ``B``, window size ``W``, and prompts per
+        train step ``P``, the bound is ``(B + W - 2) // P``.
+
+        See ``torchtitan/experiments/rl/docs/windowed_fifo.md`` for the proof and
+        a worked example.
+        """
+        return (
+            self.max_active_rollout_groups + self.window_size - 2
+        ) // self.num_prompts_per_train_step
 
 
 class Controller(Configurable):
@@ -483,9 +566,7 @@ class Controller(Configurable):
         """
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
-        max_active_rollout_groups = (
-            async_loop.max_offpolicy_steps + 1
-        ) * async_loop.num_prompts_per_train_step
+        max_active_rollout_groups = async_loop.max_active_rollout_groups
         rollout_concurrency = max(
             max_active_rollout_groups * async_loop.num_samples_per_prompt,
             async_loop.validation.num_samples,
@@ -705,13 +786,13 @@ class Controller(Configurable):
         # Trainer policy version, seeded from the resumed step; advances at each optimizer step.
         self._trainer_policy_version = self.start_step
 
-        # Buffer capacity caps how far generation runs ahead of the trainer (bounds off-policy staleness).
-        max_active_rollout_groups = (
-            async_loop.max_offpolicy_steps + 1
-        ) * async_loop.num_prompts_per_train_step
+        # Buffer capacity sets target offpolicy steps; window size sets the hard offpolicy step bound.
+        max_active_rollout_groups = async_loop.max_active_rollout_groups
+        window_size = async_loop.window_size
 
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,
+            window_size=window_size,
         )
 
         # Overlaps each step's weight handoff (push -> pull -> buffer-slot release) with the next step's fwd/bwd
@@ -740,7 +821,7 @@ class Controller(Configurable):
         # rollout_loop
         generate_fn = self._make_generate_fn(metrics_prefix="generator")
 
-        # One rollout worker per active buffer slot: lets generation fill the whole off-policy window,
+        # One rollout worker per active buffer slot: lets generation fill the whole windowed FIFO range,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
         # TODO: support warm start
         rollout_tasks = [
@@ -845,7 +926,7 @@ class Controller(Configurable):
 
         # TODO(perf): Slots are current released in batches, while this loop is a single producer.
         # we could a) increase the number of threads; b) revisit how we release slots and see if
-        # we can release them on the batcher while still preserving max off-policy steps.
+        # we can release them on the batcher while still preserving max offpolicy steps.
         # finally, c) we need to check how will this data input loop truly overlaps with the rollout loop.
         while await group_buffer.wait_for_slot():
             with sl.log_trace_span("get_training_sample"):
@@ -921,8 +1002,8 @@ class Controller(Configurable):
         On a clean close/shutdown the group_buffer drains and returns None; we forward a `None` sentinel
         so the trainer stops.
 
-        consumes: the oldest FINALIZED group (group_buffer.take_finalized)
-            waits for:    the oldest group becoming FINALIZED
+        consumes: the oldest FINALIZED group allowed by windowed FIFO (group_buffer.take_finalized)
+            waits for:    a group inside the window becoming FINALIZED
             unblocked by: _rollout_loop[N] group_buffer.finalize_work()
         produces: TrainingBatch (training_batch_queue.put)
             waits for:    a free training_batch_queue slot (maxsize=1)
@@ -1002,6 +1083,9 @@ class Controller(Configurable):
                 policy_age_panel = compute_policy_age_metrics(
                     trainer_policy_version=self._trainer_policy_version,
                     min_policy_versions=packed.min_policy_versions,
+                    target_offpolicy_steps=(
+                        self.config.async_loop.target_offpolicy_steps
+                    ),
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
