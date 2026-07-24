@@ -7,7 +7,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -37,6 +37,21 @@ from .sharding import set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
+
+
+class Qwen35AttentionMasks(NamedTuple):
+    """Per-consumer attention masks for the hybrid stack under flex attention.
+
+    A ``BlockMask`` only document-isolates the quadratic full-attention
+    layers; GatedDeltaNet is a recurrence, so it needs document *offsets*
+    (``VarlenMetadata``) to reset conv and recurrent state at packing
+    boundaries. Built once per forward by ``Qwen35Model.get_attention_masks``;
+    each attention module picks its slice in ``forward``. The varlen backend
+    does not use this type: there both consumers share one ``VarlenMetadata``.
+    """
+
+    full_attention: AttentionMasksType
+    deltanet: VarlenMetadata
 
 
 def _causal_conv1d_varlen(
@@ -206,12 +221,13 @@ class GatedDeltaNet(Module):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
-    No RoPE, different head structure from standard attention. When varlen
-    metadata (``VarlenMetadata``) is provided -- i.e. under the ``varlen``
-    attention backend -- conv and recurrent state are reset at document
-    boundaries. Under other backends (e.g. ``flex``, which passes a
-    ``BlockMask``) no reset occurs and the packed sequence is processed as a
-    single continuous stream.
+    No RoPE, different head structure from standard attention. Conv and
+    recurrent state are reset at document boundaries whenever document
+    offsets are available: directly as ``VarlenMetadata`` under the
+    ``varlen`` attention backend, or via the ``deltanet`` slice of
+    ``Qwen35AttentionMasks`` under the ``flex`` backend. With no masks
+    (``None``) the packed sequence is processed as a single continuous
+    stream.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -343,9 +359,11 @@ class GatedDeltaNet(Module):
     def forward(
         self,
         x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: AttentionMasksType | Qwen35AttentionMasks | None = None,
     ) -> torch.Tensor:
         B, L, _ = x_BLD.shape
+        if isinstance(attention_masks, Qwen35AttentionMasks):
+            attention_masks = attention_masks.deltanet
         cu_seqlens = None
         cu_seqlens_cpu = None
         if isinstance(attention_masks, VarlenMetadata):
@@ -483,10 +501,12 @@ class Qwen35Attention(BaseAttention):
     def forward(
         self,
         x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType | Qwen35AttentionMasks | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, L, _ = x_BLD.shape
+        if isinstance(attention_masks, Qwen35AttentionMasks):
+            attention_masks = attention_masks.full_attention
 
         # wq is 2x wider: produces query + gate
         xq_gate_BLN2H = self.wq(x_BLD).view(B, L, -1, self.head_dim * 2)
@@ -568,7 +588,7 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType | Qwen35AttentionMasks | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h_BLD = self.attention_norm(x_BLD)
@@ -688,10 +708,10 @@ class Qwen35Model(Decoder):
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
-    def get_attention_masks(
+    def get_attention_masks(  # pyrefly: ignore [bad-override]
         self,
         positions: torch.Tensor,
-    ) -> AttentionMasksType | None:
+    ) -> AttentionMasksType | Qwen35AttentionMasks | None:
         attn_config = self.config.first_attention
         if attn_config is not None and isinstance(
             attn_config.inner_attention, VarlenAttention.Config
@@ -705,7 +725,23 @@ class Qwen35Model(Decoder):
                 positions,
                 include_host_offsets=True,
             )
-        return super().get_attention_masks(positions)
+        full_attention_masks = super().get_attention_masks(positions)
+        if full_attention_masks is None:
+            # No full-attention layers on this stage (e.g. a pipeline stage
+            # holding only GatedDeltaNet blocks) -> no masks. TODO: DeltaNet
+            # state then runs across document boundaries on such stages,
+            # under both flex and varlen backends.
+            return None
+        # A BlockMask document-isolates the quadratic layers only; pair it
+        # with document offsets so GatedDeltaNet resets state at packing
+        # boundaries too.
+        return Qwen35AttentionMasks(
+            full_attention=full_attention_masks,
+            deltanet=create_varlen_metadata_for_document(
+                positions,
+                include_host_offsets=True,
+            ),
+        )
 
     def _get_vision_positions(
         self,
@@ -859,7 +895,7 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: AttentionMasksType | Qwen35AttentionMasks | None = None,
         positions: torch.Tensor | None = None,
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
