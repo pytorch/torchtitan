@@ -23,6 +23,7 @@ from torchtitan.distributed.full_dtensor import (
     resolve_sparse_fsdp_mesh,
     validate_config,
 )
+from torchtitan.models.common.attention_sharding import validate_context_parallel
 from torchtitan.models.gpt_oss.model import GptOssModel
 
 
@@ -67,6 +68,16 @@ def parallelize_gptoss(
     dump_folder: str,
     skip_dp: bool = False,
 ):
+    if parallel_dims.cp_enabled and parallelism.context_parallel_method == "ulysses":
+        raise NotImplementedError(
+            "GPT-OSS does not support ulysses context parallel. Ulysses reshards "
+            "attention heads across the TP and CP axes, but the per-head sinks "
+            "parameter is sharded on TP only, so the sink rescale sees a "
+            "mismatched head count. Use context_parallel_method='allgather'."
+        )
+
+    validate_context_parallel(model, parallel_dims, parallelism)
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )

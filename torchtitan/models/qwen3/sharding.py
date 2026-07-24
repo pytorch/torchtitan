@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 
 from torchtitan.models.common.attention import GQAttention
-
+from torchtitan.models.common.attention_sharding import set_inner_attention_config
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
@@ -18,7 +18,6 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
-    set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
@@ -39,6 +38,7 @@ def set_qwen3_sharding_config(
     *,
     enable_sp: bool,
     enable_ep: bool,
+    cp_method: str = "",
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3 sub-configs.
 
@@ -53,7 +53,9 @@ def set_qwen3_sharding_config(
 
     set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
-        _set_qwen3_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
+        _set_qwen3_layer_sharding(
+            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep, cp_method=cp_method
+        )
 
 
 def _set_qwen3_layer_sharding(
@@ -61,6 +63,7 @@ def _set_qwen3_layer_sharding(
     *,
     enable_sp: bool,
     enable_ep: bool,
+    cp_method: str = "",
 ) -> None:
     """Set sharding on one Qwen3 transformer layer.
 
@@ -76,7 +79,7 @@ def _set_qwen3_layer_sharding(
     layer_cfg.ffn_norm.sharding_config = norm
 
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_inner_attention_config(attention, cp_method)
 
     # QK norms: shard on head dim (dim=2) — independent of SP.
     if attention.qk_norm is not None:

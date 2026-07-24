@@ -50,6 +50,13 @@ def parallelize_flux(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
+    if parallel_dims.cp_enabled and parallelism.context_parallel_method != "allgather":
+        raise ValueError(
+            "Flux context parallel only supports "
+            "context_parallel_method='allgather', but got "
+            f"'{parallelism.context_parallel_method}'."
+        )
+
     if ac_config is not None:
         apply_ac(model)
 

@@ -187,48 +187,6 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
-def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
-    """Install a ``LocalMapConfig`` on an inner-attention config.
-
-    q/k/v arrive as ``(bs, seq, heads, head_dim)`` DTensors with heads
-    TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
-    to local tensors before the kernel runs, then wraps outputs back.
-
-    Declares placements over the full dense SPMD axis set (DP/CP/TP) so
-    the LocalMap composes under ``full_dtensor`` (where the surrounding
-    mesh is multi-axis); under non-full_dtensor, the (tp,)-only mesh only
-    consumes the ``TP`` placement and the rest are ignored.
-
-    Under ``full_dtensor`` + CP, q stays seq-sharded on the CP axis
-    (``Shard(1)``) while k/v are ``Replicate`` on CP -- DTensor all-gathers
-    k/v at the local_map boundary so the kernel sees full-length keys
-    (matching the BlockMask's kv dimension). Q's local grad is naturally
-    seq-sharded; k/v's local grads accumulate as ``Partial`` on CP and
-    DTensor reduces them on the way out.
-    """
-    q_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
-    kv_src_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
-    kv_dst_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
-    kv_grad_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
-    out_src: SpmdLayout = q_placements
-    inner_attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={
-            "q_BLNH": q_placements,
-            "k_BLNH": kv_src_placements,
-            "v_BLNH": kv_src_placements,
-        },
-        in_dst_shardings={
-            "q_BLNH": q_placements,
-            "k_BLNH": kv_dst_placements,
-            "v_BLNH": kv_dst_placements,
-        },
-        out_src_shardings=out_src,
-        local_map=LocalMapConfig(
-            in_grad_placements=(q_placements, kv_grad_placements, kv_grad_placements),
-        ),
-    )
-
-
 def set_dense_ffn_sharding(
     feed_forward_cfg,
     *,

@@ -31,6 +31,8 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.tools.logging import logger
 
+from .types import ContextParallelMethod
+
 
 def apply_cp_to_forward(
     attention_modules: Sequence[nn.Module],
@@ -118,6 +120,8 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     device: torch.device,
     load_balancer_type: str | None = "headtail",
+    *,
+    cp_method: str = "",
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Shard inputs, labels, positions, and attention masks for Context Parallel.
@@ -135,6 +139,9 @@ def prepare_context_parallel_input(
         device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
+            Ignored when ``cp_method`` is "ulysses".
+        cp_method: Context-parallel method, "allgather" (the default when empty)
+            or "ulysses". Ulysses skips the load balancer and mask sharding.
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -150,6 +157,7 @@ def prepare_context_parallel_input(
         (inputs, labels, positions),
         attention_masks,
         load_balancer_type,
+        cp_method=ContextParallelMethod(cp_method or "allgather"),
     )
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
@@ -164,6 +172,8 @@ def cp_shard(
     attention_masks: AttentionMasksType | None,
     load_balancer_type: str | None = "headtail",
     input_seq_dim: int = 1,
+    *,
+    cp_method: ContextParallelMethod = ContextParallelMethod.ALLGATHER,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.
@@ -188,6 +198,9 @@ def cp_shard(
             [batch_size, seq_len]. Can be changed by passing a
             different value if your tensors use a different sequence
             dimension layout.
+        cp_method: Context-parallel method. Defaults to all-gather. Ulysses
+            attends to the full sequence, so it skips the load balancer and
+            keeps the attention mask global.
 
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
@@ -197,40 +210,32 @@ def cp_shard(
               dict[str, BlockMask]) or None
 
     Raises:
-        ValueError: If load_balancer_type is "ptrr" and attention_masks
-            is None or a dict
+        ValueError: If load_balancer_type is "ptrr" and attention_masks is
+            not a BlockMask (e.g. None or a dict).
     """
+    is_ulysses = cp_method is ContextParallelMethod.ULYSSES
+
     seq_len = inputs[0].size(input_seq_dim)
     cp_world_size = cp_mesh.size(0)
 
     load_balancer = None
-    if load_balancer_type:
+    if not is_ulysses and load_balancer_type:
         match load_balancer_type:
             case "headtail":
-                # For SDPA, we use the _HeadTailLoadBalancer.
                 load_balancer = _HeadTailLoadBalancer(
                     seq_len, cp_world_size, cp_mesh.device_type
                 )
             case "ptrr":
-                # For FlexAttention, we use _PTRRLoadBalancer.
-                # _PTRRLoadBalancer requires attention_masks to be a BlockMask.
-                # For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
-                # support the case where there are multiple masks.
-                if attention_masks is None or isinstance(attention_masks, dict):
-                    raise ValueError(
-                        "PTRRLoadBalancer requires attention_masks to be a "
-                        "BlockMask, but got None or dict[str, BlockMask]"
-                    )
                 if not isinstance(attention_masks, BlockMask):
                     raise ValueError(
-                        f"PTRRLoadBalancer requires attention_masks to be a "
-                        f"BlockMask, but got {type(attention_masks)}"
+                        "PTRRLoadBalancer requires attention_masks to be a "
+                        f"BlockMask, but got {type(attention_masks).__name__}"
                     )
                 load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
             case _:
                 raise ValueError(
                     f"Invalid load_balancer_type '{load_balancer_type}'. "
-                    f"Must be one of: 'headtail', 'ptrr', or None"
+                    "Must be one of: 'headtail', 'ptrr', or None"
                 )
 
     inputs = cast(
@@ -243,10 +248,10 @@ def cp_shard(
         ),
     )
 
-    # BlockMask, has shape, [B, H, Q, KV], and we can only shard
-    # on the Q seq dimension, not KV.
+    # Ulysses attends to the full sequence, so its mask stays global; only the
+    # seq-sharding methods shard the mask's Q dim (BlockMask is [B, H, Q, KV]).
     MASK_Q_SEQ_DIM = 2
-    if attention_masks is not None:
+    if attention_masks is not None and not is_ulysses:
         assert isinstance(attention_masks, (BlockMask, dict))
         masks = (
             [attention_masks]
@@ -260,11 +265,11 @@ def cp_shard(
             load_balancer=load_balancer,
         )
         attention_masks = cast(
-            (BlockMask | dict[str, BlockMask]),
+            BlockMask | dict[str, BlockMask],
             (
                 masks[0]
                 if isinstance(attention_masks, BlockMask)
-                else {k: v for k, v in zip(attention_masks.keys(), masks)}
+                else dict(zip(attention_masks.keys(), masks))
             ),
         )
 

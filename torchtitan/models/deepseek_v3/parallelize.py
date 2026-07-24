@@ -21,6 +21,7 @@ from torchtitan.distributed.full_dtensor import (
     validate_config,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.common.attention_sharding import validate_context_parallel
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 
 
@@ -34,6 +35,8 @@ def parallelize_deepseekv3(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
+    validate_context_parallel(model, parallel_dims, parallelism)
+
     if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
