@@ -78,7 +78,20 @@ try:
         class Config(Linear.Config):
             """Drop-in replacement for Linear.Config that builds NVFP4Linear."""
 
-            pass
+            def __post_init__(self) -> None:
+                # NVFP4's Triton kernels need every GEMM dim to be a multiple of
+                # 128. in_features / out_features are known at config-build time
+                # (the TP degree is not), so reject the model-dim violations up
+                # front here; NVFP4Linear._validate_local_gemm_dims covers the
+                # per-rank local dims once TP has sharded the weight.
+                for name in ("in_features", "out_features"):
+                    value = getattr(self, name)
+                    if value % _NVFP4_BLOCK:
+                        raise ValueError(
+                            f"NVFP4 requires {name} divisible by {_NVFP4_BLOCK}; "
+                            f"got {name}={value}. NVFP4 cannot quantize this Linear "
+                            "(e.g. the LM head); exclude it from the converter fqns."
+                        )
 
         def __init__(self, config: "NVFP4Linear.Config"):
             TorchAONVFP4Linear.__init__(
@@ -142,13 +155,16 @@ try:
 
         def parallelize(self, parallel_dims: ParallelDims) -> None:
             if self._sharding_config is not None:
+                self._validate_tp_backend(parallel_dims)
                 tp_style = _infer_tp_style(self._sharding_config)
-                self._validate(parallel_dims, tp_style)
                 self._sharding_config = self._augment_sharding_config(
                     self._sharding_config, tp_style
                 )
                 self._cache_buffer_spec(parallel_dims)
+            # super().parallelize() shards the weight; check the resulting local
+            # GEMM dims against the 128 constraint the config could not know.
             super().parallelize(parallel_dims)
+            self._validate_local_gemm_dims()
 
         def _augment_sharding_config(
             self, sc: ShardingConfig, tp_style: Literal["colwise", "rowwise"] | None
@@ -187,11 +203,7 @@ try:
                 local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
             )
 
-        def _validate(
-            self,
-            parallel_dims: ParallelDims,
-            tp_style: Literal["colwise", "rowwise"] | None,
-        ) -> None:
+        def _validate_tp_backend(self, parallel_dims: ParallelDims) -> None:
             if parallel_dims.tp_enabled and parallel_dims.spmd_backend != "spmd_types":
                 raise ValueError(
                     "NVFP4 tensor parallelism requires "
@@ -199,27 +211,24 @@ try:
                     f"'{parallel_dims.spmd_backend}'). The NVFP4 GEMM is opaque "
                     "to DTensor; TP runs through the spmd_types local_map path."
                 )
-            tp = parallel_dims.tp if parallel_dims.tp_enabled else 1
-            if tp_style == "rowwise":
-                if self.in_features % tp:
-                    raise ValueError(
-                        f"NVFP4 rowwise TP requires in_features divisible by TP; "
-                        f"got in_features={self.in_features}, TP={tp}."
-                    )
-                local_in, local_out = self.in_features // tp, self.out_features
-            else:
-                if self.out_features % tp:
-                    raise ValueError(
-                        f"NVFP4 colwise TP requires out_features divisible by TP; "
-                        f"got out_features={self.out_features}, TP={tp}."
-                    )
-                local_in, local_out = self.in_features, self.out_features // tp
+
+        def _validate_local_gemm_dims(self) -> None:
+            # After super().parallelize() the weight is TP-sharded, so its shape
+            # is the per-rank local (out, in) that the kernel actually sees --
+            # covers colwise and rowwise without recomputing the split by hand.
+            weight = (
+                self.weight.to_local()
+                if isinstance(self.weight, DTensor)
+                else self.weight
+            )
+            local_out, local_in = weight.shape
             if local_in % _NVFP4_BLOCK or local_out % _NVFP4_BLOCK:
                 raise ValueError(
                     f"NVFP4 requires each local GEMM dim divisible by "
-                    f"{_NVFP4_BLOCK}; {tp_style or 'no-TP'} linear "
-                    f"in={self.in_features} out={self.out_features} under TP={tp} "
-                    f"gives local (in={local_in}, out={local_out})."
+                    f"{_NVFP4_BLOCK}; Linear in={self.in_features} "
+                    f"out={self.out_features} shards to local "
+                    f"(in={local_in}, out={local_out}). Pick a TP degree that "
+                    f"keeps both a multiple of {_NVFP4_BLOCK}."
                 )
 
         def _cache_buffer_spec(self, parallel_dims: ParallelDims) -> None:
