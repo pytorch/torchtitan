@@ -67,7 +67,7 @@ combinations below. FSDP composes with every listed axis.
 |---|---|---|---|---|---|
 | Qwen3-30B-A3B | GQA | yes | yes | yes | full matrix up to TP+EP+CP |
 | Mixtral-8x7B, OLMoE-1B-7B | GQA | yes | yes | yes | TP+EP, EP+CP |
-| DeepSeek-V2-Lite, V3, GLM-4.7 | MLA | yes | yes | yes* | TP+EP; *flex+CP verified on DeepSeek-V2-Lite (EP+CP) |
+| DeepSeek-V2-Lite, V3, GLM-4.7 | MLA | yes | yes | yes | TP+EP; flex+CP verified on all three (EP+CP) |
 | GLM-5 | MLA + DSA | yes | yes | no | TP works (DSA indexer runs on local tensors under spmd_types); CP not wired |
 | Gemma-4-26B-A4B | GQA | no | yes | no | attention TP not viable (num_global_key_value_heads=2) -- FSDP/EP only |
 
