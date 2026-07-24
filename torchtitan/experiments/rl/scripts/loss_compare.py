@@ -142,7 +142,7 @@ def run_training(
         # config default (off-policy lag), the tail step's rollouts depend on
         # async generator/trainer timing and vary run-to-run. Scoped to the loss
         # guard here so the shared config keeps its off-policy production default.
-        "--async-loop.max-offpolicy-steps=0",
+        "--async-loop.target-offpolicy-steps=0",
         "--async-loop.validation.num-samples=0",
         "--metrics.enable-tensorboard",
         "--metrics.no-enable-wandb",

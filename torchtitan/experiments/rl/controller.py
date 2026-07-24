@@ -170,14 +170,16 @@ class AsyncLoopConfig(Configurable.Config):
     target: when rollout generation is the bottleneck, the buffer may not fill
     and observed offpolicy steps will be lower. With strict FIFO, observed
     offpolicy steps cannot exceed this target. With windowed FIFO, it may exceed
-    this target, up to `max_offpolicy_steps`."""
+    this target, up to `max_offpolicy_steps`. See
+    ``torchtitan/experiments/rl/docs/windowed_fifo.md`` for details."""
 
     windowed_fifo_fraction: float | None = None
-    """Fraction `f` of the active buffer used as the FIFO look-ahead window.
+    """FIFO look-ahead window expressed as a fraction of the active buffer size.
 
-    None means strict FIFO (`window_size=1`). If set, must be in `(0, 1]`.
-    Larger values allow more finalized prompt groups to bypass older unfinished
-    groups, increasing the derived consume-time offpolicy bound."""
+    This allows the batcher to bypass an unfinished rollout group at the head of
+    the queue and consume younger groups that are already finished. This may
+    increase the offpoliciness of the bypassed group. Set to None for strict
+    FIFO; otherwise, must be in `(0, 1]`."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -230,8 +232,10 @@ class AsyncLoopConfig(Configurable.Config):
             ``f``: fraction of the active buffer used as the FIFO window
                 (``windowed_fifo_fraction``).
             ``B``: active buffer size in prompt groups, ``B = (S + 1) * P``.
-            ``W``: FIFO look-ahead window size, ``W = max(1, floor(f * B))``.
-                ``W = 1`` is strict FIFO.
+
+        Returns:
+            The FIFO look-ahead window size, ``max(1, floor(f * B))``. A value
+            of 1 is strict FIFO.
         """
         if self.windowed_fifo_fraction is None:
             return 1

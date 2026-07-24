@@ -90,10 +90,6 @@ class RolloutGroupWorkBuffer(Configurable):
     def __init__(
         self, config: Config, *, max_active_rollout_groups: int, window_size: int = 1
     ) -> None:
-        if max_active_rollout_groups < 1:
-            raise ValueError(
-                f"max_active_rollout_groups must be >= 1, got {max_active_rollout_groups}"
-            )
         if not 1 <= window_size <= max_active_rollout_groups:
             raise ValueError(
                 "window_size must be between 1 and max_active_rollout_groups, got "
@@ -177,16 +173,21 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @sl.log_trace_span("take_finalized")
     async def take_finalized(self) -> RolloutGroup | None:
-        """Batcher loop: return the oldest FINALIZED group inside the anchored window.
+        """Batcher loop: return the oldest FINALIZED group inside the anchored windowed-FIFO.
 
         The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
         window stay blocked even if they are finalized, so taking non-head groups does not slide
         the window. The controller defaults to strict FIFO (`window_size=1`)
         unless `windowed_fifo_fraction` is set.
 
+        This anchored-window policy follows MiniMax's rollout scheduling approach; see
+        Section 6.2.4 of https://arxiv.org/pdf/2605.26494.
+
         Example:
-            # window_size=1: head g0 still INFLIGHT, g1 FINALIZED -> waits for g0
-            await buffer.take_finalized()
+            # window_size=3: g0 is INFLIGHT, g1 is WAITING, and g2/g3 are FINALIZED.
+            group = await buffer.take_finalized()
+            assert group.group_id == 2  # g2 is inside the anchored window [g0, g2].
+            # g3 remains blocked because taking g2 does not move the window past g0.
         """
         async with self._condition:
             while True:
