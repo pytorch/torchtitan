@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
+from torchtitan.models.common.attention_sharding import set_inner_attention_config
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -17,7 +18,6 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
@@ -43,6 +43,7 @@ def set_deepseek_v3_sharding_config(
     *,
     enable_sp: bool,
     enable_ep: bool,
+    cp_method: str = "",
 ) -> None:
     """Fill ``sharding_config`` on all DeepSeek V3 sub-configs.
 
@@ -58,7 +59,7 @@ def set_deepseek_v3_sharding_config(
     set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_deepseek_v3_layer_sharding(
-            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
+            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep, cp_method=cp_method
         )
 
 
@@ -67,6 +68,7 @@ def _set_deepseek_v3_layer_sharding(
     *,
     enable_sp: bool,
     enable_ep: bool,
+    cp_method: str = "",
 ) -> None:
     """Set sharding on one DeepSeek V3 transformer layer.
 
@@ -111,7 +113,7 @@ def _set_deepseek_v3_layer_sharding(
     attention.wkv_b.sharding_config = colwise_config()
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_inner_attention_config(attention, cp_method)
 
     # Query projection: depends on q_lora_rank
     if attention.q_lora_rank == 0:

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
+from torchtitan.models.common.attention_sharding import set_inner_attention_config
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -29,7 +30,6 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
@@ -96,6 +96,7 @@ def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
     enable_ep: bool,
+    cp_method: str = "",
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs.
 
@@ -127,6 +128,7 @@ def set_qwen35_sharding_config(
                 first_layer_input_layout if layer_idx == 0 else layer_input_layout
             ),
             enable_ep=enable_ep,
+            cp_method=cp_method,
         )
 
 
@@ -135,6 +137,7 @@ def _set_qwen35_layer_sharding(
     *,
     attention_input_layout: SpmdLayout,
     enable_ep: bool,
+    cp_method: str = "",
 ) -> None:
     layer_cfg.attention_norm.sharding_config = _decoder_norm_sharding(
         attention_input_layout
@@ -145,6 +148,7 @@ def _set_qwen35_layer_sharding(
         _set_full_attention_sharding(
             layer_cfg.attention,
             attention_input_layout=attention_input_layout,
+            cp_method=cp_method,
         )
     else:
         assert layer_cfg.delta_net is not None
@@ -234,7 +238,7 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     block.attn.wk.sharding_config = colwise_config()
     block.attn.wv.sharding_config = colwise_config()
     block.attn.proj.sharding_config = rowwise_config(output_sp=False)
-    set_gqa_inner_attention_local_map(block.attn.inner_attention)
+    set_inner_attention_config(block.attn)
 
     block.mlp.fc1.sharding_config = colwise_config()
     block.mlp.fc2.sharding_config = rowwise_config(output_sp=False)
@@ -250,6 +254,7 @@ def _set_full_attention_sharding(
     attention_cfg: "Qwen35Attention.Config",
     *,
     attention_input_layout: SpmdLayout,
+    cp_method: str = "",
 ) -> None:
     """TP sharding for Qwen35Attention (output gating + partial RoPE)."""
     attention_cfg.sharding_config = ShardingConfig(
@@ -269,7 +274,7 @@ def _set_full_attention_sharding(
     attention_cfg.q_norm.sharding_config = _qk_norm_sharding()
     attention_cfg.k_norm.sharding_config = _qk_norm_sharding()
 
-    set_gqa_inner_attention_local_map(attention_cfg.inner_attention)
+    set_inner_attention_config(attention_cfg, cp_method)
 
 
 def _set_deltanet_sharding(

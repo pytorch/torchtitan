@@ -17,9 +17,11 @@ TODO: we should generalize this API to cover even Flux's use case.
 """
 
 from .api import apply_cp_to_forward, cp_shard, prepare_context_parallel_input
+from .types import ContextParallelMethod
 
 __all__ = [
     "apply_cp_to_forward",
     "cp_shard",
     "prepare_context_parallel_input",
+    "ContextParallelMethod",
 ]

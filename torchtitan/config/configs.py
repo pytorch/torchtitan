@@ -208,12 +208,21 @@ class ParallelismConfig:
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
+    context_parallel_method: Literal["allgather", "ulysses"] = "allgather"
+    """
+    Context-parallel attention method:
+    - "allgather": sequence-shard Q, all-gather K/V (default behavior).
+    - "ulysses": head-shard via all-to-all around a standard attention kernel.
+    """
+
     context_parallel_load_balancer: str | None = "headtail"
     """
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
     - "ptrr": Use PTRRLoadBalancer for FlexAttention
     - None: Disable load balancing
+    Ignored when context_parallel_method="ulysses": head-sharded attention has
+    no per-rank sequence imbalance to balance.
     """
 
     def __post_init__(self):

@@ -468,6 +468,17 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.context_parallel_method=ulysses",
+                ]
+            ],
+            "CP ulysses",
+            "cp_ulysses",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.data_parallel_shard_degree=1",
                     "--parallelism.data_parallel_replicate_degree=2",
                     "--parallelism.context_parallel_degree=2",

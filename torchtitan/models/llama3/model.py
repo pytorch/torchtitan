@@ -85,6 +85,7 @@ class Llama3Model(Decoder):
             set_llama3_sharding_config(
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
+                cp_method=parallelism.context_parallel_method,
             )
 
         def get_nparams_and_flops(

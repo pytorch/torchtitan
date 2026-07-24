@@ -24,6 +24,7 @@ from torchtitan.distributed.full_dtensor import (
     validate_config,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.common.attention_sharding import validate_context_parallel
 from torchtitan.models.qwen3.model import Qwen3Model
 
 
@@ -38,6 +39,8 @@ def parallelize_qwen3(
     dump_folder: str,
     skip_dp: bool = False,
 ):
+    validate_context_parallel(model, parallel_dims, parallelism)
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )

@@ -552,6 +552,7 @@ class Qwen35Model(Decoder):
             set_qwen35_sharding_config(
                 self,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+                cp_method=parallelism.context_parallel_method,
             )
 
         def get_nparams_and_flops(
