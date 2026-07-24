@@ -135,8 +135,8 @@ class GatedDeltaKernel(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-# "fla_chunked": parallel within chunks for training (default)
-# "fla_fused_recurrent": for inference only in rl, no backward
+        # "fla_chunked": parallel within chunks for training (default)
+        # "fla_fused_recurrent": for inference only in rl, no backward
         backend: GatedDeltaBackend = "fla_chunked"
 
     def __init__(self, config: Config):
@@ -275,7 +275,6 @@ class GatedDeltaNet(Module):
         through with a ``None`` placement (unmapped). Input is channel-sharded
         and the weight is ``Shard(0)``; DTensor-ness and gradient placements are
         restored explicitly.
-
         """
         x_plc = x.placements
         w = conv.weight
@@ -322,7 +321,8 @@ class GatedDeltaNet(Module):
 
         x_BDL = F.pad(x_BLD.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x_BDL, DTensor):
-
+            # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
+            # groups lands in a released torch.
             def _conv(x_local_BDL: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
                 # groups == local out-channels (depthwise, channel-sharded)
                 return F.conv1d(
