@@ -520,6 +520,10 @@ class Qwen35Model(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
+        # Narrow the inherited RMSNorm annotation to OffsetRMSNorm so tyro CLI
+        # parsing sees the field's actual type.
+        # pyrefly: ignore [bad-override]
+        norm: OffsetRMSNorm.Config
         vision_encoder: Qwen35VisionEncoder.Config
 
         def update_from_config(
@@ -668,9 +672,12 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
-        special_tokens: dict[str, int],
+        special_tokens: dict[str, int] | None,
     ) -> torch.Tensor:
         """Embed tokens, run vision encoder, scatter vision into text.
+
+        ``special_tokens`` may be ``None`` for text-only inputs (no pixel values),
+        in which case the vision branches are skipped.
 
         Args:
             tokens: Input token IDs (batch_size, seq_len)
@@ -683,14 +690,13 @@ class Qwen35Model(Decoder):
         Returns:
             (batch, seq_len, dim) embeddings with vision tokens scattered in
         """
-        image_token_id = special_tokens["image_id"]
-        video_token_id = special_tokens["video_id"]
-
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
 
         if pixel_values is not None and grid_thw is not None:
+            assert special_tokens is not None, "pixel_values require special_tokens"
+            image_token_id = special_tokens["image_id"]
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
@@ -705,6 +711,10 @@ class Qwen35Model(Decoder):
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
+            assert (
+                special_tokens is not None
+            ), "pixel_values_videos require special_tokens"
+            video_token_id = special_tokens["video_id"]
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )
@@ -740,7 +750,7 @@ class Qwen35Model(Decoder):
                 pixel_values_videos=pixel_values_videos,
                 grid_thw=grid_thw,
                 grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                special_tokens=special_tokens,
             )
         else:
             x = tokens
