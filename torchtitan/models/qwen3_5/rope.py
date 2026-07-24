@@ -6,9 +6,12 @@
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from torch.distributed.tensor import distribute_tensor, DTensor
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
 
 
@@ -68,39 +71,49 @@ class MRoPE(CosSinRoPE):
         cfg = self.config
         assert isinstance(cfg, MRoPE.Config)
 
-        rope_cache = self.cache
-        cache_dtensor = rope_cache if isinstance(rope_cache, DTensor) else None
-        if cache_dtensor is not None:
-            rope_cache = cache_dtensor.to_local()
-        pos = (
-            position_ids.to_local()
-            if isinstance(position_ids, DTensor)
-            else position_ids
-        )
-        pos = pos.to(device=rope_cache.device)
+        # The interleaved scatter below is local index construction over the
+        # Replicate cache buffer and per-rank positions; run it in a local
+        # region and re-type the result at the boundary.
+        with spmd.local():
+            rope_cache = self.cache
+            cache_dtensor = rope_cache if isinstance(rope_cache, DTensor) else None
+            if cache_dtensor is not None:
+                rope_cache = cache_dtensor.to_local()
+            pos = (
+                position_ids.to_local()
+                if isinstance(position_ids, DTensor)
+                else position_ids
+            )
+            pos = pos.to(device=rope_cache.device)
 
-        _maybe_check_max_pos(pos, max_valid_pos=rope_cache.shape[0] - 1)
-        head_dim = rope_cache.shape[-1] // 2
-        cos_cache = rope_cache[:, :head_dim]
-        sin_cache = rope_cache[:, head_dim:]
+            _maybe_check_max_pos(pos, max_valid_pos=rope_cache.shape[0] - 1)
+            head_dim = rope_cache.shape[-1] // 2
+            cos_cache = rope_cache[:, :head_dim]
+            sin_cache = rope_cache[:, head_dim:]
 
-        # Start from temporal positions for all dimensions, then overwrite the
-        # height/width interleaved sections with their own position IDs.
-        # ``pos`` is (batch, seq, 3); the last axis selects T/H/W.
-        t_pos = pos[..., 0].long()
-        mrope_cos = cos_cache[t_pos]
-        mrope_sin = sin_cache[t_pos]
+            # Start from temporal positions for all dimensions, then overwrite
+            # the height/width interleaved sections with their own position
+            # IDs. ``pos`` is (batch, seq, 3); the last axis selects T/H/W.
+            t_pos = pos[..., 0].long()
+            mrope_cos = cos_cache[t_pos]
+            mrope_sin = sin_cache[t_pos]
 
-        half = head_dim // 2
-        for dim, offset in enumerate((1, 2), start=1):
-            length = cfg.mrope_section[dim] * 3
-            low = torch.arange(offset, length, 3, device=rope_cache.device)
-            col_indices = torch.cat([low, low + half])
-            dim_pos = pos[..., dim].long()
-            mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
-            mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
+            half = head_dim // 2
+            for dim, offset in enumerate((1, 2), start=1):
+                length = cfg.mrope_section[dim] * 3
+                low = torch.arange(offset, length, 3, device=rope_cache.device)
+                col_indices = torch.cat([low, low + half])
+                dim_pos = pos[..., dim].long()
+                mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
+                mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
 
-        mrope_cache = torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
+            mrope_cache = torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
+            if get_spmd_backend() == "spmd_types":
+                # (batch, seq, 1, dim*2): DP batch-sharded, TP-replicated.
+                spmd.assert_type(
+                    mrope_cache,
+                    {MeshAxisName.DP: spmd.S(0), MeshAxisName.TP: spmd.R},
+                )
         if cache_dtensor is not None:
             return distribute_tensor(
                 mrope_cache,

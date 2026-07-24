@@ -7,6 +7,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,6 +15,8 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
@@ -348,9 +351,21 @@ class VisionAttention(Module):
     ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
 
-        xq = self.wq(x).view(bs, seqlen, -1, self.head_dim)
-        xk = self.wk(x).view(bs, seqlen, -1, self.head_dim)
-        xv = self.wv(x).view(bs, seqlen, -1, self.head_dim)
+        def local_head_split(x_flat: torch.Tensor) -> torch.Tensor:
+            # Same pattern as SeparateQKVLinear.local_qkv_head_split: the
+            # S(2) -> per-head unflatten cannot propagate through view, so
+            # drop into a local region and re-type at the boundary.
+            with spmd.local():
+                x_ = x_flat.view(bs, seqlen, -1, self.head_dim)
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        x_, spmd.V, spmd.PartitionSpec("dp", None, "tp", None)
+                    )
+            return x_
+
+        xq = local_head_split(self.wq(x))
+        xk = local_head_split(self.wk(x))
+        xv = local_head_split(self.wv(x))
 
         xq, xk = CosSinRoPE.apply_rotary_emb(xq, xk, rope_cache)
 
@@ -483,39 +498,56 @@ class Qwen35VisionEncoder(Module):
         """
         head_dim = self.config.dim // self.config.num_heads
 
-        # Get RoPE freq table, reusing cache when possible
-        max_hw = int(grid_thw[:, 1:].max().item())
-        if self._cached_freq_table is None or self._cached_freq_table.shape[0] < max_hw:
-            self._cached_freq_table = self.rotary_pos_emb(max_hw)
+        # Position-embedding construction is per-rank index bookkeeping over
+        # this rank's own vision items (row selects on the DP-sharded
+        # grid_thw, a Python-scalar max for cache sizing). Run it outside
+        # SPMD typechecking and re-type the outputs at the boundary -- same
+        # pattern as FlexAttention's compiled region.
+        with spmd.no_typecheck():
+            max_hw = int(grid_thw[:, 1:].max().item())
+            if (
+                self._cached_freq_table is None
+                or self._cached_freq_table.shape[0] < max_hw
+            ):
+                self._cached_freq_table = self.rotary_pos_emb(max_hw)
 
-        learned_pos = _compute_learned_pos_embeds(
-            self.pos_embed,
-            grid_thw,
-            max_num_patch,
-            self.num_grid_per_side,
-            self.spatial_merge_size,
-            self.config.dim,
-        )
-
-        if isinstance(self._cached_freq_table, DTensor):
-            rope_cache = local_map(
-                _compute_2d_rope_cache,
-                out_placements=(self._cached_freq_table.placements,),
-            )(
-                self._cached_freq_table,
-                grid_thw,  # pyrefly: ignore [bad-argument-count]
-                max_num_patch,
-                self.spatial_merge_size,
-                head_dim,
-            )
-        else:
-            rope_cache = _compute_2d_rope_cache(
-                self._cached_freq_table,
+            learned_pos = _compute_learned_pos_embeds(
+                self.pos_embed,
                 grid_thw,
                 max_num_patch,
+                self.num_grid_per_side,
                 self.spatial_merge_size,
-                head_dim,
+                self.config.dim,
             )
+
+            if isinstance(self._cached_freq_table, DTensor):
+                rope_cache = local_map(
+                    _compute_2d_rope_cache,
+                    out_placements=(self._cached_freq_table.placements,),
+                )(
+                    self._cached_freq_table,
+                    grid_thw,  # pyrefly: ignore [bad-argument-count]
+                    max_num_patch,
+                    self.spatial_merge_size,
+                    head_dim,
+                )
+            else:
+                rope_cache = _compute_2d_rope_cache(
+                    self._cached_freq_table,
+                    grid_thw,
+                    max_num_patch,
+                    self.spatial_merge_size,
+                    head_dim,
+                )
+
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            # Vision item tensors are DP batch-sharded and TP-replicated.
+            batch_type = {
+                MeshAxisName.DP: spmd.S(0),
+                MeshAxisName.TP: spmd.R,
+            }
+            spmd.assert_type(learned_pos, batch_type)
+            spmd.assert_type(rope_cache, batch_type)
 
         return learned_pos, rope_cache
 
@@ -539,23 +571,28 @@ class Qwen35VisionEncoder(Module):
         """
         num_vision, max_num_patch, _ = pixel_values.shape
 
-        num_patch = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).to(torch.long)
-
         x = self.patch_embed(pixel_values)  # (num_vision, max_num_patch, dim)
         learned_pos, rope_cache = self.compute_position_embeddings(
             grid_thw, max_num_patch
         )
         x = x + learned_pos
 
-        mask_mod = get_vision_block_mask_mod(num_patch)
-        attention_mask = _compiled_create_block_mask(
-            mask_mod,
-            num_vision,
-            None,
-            max_num_patch,
-            max_num_patch,
-            device=x.device,
-        )
+        # BlockMask construction is index bookkeeping over this rank's own
+        # vision items; keep it outside SPMD typechecking like the decoder's
+        # mask construction (the mask_mod indexes the DP-sharded num_patch).
+        with spmd.no_typecheck():
+            num_patch = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).to(
+                torch.long
+            )
+            mask_mod = get_vision_block_mask_mod(num_patch)
+            attention_mask = _compiled_create_block_mask(
+                mask_mod,
+                num_vision,
+                None,
+                max_num_patch,
+                max_num_patch,
+                device=x.device,
+            )
 
         for layer in self.layers.values():
             x = layer(x, rope_cache=rope_cache, attention_mask=attention_mask)
