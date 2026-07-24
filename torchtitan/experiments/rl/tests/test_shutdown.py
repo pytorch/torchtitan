@@ -90,9 +90,18 @@ class _FakeConfigManager:
 
 
 def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
+    default_loop = AsyncLoopConfig(
+        num_prompts_per_train_step=3,
+        target_offpolicy_steps=2,
+    )
+    assert default_loop.windowed_fifo_fraction == 0.3
+    assert default_loop.window_size == 2
+    assert default_loop.max_offpolicy_steps == 3
+
     strict_loop = AsyncLoopConfig(
         num_prompts_per_train_step=3,
         target_offpolicy_steps=2,
+        windowed_fifo_fraction=None,
     )
     assert strict_loop.window_size == 1
     assert strict_loop.max_offpolicy_steps == 2

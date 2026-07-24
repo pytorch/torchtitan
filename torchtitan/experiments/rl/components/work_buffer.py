@@ -56,8 +56,8 @@ class RolloutGroupWorkBuffer(Configurable):
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
     the pipeline at `max_active_rollout_groups` active slots; the batcher takes finalized groups within
-    a fixed look-ahead window anchored at the oldest entry. The controller defaults
-    to strict FIFO (`window_size=1`) unless `windowed_fifo_fraction` is set.
+    a fixed look-ahead window anchored at the oldest entry. A `window_size` of 1
+    gives strict FIFO.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -177,8 +177,7 @@ class RolloutGroupWorkBuffer(Configurable):
 
         The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
         window stay blocked even if they are finalized, so taking non-head groups does not slide
-        the window. The controller defaults to strict FIFO (`window_size=1`)
-        unless `windowed_fifo_fraction` is set.
+        the window. A `window_size` of 1 gives strict FIFO.
 
         This anchored-window policy follows MiniMax's rollout scheduling approach; see
         Section 6.2.4 of https://arxiv.org/pdf/2605.26494.

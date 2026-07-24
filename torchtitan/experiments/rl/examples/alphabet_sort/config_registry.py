@@ -213,6 +213,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
+    config.async_loop.windowed_fifo_fraction = None
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -364,6 +365,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
+            windowed_fifo_fraction=None,
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
@@ -682,6 +684,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
+            windowed_fifo_fraction=None,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
@@ -860,6 +863,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
+            windowed_fifo_fraction=None,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),

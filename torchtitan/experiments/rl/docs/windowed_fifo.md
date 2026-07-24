@@ -23,7 +23,7 @@ The window remains anchored at the oldest active group. Consuming a younger grou
 The user configures:
 
 - `S`: target offpolicy steps (`target_offpolicy_steps`)
-- `f`: fraction of the active buffer visible to the scheduler (`windowed_fifo_fraction`)
+- `f`: fraction of the active buffer visible to the scheduler (`windowed_fifo_fraction`), which defaults to `0.3` following the MiniMax paper
 
 Given `P` prompt groups per train step, the controller derives:
 
@@ -32,7 +32,7 @@ B = (S + 1) * P
 W = max(1, floor(f * B))
 ```
 
-If `f` is not set, `W = 1` and scheduling is strict FIFO. Increasing `f` exposes more younger groups to the scheduler without increasing `B`.
+Set `f` to `None` to use strict FIFO (`W = 1`). Increasing `f` exposes more younger groups to the scheduler without increasing `B`.
 
 ## Example
 

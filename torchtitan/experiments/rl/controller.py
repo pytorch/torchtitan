@@ -173,13 +173,14 @@ class AsyncLoopConfig(Configurable.Config):
     this target, up to `max_offpolicy_steps`. See
     ``torchtitan/experiments/rl/docs/windowed_fifo.md`` for details."""
 
-    windowed_fifo_fraction: float | None = None
+    windowed_fifo_fraction: float | None = 0.3
     """FIFO look-ahead window expressed as a fraction of the active buffer size.
 
     This allows the batcher to bypass an unfinished rollout group at the head of
     the queue and consume younger groups that are already finished. This may
-    increase the offpoliciness of the bypassed group. Set to None for strict
-    FIFO; otherwise, must be in `(0, 1]`."""
+    increase the offpoliciness of the bypassed group. Defaults to 0.3 following
+    Section 6.2.4 of https://arxiv.org/pdf/2605.26494. Set to None for strict FIFO;
+    otherwise, must be in `(0, 1]`."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
