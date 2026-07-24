@@ -161,7 +161,11 @@ def generate() -> None:
     engine_kwargs["max_num_seqs"] = max_num_seqs
     if gen_config.max_num_batched_tokens is not None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
-    if not has_cuda_capability(9, 0):
+    # FA2 requires block_size to be a multiple of 256. FA3 runs only on Hopper
+    # (SM 9.x); Blackwell (SM 10.0+) falls back to FA2, so it needs the 256 block
+    # size too. Keep this guard in sync with the FA3 activation check in
+    # experiments/rl/models/attention.py.
+    if not (has_cuda_capability(9, 0) and not has_cuda_capability(10, 0)):
         engine_kwargs["block_size"] = 256
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,

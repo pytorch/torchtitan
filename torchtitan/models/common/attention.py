@@ -12,6 +12,7 @@
 #   H = head dimension (per-head dim),
 #   T = packed tokens (B*L, used by VarlenAttention)
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
@@ -46,6 +47,9 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
+
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -101,12 +105,20 @@ class VarlenAttention(Module):
         super().__init__()
         self.window_size = config.window_size
 
+        from torchtitan.tools.logging import warn_once
         from torchtitan.tools.utils import has_cuda_capability
 
-        # Hopper (SM 9.0) uses FA3
-        if has_cuda_capability(9, 0):
+        # Hopper (SM 9.x) uses FA3. Blackwell (SM 10.0+) is excluded: torch's FA3
+        # kernel raises "FA3 requires compute capability 9.0" there, so fall back
+        # to the default varlen path (FA2). has_cuda_capability uses >=, so the
+        # explicit not-10.0 check is required to keep FA3 Hopper-only.
+        if has_cuda_capability(9, 0) and not has_cuda_capability(10, 0):
             if current_flash_attention_impl() != "FA3":
                 activate_flash_attention_impl("FA3")
+        else:
+            warn_once(
+                logger, "FA3 not available (requires SM 9.x), falling back to FA2. "
+            )
 
     def forward(
         self,
