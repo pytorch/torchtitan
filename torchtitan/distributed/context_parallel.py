@@ -152,7 +152,8 @@ def prepare_context_parallel_input(
         load_balancer_type,
     )
     extra_kwargs["positions"] = positions
-    extra_kwargs["attention_masks"] = attention_masks
+    if attention_masks is not None:
+        extra_kwargs["attention_masks"] = attention_masks
 
     return inputs, labels, extra_kwargs
 

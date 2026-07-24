@@ -32,9 +32,8 @@ from torchtitan.components.loss import (
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
-    MTPLoss,
 )
-from torchtitan.models.common.mtp import roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import set_spmd_backend
 

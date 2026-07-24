@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
@@ -17,8 +18,6 @@ from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
-    MTPDecoder,
-    MTPTransformerBlock,
     RMSNorm,
     RoPE,
     TransformerBlock,
@@ -40,12 +39,14 @@ from .model import (
     DeepSeekV3Model,
     DeepSeekV3TransformerBlock,
 )
+from .mtp import MTPLoss, MTPDecoder, MTPTransformerBlock
 from .parallelize import parallelize_deepseekv3
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 __all__ = [
     "parallelize_deepseekv3",
     "DeepSeekV3Model",
+    "MTPLoss",
     "MTPDecoder",
     "MTPTransformerBlock",
     "deepseekv3_configs",
@@ -270,10 +271,39 @@ def _build_dsv3_layers(
     return layers
 
 
+def _build_mtp_layers(
+    inner_cfg: DeepSeekV3TransformerBlock.Config,
+    *,
+    dim: int,
+    num_mtp_layers: int,
+) -> list[MTPTransformerBlock.Config]:
+    mtp_layers = []
+    for _ in range(num_mtp_layers):
+        mtp_layers.append(
+            MTPTransformerBlock.Config(
+                attention=copy.deepcopy(inner_cfg.attention),
+                feed_forward=copy.deepcopy(inner_cfg.feed_forward),
+                moe=copy.deepcopy(inner_cfg.moe),
+                attention_norm=copy.deepcopy(inner_cfg.attention_norm),
+                ffn_norm=copy.deepcopy(inner_cfg.ffn_norm),
+                enorm=RMSNorm.Config(normalized_shape=dim),
+                hnorm=RMSNorm.Config(normalized_shape=dim),
+                eh_proj=Linear.Config(
+                    in_features=dim * 2,
+                    out_features=dim,
+                    bias=False,
+                ),
+                mtp_norm=RMSNorm.Config(normalized_shape=dim),
+            )
+        )
+    return mtp_layers
+
+
 def _debugmodel(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -330,6 +360,12 @@ def _debugmodel(
             param_init=_output_linear_init(dim),
         ),
         layers=layers,
+        num_mtp_layers=num_mtp_layers,
+        mtp_layers=_build_mtp_layers(
+            layers[-1],
+            dim=dim,
+            num_mtp_layers=num_mtp_layers,
+        ),
     )
 
 
@@ -337,6 +373,7 @@ def _16b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -393,6 +430,12 @@ def _16b(
             param_init=_output_linear_init(dim),
         ),
         layers=layers,
+        num_mtp_layers=num_mtp_layers,
+        mtp_layers=_build_mtp_layers(
+            layers[-1],
+            dim=dim,
+            num_mtp_layers=num_mtp_layers,
+        ),
     )
 
 
@@ -400,6 +443,7 @@ def _236b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -460,6 +504,12 @@ def _236b(
             param_init=_output_linear_init(dim),
         ),
         layers=layers,
+        num_mtp_layers=num_mtp_layers,
+        mtp_layers=_build_mtp_layers(
+            layers[-1],
+            dim=dim,
+            num_mtp_layers=num_mtp_layers,
+        ),
     )
 
 
@@ -467,6 +517,7 @@ def _671b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
@@ -528,6 +579,12 @@ def _671b(
             param_init=_output_linear_init(dim),
         ),
         layers=layers,
+        num_mtp_layers=num_mtp_layers,
+        mtp_layers=_build_mtp_layers(
+            layers[-1],
+            dim=dim,
+            num_mtp_layers=num_mtp_layers,
+        ),
     )
 
 
@@ -545,11 +602,13 @@ def model_registry(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
+    num_mtp_layers: int = 0,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        num_mtp_layers=num_mtp_layers,
     )
     if converters is not None:
         validate_converter_order(converters)

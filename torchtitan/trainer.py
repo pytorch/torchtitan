@@ -744,15 +744,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_kwargs)
-                loss_inputs = {}
                 if "positions" in extra_kwargs:
-                    loss_inputs["positions"] = extra_kwargs["positions"]
-                loss, _ = self.loss_fn(
-                    pred,
-                    labels,
-                    global_valid_tokens,
-                    **loss_inputs,
-                )
+                    loss, _ = self.loss_fn(
+                        pred,
+                        labels,
+                        global_valid_tokens,
+                        positions=extra_kwargs["positions"],
+                    )
+                else:
+                    loss, _ = self.loss_fn(
+                        pred,
+                        labels,
+                        global_valid_tokens,
+                    )
                 del pred
                 with spmd.no_typecheck():
                     # this propagates types through BWD, causing unnecessary conflicts

@@ -177,14 +177,7 @@ def apply_fsdp_to_decoder(
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
 
-    transformer_blocks = list(model.layers.values())
-    mtp_layers = getattr(model, "mtp_layers", None)
-    if mtp_layers is not None:
-        # Shard the outer MTPTransformerBlock so its fusion/norm params and
-        # inner transformer block are covered by one FSDP unit.
-        transformer_blocks.extend(mtp_layers)
-
-    for transformer_block in transformer_blocks:
+    for layer_id, transformer_block in model.layers.items():
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
@@ -306,9 +299,10 @@ def apply_fsdp_to_decoder(
         return
 
     # set up explicit prefetching when EP is enabled for forward
+    transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
-    if model.tok_embeddings is not None and len(transformer_blocks) > 0:
+    if model.tok_embeddings is not None and len(model.layers) > 0:
         model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
@@ -325,14 +319,10 @@ def apply_fsdp_to_decoder(
 
     # set up explicit prefetching when EP is enabled for backward
     # pyrefly: ignore [no-matching-overload]
-    reversed_transformer_blocks = list(reversed(transformer_blocks))
+    reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
-    if (
-        model.norm is not None
-        and model.lm_head is not None
-        and len(transformer_blocks) > 0
-    ):
+    if model.norm is not None and model.lm_head is not None and len(model.layers) > 0:
         model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
