@@ -102,6 +102,19 @@ def llama3_debugmodel_float8_emulate_lora() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_qat() -> Trainer.Config:
+    from torchtitan.components.quantization.qat import QATConverter
+
+    config = llama3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            QATConverter.Config(scheme="int4_weight_only", group_size=64),
+        ],
+    )
+    return config
+
+
 def llama3_debugmodel_ce_loss() -> Trainer.Config:
     """Debug model with standard (non-chunked) CrossEntropyLoss."""
     config = llama3_debugmodel()
