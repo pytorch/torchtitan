@@ -573,6 +573,24 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module llama3 --config llama3_debugmodel_nvfp4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    # NVFP4 TP requires the spmd_types backend. _enable_spmd_backend
+                    # injects --parallelism.spmd_backend spmd_types plus
+                    # --debug.spmd_typechecking and activation-checkpoint:none (AC
+                    # is disabled because typechecking is incompatible with SAC +
+                    # FlexAttention), so this variant declares no backend itself.
+                ],
+            ],
+            "NVFP4 converter: dense in-layer linears (FSDP2 + TP2, spmd_types)",
+            "nvfp4_converter",
+            ngpu=4,
+            skip_rocm_test=True,
+            skip_if_no_blackwell=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu,"
                     "torchtitan.overrides.fused_swiglu.fused_grouped_experts",

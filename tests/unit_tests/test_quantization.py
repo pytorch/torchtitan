@@ -3,7 +3,10 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from types import SimpleNamespace
+
 import pytest
+import torch
 
 from torchtitan.components.quantization import Float8Linear
 from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
@@ -43,6 +46,171 @@ def test_float8_applied_by_model_registry():
         if isinstance(lc, Float8Linear.Config)
     ]
     assert len(converted) > 0
+
+
+def test_nvfp4_converter_targets_layers_not_lm_head(monkeypatch):
+    pytest.importorskip("torchao")
+    from torchtitan.components.quantization import NVFP4Linear
+
+    if NVFP4Linear is None:
+        pytest.skip("torchao NVFP4 training prototype not available")
+    # Exercise convert() targeting independent of GPU: bypass the sm100 gate
+    # that NVFP4LinearConverter.__init__ enforces (hardware is irrelevant to the
+    # config-tree transform under test).
+    import torchtitan.components.quantization.nvfp4 as nvfp4_mod
+
+    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args(
+        ["--module", "llama3", "--config", "llama3_debugmodel_nvfp4"]
+    )
+    model_config = config.model_spec.model
+    assert has_quantization(model_config)
+
+    converted, stock = [], []
+    for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
+        (converted if isinstance(lc, NVFP4Linear.Config) else stock).append(fqn)
+
+    # Every in-layer linear is swapped; the lm_head stays stock (NVFP4 requires
+    # each GEMM dim divisible by 128, which the vocab projection violates).
+    assert converted and all("layers" in fqn for fqn in converted)
+    assert stock == ["lm_head"]
+
+
+def _nvfp4_linear_cls():
+    pytest.importorskip("torchao")
+    from torchtitan.components.quantization import NVFP4Linear
+
+    if NVFP4Linear is None:
+        pytest.skip("torchao NVFP4 training prototype not available")
+    return NVFP4Linear
+
+
+def _stub_parallel_dims(*, tp_enabled, tp=4, spmd_backend="spmd_types"):
+    # NVFP4Linear._validate_tp_backend only reads these scalar fields; a stub
+    # keeps the test off the mesh so the backend gate runs on CPU.
+    return SimpleNamespace(tp_enabled=tp_enabled, tp=tp, spmd_backend=spmd_backend)
+
+
+def test_nvfp4_infer_tp_style():
+    """colwise/rowwise is read back from the weight's declared TP placement."""
+    _nvfp4_linear_cls()
+    from torchtitan.components.quantization.nvfp4 import _infer_tp_style
+    from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
+
+    assert _infer_tp_style(colwise_config()) == "colwise"
+    assert _infer_tp_style(rowwise_config(output_sp=True)) == "rowwise"
+    assert _infer_tp_style(None) is None
+
+
+@pytest.mark.parametrize("in_features, out_features", [(512, 300), (300, 512)])
+def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
+    # The model dims are known at config-build time, so a non-128 in/out_features
+    # (e.g. the LM head) is rejected in Config.__post_init__ before any TP.
+    NVFP4Linear = _nvfp4_linear_cls()
+    with pytest.raises(ValueError, match="divisible by 128"):
+        NVFP4Linear.Config(in_features=in_features, out_features=out_features)
+
+
+def test_nvfp4_rejects_local_gemm_dims_below_128():
+    # Config dims are 128-multiples but a TP shard drops a local dim below 128.
+    # Simulate the post-shard weight shape (out=64 for out_features=256 at TP=4).
+    NVFP4Linear = _nvfp4_linear_cls()
+    module = NVFP4Linear.Config(in_features=512, out_features=256).build()
+    module._validate_local_gemm_dims()  # unsharded (256, 512): both %128, no raise
+    module.weight = torch.nn.Parameter(torch.empty(64, 512, device="meta"))
+    with pytest.raises(ValueError, match="divisible by 128"):
+        module._validate_local_gemm_dims()
+
+
+def test_nvfp4_validate_requires_spmd_types_for_tp():
+    NVFP4Linear = _nvfp4_linear_cls()
+    module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
+    module._validate_tp_backend(_stub_parallel_dims(tp_enabled=True))  # no raise
+    # TP disabled (single GPU / FSDP-only): backend is irrelevant.
+    module._validate_tp_backend(
+        _stub_parallel_dims(tp_enabled=False, spmd_backend="default")
+    )
+    # The nvfp4 GEMM is opaque to DTensor: TP requires the spmd_types backend.
+    for backend in ("default", "full_dtensor"):
+        with pytest.raises(ValueError, match="spmd_types"):
+            module._validate_tp_backend(
+                _stub_parallel_dims(tp_enabled=True, spmd_backend=backend)
+            )
+
+
+def test_nvfp4_module_exposes_weight_and_two_buffers():
+    """Built module has the stock weight param and the two NVFP4 runtime buffers."""
+    NVFP4Linear = _nvfp4_linear_cls()
+    module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
+    assert {name for name, _ in module.named_parameters()} == {"weight"}
+    module.init_states()
+    buffers = dict(module.named_buffers())
+    assert set(buffers) == {"_sr_seed", "_rht_sign_vector"}
+    assert buffers["_sr_seed"].dtype == torch.int64
+    assert tuple(buffers["_rht_sign_vector"].shape) == (16,)
+
+
+def test_nvfp4_native_checkpoint_roundtrip_keeps_buffers():
+    """Native NVFP4 checkpoints persist and restore the RHT buffer. The SR seed is
+    a per-rank, non-persistent buffer, so it is intentionally absent."""
+    NVFP4Linear = _nvfp4_linear_cls()
+
+    def _built():
+        module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
+        module.init_states()
+        return module
+
+    src, dst = _built(), _built()
+    sd = src.state_dict()
+    assert set(sd) == {"weight", "_rht_sign_vector"}
+    assert "_sr_seed" not in sd  # non-persistent
+    dst.load_state_dict(sd)
+    assert torch.equal(dst._rht_sign_vector, src._rht_sign_vector)
+
+
+def test_nvfp4_stock_checkpoint_loads_before_init_states():
+    """A stock bf16 checkpoint (no NVFP4 buffers) loads; buffers stay unmaterialized
+    until init_states creates them."""
+    NVFP4Linear = _nvfp4_linear_cls()
+    stock = Linear.Config(in_features=512, out_features=1024).build()
+    nvfp4 = NVFP4Linear.Config(in_features=512, out_features=1024).build()
+
+    nvfp4.load_state_dict(stock.state_dict(), strict=False)
+    assert nvfp4._rht_sign_vector is None
+    assert nvfp4._rht_sign_vector_tuple is None
+
+    nvfp4.init_states()
+    assert nvfp4._rht_sign_vector is not None
+    assert nvfp4._rht_sign_vector_tuple is not None
+
+
+def test_nvfp4_hf_export_strips_buffers(monkeypatch):
+    """The HF export boundary contains only stock keys -- no NVFP4 runtime buffers."""
+    NVFP4Linear = _nvfp4_linear_cls()
+    import torchtitan.components.quantization.nvfp4 as nvfp4_mod
+
+    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+
+    config = ConfigManager().parse_args(
+        ["--module", "llama3", "--config", "llama3_debugmodel_nvfp4"]
+    )
+    model_config = config.model_spec.model
+    model = model_config.build()
+    model.init_states()
+    assert isinstance(model.get_submodule("layers.0.feed_forward.w1"), NVFP4Linear)
+
+    sd = model.state_dict()
+    # The persistent RHT buffer is present natively; the per-rank SR seed is
+    # non-persistent, so it is absent from the state dict entirely.
+    assert any(k.endswith("feed_forward.w1._rht_sign_vector") for k in sd)
+    assert not any("_sr_seed" in k for k in sd)
+
+    hf_sd = Llama3StateDictAdapter(model_config, hf_assets_path=None).to_hf(sd)
+    assert "model.layers.0.mlp.gate_proj.weight" in hf_sd
+    assert not any("_rht_sign_vector" in k for k in hf_sd)
 
 
 def test_quantized_grouped_experts():
