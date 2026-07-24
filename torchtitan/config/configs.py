@@ -260,7 +260,6 @@ class CompileConfig:
 
     backend: str = "inductor"
 
-
 @dataclass(kw_only=True, slots=True)
 class CommConfig:
     init_timeout_seconds: int = 300
