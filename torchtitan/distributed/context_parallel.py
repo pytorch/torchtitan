@@ -118,6 +118,8 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     device: torch.device,
     load_balancer_type: str | None = "headtail",
+    *,
+    additional_sequence_input_keys: tuple[str, ...] = (),
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Shard inputs, labels, positions, and attention masks for Context Parallel.
@@ -135,6 +137,9 @@ def prepare_context_parallel_input(
         device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
+        additional_sequence_input_keys: Keys in ``extra_kwargs`` whose tensors
+            are aligned with ``inputs`` along the sequence dimension and must
+            receive the same CP sharding and load-balancer permutation.
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -145,15 +150,23 @@ def prepare_context_parallel_input(
     """
     attention_masks = extra_kwargs.get("attention_masks", None)
     positions = extra_kwargs["positions"]
-    (inputs, labels, positions), attention_masks = cp_shard(
+    additional_sequence_inputs = tuple(
+        extra_kwargs[key] for key in additional_sequence_input_keys
+    )
+    sharded_inputs, attention_masks = cp_shard(
         cp_mesh,
-        (inputs, labels, positions),
+        (inputs, labels, positions, *additional_sequence_inputs),
         attention_masks,
         load_balancer_type,
     )
+    inputs, labels, positions, *additional_sequence_inputs = sharded_inputs
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
         extra_kwargs["attention_masks"] = attention_masks
+    for key, tensor in zip(
+        additional_sequence_input_keys, additional_sequence_inputs, strict=True
+    ):
+        extra_kwargs[key] = tensor
 
     return inputs, labels, extra_kwargs
 

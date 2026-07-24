@@ -34,7 +34,7 @@ from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     SelectiveAC,
 )
-from torchtitan.distributed.context_parallel import cp_shard
+from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
@@ -431,29 +431,31 @@ class PolicyTrainer(Actor, Configurable):
 
         attention_masks = self.model_parts[0].get_attention_masks(positions)
         if self.parallel_dims.cp_enabled:
-            (
-                (
-                    token_ids,
-                    labels,
-                    positions,
-                    generator_logprobs,
-                    loss_mask,
-                    advantages,
-                ),
-                attention_masks,
-            ) = cp_shard(
+            cp_kwargs = {
+                "positions": positions,
+                "attention_masks": attention_masks,
+                "generator_logprobs": generator_logprobs,
+                "loss_mask": loss_mask,
+                "advantages": advantages,
+            }
+            token_ids, labels, cp_kwargs = prepare_context_parallel_input(
+                token_ids,
+                labels,
+                cp_kwargs,
                 self.parallel_dims.get_mesh("cp"),
-                (
-                    token_ids,
-                    labels,
-                    positions,
-                    generator_logprobs,
-                    loss_mask,
-                    advantages,
-                ),
-                attention_masks,
+                self.device,
                 self.config.parallelism.context_parallel_load_balancer,
+                additional_sequence_input_keys=(
+                    "generator_logprobs",
+                    "loss_mask",
+                    "advantages",
+                ),
             )
+            positions = cp_kwargs["positions"]
+            attention_masks = cp_kwargs["attention_masks"]
+            generator_logprobs = cp_kwargs["generator_logprobs"]
+            loss_mask = cp_kwargs["loss_mask"]
+            advantages = cp_kwargs["advantages"]
 
         if self.parallel_dims.pp_enabled:
             self._pipeline_loss_metrics = []
