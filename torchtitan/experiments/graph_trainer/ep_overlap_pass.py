@@ -520,6 +520,7 @@ def _ready_nodes(
 ) -> tuple[fx.Node, ...]:
     """Return currently schedulable body nodes from candidate filler sets."""
     ready: list[fx.Node] = []
+    ready_set: set[fx.Node] = set()
     for chunk_id in chunk_order:
         body = region.bodies_by_chunk[chunk_id]
         candidates = sorted(
@@ -530,8 +531,9 @@ def _ready_nodes(
             if not include_waits and _is_c10d_functional_node(node):
                 continue
             deps = _body_deps(node, body=body, owner_by_node=owner_by_node)
-            if all(dep in emitted for dep in deps):
+            if all(dep in emitted for dep in deps) and node not in ready_set:
                 ready.append(node)
+                ready_set.add(node)
     return tuple(ready)
 
 
@@ -631,7 +633,17 @@ def _build_region_phases(
     emitted: set[fx.Node] = set()
 
     def append_pending(nodes: tuple[fx.Node, ...]) -> None:
-        pending = tuple(node for node in nodes if node not in emitted)
+        # A marker closure may legally pull peer-chunk dependencies through
+        # hidden shape plumbing. Deduplicate here so one FX node cannot create
+        # contradictory phase-order edges when it is ready from both chunks.
+        seen: set[fx.Node] = set()
+        pending_list: list[fx.Node] = []
+        for node in nodes:
+            if node in emitted or node in seen:
+                continue
+            seen.add(node)
+            pending_list.append(node)
+        pending = tuple(pending_list)
         if pending:
             blocks.append(pending)
             emitted.update(pending)

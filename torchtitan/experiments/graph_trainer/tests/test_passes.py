@@ -62,6 +62,7 @@ from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
 )
 from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     _apply_schedule,
+    _ready_nodes,
     _schedule_ep_overlap_regions,
     _ScheduledRegion,
 )
@@ -70,6 +71,7 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     ChunkBody,
     ChunkedRegion,
     ChunkOwner,
+    collect_chunked_regions,
     concretize_ep_chunk_symbolic_shapes_pass,
 )
 from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
@@ -2576,6 +2578,62 @@ class TestChunkPasses(TestCase):
         graph.output((refs[0]["wait"], refs[1]["wait"]))
         return torch.fx.GraphModule(torch.nn.Module(), graph), refs
 
+    def _build_shared_ep_sync_copy_schedule_gm(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+
+        pre = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        copies = tuple(
+            graph.call_function(
+                torch.ops.aten._to_copy.default,
+                args=(pre,),
+                kwargs={"device": torch.device("cpu"), "non_blocking": False},
+            )
+            for _ in range(2)
+        )
+        dispatch0_input = graph.call_function(torch.ops.aten.add.Tensor, args=copies)
+        dispatch0 = graph.call_function(
+            c10d.all_to_all_single.default,
+            args=(dispatch0_input, [], [], "ep"),
+        )
+        wait0 = graph.call_function(c10d.wait_tensor.default, args=(dispatch0,))
+        for node in (
+            pre,
+            *copies,
+            dispatch0_input,
+            dispatch0,
+            wait0,
+        ):
+            self._mark_chunk_body(
+                node,
+                chunk_id=0,
+                ep="dispatch",
+                token_exchange=node is dispatch0,
+            )
+        for copy in copies:
+            copy.meta["custom"][_EP_TOKEN_COUNT_SYNC] = "dispatch"
+
+        boundary = graph.call_function(torch.ops.aten.add.Tensor, args=copies)
+        dispatch1 = graph.call_function(
+            c10d.all_to_all_single.default,
+            args=(boundary, [], [], "ep"),
+        )
+        wait1 = graph.call_function(c10d.wait_tensor.default, args=(dispatch1,))
+        for node in (dispatch1, wait1):
+            self._mark_chunk_body(
+                node,
+                chunk_id=1,
+                ep="dispatch",
+                token_exchange=node is dispatch1,
+            )
+
+        graph.output((wait0, wait1))
+        return torch.fx.GraphModule(torch.nn.Module(), graph), {
+            "copies": copies,
+            "dispatches": (dispatch0, dispatch1),
+        }
+
     def _build_hidden_boundary_dep_schedule_gm(
         self, *, producer: str, boundary_role: str | None = None
     ):
@@ -3709,6 +3767,31 @@ class TestChunkPasses(TestCase):
                 annotation,
             )
 
+    def test_ep_overlap_ready_nodes_deduplicates_shared_candidates(self):
+        gm = self._build_ep_overlap_schedule_gm()
+        region = collect_chunked_regions(gm, module_pattern="layers.*.moe")[0]
+        owner_by_node = {
+            node: body.owner
+            for body in region.bodies_by_chunk.values()
+            for node in body.nodes
+        }
+        shared = region.bodies_by_chunk[0].nodes[0]
+        order = {node: idx for idx, node in enumerate(gm.graph.nodes)}
+
+        # Hidden shape plumbing can make one peer-owned node a candidate for
+        # both chunks, but a scheduling frontier must contain each node once.
+        ready = _ready_nodes(
+            candidates_by_chunk={0: {shared}, 1: {shared}},
+            emitted=set(),
+            region=region,
+            chunk_order=(0, 1),
+            order=order,
+            owner_by_node=owner_by_node,
+            include_waits=True,
+        )
+
+        self.assertEqual(ready, (shared,))
+
     def test_ep_overlap_reorders_forward_and_backward_token_exchange_blocks(self):
         for backward, first_chunk in ((False, 0), (True, 1)):
             with self.subTest(backward=backward):
@@ -4117,6 +4200,16 @@ class TestChunkPasses(TestCase):
         self.assertLess(
             max(order[consumer] for consumer in consumers),
             min(order[refs[chunk_id]["dispatch"]] for chunk_id in (0, 1)),
+        )
+
+    def test_ep_overlap_deduplicates_shared_token_count_sync_copies(self):
+        gm, refs = self._build_shared_ep_sync_copy_schedule_gm()
+
+        order = self._schedule_ep_overlap_and_order(gm)
+
+        self.assertLess(
+            max(order[copy] for copy in refs["copies"]),
+            min(order[dispatch] for dispatch in refs["dispatches"]),
         )
 
     def test_ep_overlap_hoists_token_count_sync_cpu_copies_per_chunk(self):
