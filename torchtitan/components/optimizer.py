@@ -23,6 +23,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
+from torchtitan.components.muon_adapter import MuonAdapter
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -110,8 +111,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         ] = "fused"
         """
         Optimizer implementation mode applied to all optimizer instances.
-        Per-param-group ``optimizer_kwargs`` can override this (e.g.
-        ``"fused": False`` for optimizers that don't support fused).
+        Muon does not support ``fused`` or ``foreach``; select ``for-loop``
+        globally or disable both in the Muon group's ``optimizer_kwargs``.
+        Per-param-group ``optimizer_kwargs`` can override this setting.
 
         - 'fused': Use fused implementation (CUDA only) for best performance.
         - 'foreach': Use some horizontal fusion of tensors for better performance.
@@ -131,6 +133,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         optimizer_classes = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
+            "Muon": MuonAdapter,
         }
         if name not in optimizer_classes:
             raise NotImplementedError(f"Optimizer {name} not added.")
