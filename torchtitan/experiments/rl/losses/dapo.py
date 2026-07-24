@@ -57,7 +57,7 @@ class DAPOLoss(BaseLoss):
         self,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: float | None = None,
+        global_valid_tokens: float | torch.Tensor | None = None,
         *,
         generator_logprobs: torch.Tensor,
         advantages: torch.Tensor,
@@ -99,9 +99,16 @@ class DAPOLoss(BaseLoss):
         token_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
         masked_loss = token_loss * loss_mask
-        loss_denominator = (
-            max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
-        )
+        if isinstance(global_valid_tokens, torch.Tensor):
+            # aot_fx_trace path: a 0-d tensor keeps the denominator a graph
+            # input rather than a baked constant. global_valid_tokens changes
+            # every step, so baking the first step's value would silently
+            # mis-scale the loss and grads on every later step.
+            loss_denominator = torch.clamp(global_valid_tokens, min=1.0)
+        elif global_valid_tokens is not None:
+            loss_denominator = max(global_valid_tokens, 1)
+        else:
+            loss_denominator = 1
         loss = masked_loss.sum() / loss_denominator
 
         with torch.no_grad():
