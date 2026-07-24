@@ -328,9 +328,7 @@ class BaseLoss(ABC, Configurable):
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
                 if get_spmd_backend() == "spmd_types":
-                    spmd.assert_type(
-                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
-                    )
+                    spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 
 
@@ -359,9 +357,7 @@ class CrossEntropyLoss(BaseLoss):
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
                 if get_spmd_backend() == "spmd_types":
-                    spmd.assert_type(
-                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
-                    )
+                    spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 
 
@@ -630,11 +626,17 @@ class ChunkedLossWrapper(BaseLoss):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
+        *,
+        backward_scale: float | torch.Tensor = 1.0,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute chunked loss.
 
         ``pred`` should come from model forward with ``_skip_lm_head=True``.
+
+        ``backward_scale`` is applied before each chunk's internal backward.
+        Callers using it must call ``backward()`` directly on the returned loss
+        instead of scaling the returned loss again.
 
         When ``pred`` does not require grad (e.g. validation), runs chunked
         forward only -- no per-chunk backward or gradient accumulation.
@@ -749,7 +751,10 @@ class ChunkedLossWrapper(BaseLoss):
 
                 if requires_grad:
                     with spmd.no_typecheck():
-                        chunk_loss.backward()
+                        if isinstance(backward_scale, float) and backward_scale == 1.0:
+                            chunk_loss.backward()
+                        else:
+                            (chunk_loss * backward_scale).backward()
                         assert h_chunk.grad is not None
                         assert grad_accumulator is not None
                         grad_accumulator.add(h_chunk.grad)
