@@ -8,7 +8,7 @@
 
 from collections.abc import MutableMapping
 from contextlib import ExitStack
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -17,25 +17,13 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor, Partial, Placement, Replicate, Shard
 from torch.optim._muon import muon
 
-from torchtitan.components.muon_compute_bucket import (
-    build_layer_compute_bucket_specs,
-    ComputeBucketAssignment,
-    ComputeBucketSpec,
-    flex_shard,
+from torchtitan.components.flex_shard import (
+    _build_muon_backend,
+    register_flex_shard_backend,
 )
 
 
-if TYPE_CHECKING:
-    from torchtitan.components.muon_compute_bucket import _BucketedOwnedMuonBackend
-
-
-__all__ = [
-    "build_layer_compute_bucket_specs",
-    "ComputeBucketAssignment",
-    "ComputeBucketSpec",
-    "MuonAdapter",
-    "flex_shard",
-]
+__all__ = ["MuonAdapter"]
 
 
 def _is_shard_like(placement: Placement) -> bool:
@@ -60,7 +48,7 @@ class MuonAdapter(torch.optim.Muon):
     """
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
-        if getattr(self, "_compute_bucket_backend", None) is not None:
+        if getattr(self, "_flex_shard_backend", None) is not None:
             raise RuntimeError(
                 "MuonAdapter cannot add parameter groups after flex_shard plan "
                 "construction"
@@ -72,18 +60,6 @@ class MuonAdapter(torch.optim.Muon):
                 "options in each Muon parameter group."
             )
         super().add_param_group(param_group)
-
-    def _install_compute_bucket_backend(
-        self, backend: "_BucketedOwnedMuonBackend"
-    ) -> None:
-        if getattr(self, "_compute_bucket_backend", None) is not None:
-            raise RuntimeError("MuonAdapter already has a compute bucket backend")
-        self._compute_bucket_backend = backend
-
-    @property
-    def compute_bucket_assignments(self) -> tuple[ComputeBucketAssignment, ...]:
-        backend = getattr(self, "_compute_bucket_backend", None)
-        return () if backend is None else backend.assignments
 
     @staticmethod
     def _compute_placements(
@@ -347,7 +323,7 @@ class MuonAdapter(torch.optim.Muon):
     @torch.no_grad()
     def step(self, closure=None):
         """Run each parameter group in its requested physical compute layout."""
-        backend = getattr(self, "_compute_bucket_backend", None)
+        backend = getattr(self, "_flex_shard_backend", None)
         if backend is not None:
             return backend.step(self, closure)
 
@@ -391,3 +367,6 @@ class MuonAdapter(torch.optim.Muon):
                     has_complex=has_complex,
                 )
         return loss
+
+
+register_flex_shard_backend(MuonAdapter, _build_muon_backend)

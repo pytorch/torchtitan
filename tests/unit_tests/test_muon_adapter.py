@@ -18,12 +18,13 @@ import torch.multiprocessing as mp
 from spmd_types._test_utils import FakeProcessGroupTestCase
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
-from torchtitan.components.muon_adapter import (
+from torchtitan.components.flex_shard import (
     build_layer_compute_bucket_specs,
     ComputeBucketSpec,
     flex_shard,
-    MuonAdapter,
+    get_flex_shard_assignments,
 )
+from torchtitan.components.muon_adapter import MuonAdapter
 
 
 _StridedShard = getattr(placement_types, "_StridedShard", None)
@@ -311,7 +312,7 @@ def _run_bucketed_muon_parity(
 
             target_assignment = next(
                 assignment
-                for assignment in optimizer.compute_bucket_assignments
+                for assignment in get_flex_shard_assignments(optimizer)
                 if assignment.owner_rank == 0
             )
             fqns = [
@@ -324,7 +325,7 @@ def _run_bucketed_muon_parity(
                     if index == target_index
                     else None
                 )
-            backend = optimizer._compute_bucket_backend
+            backend = optimizer._flex_shard_backend
             original_compute = backend._compute_full_delta
 
             def fail_on_owner(*args):
@@ -415,7 +416,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
         self.assertEqual(
             [
                 (assignment.bucket_name, assignment.fqn, assignment.owner_rank)
-                for assignment in optimizer.compute_bucket_assignments
+                for assignment in get_flex_shard_assignments(optimizer)
             ],
             [
                 ("layers.0", "layers.0.attention.wq.weight", 0),
@@ -429,6 +430,66 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
                     "param_names": ["late.weight"],
                 }
             )
+
+    def test_adamw_identity_backend_preserves_storage_sharding(self):
+        local_param = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
+        local_grad = torch.arange(6, 0, -1, dtype=torch.float32).reshape(2, 3)
+        param = self._dtensor_parameter(
+            local_param,
+            local_grad.clone(),
+            global_shape=(4, 3),
+        )
+        reference = torch.nn.Parameter(local_param.clone())
+        reference.grad = local_grad.clone()
+        kwargs = {
+            "lr": 0.03,
+            "weight_decay": 0.2,
+            "foreach": False,
+            "fused": False,
+        }
+        optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": [param],
+                    "param_names": ["layers.0.weight"],
+                }
+            ],
+            **kwargs,
+        )
+        reference_optimizer = torch.optim.AdamW([reference], **kwargs)
+        storage_placements = param.placements
+        local_data_ptr = param.to_local().data_ptr()
+
+        returned = flex_shard(
+            optimizer,
+            bucket_spec=[
+                ComputeBucketSpec(
+                    name="layers.0",
+                    patterns=("layers.0.*",),
+                    mesh=self.mesh,
+                )
+            ],
+        )
+        self.assertIs(returned, optimizer)
+        self.assertEqual(
+            [
+                (assignment.bucket_name, assignment.fqn, assignment.owner_rank)
+                for assignment in get_flex_shard_assignments(optimizer)
+            ],
+            [("layers.0", "layers.0.weight", None)],
+        )
+
+        optimizer.step()
+        reference_optimizer.step()
+
+        torch.testing.assert_close(param.to_local(), reference)
+        self.assertEqual(param.placements, storage_placements)
+        self.assertEqual(param.to_local().data_ptr(), local_data_ptr)
+        self.assertIsInstance(optimizer.state[param]["exp_avg"], DTensor)
+        self.assertEqual(
+            optimizer.state[param]["exp_avg"].placements,
+            storage_placements,
+        )
 
     def test_compute_buckets_reject_orphan_and_overlap(self):
         optimizer, _first, _second = self._bucketed_optimizer()
