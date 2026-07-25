@@ -8,7 +8,7 @@ This document uses these symbols:
 
 - `P`: prompt groups per train step (`num_prompts_per_train_step`).
 - `S`: target steady-state offpolicy steps (`target_offpolicy_steps`).
-- `f`: fraction of the buffer visible to the scheduler (`window_fraction`).
+- `f`: fraction of the `RolloutGroupWorkBuffer` size (`window_fraction`).
 - `B`: active buffer size in prompt groups (`max_active_rollout_groups`), computed as `B = (S + 1) * P`.
 - `W`: FIFO look-ahead window size (`window_size`), computed as `W = max(1, floor(f * B))`; strict FIFO uses `W = 1`.
 
@@ -28,7 +28,7 @@ Windowed FIFO is a bounded compromise between these choices. It lets a limited n
 
 The window remains anchored at the oldest active group. Consuming a younger group does not slide it forward, so no more than `W - 1` younger groups can bypass the oldest group before the scheduler applies backpressure again.
 
-## Configuration
+## Windowed FIFO configuration
 
 The user configures `S`, `P`, and `f` through `target_offpolicy_steps`, `num_prompts_per_train_step`, and `window_fraction`. `window_fraction` defaults to `0.3` following the MiniMax paper.
 

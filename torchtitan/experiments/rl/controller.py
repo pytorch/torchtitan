@@ -201,9 +201,7 @@ class AsyncLoopConfig(Configurable.Config):
             raise ValueError(
                 f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
             )
-        if self.window_fraction is not None and not (
-            0 < self.window_fraction <= 1
-        ):
+        if self.window_fraction is not None and not (0 < self.window_fraction <= 1):
             raise ValueError(
                 "window_fraction must be None or in (0, 1], got "
                 f"{self.window_fraction}"
@@ -790,7 +788,7 @@ class Controller(Configurable):
         max_active_rollout_groups = async_loop.max_active_rollout_groups
         window_size = async_loop.window_size
         logger.info(
-            f"Window size {window_size}, max_off_policy {async_loop.max_offpolicy_steps}"
+            f"window_size={window_size}, max_offpolicy_steps={async_loop.max_offpolicy_steps}"
         )
 
         self._group_buffer = async_loop.group_buffer.build(
