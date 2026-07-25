@@ -52,7 +52,7 @@ class RolloutGroupWork:
 
 
 class RolloutGroupWorkBuffer(Configurable):
-    """Run-ahead buffer of RolloutGroupWork shared by the data-input, rollout, and batcher loops.
+    """Buffer of `RolloutGroupWork` shared between the data-input, rollout, and batcher loops.
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
     the pipeline at `max_active_rollout_groups` active slots; the batcher takes finalized groups within

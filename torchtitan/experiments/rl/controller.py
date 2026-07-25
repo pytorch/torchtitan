@@ -174,7 +174,7 @@ class AsyncLoopConfig(Configurable.Config):
     ``torchtitan/experiments/rl/docs/windowed_fifo.md`` for details."""
 
     window_fraction: float | None = 0.3
-    """FIFO look-ahead window expressed as a fraction of the active buffer size.
+    """FIFO look-ahead window expressed as a fraction of the `RolloutGroupWorkBuffer` size.
 
     This allows the batcher to bypass an unfinished rollout group at the head of
     the queue and consume younger groups that are already finished. This may
@@ -789,6 +789,9 @@ class Controller(Configurable):
         # Buffer capacity sets target offpolicy steps; window size sets the hard offpolicy step bound.
         max_active_rollout_groups = async_loop.max_active_rollout_groups
         window_size = async_loop.window_size
+        logger.info(
+            f"Window size {window_size}, max_off_policy {async_loop.max_offpolicy_steps}"
+        )
 
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,

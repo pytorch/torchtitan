@@ -2,9 +2,19 @@
 
 This design follows the windowed FIFO rollout scheduling described in Section 6.2.4 of the [MiniMax paper](https://arxiv.org/pdf/2605.26494).
 
+## Symbols
+
+This document uses these symbols:
+
+- `P`: prompt groups per train step (`num_prompts_per_train_step`).
+- `S`: target steady-state offpolicy steps (`target_offpolicy_steps`).
+- `f`: fraction of the buffer visible to the scheduler (`window_fraction`).
+- `B`: active buffer size in prompt groups (`max_active_rollout_groups`), computed as `B = (S + 1) * P`.
+- `W`: FIFO look-ahead window size (`window_size`), computed as `W = max(1, floor(f * B))`; strict FIFO uses `W = 1`.
+
 ## Strict FIFO
 
-The simplest scheduling policy is strict FIFO: always consume the oldest prompt group before any younger group. With `P` prompt groups per train step and a target of `S` offpolicy steps, the active buffer holds `B = (S + 1) * P` groups. Strict FIFO keeps every group within the target bound because at most `B - 1` older groups can be consumed first.
+The simplest scheduling policy is strict FIFO: always consume the oldest prompt group before any younger group. With `P` prompt groups per train step and a target of `S` offpolicy steps, the buffer holds `B = (S + 1) * P` groups. Strict FIFO keeps every group within the target bound because at most `B - 1` older groups can be consumed first.
 
 ## The straggler problem
 
@@ -20,12 +30,9 @@ The window remains anchored at the oldest active group. Consuming a younger grou
 
 ## Configuration
 
-The user configures:
+The user configures `S`, `P`, and `f` through `target_offpolicy_steps`, `num_prompts_per_train_step`, and `window_fraction`. `window_fraction` defaults to `0.3` following the MiniMax paper.
 
-- `S`: target offpolicy steps (`target_offpolicy_steps`)
-- `f`: fraction of the active buffer visible to the scheduler (`window_fraction`), which defaults to `0.3` following the MiniMax paper
-
-Given `P` prompt groups per train step, the controller derives:
+The controller derives:
 
 ```text
 B = (S + 1) * P
@@ -36,7 +43,7 @@ Set `f` to `None` to use strict FIFO (`W = 1`). Increasing `f` exposes more youn
 
 ## Example
 
-Let `S = 1`, `P = 3`, and `f = 0.5`, which gives `B = 6` and `W = 3`. Groups `0`, `1`, `3`, `4`, and `5` finish quickly, but group `2` is slow:
+Let `target_offpolicy_steps = 1`, `num_prompts_per_train_step = 3`, and `window_fraction = 0.5`. Then `max_active_rollout_groups = (1 + 1) * 3 = 6`, and `window_size = max(1, floor(0.5 * 6)) = 3`. Groups `0`, `1`, `3`, `4`, and `5` finish quickly, but group `2` is slow:
 
 ```text
 [ 0 ready ][ 1 ready ][ 2 slow ][ 3 ready ][ 4 ready ][ 5 ready ]
@@ -44,7 +51,7 @@ Let `S = 1`, `P = 3`, and `f = 0.5`, which gives `B = 6` and `W = 3`. Groups `0`
 
 With strict FIFO, the batcher consumes groups `0` and `1`, then stalls on group `2`. The trainer has only two of the three groups needed for a train step, so it remains idle even though younger groups are ready.
 
-With `W = 3`, once groups `0` and `1` are consumed, the window is anchored at group `2` and covers groups `[2, 4]`:
+With `window_size = 3`, once groups `0` and `1` are consumed, the window is anchored at group `2` and covers groups `[2, 4]`:
 
 ```text
 anchored window
@@ -58,18 +65,18 @@ Group `3` may bypass group `2` and complete the train batch. Group `4` may also 
 
 Given a window size `W`, we can calculate the worst-case extra offpoliciness it introduces. Consider a slow target group `g` that was admitted at the back of a full active buffer:
 
-1. The trainer consumes all `B - 1` older groups ahead of `g`.
+1. When `g` is admitted, it occupies one of the `B` active slots, so the full buffer can contain at most `B - 1` older groups ahead of it. The trainer consumes those older groups first.
 2. Because `B - 1 = S * P + (P - 1)`, this completes `S` train steps and leaves the next batch one group short.
 3. Group `g`, which would complete that batch, stalls.
-4. The trainer consumes all `W - 1` younger groups that may bypass `g` before the anchored window blocks again.
+4. The trainer consumes all `W - 1` younger groups that may bypass `g` within the window.
 
-The worst-case ordering for a group sampled at policy version `v` is:
+The worst-case ordering for a target group is:
 
 ```text
 older groups                                  younger groups
 [ 0 ][ 1 ] ... [ g-1 ][ g ][ g+1 ] ... [ g+W-1 ]
                        ^    at most W-1 prompt groups can bypass g
-                       target sampled at policy v
+                       target group
 ```
 
 ```text
