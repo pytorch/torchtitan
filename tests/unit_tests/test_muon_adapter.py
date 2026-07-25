@@ -23,6 +23,7 @@ from torchtitan.components.flex_shard import (
     build_layer_bucket_specs,
     flex_shard,
     get_flex_shard_assignments,
+    Owned,
 )
 from torchtitan.components.muon_adapter import MuonAdapter
 
@@ -185,7 +186,7 @@ def _run_bucketed_muon_parity(
                 optimizer.step()
                 reference_optimizer.step()
                 assert all(
-                    param._version == version + 2
+                    param._version == version + 1
                     for param, version in zip(params, versions, strict=True)
                 )
                 assert_state_matches_reference()
@@ -201,7 +202,7 @@ def _run_bucketed_muon_parity(
             versions = [param._version for param in params]
             optimizer.step()
             reference_optimizer.step()
-            assert params[0]._version == versions[0] + 2
+            assert params[0]._version == versions[0] + 1
             assert all(
                 param._version == version
                 for param, version in zip(params[1:], versions[1:], strict=True)
@@ -268,12 +269,6 @@ def _run_bucketed_muon_parity(
                 raise AssertionError("Expected mismatched gradient presence to fail")
             assert all_to_all_calls == calls_before_mismatch
 
-            optimizer.param_groups[0]["matrix_shape"] = (2, 6)
-            with unittest.TestCase().assertRaisesRegex(RuntimeError, "matrix_shape"):
-                optimizer.step()
-            optimizer.param_groups[0]["matrix_shape"] = (3, 4)
-            assert all_to_all_calls == calls_before_mismatch
-
             optimizer.param_groups[0]["lr"] = 0.04 if rank == 0 else 0.03
             with unittest.TestCase().assertRaisesRegex(
                 RuntimeError, "differ across ranks"
@@ -325,8 +320,8 @@ def _run_bucketed_muon_parity(
                     if index == target_index
                     else None
                 )
-            backend = optimizer._flex_shard_backend
-            original_compute = backend._compute_full_delta
+            runtime = optimizer._flex_shard_runtime
+            original_compute = runtime._compute_owned_update
 
             def fail_on_owner(*args):
                 binding = args[1]
@@ -335,7 +330,7 @@ def _run_bucketed_muon_parity(
                 return original_compute(*args)
 
             with (
-                patch.object(backend, "_compute_full_delta", new=fail_on_owner),
+                patch.object(runtime, "_compute_owned_update", new=fail_on_owner),
                 unittest.TestCase().assertRaisesRegex(RuntimeError, "owner compute"),
             ):
                 optimizer.step()
@@ -431,7 +426,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
                 }
             )
 
-    def test_adamw_identity_backend_preserves_storage_sharding(self):
+    def test_adamw_same_as_storage_preserves_storage_sharding(self):
         local_param = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
         local_grad = torch.arange(6, 0, -1, dtype=torch.float32).reshape(2, 3)
         param = self._dtensor_parameter(
@@ -490,6 +485,26 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
             optimizer.state[param]["exp_avg"].placements,
             storage_placements,
         )
+        with self.assertRaisesRegex(RuntimeError, "after flex_shard plan"):
+            optimizer.add_param_group(
+                {
+                    "params": [torch.nn.Parameter(torch.ones(2, 2))],
+                    "param_names": ["late.weight"],
+                }
+            )
+
+    def test_compute_requirements_are_declarative(self):
+        optimizer, first, _second = self._bucketed_optimizer()
+        self.assertEqual(
+            optimizer.flex_shard_compute_requirement(first, optimizer.param_groups[0]),
+            Owned(trailing_dims=2),
+        )
+
+        with self.assertRaisesRegex(TypeError, "must implement"):
+            flex_shard(
+                torch.optim.SGD([torch.nn.Parameter(torch.ones(2, 2))]),
+                bucket_spec=[],
+            )
 
     def test_compute_buckets_reject_orphan_and_overlap(self):
         optimizer, _first, _second = self._bucketed_optimizer()

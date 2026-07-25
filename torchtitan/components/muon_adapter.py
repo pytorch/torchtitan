@@ -17,10 +17,7 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor, Partial, Placement, Replicate, Shard
 from torch.optim._muon import muon
 
-from torchtitan.components.flex_shard import (
-    _build_muon_backend,
-    register_flex_shard_backend,
-)
+from torchtitan.components.flex_shard import Owned
 
 
 __all__ = ["MuonAdapter"]
@@ -48,11 +45,6 @@ class MuonAdapter(torch.optim.Muon):
     """
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
-        if getattr(self, "_flex_shard_backend", None) is not None:
-            raise RuntimeError(
-                "MuonAdapter cannot add parameter groups after flex_shard plan "
-                "construction"
-            )
         if param_group.get("fused") or param_group.get("foreach"):
             raise NotImplementedError(
                 "MuonAdapter does not support fused or foreach implementations. "
@@ -154,35 +146,140 @@ class MuonAdapter(torch.optim.Muon):
         batch_size = tensor.numel() // matrix_numel
         return tensor.view(batch_size, *matrix_shape)
 
-    def _compute_owned_pre_ns(
+    def flex_shard_compute_requirement(
         self,
-        param: DTensor,
-        grad: DTensor,
+        param: Tensor,
         group: MutableMapping,
-    ) -> DTensor:
+    ) -> Owned:
+        if torch.is_complex(param):
+            raise RuntimeError("Muon does not support complex parameters")
+        matrix_shape = group.get("matrix_shape")
+        self._validate_matrix_shape(param, matrix_shape)
+        return Owned(trailing_dims=2)
+
+    @staticmethod
+    def flex_shard_validate_group(
+        group_index: int,
+        group: MutableMapping,
+    ) -> None:
+        ns_steps = group["ns_steps"]
+        if (
+            isinstance(ns_steps, bool)
+            or not isinstance(ns_steps, int)
+            or ns_steps < 0
+            or ns_steps >= 100
+        ):
+            raise ValueError(
+                f"group {group_index} ns_steps must be an integer in [0, 100), "
+                f"got {ns_steps!r}"
+            )
+        coefficients = group["ns_coefficients"]
+        if (
+            not isinstance(coefficients, tuple)
+            or len(coefficients) != 3
+            or not all(isinstance(value, (int, float)) for value in coefficients)
+        ):
+            raise ValueError(
+                f"group {group_index} must have exactly three numeric "
+                "Newton-Schulz coefficients"
+            )
+        eps = group["eps"]
+        if not isinstance(eps, (int, float)) or eps < 0:
+            raise ValueError(
+                f"group {group_index} eps must be non-negative, got {eps!r}"
+            )
+        for name in ("lr", "momentum", "weight_decay"):
+            value = group[name]
+            valid = (
+                value.numel() == 1
+                if isinstance(value, torch.Tensor)
+                else isinstance(value, (int, float))
+            )
+            if not valid:
+                raise ValueError(
+                    f"group {group_index} {name} must be a number or scalar tensor, "
+                    f"got {value!r}"
+                )
+            try:
+                nonnegative = bool(value >= 0)
+            except (RuntimeError, TypeError, ValueError):
+                nonnegative = False
+            if not nonnegative:
+                raise ValueError(
+                    f"group {group_index} {name} must be non-negative, got {value!r}"
+                )
+        if not isinstance(group["nesterov"], bool):
+            raise ValueError(f"group {group_index} nesterov must be a bool")
+        if group["adjust_lr_fn"] not in (
+            None,
+            "original",
+            "match_rms_adamw",
+            "spectral_unclamped",
+        ):
+            raise ValueError(
+                f"group {group_index} has unsupported adjust_lr_fn "
+                f"{group['adjust_lr_fn']!r}"
+            )
+
+    @staticmethod
+    def flex_shard_group_signature(group: MutableMapping) -> object:
+        def signature_value(value):
+            if isinstance(value, torch.Tensor):
+                if value.numel() != 1:
+                    return ("invalid_tensor", tuple(value.shape))
+                return ("tensor", value.detach().item())
+            return value
+
+        return (
+            signature_value(group["lr"]),
+            signature_value(group["weight_decay"]),
+            signature_value(group["momentum"]),
+            group["nesterov"],
+            group["ns_coefficients"],
+            group["eps"],
+            group["ns_steps"],
+            group["adjust_lr_fn"],
+            group.get("matrix_shape"),
+        )
+
+    def flex_shard_init_state(
+        self,
+        param: Tensor,
+        grad: Tensor,
+        group: MutableMapping,
+    ) -> MutableMapping:
         state = self.state[param]
         if "momentum_buffer" not in state:
             state["momentum_buffer"] = torch.zeros_like(
                 grad, memory_format=torch.preserve_format
             )
+        return state
+
+    @staticmethod
+    def flex_shard_prepare(
+        param: Tensor,
+        grad: Tensor,
+        state: MutableMapping[str, Tensor],
+        group: MutableMapping,
+    ) -> Tensor:
+        if param.shape != grad.shape:
+            raise ValueError("Muon parameter and gradient shapes must match")
         momentum_buffer = state["momentum_buffer"]
-        assert isinstance(momentum_buffer, DTensor)
         momentum_buffer.lerp_(grad, 1 - group["momentum"])
-        pre_ns = (
+        return (
             grad.lerp(momentum_buffer, group["momentum"])
             if group["nesterov"]
             else momentum_buffer
         )
-        assert isinstance(pre_ns, DTensor)
-        return pre_ns
 
-    def _compute_owned_delta(
+    def flex_shard_compute(
         self,
-        full_pre: Tensor,
-        matrix_shape: tuple[int, int] | None,
+        compute_input: Tensor,
         group: MutableMapping,
     ) -> Tensor:
-        logical_pre = self._logical_matrix_view(full_pre, matrix_shape)
+        logical_pre = self._logical_matrix_view(
+            compute_input, group.get("matrix_shape")
+        )
         scratch_param = torch.zeros_like(logical_pre)
         scratch_momentum = torch.zeros_like(logical_pre)
         muon(
@@ -199,16 +296,15 @@ class MuonAdapter(torch.optim.Muon):
             adjust_lr_fn=group["adjust_lr_fn"],
             has_complex=False,
         )
-        return scratch_param.view(full_pre.shape)
+        return scratch_param.view(compute_input.shape)
 
     @staticmethod
-    def _apply_owned_delta(
-        param: DTensor,
-        delta: DTensor,
+    def flex_shard_finalize(
+        param: Tensor,
+        update: Tensor,
         group: MutableMapping,
-    ) -> None:
-        param.mul_(1 - group["lr"] * group["weight_decay"])
-        param.add_(delta)
+    ) -> Tensor:
+        return param * (1 - group["lr"] * group["weight_decay"]) + update
 
     def _validate_group(self, group: MutableMapping) -> None:
         """Reject deterministic input errors before opening mutable views."""
@@ -323,10 +419,6 @@ class MuonAdapter(torch.optim.Muon):
     @torch.no_grad()
     def step(self, closure=None):
         """Run each parameter group in its requested physical compute layout."""
-        backend = getattr(self, "_flex_shard_backend", None)
-        if backend is not None:
-            return backend.step(self, closure)
-
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -367,6 +459,3 @@ class MuonAdapter(torch.optim.Muon):
                     has_complex=has_complex,
                 )
         return loss
-
-
-register_flex_shard_backend(MuonAdapter, _build_muon_backend)

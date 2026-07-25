@@ -13,9 +13,10 @@ import hashlib
 import heapq
 import math
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, TYPE_CHECKING, TypeVar
+from types import MethodType
+from typing import Any, cast, Protocol, TYPE_CHECKING, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -27,17 +28,17 @@ from torch.optim import Optimizer
 if TYPE_CHECKING:
     from torch import Tensor
 
-    from torchtitan.components.muon_adapter import MuonAdapter
-
 
 __all__ = [
     "build_layer_bucket_specs",
     "BucketAssignment",
     "BucketSpec",
-    "FlexShardBackend",
+    "ComputeShardingRequirement",
+    "FlexShardOptimizer",
+    "Owned",
+    "SameAsStorage",
     "flex_shard",
     "get_flex_shard_assignments",
-    "register_flex_shard_backend",
 ]
 
 
@@ -84,35 +85,107 @@ class BucketAssignment:
     owner_rank: int | None
 
 
-class FlexShardBackend(Protocol):
-    """Optimizer-specific implementation selected by :func:`flex_shard`."""
+@dataclass(frozen=True, slots=True)
+class SameAsStorage:
+    """Compute directly in each parameter's persistent storage placement."""
+
+
+@dataclass(frozen=True, slots=True)
+class Owned:
+    """Place each complete trailing compute block on exactly one mesh rank."""
+
+    trailing_dims: int
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.trailing_dims, bool)
+            or not isinstance(self.trailing_dims, int)
+            or self.trailing_dims <= 0
+        ):
+            raise ValueError("Owned trailing_dims must be a positive integer")
+
+
+ComputeShardingRequirement = SameAsStorage | Owned
+
+
+class FlexShardOptimizer(Protocol):
+    """Optimizer-side declaration and distribution-agnostic compute hooks.
+
+    ``prepare``, ``compute``, and ``finalize`` receive only plain tensors and
+    return staged values. They neither choose owners nor mutate persistent
+    storage; the FlexShard runtime performs redistribution and copyback.
+    """
+
+    param_groups: list[dict[str, Any]]
+    state: dict[Any, Any]
+
+    def flex_shard_compute_requirement(
+        self,
+        param: Tensor,
+        group: MutableMapping[str, Any],
+    ) -> ComputeShardingRequirement:
+        ...
+
+    def flex_shard_validate_group(
+        self,
+        group_index: int,
+        group: MutableMapping[str, Any],
+    ) -> None:
+        ...
+
+    def flex_shard_group_signature(
+        self,
+        group: MutableMapping[str, Any],
+    ) -> object:
+        ...
+
+    def flex_shard_init_state(
+        self,
+        param: Tensor,
+        grad: Tensor,
+        group: MutableMapping[str, Any],
+    ) -> MutableMapping[str, Any]:
+        ...
+
+    def flex_shard_prepare(
+        self,
+        param: Tensor,
+        grad: Tensor,
+        state: MutableMapping[str, Tensor],
+        group: MutableMapping[str, Any],
+    ) -> Tensor:
+        ...
+
+    def flex_shard_compute(
+        self,
+        compute_input: Tensor,
+        group: MutableMapping[str, Any],
+    ) -> Tensor:
+        ...
+
+    def flex_shard_finalize(
+        self,
+        param: Tensor,
+        update: Tensor,
+        group: MutableMapping[str, Any],
+    ) -> Tensor:
+        ...
+
+
+class _FlexShardRuntime(Protocol):
+    """Execution plan built and owned by :func:`flex_shard`."""
 
     @property
     def assignments(self) -> tuple[BucketAssignment, ...]:
         ...
 
 
-_BackendFactory = Callable[
-    [Optimizer, Sequence[BucketSpec]],
-    FlexShardBackend,
-]
-_BACKEND_FACTORIES: dict[type[Optimizer], _BackendFactory] = {}
-
-
-def register_flex_shard_backend(
-    optimizer_type: type[Optimizer],
-    factory: _BackendFactory,
-) -> None:
-    """Register an optimizer's storage-to-compute sharding implementation."""
-    _BACKEND_FACTORIES[optimizer_type] = factory
-
-
 def get_flex_shard_assignments(
     optimizer: Optimizer,
 ) -> tuple[BucketAssignment, ...]:
     """Return the resolved compute plan for a flex-sharded optimizer."""
-    backend = getattr(optimizer, "_flex_shard_backend", None)
-    return () if backend is None else backend.assignments
+    runtime = getattr(optimizer, "_flex_shard_runtime", None)
+    return () if runtime is None else runtime.assignments
 
 
 def build_layer_bucket_specs(
@@ -199,7 +272,7 @@ class _UnassignedBinding:
     fqn: str
     param: DTensor
     group_index: int
-    matrix_shape: tuple[int, int] | None
+    requirement: Owned
     global_shape: torch.Size
     global_stride: tuple[int, ...]
     dtype: torch.dtype
@@ -217,7 +290,7 @@ class _Binding:
     fqn: str
     param: DTensor
     group_index: int
-    matrix_shape: tuple[int, int] | None
+    requirement: Owned
     owner_group_rank: int
     global_shape: torch.Size
     global_stride: tuple[int, ...]
@@ -266,8 +339,32 @@ def _shard_metadata(
     return tuple(shard_numels), tuple(shard_offsets)
 
 
+def _compute_sharding_requirement(
+    optimizer: Optimizer,
+    param: Tensor,
+    group: MutableMapping[str, Any],
+) -> ComputeShardingRequirement:
+    provider = getattr(optimizer, "flex_shard_compute_requirement", None)
+    if provider is None:
+        # torch.optim.AdamW is pointwise, so its compute placement is exactly
+        # its persistent parameter and state placement.
+        if type(optimizer) is torch.optim.AdamW:
+            return SameAsStorage()
+        raise TypeError(
+            f"{type(optimizer).__name__} must implement "
+            "flex_shard_compute_requirement()"
+        )
+    requirement = provider(param, group)
+    if not isinstance(requirement, (SameAsStorage, Owned)):
+        raise TypeError(
+            "flex_shard_compute_requirement() must return SameAsStorage or Owned, "
+            f"got {requirement!r}"
+        )
+    return requirement
+
+
 def _bind_optimizer_params(
-    optimizer: MuonAdapter,
+    optimizer: Optimizer,
 ) -> tuple[_UnassignedBinding, ...]:
     bindings = []
     seen_fqns: set[str] = set()
@@ -280,73 +377,72 @@ def _bind_optimizer_params(
         param_names = group.get("param_names")
         if param_names is None or len(param_names) != len(params):
             raise ValueError(
-                "Bucketed MuonAdapter parameter groups require param_names aligned "
-                "with params"
+                "Owned FlexShard parameter groups require param_names aligned with "
+                "params"
             )
-        matrix_shape = group.get("matrix_shape")
         for fqn, param in zip(param_names, params, strict=True):
             if not isinstance(fqn, str) or not fqn:
-                raise ValueError(f"Invalid MuonAdapter parameter FQN {fqn!r}")
+                raise ValueError(f"Invalid FlexShard parameter FQN {fqn!r}")
             if fqn in seen_fqns:
-                raise ValueError(f"Duplicate MuonAdapter parameter FQN {fqn!r}")
+                raise ValueError(f"Duplicate FlexShard parameter FQN {fqn!r}")
             seen_fqns.add(fqn)
             if id(param) in seen_param_ids:
-                raise ValueError(
-                    f"MuonAdapter parameter {fqn!r} appears more than once"
-                )
+                raise ValueError(f"FlexShard parameter {fqn!r} appears more than once")
             seen_param_ids.add(id(param))
 
-            if not isinstance(param, DTensor):
+            requirement = _compute_sharding_requirement(optimizer, param, group)
+            if not isinstance(requirement, Owned):
                 raise ValueError(
-                    f"Bucketed MuonAdapter parameter {fqn!r} must be a DTensor"
+                    "Owned FlexShard runtime cannot mix SameAsStorage and Owned "
+                    f"requirements; {fqn!r} declared {requirement!r}"
                 )
-            if param.ndim < 2:
+
+            if not isinstance(param, DTensor):
+                raise ValueError(f"Owned FlexShard parameter {fqn!r} must be a DTensor")
+            if param.ndim < requirement.trailing_dims:
                 raise ValueError(
-                    f"Bucketed MuonAdapter parameter {fqn!r} must be at least 2D"
+                    f"Owned FlexShard parameter {fqn!r} has {param.ndim} dimensions, "
+                    f"fewer than its {requirement.trailing_dims} complete trailing "
+                    "dimensions"
                 )
             if param.device_mesh.ndim != 1:
                 raise ValueError(
-                    f"Bucketed MuonAdapter parameter {fqn!r} must use a 1D mesh"
+                    f"Owned FlexShard parameter {fqn!r} must use a 1D mesh"
                 )
             if len(param.placements) != 1 or type(param.placements[0]) is not Shard:
                 raise ValueError(
-                    f"Bucketed MuonAdapter parameter {fqn!r} must have exactly "
+                    f"Owned FlexShard parameter {fqn!r} must have exactly "
                     "one Shard placement"
                 )
             if param.placements[0].dim % param.ndim != 0:
                 raise ValueError(
-                    f"Bucketed MuonAdapter parameter {fqn!r} must use Shard(0), "
+                    f"Owned FlexShard parameter {fqn!r} must use Shard(0), "
                     f"got {param.placements[0]}"
                 )
-            if torch.is_complex(param):
-                raise RuntimeError("Muon does not support complex parameters")
-            optimizer._validate_matrix_shape(param, matrix_shape)
 
             ranks = _mesh_ranks(param.device_mesh)
             if process_group_ranks is None:
                 process_group_ranks = ranks
             elif ranks != process_group_ranks:
                 raise ValueError(
-                    "Bucketed MuonAdapter parameters must use the same process group"
+                    "Owned FlexShard parameters must use the same process group"
                 )
 
             local_param = param.to_local()
             if tensor_device is None:
                 tensor_device = local_param.device
             elif local_param.device != tensor_device:
-                raise ValueError(
-                    "Bucketed MuonAdapter parameters must use the same device"
-                )
+                raise ValueError("Owned FlexShard parameters must use the same device")
             if not local_param.is_contiguous():
                 raise ValueError(
-                    f"Bucketed MuonAdapter parameter {fqn!r} must have contiguous "
+                    f"Owned FlexShard parameter {fqn!r} must have contiguous "
                     "local Shard(0) storage"
                 )
             if tuple(param.stride()) != tuple(
                 torch.empty(param.shape, device="meta").stride()
             ):
                 raise ValueError(
-                    f"Bucketed MuonAdapter parameter {fqn!r} must have contiguous "
+                    f"Owned FlexShard parameter {fqn!r} must have contiguous "
                     "global storage"
                 )
 
@@ -363,7 +459,7 @@ def _bind_optimizer_params(
             )
             if local_param.shape != expected_shape:
                 raise ValueError(
-                    f"Bucketed MuonAdapter parameter {fqn!r} has local shape "
+                    f"Owned FlexShard parameter {fqn!r} has local shape "
                     f"{tuple(local_param.shape)}, expected {tuple(expected_shape)}"
                 )
 
@@ -372,7 +468,7 @@ def _bind_optimizer_params(
                     fqn=fqn,
                     param=param,
                     group_index=group_index,
-                    matrix_shape=matrix_shape,
+                    requirement=requirement,
                     global_shape=torch.Size(param.shape),
                     global_stride=tuple(param.stride()),
                     dtype=param.dtype,
@@ -383,7 +479,7 @@ def _bind_optimizer_params(
             )
 
     if not bindings:
-        raise ValueError("Bucketed MuonAdapter requires at least one parameter")
+        raise ValueError("Owned FlexShard requires at least one parameter")
     return tuple(bindings)
 
 
@@ -419,16 +515,16 @@ def _resolve_buckets(
 
 
 @dataclass(frozen=True, slots=True)
-class _IdentityFlexShardBackend:
+class _IdentityFlexShardRuntime:
     """A validated no-op plan for pointwise optimizer compute."""
 
     assignments: tuple[BucketAssignment, ...]
 
 
-def _build_identity_backend(
+def _build_identity_runtime(
     optimizer: Optimizer,
     specs: Sequence[BucketSpec],
-) -> FlexShardBackend:
+) -> _FlexShardRuntime:
     resolved = _resolve_buckets(_bind_optimizer_fqns(optimizer), specs)
     assignments = tuple(
         BucketAssignment(
@@ -441,7 +537,7 @@ def _build_identity_backend(
         )
         for binding in bindings
     )
-    return _IdentityFlexShardBackend(assignments)
+    return _IdentityFlexShardRuntime(assignments)
 
 
 def _assign_balanced_owners(
@@ -577,22 +673,18 @@ def _build_bucket_plan(
     )
 
 
-class _BucketedOwnedMuonBackend:
+class _OwnedFlexShardRuntime:
     def __init__(
         self,
-        optimizer: MuonAdapter,
+        optimizer: Optimizer,
         bucket_specs: Sequence[BucketSpec],
     ) -> None:
         if not dist.is_available() or not dist.is_initialized():
-            raise RuntimeError(
-                "Bucketed MuonAdapter requires distributed initialization"
-            )
+            raise RuntimeError("Owned FlexShard requires distributed initialization")
 
         self._specs = tuple(bucket_specs)
         if any(spec.mesh.ndim != 1 for spec in self._specs):
-            raise ValueError(
-                "MuonAdapter flex_shard currently requires 1D bucket meshes"
-            )
+            raise ValueError("Owned FlexShard currently requires 1D bucket meshes")
         setup_error = None
         try:
             self._initialize_local(optimizer)
@@ -601,7 +693,7 @@ class _BucketedOwnedMuonBackend:
         self._synchronize_setup_error(setup_error)
         self._validate_plan_across_ranks(optimizer)
 
-    def _initialize_local(self, optimizer: MuonAdapter) -> None:
+    def _initialize_local(self, optimizer: Optimizer) -> None:
         unassigned = _bind_optimizer_params(optimizer)
         resolved = _resolve_buckets(unassigned, self._specs)
 
@@ -639,7 +731,7 @@ class _BucketedOwnedMuonBackend:
                     fqn=binding.fqn,
                     param=binding.param,
                     group_index=binding.group_index,
-                    matrix_shape=binding.matrix_shape,
+                    requirement=binding.requirement,
                     owner_group_rank=owner_map[binding.fqn],
                     global_shape=binding.global_shape,
                     global_stride=binding.global_stride,
@@ -693,16 +785,16 @@ class _BucketedOwnedMuonBackend:
             if error is not None:
                 raise error
             raise RuntimeError(
-                "Bucketed MuonAdapter setup failed validation on another rank"
+                "Owned FlexShard setup failed validation on another rank"
             )
 
     @staticmethod
-    def _validate_groups(optimizer: MuonAdapter) -> None:
-        errors = _BucketedOwnedMuonBackend._group_validation_errors(optimizer)
+    def _validate_groups(optimizer: Optimizer) -> None:
+        errors = _OwnedFlexShardRuntime._group_validation_errors(optimizer)
         if errors:
-            raise ValueError(f"Invalid bucketed MuonAdapter group: {errors[0]}")
+            raise ValueError(f"Invalid FlexShard optimizer group: {errors[0]}")
 
-    def _validate_plan_across_ranks(self, optimizer: MuonAdapter) -> None:
+    def _validate_plan_across_ranks(self, optimizer: Optimizer) -> None:
         plan_description = (
             [
                 (
@@ -716,7 +808,7 @@ class _BucketedOwnedMuonBackend:
                             binding.global_stride,
                             str(binding.dtype),
                             str(binding.device.type),
-                            binding.matrix_shape,
+                            binding.requirement,
                             binding.owner_group_rank,
                             binding.shard_numels,
                         )
@@ -765,100 +857,49 @@ class _BucketedOwnedMuonBackend:
             group=self._process_group,
         )
         if any(value.item() != plan_hash for value in gathered_hashes):
-            raise RuntimeError("Bucketed MuonAdapter plans differ across ranks")
+            raise RuntimeError("FlexShard plans differ across ranks")
 
     @staticmethod
-    def _group_validation_errors(optimizer: MuonAdapter) -> list[str]:
+    def _group_validation_errors(optimizer: Optimizer) -> list[str]:
         errors = []
+        required_methods = (
+            "flex_shard_compute_requirement",
+            "flex_shard_validate_group",
+            "flex_shard_group_signature",
+            "flex_shard_init_state",
+            "flex_shard_prepare",
+            "flex_shard_compute",
+            "flex_shard_finalize",
+        )
+        for method_name in required_methods:
+            if not callable(getattr(optimizer, method_name, None)):
+                errors.append(
+                    f"{type(optimizer).__name__} must implement {method_name}()"
+                )
+        if errors:
+            return errors
+        validator = getattr(optimizer, "flex_shard_validate_group", None)
+        assert validator is not None
         for group_index, group in enumerate(optimizer.param_groups):
-            ns_steps = group["ns_steps"]
-            if (
-                isinstance(ns_steps, bool)
-                or not isinstance(ns_steps, int)
-                or ns_steps < 0
-                or ns_steps >= 100
-            ):
-                errors.append(
-                    f"group {group_index} ns_steps must be an integer in [0, 100), "
-                    f"got {ns_steps!r}"
-                )
-            coefficients = group["ns_coefficients"]
-            if (
-                not isinstance(coefficients, tuple)
-                or len(coefficients) != 3
-                or not all(isinstance(value, (int, float)) for value in coefficients)
-            ):
-                errors.append(
-                    f"group {group_index} must have exactly three numeric "
-                    "Newton-Schulz coefficients"
-                )
-            eps = group["eps"]
-            if not isinstance(eps, (int, float)) or eps < 0:
-                errors.append(
-                    f"group {group_index} eps must be non-negative, got {eps!r}"
-                )
-            for name in ("lr", "momentum", "weight_decay"):
-                value = group[name]
-                if isinstance(value, torch.Tensor):
-                    valid = value.numel() == 1
-                else:
-                    valid = isinstance(value, (int, float))
-                if not valid:
-                    errors.append(
-                        f"group {group_index} {name} must be a number or scalar "
-                        f"tensor, got {value!r}"
-                    )
-                    continue
-                try:
-                    nonnegative = bool(value >= 0)
-                except (RuntimeError, TypeError, ValueError):
-                    nonnegative = False
-                if not nonnegative:
-                    errors.append(
-                        f"group {group_index} {name} must be non-negative, "
-                        f"got {value!r}"
-                    )
-            if not isinstance(group["nesterov"], bool):
-                errors.append(f"group {group_index} nesterov must be a bool")
-            if group["adjust_lr_fn"] not in (
-                None,
-                "original",
-                "match_rms_adamw",
-                "spectral_unclamped",
-            ):
-                errors.append(
-                    f"group {group_index} has unsupported adjust_lr_fn "
-                    f"{group['adjust_lr_fn']!r}"
-                )
+            try:
+                validator(group_index, group)
+            except Exception as error:
+                errors.append(str(error))
         return errors
 
     @staticmethod
-    def _group_config_hash(optimizer: MuonAdapter) -> int:
-        def signature_value(value):
-            if isinstance(value, torch.Tensor):
-                if value.numel() != 1:
-                    return ("invalid_tensor", tuple(value.shape))
-                return ("tensor", value.detach().item())
-            return value
-
-        signature = [
-            (
-                signature_value(group["lr"]),
-                signature_value(group["weight_decay"]),
-                signature_value(group["momentum"]),
-                group["nesterov"],
-                group["ns_coefficients"],
-                group["eps"],
-                group["ns_steps"],
-                group["adjust_lr_fn"],
-                group.get("matrix_shape"),
+    def _group_config_hash(optimizer: Optimizer) -> int:
+        signature_provider = getattr(optimizer, "flex_shard_group_signature", None)
+        if signature_provider is None:
+            raise TypeError(
+                f"{type(optimizer).__name__} must implement "
+                "flex_shard_group_signature()"
             )
-            for group in optimizer.param_groups
-        ]
+        signature = [signature_provider(group) for group in optimizer.param_groups]
         digest = hashlib.sha256(repr(signature).encode("utf-8")).digest()
         return int.from_bytes(digest[:7], byteorder="little")
 
-    def _validate_step_inputs(self, optimizer: MuonAdapter) -> dict[int, bool]:
+    def _validate_step_inputs(self, optimizer: Optimizer) -> dict[int, bool]:
         local_errors = self._group_validation_errors(optimizer)
         local_active = []
         for binding in self._bindings:
@@ -885,8 +926,17 @@ class _BucketedOwnedMuonBackend:
                     or param_names[param_index] != binding.fqn
                 ):
                     local_errors.append(f"parameter FQN for {binding.fqn!r} changed")
-            if group.get("matrix_shape") != binding.matrix_shape:
-                local_errors.append(f"matrix_shape for {binding.fqn!r} changed")
+            try:
+                requirement = _compute_sharding_requirement(
+                    optimizer, binding.param, group
+                )
+            except Exception as error:
+                local_errors.append(str(error))
+            else:
+                if requirement != binding.requirement:
+                    local_errors.append(
+                        f"compute requirement for {binding.fqn!r} changed"
+                    )
 
             local_param = binding.param.to_local()
             if (
@@ -921,22 +971,26 @@ class _BucketedOwnedMuonBackend:
             ):
                 local_errors.append(f"gradient layout for {binding.fqn!r} changed")
 
-            momentum_buffer = optimizer.state.get(binding.param, {}).get(
-                "momentum_buffer"
-            )
-            if momentum_buffer is not None and (
-                not isinstance(momentum_buffer, DTensor)
-                or torch.Size(momentum_buffer.shape) != binding.global_shape
-                or momentum_buffer.placements != binding.param.placements
-                or _mesh_ranks(momentum_buffer.device_mesh)
-                != _mesh_ranks(binding.param.device_mesh)
-                or momentum_buffer.to_local().shape != binding.param.to_local().shape
-                or momentum_buffer.to_local().dtype != binding.dtype
-                or momentum_buffer.to_local().device != binding.device
-                or tuple(momentum_buffer.stride()) != binding.global_stride
-                or not momentum_buffer.to_local().is_contiguous()
-            ):
-                local_errors.append(f"momentum layout for {binding.fqn!r} changed")
+            for state_name, state_value in optimizer.state.get(
+                binding.param, {}
+            ).items():
+                if not isinstance(state_value, torch.Tensor) or state_value.ndim == 0:
+                    continue
+                if (
+                    not isinstance(state_value, DTensor)
+                    or torch.Size(state_value.shape) != binding.global_shape
+                    or state_value.placements != binding.param.placements
+                    or _mesh_ranks(state_value.device_mesh)
+                    != _mesh_ranks(binding.param.device_mesh)
+                    or state_value.to_local().shape != binding.param.to_local().shape
+                    or state_value.to_local().dtype != binding.dtype
+                    or state_value.to_local().device != binding.device
+                    or tuple(state_value.stride()) != binding.global_stride
+                    or not state_value.to_local().is_contiguous()
+                ):
+                    local_errors.append(
+                        f"state {state_name!r} layout for {binding.fqn!r} changed"
+                    )
 
         status = torch.tensor(
             [
@@ -953,14 +1007,12 @@ class _BucketedOwnedMuonBackend:
             detail = (
                 local_errors[0] if local_errors else "error reported by another rank"
             )
-            raise RuntimeError(f"Invalid bucketed MuonAdapter input: {detail}")
+            raise RuntimeError(f"Invalid FlexShard input: {detail}")
         if any(
             rank_status[-1].item() != status[-1].item()
             for rank_status in gathered_status
         ):
-            raise RuntimeError(
-                "Bucketed MuonAdapter parameter-group settings differ across ranks"
-            )
+            raise RuntimeError("FlexShard parameter-group settings differ across ranks")
 
         active_by_param = {}
         for binding_index, binding in enumerate(self._bindings):
@@ -969,24 +1021,101 @@ class _BucketedOwnedMuonBackend:
             }
             if len(active_values) != 1:
                 raise RuntimeError(
-                    "Bucketed MuonAdapter gradient presence differs across ranks "
+                    "FlexShard gradient presence differs across ranks "
                     f"for {binding.fqn!r}"
                 )
             active_by_param[id(binding.param)] = active_values == {1}
         return active_by_param
 
     @staticmethod
-    def _compute_full_delta(
-        optimizer: MuonAdapter,
+    def _compute_owned_update(
+        optimizer: Optimizer,
         binding: _Binding,
-        full_pre: Tensor,
+        compute_input: Tensor,
     ) -> Tensor:
         group = optimizer.param_groups[binding.group_index]
-        return optimizer._compute_owned_delta(
-            full_pre,
-            binding.matrix_shape,
+        return cast(FlexShardOptimizer, optimizer).flex_shard_compute(
+            compute_input, group
+        )
+
+    @staticmethod
+    def _copy_local_to_storage(storage: DTensor, local_value: Tensor) -> None:
+        storage.copy_(
+            DTensor.from_local(
+                local_value,
+                device_mesh=storage.device_mesh,
+                placements=storage.placements,
+                run_check=False,
+                shape=storage.shape,
+                stride=storage.stride(),
+            )
+        )
+
+    @staticmethod
+    def _validate_local_value(
+        value: Tensor,
+        expected: Tensor,
+        hook_name: str,
+    ) -> None:
+        if not isinstance(value, torch.Tensor) or isinstance(value, DTensor):
+            raise TypeError(f"{hook_name}() must return a plain Tensor")
+        if (
+            value.shape != expected.shape
+            or value.dtype != expected.dtype
+            or value.device != expected.device
+        ):
+            raise ValueError(
+                f"{hook_name}() output must match the expected local tensor layout"
+            )
+
+    @classmethod
+    def _prepare_local_compute(
+        cls,
+        optimizer: Optimizer,
+        binding: _Binding,
+        grad: DTensor,
+    ) -> tuple[Tensor, list[tuple[DTensor, Tensor]]]:
+        group = optimizer.param_groups[binding.group_index]
+        compute_optimizer = cast(FlexShardOptimizer, optimizer)
+        persistent_state = compute_optimizer.flex_shard_init_state(
+            binding.param, grad, group
+        )
+        if not isinstance(persistent_state, MutableMapping):
+            raise TypeError("flex_shard_init_state() must return a mutable mapping")
+
+        local_state = {}
+        tensor_state = {}
+        for name, value in persistent_state.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            if not isinstance(value, DTensor):
+                raise TypeError(
+                    f"Owned FlexShard state {name!r} must be stored as a DTensor"
+                )
+            local_state[name] = value.to_local().clone()
+            tensor_state[name] = value
+
+        compute_input = compute_optimizer.flex_shard_prepare(
+            binding.param.to_local(),
+            grad.to_local(),
+            local_state,
             group,
         )
+        cls._validate_local_value(
+            compute_input,
+            binding.param.to_local(),
+            "flex_shard_prepare",
+        )
+        state_writebacks = []
+        for name, storage in tensor_state.items():
+            local_value = local_state[name]
+            cls._validate_local_value(
+                local_value,
+                storage.to_local(),
+                f"flex_shard_prepare state {name!r}",
+            )
+            state_writebacks.append((storage, local_value))
+        return compute_input, state_writebacks
 
     def _synchronize_bucket_error(
         self,
@@ -1001,16 +1130,14 @@ class _BucketedOwnedMuonBackend:
             group=plan.process_group,
         )
         if self._bucket_status.item():
-            message = (
-                f"Bucketed MuonAdapter {phase} failed for bucket " f"{plan.spec.name!r}"
-            )
+            message = f"FlexShard {phase} failed for bucket {plan.spec.name!r}"
             if error is not None:
                 raise RuntimeError(message) from error
             raise RuntimeError(f"{message} on another rank")
 
     def _step_bucket(
         self,
-        optimizer: MuonAdapter,
+        optimizer: Optimizer,
         plan: _BucketPlan,
         active_by_param: dict[int, bool],
     ) -> None:
@@ -1019,6 +1146,7 @@ class _BucketedOwnedMuonBackend:
 
         local_buffer = None
         owner_buffer = None
+        state_writebacks: list[tuple[DTensor, Tensor]] = []
         pack_error = None
         try:
             local_buffer = torch.zeros(
@@ -1036,16 +1164,16 @@ class _BucketedOwnedMuonBackend:
                     continue
                 grad = binding.param.grad
                 assert isinstance(grad, DTensor)
-                group = optimizer.param_groups[binding.group_index]
-                pre_ns = optimizer._compute_owned_pre_ns(
-                    binding.param,
+                compute_input, binding_state_writebacks = self._prepare_local_compute(
+                    optimizer,
+                    binding,
                     grad,
-                    group,
                 )
-                local_pre = pre_ns.to_local().contiguous().view(-1)
+                state_writebacks.extend(binding_state_writebacks)
+                local_input = compute_input.contiguous().view(-1)
                 local_offset = plan.local_offsets[binding_index]
-                local_buffer[local_offset : local_offset + local_pre.numel()].copy_(
-                    local_pre
+                local_buffer[local_offset : local_offset + local_input.numel()].copy_(
+                    local_input
                 )
         except Exception as error:
             pack_error = error
@@ -1069,27 +1197,32 @@ class _BucketedOwnedMuonBackend:
                     or not active_by_param[id(binding.param)]
                 ):
                     continue
-                full_pre = torch.empty(
+                full_input = torch.empty(
                     binding.global_shape,
                     dtype=owner_buffer.dtype,
                     device=owner_buffer.device,
                 )
-                flat_pre = full_pre.view(-1)
+                flat_input = full_input.view(-1)
                 for source_rank in range(plan.world_size):
                     source_numel = binding.shard_numels[source_rank]
                     source_offset = binding.shard_offsets[source_rank]
                     owner_offset = plan.owner_offsets[(binding_index, source_rank)]
-                    flat_pre[source_offset : source_offset + source_numel].copy_(
+                    flat_input[source_offset : source_offset + source_numel].copy_(
                         owner_buffer[owner_offset : owner_offset + source_numel]
                     )
-                full_delta = self._compute_full_delta(optimizer, binding, full_pre)
-                flat_delta = full_delta.view(-1)
+                full_update = self._compute_owned_update(optimizer, binding, full_input)
+                self._validate_local_value(
+                    full_update,
+                    full_input,
+                    "flex_shard_compute",
+                )
+                flat_update = full_update.view(-1)
                 for destination_rank in range(plan.world_size):
                     destination_numel = binding.shard_numels[destination_rank]
                     destination_offset = binding.shard_offsets[destination_rank]
                     owner_offset = plan.owner_offsets[(binding_index, destination_rank)]
                     owner_buffer[owner_offset : owner_offset + destination_numel].copy_(
-                        flat_delta[
+                        flat_update[
                             destination_offset : destination_offset + destination_numel
                         ]
                     )
@@ -1105,26 +1238,36 @@ class _BucketedOwnedMuonBackend:
             group=plan.process_group,
         )
 
-        for binding_index, binding in enumerate(plan.bindings):
-            if not active_by_param[id(binding.param)]:
-                continue
-            local_param = binding.param.to_local()
-            local_offset = plan.local_offsets[binding_index]
-            local_delta = local_buffer[
-                local_offset : local_offset + local_param.numel()
-            ].view(local_param.shape)
-            delta = DTensor.from_local(
-                local_delta,
-                device_mesh=binding.param.device_mesh,
-                placements=binding.param.placements,
-                run_check=False,
-                shape=binding.global_shape,
-                stride=binding.global_stride,
-            )
-            group = optimizer.param_groups[binding.group_index]
-            optimizer._apply_owned_delta(binding.param, delta, group)
+        writebacks = []
+        finalize_error = None
+        try:
+            for binding_index, binding in enumerate(plan.bindings):
+                if not active_by_param[id(binding.param)]:
+                    continue
+                local_param = binding.param.to_local()
+                local_offset = plan.local_offsets[binding_index]
+                local_update = local_buffer[
+                    local_offset : local_offset + local_param.numel()
+                ].view(local_param.shape)
+                group = optimizer.param_groups[binding.group_index]
+                updated_param = cast(FlexShardOptimizer, optimizer).flex_shard_finalize(
+                    local_param, local_update, group
+                )
+                self._validate_local_value(
+                    updated_param,
+                    local_param,
+                    "flex_shard_finalize",
+                )
+                writebacks.append((binding.param, updated_param))
+        except Exception as error:
+            finalize_error = error
+        self._synchronize_bucket_error(plan, finalize_error, "local finalize")
+        for storage, local_value in state_writebacks:
+            self._copy_local_to_storage(storage, local_value)
+        for storage, local_value in writebacks:
+            self._copy_local_to_storage(storage, local_value)
 
-    def step(self, optimizer: MuonAdapter, closure=None):
+    def step(self, optimizer: Optimizer, closure=None):
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -1136,44 +1279,62 @@ class _BucketedOwnedMuonBackend:
         return loss
 
 
-def _build_muon_backend(
-    optimizer: Optimizer,
-    specs: Sequence[BucketSpec],
-) -> FlexShardBackend:
-    from torchtitan.components.muon_adapter import MuonAdapter
+@torch.no_grad()
+def _run_owned_flex_shard_step(optimizer: Optimizer, closure=None):
+    runtime = optimizer.__dict__["_flex_shard_runtime"]
+    assert isinstance(runtime, _OwnedFlexShardRuntime)
+    return runtime.step(optimizer, closure)
 
-    if not isinstance(optimizer, MuonAdapter):
-        raise TypeError("Muon flex_shard backend requires a MuonAdapter")
-    return _BucketedOwnedMuonBackend(optimizer, specs)
+
+def _reject_flex_shard_param_group(
+    optimizer: Optimizer,
+    param_group: dict[str, Any],
+) -> None:
+    raise RuntimeError(
+        f"{type(optimizer).__name__} cannot add parameter groups after "
+        "flex_shard plan construction"
+    )
 
 
 def flex_shard(
     optimizer: _OptimizerT,
     bucket_spec: Sequence[BucketSpec],
 ) -> _OptimizerT:
-    """Apply an optimizer's registered storage-to-compute sharding plan.
+    """Build bucketed transformations from storage and compute requirements.
 
-    Unregistered optimizers use an identity backend: compute sharding equals
-    storage sharding. Optimizers whose compute needs a different placement
-    register a backend that owns temporary redistribution and writeback.
+    The optimizer declares its compute placement and implements plain-tensor
+    math. FlexShard owns FQN resolution, owner assignment, redistribution,
+    temporary buffers, and writeback into persistent storage placements.
     """
-    if getattr(optimizer, "_flex_shard_backend", None) is not None:
+    if getattr(optimizer, "_flex_shard_runtime", None) is not None:
         raise RuntimeError(f"{type(optimizer).__name__} is already flex-sharded")
 
     specs = tuple(bucket_spec)
     if not all(isinstance(spec, BucketSpec) for spec in specs):
         raise TypeError("bucket_spec must contain only BucketSpec objects")
 
-    factory = next(
-        (
-            _BACKEND_FACTORIES[optimizer_type]
-            for optimizer_type in type(optimizer).__mro__
-            if optimizer_type in _BACKEND_FACTORIES
-        ),
-        None,
+    requirements = tuple(
+        _compute_sharding_requirement(optimizer, param, group)
+        for group in optimizer.param_groups
+        for param in group["params"]
     )
-    if factory is None:
-        factory = _build_identity_backend
-    backend = factory(optimizer, specs)
-    optimizer.__dict__["_flex_shard_backend"] = backend
+    if not requirements:
+        raise ValueError("flex_shard requires at least one optimizer parameter")
+    if all(isinstance(requirement, SameAsStorage) for requirement in requirements):
+        runtime = _build_identity_runtime(optimizer, specs)
+    elif all(isinstance(requirement, Owned) for requirement in requirements):
+        runtime = _OwnedFlexShardRuntime(optimizer, specs)
+    else:
+        raise ValueError(
+            "One flex_shard optimizer cannot mix SameAsStorage and Owned "
+            "compute requirements"
+        )
+    optimizer.__dict__["_flex_shard_runtime"] = runtime
+    optimizer.add_param_group = MethodType(  # type: ignore[method-assign]
+        _reject_flex_shard_param_group,
+        optimizer,
+    )
+    if isinstance(runtime, _OwnedFlexShardRuntime):
+        step = Optimizer.profile_hook_step(_run_owned_flex_shard_step)
+        optimizer.step = MethodType(step, optimizer)  # type: ignore[method-assign]
     return optimizer
