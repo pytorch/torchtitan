@@ -61,8 +61,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
-            num_groups_per_train_step=8,
-            group_size=8,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=4096),
@@ -181,8 +181,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
-            num_groups_per_train_step=32,  # TODO: TBD
-            group_size=8,  # TODO: TBD
+            num_prompts_per_train_step=32,  # TODO: TBD
+            num_samples_per_prompt=8,  # TODO: TBD
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(
                 # TODO: TBD local_batch_size, seq_len
