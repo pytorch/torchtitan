@@ -31,9 +31,9 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "build_layer_compute_bucket_specs",
-    "ComputeBucketAssignment",
-    "ComputeBucketSpec",
+    "build_layer_bucket_specs",
+    "BucketAssignment",
+    "BucketSpec",
     "FlexShardBackend",
     "flex_shard",
     "get_flex_shard_assignments",
@@ -52,7 +52,7 @@ _BucketBindingT = TypeVar("_BucketBindingT", bound=_HasFqn)
 
 
 @dataclass(frozen=True, slots=True)
-class ComputeBucketSpec:
+class BucketSpec:
     """One ordered optimizer-compute communication bucket.
 
     ``patterns`` use ``fnmatch`` syntax and match canonical optimizer FQNs.
@@ -65,14 +65,14 @@ class ComputeBucketSpec:
 
     def __post_init__(self) -> None:
         if isinstance(self.patterns, str):
-            raise TypeError("ComputeBucketSpec patterns must be a sequence of strings")
+            raise TypeError("BucketSpec patterns must be a sequence of strings")
         object.__setattr__(self, "patterns", tuple(self.patterns))
         if not self.patterns or any(not pattern for pattern in self.patterns):
-            raise ValueError("ComputeBucketSpec requires non-empty FQN patterns")
+            raise ValueError("BucketSpec requires non-empty FQN patterns")
 
 
 @dataclass(frozen=True, slots=True)
-class ComputeBucketAssignment:
+class BucketAssignment:
     """Resolved compute-bucket information for one optimizer parameter.
 
     ``owner_rank`` is a global distributed rank when compute is routed to one
@@ -88,12 +88,12 @@ class FlexShardBackend(Protocol):
     """Optimizer-specific implementation selected by :func:`flex_shard`."""
 
     @property
-    def assignments(self) -> tuple[ComputeBucketAssignment, ...]:
+    def assignments(self) -> tuple[BucketAssignment, ...]:
         ...
 
 
 _BackendFactory = Callable[
-    [Optimizer, Sequence[ComputeBucketSpec]],
+    [Optimizer, Sequence[BucketSpec]],
     FlexShardBackend,
 ]
 _BACKEND_FACTORIES: dict[type[Optimizer], _BackendFactory] = {}
@@ -109,17 +109,17 @@ def register_flex_shard_backend(
 
 def get_flex_shard_assignments(
     optimizer: Optimizer,
-) -> tuple[ComputeBucketAssignment, ...]:
+) -> tuple[BucketAssignment, ...]:
     """Return the resolved compute plan for a flex-sharded optimizer."""
     backend = getattr(optimizer, "_flex_shard_backend", None)
     return () if backend is None else backend.assignments
 
 
-def build_layer_compute_bucket_specs(
+def build_layer_bucket_specs(
     optimizer: Optimizer,
     *,
     mesh: DeviceMesh | None = None,
-) -> tuple[ComputeBucketSpec, ...]:
+) -> tuple[BucketSpec, ...]:
     """Build one exact-FQN compute bucket per canonical transformer layer."""
     layer_fqns: dict[str, list[str]] = {}
     inferred_mesh = mesh
@@ -154,7 +154,7 @@ def build_layer_compute_bucket_specs(
         return prefix, int(index)
 
     return tuple(
-        ComputeBucketSpec(
+        BucketSpec(
             name=layer_name,
             patterns=tuple(fqns),
             mesh=inferred_mesh,
@@ -233,7 +233,7 @@ class _Binding:
 
 @dataclass(slots=True)
 class _BucketPlan:
-    spec: ComputeBucketSpec
+    spec: BucketSpec
     bindings: tuple[_Binding, ...]
     process_group: dist.ProcessGroup
     group_rank: int
@@ -389,10 +389,10 @@ def _bind_optimizer_params(
 
 def _resolve_buckets(
     bindings: Sequence[_BucketBindingT],
-    specs: Sequence[ComputeBucketSpec],
+    specs: Sequence[BucketSpec],
 ) -> list[list[_BucketBindingT]]:
     if not specs:
-        raise ValueError("flex_shard requires at least one ComputeBucketSpec")
+        raise ValueError("flex_shard requires at least one BucketSpec")
 
     resolved = [[] for _ in specs]
     for binding in bindings:
@@ -406,7 +406,7 @@ def _resolve_buckets(
         if not matches:
             raise ValueError(
                 f"Optimizer parameter {binding.fqn!r} is not covered by any "
-                "ComputeBucketSpec"
+                "BucketSpec"
             )
         if len(matches) != 1:
             names = [specs[index].name or str(index) for index in matches]
@@ -422,16 +422,16 @@ def _resolve_buckets(
 class _IdentityFlexShardBackend:
     """A validated no-op plan for pointwise optimizer compute."""
 
-    assignments: tuple[ComputeBucketAssignment, ...]
+    assignments: tuple[BucketAssignment, ...]
 
 
 def _build_identity_backend(
     optimizer: Optimizer,
-    specs: Sequence[ComputeBucketSpec],
+    specs: Sequence[BucketSpec],
 ) -> FlexShardBackend:
     resolved = _resolve_buckets(_bind_optimizer_fqns(optimizer), specs)
     assignments = tuple(
-        ComputeBucketAssignment(
+        BucketAssignment(
             bucket_name=spec.name or str(bucket_index),
             fqn=binding.fqn,
             owner_rank=None,
@@ -535,7 +535,7 @@ def _routing_metadata(
 
 
 def _build_bucket_plan(
-    spec: ComputeBucketSpec,
+    spec: BucketSpec,
     bindings: tuple[_Binding, ...],
 ) -> _BucketPlan:
     process_group = spec.mesh.get_group()
@@ -581,7 +581,7 @@ class _BucketedOwnedMuonBackend:
     def __init__(
         self,
         optimizer: MuonAdapter,
-        bucket_specs: Sequence[ComputeBucketSpec],
+        bucket_specs: Sequence[BucketSpec],
     ) -> None:
         if not dist.is_available() or not dist.is_initialized():
             raise RuntimeError(
@@ -652,7 +652,7 @@ class _BucketedOwnedMuonBackend:
             )
             plans.append(_build_bucket_plan(spec, bindings))
             assignments.extend(
-                ComputeBucketAssignment(
+                BucketAssignment(
                     bucket_name=spec.name or str(index),
                     fqn=binding.fqn,
                     owner_rank=_mesh_ranks(spec.mesh)[binding.owner_group_rank],
@@ -677,7 +677,7 @@ class _BucketedOwnedMuonBackend:
         if not self._specs:
             if error is not None:
                 raise error
-            raise ValueError("flex_shard requires at least one ComputeBucketSpec")
+            raise ValueError("flex_shard requires at least one BucketSpec")
 
         mesh = self._specs[0].mesh
         device = torch.device(mesh.device_type)
@@ -1138,7 +1138,7 @@ class _BucketedOwnedMuonBackend:
 
 def _build_muon_backend(
     optimizer: Optimizer,
-    specs: Sequence[ComputeBucketSpec],
+    specs: Sequence[BucketSpec],
 ) -> FlexShardBackend:
     from torchtitan.components.muon_adapter import MuonAdapter
 
@@ -1149,7 +1149,7 @@ def _build_muon_backend(
 
 def flex_shard(
     optimizer: _OptimizerT,
-    bucket_spec: Sequence[ComputeBucketSpec],
+    bucket_spec: Sequence[BucketSpec],
 ) -> _OptimizerT:
     """Apply an optimizer's registered storage-to-compute sharding plan.
 
@@ -1161,8 +1161,8 @@ def flex_shard(
         raise RuntimeError(f"{type(optimizer).__name__} is already flex-sharded")
 
     specs = tuple(bucket_spec)
-    if not all(isinstance(spec, ComputeBucketSpec) for spec in specs):
-        raise TypeError("bucket_spec must contain only ComputeBucketSpec objects")
+    if not all(isinstance(spec, BucketSpec) for spec in specs):
+        raise TypeError("bucket_spec must contain only BucketSpec objects")
 
     factory = next(
         (

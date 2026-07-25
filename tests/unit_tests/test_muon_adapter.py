@@ -19,8 +19,8 @@ from spmd_types._test_utils import FakeProcessGroupTestCase
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torchtitan.components.flex_shard import (
-    build_layer_compute_bucket_specs,
-    ComputeBucketSpec,
+    BucketSpec,
+    build_layer_bucket_specs,
     flex_shard,
     get_flex_shard_assignments,
 )
@@ -79,12 +79,12 @@ def _run_bucketed_muon_parity(
             "adjust_lr_fn": "match_rms_adamw",
         }
         bucket_specs = [
-            ComputeBucketSpec(
+            BucketSpec(
                 name="layer-0",
                 patterns=("layers.0.*",),
                 mesh=mesh,
             ),
-            ComputeBucketSpec(
+            BucketSpec(
                 name="layer-1",
                 patterns=("layers.1.*",),
                 mesh=mesh,
@@ -303,7 +303,7 @@ def _run_bucketed_muon_parity(
                 flex_shard(
                     bad_optimizer,
                     bucket_spec=[
-                        ComputeBucketSpec(
+                        BucketSpec(
                             patterns=("layers.0.*",),
                             mesh=mesh,
                         )
@@ -402,7 +402,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
     def test_compute_buckets_resolve_fqns_and_balance_layers(self):
         optimizer, _first, _second = self._bucketed_optimizer()
 
-        bucket_spec = build_layer_compute_bucket_specs(optimizer)
+        bucket_spec = build_layer_bucket_specs(optimizer)
         self.assertEqual(
             [(spec.name, spec.patterns) for spec in bucket_spec],
             [
@@ -463,7 +463,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
         returned = flex_shard(
             optimizer,
             bucket_spec=[
-                ComputeBucketSpec(
+                BucketSpec(
                     name="layers.0",
                     patterns=("layers.0.*",),
                     mesh=self.mesh,
@@ -497,7 +497,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
             flex_shard(
                 optimizer,
                 bucket_spec=[
-                    ComputeBucketSpec(
+                    BucketSpec(
                         patterns=("layers.0.*",),
                         mesh=self.mesh,
                     )
@@ -509,11 +509,11 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
             flex_shard(
                 optimizer,
                 bucket_spec=[
-                    ComputeBucketSpec(
+                    BucketSpec(
                         patterns=("layers.*",),
                         mesh=self.mesh,
                     ),
-                    ComputeBucketSpec(
+                    BucketSpec(
                         patterns=("layers.0.*", "layers.1.*"),
                         mesh=self.mesh,
                     ),
@@ -537,7 +537,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
             flex_shard(
                 optimizer,
                 bucket_spec=[
-                    ComputeBucketSpec(
+                    BucketSpec(
                         patterns=("layers.0.*",),
                         mesh=self.mesh,
                     )
@@ -550,7 +550,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
             flex_shard(
                 optimizer,
                 bucket_spec=[
-                    ComputeBucketSpec(
+                    BucketSpec(
                         patterns=("layers.*",),
                         mesh=self.mesh,
                     )
