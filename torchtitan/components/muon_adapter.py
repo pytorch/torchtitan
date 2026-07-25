@@ -8,23 +8,34 @@
 
 from collections.abc import MutableMapping
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
 import torch.distributed.tensor.placement_types as placement_types
 from torch import Tensor
-from torch.distributed.tensor import (
-    DTensor,
-    Partial,
-    Placement,
-    Replicate,
-    Shard,
-)
+from torch.distributed.tensor import DTensor, Partial, Placement, Replicate, Shard
 from torch.optim._muon import muon
 
+from torchtitan.components.muon_compute_bucket import (
+    build_layer_compute_bucket_specs,
+    ComputeBucketAssignment,
+    ComputeBucketSpec,
+    flex_shard,
+)
 
-__all__ = ["MuonAdapter"]
+
+if TYPE_CHECKING:
+    from torchtitan.components.muon_compute_bucket import _BucketedOwnedMuonBackend
+
+
+__all__ = [
+    "build_layer_compute_bucket_specs",
+    "ComputeBucketAssignment",
+    "ComputeBucketSpec",
+    "MuonAdapter",
+    "flex_shard",
+]
 
 
 def _is_shard_like(placement: Placement) -> bool:
@@ -34,8 +45,7 @@ def _is_shard_like(placement: Placement) -> bool:
 
     strided_shard_type = getattr(placement_types, "_StridedShard", None)
     return isinstance(placement, Shard) or (
-        strided_shard_type is not None
-        and isinstance(placement, strided_shard_type)
+        strided_shard_type is not None and isinstance(placement, strided_shard_type)
     )
 
 
@@ -50,6 +60,11 @@ class MuonAdapter(torch.optim.Muon):
     """
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
+        if getattr(self, "_compute_bucket_backend", None) is not None:
+            raise RuntimeError(
+                "MuonAdapter cannot add parameter groups after flex_shard plan "
+                "construction"
+            )
         if param_group.get("fused") or param_group.get("foreach"):
             raise NotImplementedError(
                 "MuonAdapter does not support fused or foreach implementations. "
@@ -57,6 +72,18 @@ class MuonAdapter(torch.optim.Muon):
                 "options in each Muon parameter group."
             )
         super().add_param_group(param_group)
+
+    def _install_compute_bucket_backend(
+        self, backend: "_BucketedOwnedMuonBackend"
+    ) -> None:
+        if getattr(self, "_compute_bucket_backend", None) is not None:
+            raise RuntimeError("MuonAdapter already has a compute bucket backend")
+        self._compute_bucket_backend = backend
+
+    @property
+    def compute_bucket_assignments(self) -> tuple[ComputeBucketAssignment, ...]:
+        backend = getattr(self, "_compute_bucket_backend", None)
+        return () if backend is None else backend.assignments
 
     @staticmethod
     def _compute_placements(
@@ -73,7 +100,8 @@ class MuonAdapter(torch.optim.Muon):
                     "optimizer step; Partial storage is not a valid input"
                 )
             if _is_shard_like(placement):
-                shard_dim = getattr(placement, "dim") % tensor.ndim
+                # pyrefly: ignore [missing-attribute]
+                shard_dim = placement.dim % tensor.ndim
                 # A logical reshape makes every physical shard boundary
                 # ambiguous. Native [..., M, N] tensors may retain shards only
                 # on their leading matrix-batch dimensions.
@@ -149,6 +177,62 @@ class MuonAdapter(torch.optim.Muon):
         matrix_numel = matrix_shape[0] * matrix_shape[1]
         batch_size = tensor.numel() // matrix_numel
         return tensor.view(batch_size, *matrix_shape)
+
+    def _compute_owned_pre_ns(
+        self,
+        param: DTensor,
+        grad: DTensor,
+        group: MutableMapping,
+    ) -> DTensor:
+        state = self.state[param]
+        if "momentum_buffer" not in state:
+            state["momentum_buffer"] = torch.zeros_like(
+                grad, memory_format=torch.preserve_format
+            )
+        momentum_buffer = state["momentum_buffer"]
+        assert isinstance(momentum_buffer, DTensor)
+        momentum_buffer.lerp_(grad, 1 - group["momentum"])
+        pre_ns = (
+            grad.lerp(momentum_buffer, group["momentum"])
+            if group["nesterov"]
+            else momentum_buffer
+        )
+        assert isinstance(pre_ns, DTensor)
+        return pre_ns
+
+    def _compute_owned_delta(
+        self,
+        full_pre: Tensor,
+        matrix_shape: tuple[int, int] | None,
+        group: MutableMapping,
+    ) -> Tensor:
+        logical_pre = self._logical_matrix_view(full_pre, matrix_shape)
+        scratch_param = torch.zeros_like(logical_pre)
+        scratch_momentum = torch.zeros_like(logical_pre)
+        muon(
+            [scratch_param],
+            [logical_pre],
+            [scratch_momentum],
+            lr=group["lr"],
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            ns_coefficients=group["ns_coefficients"],
+            eps=group["eps"],
+            ns_steps=group["ns_steps"],
+            adjust_lr_fn=group["adjust_lr_fn"],
+            has_complex=False,
+        )
+        return scratch_param.view(full_pre.shape)
+
+    @staticmethod
+    def _apply_owned_delta(
+        param: DTensor,
+        delta: DTensor,
+        group: MutableMapping,
+    ) -> None:
+        param.mul_(1 - group["lr"] * group["weight_decay"])
+        param.add_(delta)
 
     def _validate_group(self, group: MutableMapping) -> None:
         """Reject deterministic input errors before opening mutable views."""
@@ -263,6 +347,10 @@ class MuonAdapter(torch.optim.Muon):
     @torch.no_grad()
     def step(self, closure=None):
         """Run each parameter group in its requested physical compute layout."""
+        backend = getattr(self, "_compute_bucket_backend", None)
+        if backend is not None:
+            return backend.step(self, closure)
+
         loss = None
         if closure is not None:
             with torch.enable_grad():
