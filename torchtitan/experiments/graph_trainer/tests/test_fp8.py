@@ -164,10 +164,16 @@ class TestFP8ValidationPass(TestCase):
         *,
         backward: bool = False,
         quantization_kind: str = "float8_linear",
+        data_operand_dtype: torch.dtype = torch.float8_e4m3fn,
     ):
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
-        node = graph.call_function(target, args=(x,))
+        x.meta["val"] = torch.empty(1, dtype=torch.bfloat16)
+        data_operand = graph.placeholder("data_operand")
+        data_operand.meta["val"] = torch.empty(1, dtype=data_operand_dtype)
+        scale_operand = graph.placeholder("scale_operand")
+        scale_operand.meta["val"] = torch.empty(1, dtype=torch.float8_e4m3fn)
+        node = graph.call_function(target, args=(x, data_operand, scale_operand))
         node.meta["custom"] = {
             _MODULE_FQN: "layers.0.feed_forward.w1",
             _QUANTIZATION_KIND: quantization_kind,
@@ -183,8 +189,16 @@ class TestFP8ValidationPass(TestCase):
         target = next(iter(targets))
         gm, forward = self._graph_with_quantized_node(target)
         output = next(node for node in gm.graph.nodes if node.op == "output")
+        data_operand = next(
+            node for node in gm.graph.nodes if node.name == "data_operand"
+        )
+        scale_operand = next(
+            node for node in gm.graph.nodes if node.name == "scale_operand"
+        )
         with gm.graph.inserting_before(output):
-            backward = gm.graph.call_function(target, args=(forward,))
+            backward = gm.graph.call_function(
+                target, args=(forward, data_operand, scale_operand)
+            )
         backward.meta["custom"] = dict(forward.meta["custom"])
         backward.meta["autograd_backward"] = True
         output.args = (backward,)
@@ -227,6 +241,17 @@ class TestFP8ValidationPass(TestCase):
             region,
             {"forward_compute_ops": 1, "backward_compute_ops": 0},
         )
+
+    def test_fp8_scale_operand_does_not_prove_fp8_compute(self) -> None:
+        targets = FP8_COMPUTE_TARGETS["float8_linear"]
+        self.assertTrue(targets)
+        gm, _ = self._graph_with_quantized_node(
+            next(iter(targets)),
+            data_operand_dtype=torch.bfloat16,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "without a supported FP8 compute"):
+            validate_fp8_graph_pass(gm, strict=True)
 
     def test_non_quantized_graph_is_a_noop(self) -> None:
         graph = torch.fx.Graph()

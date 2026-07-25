@@ -32,6 +32,16 @@ def _available_scaled_mm_targets() -> frozenset[object]:
 
 
 _SCALED_MM_TARGETS = _available_scaled_mm_targets()
+_FP8_DATA_DTYPES = frozenset(
+    dtype
+    for dtype in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+        getattr(torch, "float8_e5m2", None),
+        getattr(torch, "float8_e5m2fnuz", None),
+    )
+    if dtype is not None
+)
 
 # Each quantization kind declares the operations that prove its compute was
 # lowered to a supported FP8 implementation. Add a new kind here together
@@ -44,8 +54,30 @@ FP8_COMPUTE_TARGETS: dict[str, frozenset[object]] = {
 }
 
 
+def _value_contains_fp8_tensor(value: object) -> bool:
+    if isinstance(value, torch.fx.Node):
+        return _value_contains_fp8_tensor(value.meta.get("val"))
+    if isinstance(value, torch.Tensor):
+        return value.dtype in _FP8_DATA_DTYPES
+    if isinstance(value, (tuple, list)):
+        return any(_value_contains_fp8_tensor(item) for item in value)
+    if isinstance(value, dict):
+        return any(_value_contains_fp8_tensor(item) for item in value.values())
+    return False
+
+
+def _has_fp8_data_operand(node: torch.fx.Node) -> bool:
+    # The first two operands of the supported scaled matrix multiplication
+    # overloads are the input matrices. Scale operands may use FP8 formats too,
+    # so they cannot establish that the compute itself is FP8.
+    return any(_value_contains_fp8_tensor(operand) for operand in node.args[:2])
+
+
 def _classify_fp8_node(node: torch.fx.Node, quantization_kind: str) -> str:
-    if node.target in FP8_COMPUTE_TARGETS.get(quantization_kind, frozenset()):
+    if (
+        node.target in FP8_COMPUTE_TARGETS.get(quantization_kind, frozenset())
+        and _has_fp8_data_operand(node)
+    ):
         return "compute"
 
     target_name = str(node.target)
@@ -55,10 +87,7 @@ def _classify_fp8_node(node: torch.fx.Node, quantization_kind: str) -> str:
         return "cast"
 
     value = node.meta.get("val")
-    if isinstance(value, torch.Tensor) and value.dtype in {
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-    }:
+    if _value_contains_fp8_tensor(value):
         return "cast"
     return "other"
 
