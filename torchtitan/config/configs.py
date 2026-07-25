@@ -216,6 +216,15 @@ class ParallelismConfig:
     - None: Disable load balancing
     """
 
+    context_parallel_ptrr_mask_key: str | None = None
+    """
+    When the load balancer is "ptrr" and the attention masks are a
+    dict[str, BlockMask], this selects which mask in the dict the
+    PTRRLoadBalancer is built from. The chosen balancer is then used to shard
+    every mask in the dict as well as the inputs. Only relevant for the "ptrr"
+    load balancer with dict-valued attention masks; ignored otherwise.
+    """
+
     def __post_init__(self):
         if self.spmd_backend not in {"default", "full_dtensor", "spmd_types"}:
             raise ValueError(
