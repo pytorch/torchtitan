@@ -208,8 +208,8 @@ def _identify_fp8_regional_components(
     provenance. FP8 placeholders are legal callable boundaries, notably when
     GraphPP passes shared grad-output quantization from bw_di to bw_dw; they
     prove the compute operand dtype but are not compiled as part of the local
-    region. Communication, host work, and grouped-expert FP8 remain outside
-    Phase 2 regional support.
+    region. Communication and host work remain outside these regions.
+    Grouped-expert FP8 is not supported by regional Inductor compilation.
     """
     candidate_nodes: set[torch.fx.Node] = set()
     seeds: list[torch.fx.Node] = []
@@ -226,7 +226,7 @@ def _identify_fp8_regional_components(
         if quantization_kind.endswith("grouped_experts"):
             raise ValueError(
                 "FP8 regional compilation does not support grouped experts. "
-                "Use full Inductor or wait for Phase 4 MoE support."
+                "Use full Inductor for grouped-expert FP8 graphs."
             )
         if _is_regional_fp8_compute_node(
             node,
