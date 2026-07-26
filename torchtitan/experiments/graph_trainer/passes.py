@@ -137,24 +137,15 @@ def async_tensor_parallel_pass(
 def graph_pp_pre_partition_fp8_passes(
     compile_config: GraphTrainerCompileConfig,
 ) -> list[Callable]:
-    """Return FP8 passes that require the complete GraphPP joint graph."""
+    """Return FP8 validation that requires the complete GraphPP joint graph."""
     if not compile_config.fp8.enabled:
         return []
-    if compile_config.inductor_compilation == "full":
-        return [
-            functools.partial(
-                validate_fp8_graph_pass,
-                strict=compile_config.fp8.strict_validation,
-            )
-        ]
-    if compile_config.inductor_compilation == "regional":
-        return [
-            functools.partial(
-                annotate_fp8_regions_for_regional_inductor_pass,
-                strict=compile_config.fp8.strict_validation,
-            )
-        ]
-    return []
+    return [
+        functools.partial(
+            validate_fp8_graph_pass,
+            strict=compile_config.fp8.strict_validation,
+        )
+    ]
 
 
 def _tensor_parallel_degree(config, parallel_dims=None) -> int:

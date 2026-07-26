@@ -707,7 +707,7 @@ class TestFP8PassOrdering(TestCase):
             pass_names.index("regional_inductor_pass"),
         )
 
-    def test_graph_pp_keeps_regional_annotation_before_partitioning(self) -> None:
+    def test_graph_pp_validates_before_partitioning(self) -> None:
         compile_config = GraphTrainerCompileConfig(
             inductor_compilation="regional",
             disable_passes=["cudagraph_pass"],
@@ -720,5 +720,4 @@ class TestFP8PassOrdering(TestCase):
             for pass_fn in passes
         ]
 
-        self.assertIn("annotate_fp8_regions_for_regional_inductor_pass", pass_names)
-        self.assertNotIn("regional_inductor_pass", pass_names)
+        self.assertEqual(pass_names, ["validate_fp8_graph_pass"])
