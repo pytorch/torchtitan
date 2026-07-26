@@ -351,7 +351,7 @@ def validate_fp8_graph_pass(
     )
 
 
-def identify_fp8_regions_for_regional_inductor_pass(
+def annotate_fp8_regions_for_regional_inductor_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
