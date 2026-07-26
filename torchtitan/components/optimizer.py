@@ -182,10 +182,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             params: list[nn.Parameter] = []
             param_names: list[str] = []
             for name, param in model.named_parameters():
-                if param.requires_grad and name not in claimed and pattern.search(name):
+                param_name = canonical_fqn(name)
+                if (
+                    param.requires_grad
+                    and param_name not in claimed
+                    and pattern.search(param_name)
+                ):
                     params.append(param)
-                    param_names.append(canonical_fqn(name))
-                    claimed.add(name)
+                    param_names.append(param_name)
+                    claimed.add(param_name)
 
             if not params:
                 raise ValueError(
