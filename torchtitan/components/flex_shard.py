@@ -13,7 +13,7 @@ import hashlib
 import heapq
 import math
 import re
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from types import MethodType
 from typing import Any, cast, Protocol, TYPE_CHECKING, TypeVar
@@ -111,9 +111,11 @@ ComputeShardingRequirement = SameAsStorage | Owned
 class FlexShardOptimizer(Protocol):
     """Optimizer-side declaration and distribution-agnostic compute hooks.
 
-    ``prepare``, ``compute``, and ``finalize`` receive only plain tensors and
-    return staged values. They neither choose owners nor mutate persistent
-    storage; the FlexShard runtime performs redistribution and copyback.
+    ``prepare``, ``compute``, and ``finalize`` receive only plain tensors.
+    FlexShard chooses owners and supplies output buffers; the optimizer writes
+    distribution-agnostic results into those buffers. ``prepare`` may update
+    local optimizer state in place, and ``finalize`` must support ``out``
+    aliasing ``param``.
     """
 
     param_groups: list[dict[str, Any]]
@@ -151,9 +153,11 @@ class FlexShardOptimizer(Protocol):
         self,
         param: Tensor,
         grad: Tensor,
-        state: MutableMapping[str, Tensor],
+        state: Mapping[str, Tensor],
         group: MutableMapping[str, Any],
-    ) -> Tensor:
+        *,
+        out: Tensor,
+    ) -> None:
         ...
 
     def flex_shard_compute(
@@ -168,7 +172,9 @@ class FlexShardOptimizer(Protocol):
         param: Tensor,
         update: Tensor,
         group: MutableMapping[str, Any],
-    ) -> Tensor:
+        *,
+        out: Tensor,
+    ) -> None:
         ...
 
 
@@ -319,6 +325,7 @@ class _BucketPlan:
     device: torch.device
     local_buffer_numel: int
     owner_buffer_numel: int
+    owner_buffer_is_compute_layout: bool
 
 
 def _mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
@@ -655,6 +662,11 @@ def _build_bucket_plan(
         local_offsets,
         owner_offsets,
     ) = _routing_metadata(bindings, group_rank, world_size)
+    # With one binding per owner, source-rank Shard(0) pieces are already
+    # concatenated in global flat-tensor order by the all-to-all.
+    owner_buffer_is_compute_layout = len(
+        {binding.owner_group_rank for binding in bindings}
+    ) == len(bindings)
 
     return _BucketPlan(
         spec=spec,
@@ -670,6 +682,7 @@ def _build_bucket_plan(
         device=device,
         local_buffer_numel=sum(input_split_sizes),
         owner_buffer_numel=sum(output_split_sizes),
+        owner_buffer_is_compute_layout=owner_buffer_is_compute_layout,
     )
 
 
@@ -908,19 +921,6 @@ class _OwnedFlexShardRuntime:
         )
 
     @staticmethod
-    def _copy_local_to_storage(storage: DTensor, local_value: Tensor) -> None:
-        storage.copy_(
-            DTensor.from_local(
-                local_value,
-                device_mesh=storage.device_mesh,
-                placements=storage.placements,
-                run_check=False,
-                shape=storage.shape,
-                stride=storage.stride(),
-            )
-        )
-
-    @staticmethod
     def _validate_local_value(
         value: Tensor,
         expected: Tensor,
@@ -937,13 +937,13 @@ class _OwnedFlexShardRuntime:
                 f"{hook_name}() output must match the expected local tensor layout"
             )
 
-    @classmethod
+    @staticmethod
     def _prepare_local_compute(
-        cls,
         optimizer: Optimizer,
         binding: _Binding,
         grad: DTensor,
-    ) -> tuple[Tensor, list[tuple[DTensor, Tensor]]]:
+        out: Tensor,
+    ) -> None:
         group = optimizer.param_groups[binding.group_index]
         compute_optimizer = cast(FlexShardOptimizer, optimizer)
         persistent_state = compute_optimizer.flex_shard_init_state(
@@ -961,30 +961,27 @@ class _OwnedFlexShardRuntime:
                 raise TypeError(
                     f"Owned FlexShard state {name!r} must be stored as a DTensor"
                 )
-            local_state[name] = value.to_local().clone()
-            tensor_state[name] = value
+            local_value = value.to_local()
+            local_state[name] = local_value
+            tensor_state[name] = (value, local_value, local_value._version)
 
-        compute_input = compute_optimizer.flex_shard_prepare(
+        result = compute_optimizer.flex_shard_prepare(
             binding.param.to_local(),
             grad.to_local(),
             local_state,
             group,
+            out=out,
         )
-        cls._validate_local_value(
-            compute_input,
-            binding.param.to_local(),
-            "flex_shard_prepare",
-        )
-        state_writebacks = []
-        for name, storage in tensor_state.items():
-            local_value = local_state[name]
-            cls._validate_local_value(
-                local_value,
-                storage.to_local(),
-                f"flex_shard_prepare state {name!r}",
-            )
-            state_writebacks.append((storage, local_value))
-        return compute_input, state_writebacks
+        if result is not None:
+            raise TypeError("flex_shard_prepare() must write to out and return None")
+        if local_state.keys() != tensor_state.keys() or any(
+            local_state[name] is not local_value
+            for name, (_storage, local_value, _version) in tensor_state.items()
+        ):
+            raise TypeError("flex_shard_prepare() must update state tensors in place")
+        for storage, local_value, version in tensor_state.values():
+            if local_value._version != version:
+                torch.autograd.graph.increment_version(storage)
 
     def _active_params(self) -> dict[int, bool]:
         active_by_param = {}
@@ -1028,7 +1025,7 @@ class _OwnedFlexShardRuntime:
         if not any(active_by_param[id(binding.param)] for binding in plan.bindings):
             return
 
-        local_buffer = torch.zeros(
+        local_buffer = torch.empty(
             plan.local_buffer_numel,
             dtype=plan.dtype,
             device=plan.device,
@@ -1038,22 +1035,21 @@ class _OwnedFlexShardRuntime:
             dtype=plan.dtype,
             device=plan.device,
         )
-        state_writebacks: list[tuple[DTensor, Tensor]] = []
         for binding_index, binding in enumerate(plan.bindings):
+            local_offset = plan.local_offsets[binding_index]
+            local_numel = binding.shard_numels[plan.group_rank]
+            local_output = local_buffer[local_offset : local_offset + local_numel]
             if not active_by_param[id(binding.param)]:
+                local_output.zero_()
                 continue
             grad = binding.param.grad
             assert isinstance(grad, DTensor)
-            compute_input, binding_state_writebacks = self._prepare_local_compute(
+            local_param = binding.param.to_local()
+            self._prepare_local_compute(
                 optimizer,
                 binding,
                 grad,
-            )
-            state_writebacks.extend(binding_state_writebacks)
-            local_input = compute_input.contiguous().view(-1)
-            local_offset = plan.local_offsets[binding_index]
-            local_buffer[local_offset : local_offset + local_input.numel()].copy_(
-                local_input
+                local_output.view(local_param.shape),
             )
 
         dist.all_to_all_single(
@@ -1064,25 +1060,29 @@ class _OwnedFlexShardRuntime:
             group=plan.process_group,
         )
 
+        reverse_buffer = owner_buffer
         for binding_index, binding in enumerate(plan.bindings):
             if (
                 binding.owner_group_rank != plan.group_rank
                 or not active_by_param[id(binding.param)]
             ):
                 continue
-            full_input = torch.empty(
-                binding.global_shape,
-                dtype=owner_buffer.dtype,
-                device=owner_buffer.device,
-            )
-            flat_input = full_input.view(-1)
-            for source_rank in range(plan.world_size):
-                source_numel = binding.shard_numels[source_rank]
-                source_offset = binding.shard_offsets[source_rank]
-                owner_offset = plan.owner_offsets[(binding_index, source_rank)]
-                flat_input[source_offset : source_offset + source_numel].copy_(
-                    owner_buffer[owner_offset : owner_offset + source_numel]
+            if plan.owner_buffer_is_compute_layout:
+                full_input = owner_buffer.view(binding.global_shape)
+            else:
+                full_input = torch.empty(
+                    binding.global_shape,
+                    dtype=owner_buffer.dtype,
+                    device=owner_buffer.device,
                 )
+                flat_input = full_input.view(-1)
+                for source_rank in range(plan.world_size):
+                    source_numel = binding.shard_numels[source_rank]
+                    source_offset = binding.shard_offsets[source_rank]
+                    owner_offset = plan.owner_offsets[(binding_index, source_rank)]
+                    flat_input[source_offset : source_offset + source_numel].copy_(
+                        owner_buffer[owner_offset : owner_offset + source_numel]
+                    )
             full_update = self._compute_owned_update(optimizer, binding, full_input)
             self._validate_local_value(
                 full_update,
@@ -1090,25 +1090,27 @@ class _OwnedFlexShardRuntime:
                 "flex_shard_compute",
             )
             flat_update = full_update.view(-1)
-            for destination_rank in range(plan.world_size):
-                destination_numel = binding.shard_numels[destination_rank]
-                destination_offset = binding.shard_offsets[destination_rank]
-                owner_offset = plan.owner_offsets[(binding_index, destination_rank)]
-                owner_buffer[owner_offset : owner_offset + destination_numel].copy_(
-                    flat_update[
-                        destination_offset : destination_offset + destination_numel
-                    ]
-                )
+            if plan.owner_buffer_is_compute_layout:
+                reverse_buffer = flat_update
+            else:
+                for destination_rank in range(plan.world_size):
+                    destination_numel = binding.shard_numels[destination_rank]
+                    destination_offset = binding.shard_offsets[destination_rank]
+                    owner_offset = plan.owner_offsets[(binding_index, destination_rank)]
+                    owner_buffer[owner_offset : owner_offset + destination_numel].copy_(
+                        flat_update[
+                            destination_offset : destination_offset + destination_numel
+                        ]
+                    )
 
         dist.all_to_all_single(
             local_buffer,
-            owner_buffer,
+            reverse_buffer,
             output_split_sizes=plan.input_split_sizes,
             input_split_sizes=plan.output_split_sizes,
             group=plan.process_group,
         )
 
-        writebacks = []
         for binding_index, binding in enumerate(plan.bindings):
             if not active_by_param[id(binding.param)]:
                 continue
@@ -1118,19 +1120,17 @@ class _OwnedFlexShardRuntime:
                 local_offset : local_offset + local_param.numel()
             ].view(local_param.shape)
             group = optimizer.param_groups[binding.group_index]
-            updated_param = cast(FlexShardOptimizer, optimizer).flex_shard_finalize(
-                local_param, local_update, group
-            )
-            self._validate_local_value(
-                updated_param,
+            result = cast(FlexShardOptimizer, optimizer).flex_shard_finalize(
                 local_param,
-                "flex_shard_finalize",
+                local_update,
+                group,
+                out=local_param,
             )
-            writebacks.append((binding.param, updated_param))
-        for storage, local_value in state_writebacks:
-            self._copy_local_to_storage(storage, local_value)
-        for storage, local_value in writebacks:
-            self._copy_local_to_storage(storage, local_value)
+            if result is not None:
+                raise TypeError(
+                    "flex_shard_finalize() must write to out and return None"
+                )
+            torch.autograd.graph.increment_version(binding.param)
 
     def step(self, optimizer: Optimizer, closure=None):
         loss = None

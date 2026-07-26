@@ -49,6 +49,8 @@ def _run_bucketed_muon_parity(
             torch.arange(1, 25, dtype=torch.float32).reshape(6, 4) / 29,
             torch.arange(1, 16, dtype=torch.float32).reshape(5, 3) / 17,
             torch.arange(1, 9, dtype=torch.float32).reshape(4, 2) / 11,
+            torch.arange(1, 16, dtype=torch.float32).reshape(3, 5) / 23,
+            torch.arange(1, 7, dtype=torch.float32).reshape(3, 2) / 13,
         ]
 
         def to_dtensor(tensor: torch.Tensor) -> DTensor:
@@ -70,6 +72,8 @@ def _run_bucketed_muon_parity(
             torch.nn.Parameter(full_values[0].clone().view(2, 3, 4)),
             torch.nn.Parameter(full_values[1].clone()),
             torch.nn.Parameter(full_values[2].clone()),
+            torch.nn.Parameter(full_values[3].clone()),
+            torch.nn.Parameter(full_values[4].clone()),
         ]
         kwargs = {
             "lr": 0.03,
@@ -108,6 +112,14 @@ def _run_bucketed_muon_parity(
                         "params": [optimizer_params[2]],
                         "param_names": ["layers.0.feed_forward.w1.weight"],
                     },
+                    {
+                        "params": [optimizer_params[3]],
+                        "param_names": ["layers.1.feed_forward.w2.weight"],
+                    },
+                    {
+                        "params": [optimizer_params[4]],
+                        "param_names": ["layers.1.feed_forward.w3.weight"],
+                    },
                 ],
                 **{**kwargs, **overrides},
             )
@@ -119,6 +131,8 @@ def _run_bucketed_muon_parity(
                 {"params": [references[0]]},
                 {"params": [references[1]]},
                 {"params": [references[2]]},
+                {"params": [references[3]]},
+                {"params": [references[4]]},
             ],
             **kwargs,
         )
@@ -154,6 +168,7 @@ def _run_bucketed_muon_parity(
         storage_placements = [param.placements for param in params]
         persistent_momentum = [None] * len(params)
         momentum_ptrs = [None] * len(params)
+        momentum_versions = [None] * len(params)
 
         def assert_state_matches_reference():
             for index, (param, reference) in enumerate(
@@ -188,6 +203,12 @@ def _run_bucketed_muon_parity(
                 else:
                     assert momentum is persistent_momentum[index]
                     assert momentum.to_local().data_ptr() == momentum_ptrs[index]
+                    previous_version = momentum_versions[index]
+                    assert previous_version is not None
+                    assert momentum._version == previous_version + int(
+                        param.grad is not None
+                    )
+                momentum_versions[index] = momentum._version
 
         with (
             patch.object(dist, "all_to_all_single", side_effect=counted_all_to_all),

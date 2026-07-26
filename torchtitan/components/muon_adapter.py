@@ -6,7 +6,7 @@
 
 """Adapt core Muon to persistent storage layouts and logical matrix views."""
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from contextlib import ExitStack
 from typing import Any
 
@@ -259,18 +259,19 @@ class MuonAdapter(torch.optim.Muon):
     def flex_shard_prepare(
         param: Tensor,
         grad: Tensor,
-        state: MutableMapping[str, Tensor],
+        state: Mapping[str, Tensor],
         group: MutableMapping,
-    ) -> Tensor:
+        *,
+        out: Tensor,
+    ) -> None:
         if param.shape != grad.shape:
             raise ValueError("Muon parameter and gradient shapes must match")
         momentum_buffer = state["momentum_buffer"]
         momentum_buffer.lerp_(grad, 1 - group["momentum"])
-        return (
-            grad.lerp(momentum_buffer, group["momentum"])
-            if group["nesterov"]
-            else momentum_buffer
-        )
+        if group["nesterov"]:
+            torch.lerp(grad, momentum_buffer, group["momentum"], out=out)
+        else:
+            out.copy_(momentum_buffer)
 
     def flex_shard_compute(
         self,
@@ -303,8 +304,15 @@ class MuonAdapter(torch.optim.Muon):
         param: Tensor,
         update: Tensor,
         group: MutableMapping,
-    ) -> Tensor:
-        return param * (1 - group["lr"] * group["weight_decay"]) + update
+        *,
+        out: Tensor,
+    ) -> None:
+        decay = 1 - group["lr"] * group["weight_decay"]
+        if isinstance(decay, Tensor):
+            torch.mul(param, decay, out=out)
+            out.add_(update)
+        else:
+            torch.add(update, param, alpha=decay, out=out)
 
     def _validate_group(self, group: MutableMapping) -> None:
         """Reject deterministic input errors before opening mutable views."""
