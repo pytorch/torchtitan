@@ -97,14 +97,19 @@ class MuonAdapter(torch.optim.Muon):
     ) -> Tensor:
         if isinstance(tensor, DTensor):
             return compute_views.enter_context(
-                spmd.dtensor_compute_view(
+                spmd.dtensor_compute_view(  # pyrefly: ignore [missing-attribute]
                     tensor,
                     placements=self._compute_placements(tensor, matrix_shape),
                     writeback=writeback,
                 )
             )
-        tensor_is_typed = spmd.has_local_type(tensor)
-        if source is not None and spmd.has_local_type(source):
+        tensor_is_typed = spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
+            tensor
+        )
+        source_is_typed = source is not None and spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
+            source
+        )
+        if source_is_typed:
             spmd.assert_type_like(tensor, source)
         elif source is not None and tensor_is_typed:
             raise spmd.SpmdTypeError(
@@ -187,7 +192,7 @@ class MuonAdapter(torch.optim.Muon):
                 if isinstance(persistent_momentum, DTensor):
                     self._compute_placements(persistent_momentum, matrix_shape)
 
-    def _init_group(
+    def _init_compute_group(
         self,
         group: MutableMapping,
         params_with_grad: list[Tensor],
@@ -215,10 +220,12 @@ class MuonAdapter(torch.optim.Muon):
                 matrix_shape=matrix_shape,
                 writeback=False,
             )
-            if spmd.has_local_type(param):
+            if spmd.has_local_type(param):  # pyrefly: ignore [missing-attribute]
                 spmd.assert_type_like(grad, param)
                 for compute_tensor in (param, grad):
-                    spmd.assert_local_block(compute_tensor, trailing_dims=2)
+                    spmd.assert_local_block(  # pyrefly: ignore [missing-attribute]
+                        compute_tensor, trailing_dims=2
+                    )
             if param.shape != grad.shape:
                 raise RuntimeError(
                     "MuonAdapter parameter and gradient local views must have the "
@@ -244,9 +251,13 @@ class MuonAdapter(torch.optim.Muon):
                 matrix_shape=matrix_shape,
                 writeback=True,
             )
-            if spmd.has_local_type(storage_param):
+            if spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
+                storage_param
+            ):
                 spmd.assert_type_like(momentum, storage_param)
-                spmd.assert_local_block(momentum, trailing_dims=2)
+                spmd.assert_local_block(  # pyrefly: ignore [missing-attribute]
+                    momentum, trailing_dims=2
+                )
             momentum = self._logical_matrix_view(momentum, matrix_shape)
             if momentum.shape != param.shape:
                 raise RuntimeError(
@@ -281,7 +292,7 @@ class MuonAdapter(torch.optim.Muon):
                 params_with_grad: list[Tensor] = []
                 grads: list[Tensor] = []
                 muon_momentum_bufs: list[Tensor] = []
-                has_complex = self._init_group(
+                has_complex = self._init_compute_group(
                     group,
                     params_with_grad,
                     grads,
