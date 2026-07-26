@@ -72,7 +72,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
 )
 from torchtitan.experiments.graph_trainer.fp8_passes import (
     annotate_complete_fp8_regions_for_regional_inductor_pass,
-    identify_fp8_regions_for_regional_inductor_pass,
+    annotate_fp8_regions_for_regional_inductor_pass,
     validate_fp8_graph_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
@@ -150,7 +150,7 @@ def graph_pp_pre_partition_fp8_passes(
     if compile_config.inductor_compilation == "regional":
         return [
             functools.partial(
-                identify_fp8_regions_for_regional_inductor_pass,
+                annotate_fp8_regions_for_regional_inductor_pass,
                 strict=compile_config.fp8.strict_validation,
             )
         ]
@@ -438,7 +438,7 @@ def final_inductor_compile_passes(
         if fp8_enabled:
             passes.append(
                 functools.partial(
-                    identify_fp8_regions_for_regional_inductor_pass,
+                    annotate_fp8_regions_for_regional_inductor_pass,
                     strict=strict_validation,
                 )
             )

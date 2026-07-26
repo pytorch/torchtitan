@@ -37,7 +37,7 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.fp8_passes import (
     FP8_COMPUTE_TARGETS,
     annotate_complete_fp8_regions_for_regional_inductor_pass,
-    identify_fp8_regions_for_regional_inductor_pass,
+    annotate_fp8_regions_for_regional_inductor_pass,
     validate_fp8_graph_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
@@ -349,7 +349,7 @@ class TestFP8RegionalAnnotation(TestCase):
             "torchtitan.experiments.graph_trainer.fp8_passes._is_regional_fp8_compute_node",
             return_value=True,
         ):
-            identify_fp8_regions_for_regional_inductor_pass(gm, strict=False)
+            annotate_fp8_regions_for_regional_inductor_pass(gm, strict=False)
         annotate_complete_fp8_regions_for_regional_inductor_pass(gm)
 
         self.assertEqual(gm.meta["fp8_regional_summary"]["num_regions"], 1)
@@ -365,7 +365,7 @@ class TestFP8RegionalAnnotation(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         with self.assertRaisesRegex(ValueError, "grouped experts"):
-            identify_fp8_regions_for_regional_inductor_pass(gm, strict=False)
+            annotate_fp8_regions_for_regional_inductor_pass(gm, strict=False)
 
     def test_identifies_fp8_region_without_tagging_inductor(self) -> None:
         graph = torch.fx.Graph()
@@ -386,7 +386,7 @@ class TestFP8RegionalAnnotation(TestCase):
             "torchtitan.experiments.graph_trainer.fp8_passes._is_regional_fp8_compute_node",
             return_value=True,
         ):
-            identify_fp8_regions_for_regional_inductor_pass(
+            annotate_fp8_regions_for_regional_inductor_pass(
                 gm,
                 strict=False,
             )
@@ -470,7 +470,7 @@ class TestFP8RegionalAnnotation(TestCase):
                 "_is_regional_fp8_compute_node",
                 return_value=True,
             ):
-                identify_fp8_regions_for_regional_inductor_pass(gm, strict=False)
+                annotate_fp8_regions_for_regional_inductor_pass(gm, strict=False)
             annotate_complete_fp8_regions_for_regional_inductor_pass(gm)
 
             self.assertEqual(gm.meta["fp8_regional_summary"]["num_regions"], 1)
@@ -523,7 +523,7 @@ class TestFP8RegionalCompilation(TestCase):
             )
         )
 
-        identify_fp8_regions_for_regional_inductor_pass(traced.gm, strict=True)
+        annotate_fp8_regions_for_regional_inductor_pass(traced.gm, strict=True)
         annotate_complete_fp8_regions_for_regional_inductor_pass(traced.gm)
         traced.gm = regional_inductor_pass(traced.gm, traced.example_inputs)
         actual = run_traced(traced, module=model)(input_tensor)
@@ -615,10 +615,10 @@ class TestFP8PassOrdering(TestCase):
         ]
         self.assertLess(
             pass_names.index("annotate_rmsnorm_for_regional_inductor_pass"),
-            pass_names.index("identify_fp8_regions_for_regional_inductor_pass"),
+            pass_names.index("annotate_fp8_regions_for_regional_inductor_pass"),
         )
         self.assertLess(
-            pass_names.index("identify_fp8_regions_for_regional_inductor_pass"),
+            pass_names.index("annotate_fp8_regions_for_regional_inductor_pass"),
             pass_names.index(
                 "annotate_complete_fp8_regions_for_regional_inductor_pass"
             ),
@@ -637,7 +637,7 @@ class TestFP8PassOrdering(TestCase):
             for pass_fn in skipped_passes
         ]
         self.assertNotIn(
-            "identify_fp8_regions_for_regional_inductor_pass", skipped_names
+            "annotate_fp8_regions_for_regional_inductor_pass", skipped_names
         )
         self.assertNotIn(
             "annotate_complete_fp8_regions_for_regional_inductor_pass",
@@ -664,7 +664,7 @@ class TestFP8PassOrdering(TestCase):
         ]
 
         self.assertIn("validate_fp8_graph_pass", pass_names)
-        self.assertNotIn("identify_fp8_regions_for_regional_inductor_pass", pass_names)
+        self.assertNotIn("annotate_fp8_regions_for_regional_inductor_pass", pass_names)
         self.assertLess(
             pass_names.index("async_tensor_parallel_pass"),
             pass_names.index("validate_fp8_graph_pass"),
@@ -700,10 +700,10 @@ class TestFP8PassOrdering(TestCase):
         )
         self.assertLess(
             pass_names.index("annotate_rmsnorm_for_regional_inductor_pass"),
-            pass_names.index("identify_fp8_regions_for_regional_inductor_pass"),
+            pass_names.index("annotate_fp8_regions_for_regional_inductor_pass"),
         )
         self.assertLess(
-            pass_names.index("identify_fp8_regions_for_regional_inductor_pass"),
+            pass_names.index("annotate_fp8_regions_for_regional_inductor_pass"),
             pass_names.index("regional_inductor_pass"),
         )
 
@@ -720,5 +720,5 @@ class TestFP8PassOrdering(TestCase):
             for pass_fn in passes
         ]
 
-        self.assertIn("identify_fp8_regions_for_regional_inductor_pass", pass_names)
+        self.assertIn("annotate_fp8_regions_for_regional_inductor_pass", pass_names)
         self.assertNotIn("regional_inductor_pass", pass_names)
