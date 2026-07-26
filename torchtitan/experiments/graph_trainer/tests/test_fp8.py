@@ -20,6 +20,7 @@ from torchtitan.components.quantization.utils import QuantizationSignature
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
+    _QUANTIZATION_EMULATE,
     _QUANTIZATION_KIND,
     annotate_module_fqns,
 )
@@ -133,6 +134,37 @@ class TestFP8Provenance(TestCase):
         self.assertTrue(
             all(
                 metadata[_QUANTIZATION_KIND] == "float8_linear"
+                for metadata in custom_metadata
+            )
+        )
+        self.assertTrue(
+            all(
+                metadata[_QUANTIZATION_EMULATE] is False
+                for metadata in custom_metadata
+            )
+        )
+
+    def test_module_annotation_includes_emulation_mode(self) -> None:
+        model = nn.Sequential(nn.ReLU())
+        model[0]._torchtitan_quantization_emulate = True
+        with patch(
+            "torchtitan.components.quantization.utils.get_quantization_kind",
+            return_value="float8_linear",
+        ):
+            annotate_module_fqns(model)
+
+        with preserve_node_meta():
+            gm = make_fx(model)(torch.randn(2, 2))
+
+        custom_metadata = [
+            node.meta.get("custom", {})
+            for node in gm.graph.nodes
+            if node.meta.get("custom", {}).get(_MODULE_FQN) == "0"
+        ]
+        self.assertTrue(custom_metadata)
+        self.assertTrue(
+            all(
+                metadata[_QUANTIZATION_EMULATE] is True
                 for metadata in custom_metadata
             )
         )
@@ -253,6 +285,20 @@ class TestFP8ValidationPass(TestCase):
         with self.assertRaisesRegex(RuntimeError, "without a supported FP8 compute"):
             validate_fp8_graph_pass(gm, strict=True)
 
+    def test_emulated_float8_region_does_not_require_scaled_compute(self) -> None:
+        gm, node = self._graph_with_quantized_node(torch.ops.aten.mm.default)
+        node.meta["custom"][_QUANTIZATION_EMULATE] = True
+
+        validate_fp8_graph_pass(gm, strict=True)
+
+        region = gm.meta["fp8_summary"]["regions"][
+            "('layers.0.feed_forward.w1', 'float8_linear')"
+        ]
+        self.assertEqual(
+            region,
+            {"forward_compute_ops": 0, "backward_compute_ops": 0},
+        )
+
     def test_non_quantized_graph_is_a_noop(self) -> None:
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
@@ -263,15 +309,14 @@ class TestFP8ValidationPass(TestCase):
 
         self.assertEqual(gm.meta["fp8_summary"], {"regions": {}, "target_inventory": {}})
 
-    def test_non_quantized_graph_is_a_noop_in_strict_mode(self) -> None:
+    def test_strict_validation_rejects_missing_quantized_region(self) -> None:
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
         graph.output(x)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
-        validate_fp8_graph_pass(gm, strict=True)
-
-        self.assertEqual(gm.meta["fp8_summary"], {"regions": {}, "target_inventory": {}})
+        with self.assertRaisesRegex(RuntimeError, "did not find quantized module"):
+            validate_fp8_graph_pass(gm, strict=True)
 
 
 class TestFP8RegionalAnnotation(TestCase):
@@ -292,6 +337,9 @@ class TestFP8RegionalAnnotation(TestCase):
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
         cast = self._node(graph, torch.ops.aten.clone.default, (x,))
+        cast.meta["val"] = torch.empty(
+            1, device="meta", dtype=torch.float8_e4m3fn
+        )
         gemm = self._node(graph, target, (cast,))
         gemm.meta["custom"]["fp8"]["op_role"] = "compute"
         graph.output(gemm)
@@ -323,6 +371,9 @@ class TestFP8RegionalAnnotation(TestCase):
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
         cast = self._node(graph, torch.ops.aten.clone.default, (x,))
+        cast.meta["val"] = torch.empty(
+            1, device="meta", dtype=torch.float8_e4m3fn
+        )
         compute = self._node(
             graph,
             next(iter(FP8_COMPUTE_TARGETS["float8_linear"])),
@@ -385,9 +436,53 @@ class TestFP8RegionalAnnotation(TestCase):
         partial_graph.output(partial_cast)
         partial_gm = torch.fx.GraphModule(torch.nn.Module(), partial_graph)
 
-        annotate_complete_fp8_regions_for_regional_inductor_pass(partial_gm)
+        with self.assertWarnsRegex(UserWarning, "incomplete FP8 regional"):
+            annotate_complete_fp8_regions_for_regional_inductor_pass(partial_gm)
 
         self.assertNotIn("compile_with_inductor", partial_cast.meta["custom"])
+
+    def test_reidentifies_partitioned_fp8_regions(self) -> None:
+        target = next(iter(FP8_COMPUTE_TARGETS["float8_linear"]))
+
+        def make_partition(region_id: int) -> tuple[torch.fx.GraphModule, list]:
+            graph = torch.fx.Graph()
+            x = graph.placeholder("x")
+            cast = self._node(graph, torch.ops.aten.clone.default, (x,))
+            cast.meta["val"] = torch.empty(
+                1, device="meta", dtype=torch.float8_e4m3fn
+            )
+            compute = self._node(graph, target, (cast,))
+            compute.meta["custom"]["fp8"]["op_role"] = "compute"
+            graph.output(compute)
+            for node in (cast, compute):
+                node.meta["custom"]["fp8"].update(
+                    {
+                        "regional_region_id": region_id,
+                        "regional_region_num_nodes": 4,
+                    }
+                )
+            return torch.fx.GraphModule(torch.nn.Module(), graph), [cast, compute]
+
+        for region_id in (0, 1):
+            gm, nodes = make_partition(region_id)
+            with patch(
+                "torchtitan.experiments.graph_trainer.fp8_passes."
+                "_is_regional_fp8_compute_node",
+                return_value=True,
+            ):
+                identify_fp8_regions_for_regional_inductor_pass(gm, strict=False)
+            annotate_complete_fp8_regions_for_regional_inductor_pass(gm)
+
+            self.assertEqual(gm.meta["fp8_regional_summary"]["num_regions"], 1)
+            self.assertTrue(
+                all(
+                    node.meta["custom"]["fp8"]["regional_region_num_nodes"] == 2
+                    for node in nodes
+                )
+            )
+            self.assertTrue(
+                all("compile_with_inductor" in node.meta["custom"] for node in nodes)
+            )
 
 
 @unittest.skipUnless(
@@ -491,10 +586,7 @@ class TestFP8PassOrdering(TestCase):
             fp8=FP8GraphConfig(enabled=True),
         )
 
-        fp8_passes = final_inductor_compile_passes(
-            config,
-            include_fp8_passes=True,
-        )
+        fp8_passes = final_inductor_compile_passes(config)
         fp8_pass_names = [
             pass_fn.func.__name__ if hasattr(pass_fn, "func") else pass_fn.__name__
             for pass_fn in fp8_passes
@@ -504,6 +596,7 @@ class TestFP8PassOrdering(TestCase):
             ["validate_fp8_graph_pass", "full_inductor_compilation_pass"],
         )
 
+        config.fp8.enabled = False
         skipped_passes = final_inductor_compile_passes(config)
         self.assertEqual(len(skipped_passes), 1)
 
@@ -515,10 +608,7 @@ class TestFP8PassOrdering(TestCase):
             fp8=FP8GraphConfig(enabled=True),
         )
 
-        passes = final_inductor_compile_passes(
-            config,
-            include_fp8_passes=True,
-        )
+        passes = final_inductor_compile_passes(config)
         pass_names = [
             pass_fn.func.__name__ if hasattr(pass_fn, "func") else pass_fn.__name__
             for pass_fn in passes
@@ -540,6 +630,7 @@ class TestFP8PassOrdering(TestCase):
             pass_names.index("regional_inductor_pass"),
         )
 
+        config.fp8.enabled = False
         skipped_passes = final_inductor_compile_passes(config)
         skipped_names = [
             pass_fn.func.__name__ if hasattr(pass_fn, "func") else pass_fn.__name__
@@ -548,7 +639,7 @@ class TestFP8PassOrdering(TestCase):
         self.assertNotIn(
             "identify_fp8_regions_for_regional_inductor_pass", skipped_names
         )
-        self.assertIn(
+        self.assertNotIn(
             "annotate_complete_fp8_regions_for_regional_inductor_pass",
             skipped_names,
         )

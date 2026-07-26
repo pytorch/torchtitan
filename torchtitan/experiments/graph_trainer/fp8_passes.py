@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
+import warnings
 from collections import defaultdict
 
 import torch
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
+    _QUANTIZATION_EMULATE,
     _QUANTIZATION_KIND,
 )
 from torchtitan.tools.logging import logger
@@ -100,6 +102,7 @@ def _inspect_fp8_regions(
 ) -> torch.fx.GraphModule:
     """Inspect FP8 regions and optionally annotate their nodes."""
     regions: dict[tuple[str, str], dict[str, int]] = {}
+    emulated_regions: set[tuple[str, str]] = set()
     target_inventory: defaultdict[str, set[str]] = defaultdict(set)
 
     for node in gm.graph.nodes:
@@ -114,6 +117,8 @@ def _inspect_fp8_regions(
             region_key,
             {"forward_compute_ops": 0, "backward_compute_ops": 0},
         )
+        if custom.get(_QUANTIZATION_EMULATE, False):
+            emulated_regions.add(region_key)
         target_inventory[quantization_kind].add(str(node.target))
 
         role = _classify_fp8_node(node, quantization_kind)
@@ -133,9 +138,16 @@ def _inspect_fp8_regions(
             phase = "backward" if node.meta.get("autograd_backward", False) else "forward"
             region[f"{phase}_compute_ops"] += 1
 
+    if strict and not regions:
+        raise RuntimeError(
+            "GraphTrainer did not find quantized module regions while "
+            "--compile.fp8.enabled is set."
+        )
+
     missing_regions = [
         region_key
         for region_key, region in regions.items()
+        if region_key not in emulated_regions
         if not region["forward_compute_ops"] and not region["backward_compute_ops"]
     ]
     if strict and missing_regions:
@@ -230,7 +242,11 @@ def _identify_fp8_regional_components(
             node = pending.pop()
             neighbors = (*node.all_input_nodes, *node.users)
             for neighbor in neighbors:
-                if neighbor in component or neighbor not in candidate_nodes:
+                if (
+                    neighbor in component
+                    or neighbor in identified_nodes
+                    or neighbor not in candidate_nodes
+                ):
                     continue
                 if not _is_regional_fp8_compute_node(
                     neighbor,
@@ -291,8 +307,10 @@ def annotate_complete_fp8_regions_for_regional_inductor_pass(
         expected_num_nodes[region_key] = region_num_nodes
 
     num_tagged_nodes = 0
+    incomplete_regions: list[tuple[str, str, int]] = []
     for region_key, nodes in regions.items():
         if len(nodes) != expected_num_nodes[region_key]:
+            incomplete_regions.append(region_key)
             continue
         if not any(
             node.meta["custom"][_FP8_META].get("op_role") == "compute"
@@ -303,6 +321,12 @@ def annotate_complete_fp8_regions_for_regional_inductor_pass(
             node.meta.setdefault("custom", {}).setdefault("compile_with_inductor", {})
             num_tagged_nodes += 1
 
+    if incomplete_regions:
+        warnings.warn(
+            "GraphTrainer skipped incomplete FP8 regional Inductor regions: "
+            f"{incomplete_regions}. The affected nodes will run eagerly.",
+            stacklevel=2,
+        )
     if num_tagged_nodes:
         gm.meta["fp8_regional_tagged_complete_nodes"] = num_tagged_nodes
         logger.info(
