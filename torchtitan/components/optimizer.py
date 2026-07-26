@@ -76,6 +76,28 @@ class _MoELike(Protocol):
     expert_bias_E: torch.Tensor  # noqa: N815
 
 
+def _foreach_inplace_dtensor_version_compat(
+    foreach_op: Callable[..., Any],
+    tensors: list[torch.Tensor],
+    *args: Any,
+) -> None:
+    dtensor_versions = [
+        (tensor, tensor._version)
+        for tensor in tensors
+        if isinstance(tensor, torch.distributed.tensor.DTensor)
+    ]
+    foreach_op(tensors, *args)
+    # TODO: Remove this wrapper once https://github.com/pytorch/pytorch/pull/191154
+    # lands and TorchTitan's minimum PyTorch version includes the fix.
+    torch.autograd.graph.increment_version(
+        [
+            tensor
+            for tensor, version in dtensor_versions
+            if tensor._version == version
+        ]
+    )
+
+
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     """A container for multiple optimizers, supporting mixed optimizer types.
 
@@ -516,12 +538,6 @@ def register_moe_load_balancing_hook(
                 load_balance_coeffs.append(load_balance_coeff)
                 expert_bias_buffers.append(moe.expert_bias_E)
                 token_count_buffers.append(moe.tokens_per_expert_E)
-            dtensor_versions = [
-                (buffer, buffer._version)
-                for buffer in (*expert_bias_buffers, *token_count_buffers)
-                if isinstance(buffer, torch.distributed.tensor.DTensor)
-            ]
-
             torch._foreach_mul_(expert_bias_direction_rows, load_balance_coeffs)
             expert_bias_direction_LE.sub_(
                 expert_bias_direction_LE.mean(dim=1, keepdim=True)
@@ -529,16 +545,13 @@ def register_moe_load_balancing_hook(
 
             # This is not exactly the same as
             # https://arxiv.org/pdf/2408.15664 proposed.
-            torch._foreach_add_(expert_bias_buffers, expert_bias_direction_rows)
+            _foreach_inplace_dtensor_version_compat(
+                torch._foreach_add_, expert_bias_buffers, expert_bias_direction_rows
+            )
             # Multiplication by zero preserves Partial DTensor placement, unlike
             # the foreach zero operator, which has no Partial strategy.
-            torch._foreach_mul_(token_count_buffers, 0)
-            torch.autograd.graph.increment_version(
-                [
-                    buffer
-                    for buffer, version in dtensor_versions
-                    if buffer._version == version
-                ]
+            _foreach_inplace_dtensor_version_compat(
+                torch._foreach_mul_, token_count_buffers, 0
             )
 
     if _should_register_moe_balancing_hook(model_parts):
