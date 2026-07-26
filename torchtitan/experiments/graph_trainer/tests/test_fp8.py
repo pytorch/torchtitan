@@ -53,7 +53,7 @@ from torchtitan.tools.utils import has_cuda_capability
 
 
 class TestFP8GraphConfig(TestCase):
-    def test_phase_one_contract(self) -> None:
+    def test_enabled_config_contract(self) -> None:
         config = GraphTrainerCompileConfig(
             enable=True,
             inductor_compilation="full",

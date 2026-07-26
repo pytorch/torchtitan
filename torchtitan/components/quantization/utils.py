@@ -133,8 +133,8 @@ def get_quantization_signature(
 ) -> tuple[QuantizationSignature, ...]:
     """Return sorted stable signatures for quantized runtime modules.
 
-    Grouped-expert modules are rejected because regional grouped FP8
-    compilation is a Phase 4 feature and has no complete artifact signature.
+    Grouped-expert modules are rejected because their regional compilation
+    path does not yet have a complete precompile artifact signature.
     """
     signatures = []
     for module_fqn, module in model.named_modules():
@@ -144,7 +144,7 @@ def get_quantization_signature(
         if kind.endswith("grouped_experts"):
             raise ValueError(
                 "FP8 precompile does not support grouped experts. "
-                "Use dense FP8 or wait for Phase 4 MoE support."
+                "Use dense FP8 modules for precompiled graphs."
             )
         recipe_name = getattr(module, "_torchtitan_quantization_recipe_name", "")
         if not recipe_name:
