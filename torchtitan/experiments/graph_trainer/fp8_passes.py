@@ -82,6 +82,15 @@ def _classify_fp8_node(node: torch.fx.Node, quantization_kind: str) -> str:
     ):
         return "compute"
 
+    # GraphPP may compute shared backward quantization in bw_di and pass the
+    # resulting FP8 tensor to bw_dw. Treat that callable input as an explicit
+    # boundary, not as a missing cast. The local region starts at its consumer
+    # (for example, _scaled_mm), while the placeholder remains interpreted.
+    if node.op == "placeholder" and _value_contains_fp8_tensor(
+        node.meta.get("val")
+    ):
+        return "input_boundary"
+
     target_name = str(node.target)
     if "amax" in target_name or node.target == torch.ops.aten.amax.default:
         return "amax"
@@ -196,8 +205,11 @@ def _identify_fp8_regional_components(
 
     Each component is seeded by a supported FP8 compute operation and expands
     only through CUDA aten nodes with the same module and quantization
-    provenance. Communication, host work, and grouped-expert FP8 remain
-    outside Phase 2 regional support.
+    provenance. FP8 placeholders are legal callable boundaries, notably when
+    GraphPP passes shared grad-output quantization from bw_di to bw_dw; they
+    prove the compute operand dtype but are not compiled as part of the local
+    region. Communication, host work, and grouped-expert FP8 remain outside
+    Phase 2 regional support.
     """
     candidate_nodes: set[torch.fx.Node] = set()
     seeds: list[torch.fx.Node] = []
@@ -279,11 +291,12 @@ def annotate_complete_fp8_regions_for_regional_inductor_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
-    """Tag only complete, previously identified FP8 regions for Inductor.
+    """Tag only complete FP8 regions identified in the current callable.
 
-    GraphPP may extract a subset of a pre-partition FP8 region. A partial
-    region is left eager so regional Inductor only receives complete FP8
-    compute components. Other regional annotations are not modified.
+    GraphPP re-identifies regions after extracting each callable, so an FP8
+    placeholder is a valid local boundary. The node-count check still protects
+    against graph rewrites between identification and tagging. Other regional
+    annotations are not modified.
     """
     del example_inputs
     regions: dict[tuple[str, str, int], list[torch.fx.Node]] = defaultdict(list)

@@ -484,6 +484,42 @@ class TestFP8RegionalAnnotation(TestCase):
                 all("compile_with_inductor" in node.meta["custom"] for node in nodes)
             )
 
+    def test_tags_compute_after_graph_pp_fp8_input_boundary(self) -> None:
+        target = next(iter(FP8_COMPUTE_TARGETS["float8_linear"]))
+        graph = torch.fx.Graph()
+        grad_output_fp8 = graph.placeholder("grad_output_fp8")
+        weight_fp8 = graph.placeholder("weight_fp8")
+        for node in (grad_output_fp8, weight_fp8):
+            node.meta["val"] = torch.empty(
+                1, device="meta", dtype=torch.float8_e4m3fn
+            )
+            node.meta["custom"] = {
+                _MODULE_FQN: "layers.0.feed_forward.w1",
+                _QUANTIZATION_KIND: "float8_linear",
+            }
+        compute = self._node(graph, target, (grad_output_fp8, weight_fp8))
+        graph.output(compute)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        with patch(
+            "torchtitan.experiments.graph_trainer.fp8_passes."
+            "_is_regional_fp8_compute_node",
+            side_effect=lambda node, **_kwargs: node.op == "call_function",
+        ):
+            annotate_fp8_regions_for_regional_inductor_pass(gm, strict=False)
+        annotate_complete_fp8_regions_for_regional_inductor_pass(gm)
+
+        for boundary in (grad_output_fp8, weight_fp8):
+            self.assertEqual(
+                boundary.meta["custom"]["fp8"]["op_role"], "input_boundary"
+            )
+            self.assertNotIn("compile_with_inductor", boundary.meta["custom"])
+        self.assertEqual(compute.meta["custom"]["fp8"]["op_role"], "compute")
+        self.assertEqual(
+            compute.meta["custom"]["fp8"]["regional_region_num_nodes"], 1
+        )
+        self.assertEqual(compute.meta["custom"]["compile_with_inductor"], {})
+
 
 @unittest.skipUnless(
     torch.cuda.is_available()
