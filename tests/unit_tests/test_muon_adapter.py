@@ -15,9 +15,12 @@ import torch
 import torch.distributed as dist
 import torch.distributed.tensor.placement_types as placement_types
 import torch.multiprocessing as mp
-from spmd_types._test_utils import FakeProcessGroupTestCase
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 from torchtitan.components.flex_shard import (
     BucketSpec,
     build_layer_bucket_specs,
@@ -364,8 +367,24 @@ def _has_batched_muon() -> bool:
     return True
 
 
-class TestMuonAdapter(FakeProcessGroupTestCase):
-    WORLD_SIZE = 2
+class TestMuonAdapter(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    @property
+    def mesh(self):
+        if not hasattr(self, "_mesh"):
+            self._mesh = init_device_mesh(
+                self.device_type,
+                (self.world_size,),
+                mesh_dim_names=("fsdp",),
+            )
+        return self._mesh
 
     def test_rejects_unsupported_implementation(self):
         param = torch.nn.Parameter(torch.randn(3, 4))
@@ -410,6 +429,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
         )
         return optimizer, first, second
 
+    @with_comms
     def test_compute_buckets_resolve_fqns_and_balance_layers(self):
         optimizer, _first, _second = self._bucketed_optimizer()
 
@@ -442,6 +462,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
                 }
             )
 
+    @with_comms
     def test_adamw_same_as_storage_preserves_storage_sharding(self):
         local_param = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
         local_grad = torch.arange(6, 0, -1, dtype=torch.float32).reshape(2, 3)
@@ -509,6 +530,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
                 }
             )
 
+    @with_comms
     def test_compute_requirements_are_declarative(self):
         optimizer, first, _second = self._bucketed_optimizer()
         self.assertEqual(
@@ -522,6 +544,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
                 bucket_spec=[],
             )
 
+    @with_comms
     def test_compute_buckets_reject_orphan_and_overlap(self):
         optimizer, _first, _second = self._bucketed_optimizer()
         with self.assertRaisesRegex(ValueError, "not covered"):
@@ -551,6 +574,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
                 ],
             )
 
+    @with_comms
     def test_compute_buckets_reject_non_row_shard_and_invalid_ns(self):
         local = torch.ones(4, 2)
         param = DTensor.from_local(
@@ -622,10 +646,11 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
             )
 
     @unittest.skipUnless(_has_batched_muon(), "requires PyTorch PR #190597")
+    @with_comms
     def test_leading_expert_shard_matches_independent_muon_for_two_steps(self):
         local_experts, matrix_rows, matrix_cols = 2, 3, 4
         local_shape = (local_experts, matrix_rows, matrix_cols)
-        global_shape = (self.WORLD_SIZE * local_experts, matrix_rows, matrix_cols)
+        global_shape = (self.world_size * local_experts, matrix_rows, matrix_cols)
         local_param = (
             torch.arange(1, 25, dtype=torch.bfloat16).reshape(local_shape) / 29
         )
@@ -695,6 +720,7 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
             torch.testing.assert_close(momentum.to_local(), reference_momentum)
 
     @unittest.skipUnless(_has_batched_muon(), "requires PyTorch PR #190597")
+    @with_comms
     def test_matrix_shape_matches_batched_muon_for_two_steps(self):
         head_dim, model_dim = 3, 4
         global_shape = (2 * head_dim, model_dim)
@@ -754,11 +780,27 @@ class TestMuonAdapter(FakeProcessGroupTestCase):
             )
 
 
-class TestMuonAdapterStridedPolicy(FakeProcessGroupTestCase):
-    MESH_SHAPE = (2, 2)
-    MESH_DIM_NAMES = ("dp", "tp")
+class TestMuonAdapterStridedPolicy(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    @property
+    def mesh(self):
+        if not hasattr(self, "_mesh"):
+            self._mesh = init_device_mesh(
+                self.device_type,
+                (2, 2),
+                mesh_dim_names=("dp", "tp"),
+            )
+        return self._mesh
 
     @unittest.skipIf(_StridedShard is None, "PyTorch has no private strided shard")
+    @with_comms
     def test_composed_strided_storage_uses_conservative_compute_layout(self):
         assert _StridedShard is not None
         storage_placements = (

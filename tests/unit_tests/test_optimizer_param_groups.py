@@ -8,10 +8,14 @@ import unittest
 
 import torch
 import torch.nn as nn
-from spmd_types._test_utils import FakeProcessGroupTestCase
-from torch.distributed.tensor import DTensor, Partial, Replicate
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
+)
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Partial, Replicate
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
 )
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import (
@@ -739,10 +743,22 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
                 self.assertAlmostEqual(base_lr, 1e-3, places=6)
 
 
-class TestMoELoadBalancingDTensor(FakeProcessGroupTestCase):
-    WORLD_SIZE = 2
+class TestMoELoadBalancingDTensor(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
 
+    @property
+    def device_type(self):
+        return "cpu"
+
+    @with_comms
     def test_vectorized_update_preserves_dtensor_storage(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp",),
+        )
         rows = (
             ("0", [10.0, 8.0, 6.0], [1.0, 2.0, 3.0], [0.9, 2.0, 3.1]),
             ("1", [3.0, 1.0, 1.0], [-1.0, -2.0, -3.0], [-1.4, -1.8, -2.8]),
@@ -755,13 +771,13 @@ class TestMoELoadBalancingDTensor(FakeProcessGroupTestCase):
                     moe = model.layers[key].moe
                     moe.tokens_per_expert_E = DTensor.from_local(
                         torch.tensor(counts),
-                        self.mesh,
+                        mesh,
                         (Partial(),),
                         run_check=False,
                     )
                     moe.expert_bias_E = DTensor.from_local(
                         torch.tensor(bias),
-                        self.mesh,
+                        mesh,
                         (Replicate(),),
                         run_check=False,
                     )
