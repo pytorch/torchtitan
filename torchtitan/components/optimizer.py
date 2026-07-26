@@ -444,7 +444,7 @@ def register_moe_load_balancing_hook(
                 # This does not affect to expert choice, but affects the experts usage metrics.
                 # We divide by 2 to correct for this double-counting due to recomputation
                 # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                tokens_per_expert_E = tokens_per_expert_E / 2
+                tokens_per_expert_E = tokens_per_expert_E // 2
             tokens_per_expert_E_list.append(tokens_per_expert_E)
 
         if not tokens_per_expert_E_list:
