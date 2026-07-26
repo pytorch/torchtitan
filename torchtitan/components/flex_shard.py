@@ -435,7 +435,8 @@ def _bind_optimizer_params(
                     "Owned FlexShard parameters must use the same process group"
                 )
 
-            local_param = param.to_local()
+            # FlexShard needs the plain storage shard, not Parameter preservation.
+            local_param = param._local_tensor
             if tensor_device is None:
                 tensor_device = local_param.device
             elif local_param.device != tensor_device:
@@ -644,7 +645,7 @@ def _build_bucket_plan(
     process_group = spec.mesh.get_group()
     group_rank = spec.mesh.get_local_rank()
     world_size = spec.mesh.size()
-    local_params = [binding.param.to_local() for binding in bindings]
+    local_params = [binding.param._local_tensor for binding in bindings]
     dtype = local_params[0].dtype
     device = local_params[0].device
     if any(param.dtype != dtype for param in local_params):
@@ -966,7 +967,7 @@ class _OwnedFlexShardRuntime:
             tensor_state[name] = (value, local_value, local_value._version)
 
         result = compute_optimizer.flex_shard_prepare(
-            binding.param.to_local(),
+            binding.param._local_tensor,
             grad.to_local(),
             local_state,
             group,
@@ -999,7 +1000,7 @@ class _OwnedFlexShardRuntime:
                     f"FlexShard gradient for {binding.fqn!r} must be dense"
                 )
             local_grad = grad.to_local()
-            local_param = binding.param.to_local()
+            local_param = binding.param._local_tensor
             if (
                 torch.Size(grad.shape) != binding.global_shape
                 or _mesh_ranks(grad.device_mesh)
@@ -1044,7 +1045,7 @@ class _OwnedFlexShardRuntime:
                 continue
             grad = binding.param.grad
             assert isinstance(grad, DTensor)
-            local_param = binding.param.to_local()
+            local_param = binding.param._local_tensor
             self._prepare_local_compute(
                 optimizer,
                 binding,
@@ -1114,7 +1115,7 @@ class _OwnedFlexShardRuntime:
         for binding_index, binding in enumerate(plan.bindings):
             if not active_by_param[id(binding.param)]:
                 continue
-            local_param = binding.param.to_local()
+            local_param = binding.param._local_tensor
             local_offset = plan.local_offsets[binding_index]
             local_update = local_buffer[
                 local_offset : local_offset + local_param.numel()
