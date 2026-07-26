@@ -106,15 +106,16 @@ class MuonAdapter(torch.optim.Muon):
         tensor_is_typed = spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
             tensor
         )
-        source_is_typed = source is not None and spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
-            source
-        )
-        if source_is_typed:
-            spmd.assert_type_like(tensor, source)
-        elif source is not None and tensor_is_typed:
-            raise spmd.SpmdTypeError(
-                "MuonAdapter received a typed tensor whose parameter is untyped"
+        if source is not None:
+            source_is_typed = spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
+                source
             )
+            if source_is_typed:
+                spmd.assert_type_like(tensor, source)
+            elif tensor_is_typed:
+                raise spmd.SpmdTypeError(
+                    "MuonAdapter received a typed tensor whose parameter is untyped"
+                )
         return tensor
 
     @staticmethod
