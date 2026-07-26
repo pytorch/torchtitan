@@ -760,9 +760,6 @@ class _OwnedFlexShardRuntime:
         self._process_group = self._plans[0].process_group
         self._world_size = self._plans[0].world_size
         self._tensor_device = self._plans[0].device
-        self._bucket_status = torch.empty(
-            1, dtype=torch.int32, device=self._tensor_device
-        )
         self._validate_groups(optimizer)
 
     def _synchronize_setup_error(self, error: Exception | None) -> None:
@@ -899,134 +896,6 @@ class _OwnedFlexShardRuntime:
         digest = hashlib.sha256(repr(signature).encode("utf-8")).digest()
         return int.from_bytes(digest[:7], byteorder="little")
 
-    def _validate_step_inputs(self, optimizer: Optimizer) -> dict[int, bool]:
-        local_errors = self._group_validation_errors(optimizer)
-        local_active = []
-        for binding in self._bindings:
-            if binding.group_index >= len(optimizer.param_groups):
-                local_errors.append(f"parameter group for {binding.fqn!r} was removed")
-                local_active.append(False)
-                continue
-            group = optimizer.param_groups[binding.group_index]
-            param_index = next(
-                (
-                    index
-                    for index, param in enumerate(group["params"])
-                    if param is binding.param
-                ),
-                None,
-            )
-            if param_index is None:
-                local_errors.append(f"parameter group for {binding.fqn!r} changed")
-            else:
-                param_names = group.get("param_names")
-                if (
-                    param_names is None
-                    or len(param_names) != len(group["params"])
-                    or param_names[param_index] != binding.fqn
-                ):
-                    local_errors.append(f"parameter FQN for {binding.fqn!r} changed")
-            try:
-                requirement = _compute_sharding_requirement(
-                    optimizer, binding.param, group
-                )
-            except Exception as error:
-                local_errors.append(str(error))
-            else:
-                if requirement != binding.requirement:
-                    local_errors.append(
-                        f"compute requirement for {binding.fqn!r} changed"
-                    )
-
-            local_param = binding.param.to_local()
-            if (
-                torch.Size(binding.param.shape) != binding.global_shape
-                or tuple(binding.param.stride()) != binding.global_stride
-                or binding.param.dtype != binding.dtype
-                or local_param.device != binding.device
-                or not local_param.is_contiguous()
-            ):
-                local_errors.append(f"parameter layout for {binding.fqn!r} changed")
-
-            grad = binding.param.grad
-            local_active.append(grad is not None)
-            if grad is None:
-                continue
-            if not isinstance(grad, DTensor):
-                local_errors.append(f"gradient for {binding.fqn!r} is not a DTensor")
-                continue
-            if grad.is_sparse:
-                local_errors.append(f"gradient for {binding.fqn!r} is sparse")
-                continue
-            if (
-                torch.Size(grad.shape) != binding.global_shape
-                or _mesh_ranks(grad.device_mesh)
-                != _mesh_ranks(binding.param.device_mesh)
-                or grad.placements != binding.param.placements
-                or grad.to_local().shape != binding.param.to_local().shape
-                or grad.to_local().dtype != binding.param.to_local().dtype
-                or grad.to_local().device != binding.param.to_local().device
-                or tuple(grad.stride()) != binding.global_stride
-                or not grad.to_local().is_contiguous()
-            ):
-                local_errors.append(f"gradient layout for {binding.fqn!r} changed")
-
-            for state_name, state_value in optimizer.state.get(
-                binding.param, {}
-            ).items():
-                if not isinstance(state_value, torch.Tensor) or state_value.ndim == 0:
-                    continue
-                if (
-                    not isinstance(state_value, DTensor)
-                    or torch.Size(state_value.shape) != binding.global_shape
-                    or state_value.placements != binding.param.placements
-                    or _mesh_ranks(state_value.device_mesh)
-                    != _mesh_ranks(binding.param.device_mesh)
-                    or state_value.to_local().shape != binding.param.to_local().shape
-                    or state_value.to_local().dtype != binding.dtype
-                    or state_value.to_local().device != binding.device
-                    or tuple(state_value.stride()) != binding.global_stride
-                    or not state_value.to_local().is_contiguous()
-                ):
-                    local_errors.append(
-                        f"state {state_name!r} layout for {binding.fqn!r} changed"
-                    )
-
-        status = torch.tensor(
-            [
-                *(int(active) for active in local_active),
-                int(bool(local_errors)),
-                self._group_config_hash(optimizer),
-            ],
-            dtype=torch.int64,
-            device=self._tensor_device,
-        )
-        gathered_status = [torch.empty_like(status) for _ in range(self._world_size)]
-        dist.all_gather(gathered_status, status, group=self._process_group)
-        if any(rank_status[-2].item() for rank_status in gathered_status):
-            detail = (
-                local_errors[0] if local_errors else "error reported by another rank"
-            )
-            raise RuntimeError(f"Invalid FlexShard input: {detail}")
-        if any(
-            rank_status[-1].item() != status[-1].item()
-            for rank_status in gathered_status
-        ):
-            raise RuntimeError("FlexShard parameter-group settings differ across ranks")
-
-        active_by_param = {}
-        for binding_index, binding in enumerate(self._bindings):
-            active_values = {
-                rank_status[binding_index].item() for rank_status in gathered_status
-            }
-            if len(active_values) != 1:
-                raise RuntimeError(
-                    "FlexShard gradient presence differs across ranks "
-                    f"for {binding.fqn!r}"
-                )
-            active_by_param[id(binding.param)] = active_values == {1}
-        return active_by_param
-
     @staticmethod
     def _compute_owned_update(
         optimizer: Optimizer,
@@ -1117,23 +986,38 @@ class _OwnedFlexShardRuntime:
             state_writebacks.append((storage, local_value))
         return compute_input, state_writebacks
 
-    def _synchronize_bucket_error(
-        self,
-        plan: _BucketPlan,
-        error: Exception | None,
-        phase: str,
-    ) -> None:
-        self._bucket_status.fill_(int(error is not None))
-        dist.all_reduce(
-            self._bucket_status,
-            op=dist.ReduceOp.SUM,
-            group=plan.process_group,
-        )
-        if self._bucket_status.item():
-            message = f"FlexShard {phase} failed for bucket {plan.spec.name!r}"
-            if error is not None:
-                raise RuntimeError(message) from error
-            raise RuntimeError(f"{message} on another rank")
+    def _active_params(self) -> dict[int, bool]:
+        active_by_param = {}
+        for binding in self._bindings:
+            grad = binding.param.grad
+            active_by_param[id(binding.param)] = grad is not None
+            if grad is None:
+                continue
+            if not isinstance(grad, DTensor):
+                raise RuntimeError(
+                    f"FlexShard gradient for {binding.fqn!r} must be a DTensor"
+                )
+            if grad.is_sparse:
+                raise RuntimeError(
+                    f"FlexShard gradient for {binding.fqn!r} must be dense"
+                )
+            local_grad = grad.to_local()
+            local_param = binding.param.to_local()
+            if (
+                torch.Size(grad.shape) != binding.global_shape
+                or _mesh_ranks(grad.device_mesh)
+                != _mesh_ranks(binding.param.device_mesh)
+                or grad.placements != binding.param.placements
+                or local_grad.shape != local_param.shape
+                or local_grad.dtype != local_param.dtype
+                or local_grad.device != local_param.device
+                or tuple(grad.stride()) != binding.global_stride
+                or not local_grad.is_contiguous()
+            ):
+                raise RuntimeError(
+                    f"FlexShard gradient layout for {binding.fqn!r} changed"
+                )
+        return active_by_param
 
     def _step_bucket(
         self,
@@ -1144,42 +1028,33 @@ class _OwnedFlexShardRuntime:
         if not any(active_by_param[id(binding.param)] for binding in plan.bindings):
             return
 
-        local_buffer = None
-        owner_buffer = None
+        local_buffer = torch.zeros(
+            plan.local_buffer_numel,
+            dtype=plan.dtype,
+            device=plan.device,
+        )
+        owner_buffer = torch.empty(
+            plan.owner_buffer_numel,
+            dtype=plan.dtype,
+            device=plan.device,
+        )
         state_writebacks: list[tuple[DTensor, Tensor]] = []
-        pack_error = None
-        try:
-            local_buffer = torch.zeros(
-                plan.local_buffer_numel,
-                dtype=plan.dtype,
-                device=plan.device,
+        for binding_index, binding in enumerate(plan.bindings):
+            if not active_by_param[id(binding.param)]:
+                continue
+            grad = binding.param.grad
+            assert isinstance(grad, DTensor)
+            compute_input, binding_state_writebacks = self._prepare_local_compute(
+                optimizer,
+                binding,
+                grad,
             )
-            owner_buffer = torch.empty(
-                plan.owner_buffer_numel,
-                dtype=plan.dtype,
-                device=plan.device,
+            state_writebacks.extend(binding_state_writebacks)
+            local_input = compute_input.contiguous().view(-1)
+            local_offset = plan.local_offsets[binding_index]
+            local_buffer[local_offset : local_offset + local_input.numel()].copy_(
+                local_input
             )
-            for binding_index, binding in enumerate(plan.bindings):
-                if not active_by_param[id(binding.param)]:
-                    continue
-                grad = binding.param.grad
-                assert isinstance(grad, DTensor)
-                compute_input, binding_state_writebacks = self._prepare_local_compute(
-                    optimizer,
-                    binding,
-                    grad,
-                )
-                state_writebacks.extend(binding_state_writebacks)
-                local_input = compute_input.contiguous().view(-1)
-                local_offset = plan.local_offsets[binding_index]
-                local_buffer[local_offset : local_offset + local_input.numel()].copy_(
-                    local_input
-                )
-        except Exception as error:
-            pack_error = error
-        self._synchronize_bucket_error(plan, pack_error, "local packing")
-        assert local_buffer is not None
-        assert owner_buffer is not None
 
         dist.all_to_all_single(
             owner_buffer,
@@ -1189,46 +1064,41 @@ class _OwnedFlexShardRuntime:
             group=plan.process_group,
         )
 
-        compute_error = None
-        try:
-            for binding_index, binding in enumerate(plan.bindings):
-                if (
-                    binding.owner_group_rank != plan.group_rank
-                    or not active_by_param[id(binding.param)]
-                ):
-                    continue
-                full_input = torch.empty(
-                    binding.global_shape,
-                    dtype=owner_buffer.dtype,
-                    device=owner_buffer.device,
+        for binding_index, binding in enumerate(plan.bindings):
+            if (
+                binding.owner_group_rank != plan.group_rank
+                or not active_by_param[id(binding.param)]
+            ):
+                continue
+            full_input = torch.empty(
+                binding.global_shape,
+                dtype=owner_buffer.dtype,
+                device=owner_buffer.device,
+            )
+            flat_input = full_input.view(-1)
+            for source_rank in range(plan.world_size):
+                source_numel = binding.shard_numels[source_rank]
+                source_offset = binding.shard_offsets[source_rank]
+                owner_offset = plan.owner_offsets[(binding_index, source_rank)]
+                flat_input[source_offset : source_offset + source_numel].copy_(
+                    owner_buffer[owner_offset : owner_offset + source_numel]
                 )
-                flat_input = full_input.view(-1)
-                for source_rank in range(plan.world_size):
-                    source_numel = binding.shard_numels[source_rank]
-                    source_offset = binding.shard_offsets[source_rank]
-                    owner_offset = plan.owner_offsets[(binding_index, source_rank)]
-                    flat_input[source_offset : source_offset + source_numel].copy_(
-                        owner_buffer[owner_offset : owner_offset + source_numel]
-                    )
-                full_update = self._compute_owned_update(optimizer, binding, full_input)
-                self._validate_local_value(
-                    full_update,
-                    full_input,
-                    "flex_shard_compute",
+            full_update = self._compute_owned_update(optimizer, binding, full_input)
+            self._validate_local_value(
+                full_update,
+                full_input,
+                "flex_shard_compute",
+            )
+            flat_update = full_update.view(-1)
+            for destination_rank in range(plan.world_size):
+                destination_numel = binding.shard_numels[destination_rank]
+                destination_offset = binding.shard_offsets[destination_rank]
+                owner_offset = plan.owner_offsets[(binding_index, destination_rank)]
+                owner_buffer[owner_offset : owner_offset + destination_numel].copy_(
+                    flat_update[
+                        destination_offset : destination_offset + destination_numel
+                    ]
                 )
-                flat_update = full_update.view(-1)
-                for destination_rank in range(plan.world_size):
-                    destination_numel = binding.shard_numels[destination_rank]
-                    destination_offset = binding.shard_offsets[destination_rank]
-                    owner_offset = plan.owner_offsets[(binding_index, destination_rank)]
-                    owner_buffer[owner_offset : owner_offset + destination_numel].copy_(
-                        flat_update[
-                            destination_offset : destination_offset + destination_numel
-                        ]
-                    )
-        except Exception as error:
-            compute_error = error
-        self._synchronize_bucket_error(plan, compute_error, "owner compute")
 
         dist.all_to_all_single(
             local_buffer,
@@ -1239,29 +1109,24 @@ class _OwnedFlexShardRuntime:
         )
 
         writebacks = []
-        finalize_error = None
-        try:
-            for binding_index, binding in enumerate(plan.bindings):
-                if not active_by_param[id(binding.param)]:
-                    continue
-                local_param = binding.param.to_local()
-                local_offset = plan.local_offsets[binding_index]
-                local_update = local_buffer[
-                    local_offset : local_offset + local_param.numel()
-                ].view(local_param.shape)
-                group = optimizer.param_groups[binding.group_index]
-                updated_param = cast(FlexShardOptimizer, optimizer).flex_shard_finalize(
-                    local_param, local_update, group
-                )
-                self._validate_local_value(
-                    updated_param,
-                    local_param,
-                    "flex_shard_finalize",
-                )
-                writebacks.append((binding.param, updated_param))
-        except Exception as error:
-            finalize_error = error
-        self._synchronize_bucket_error(plan, finalize_error, "local finalize")
+        for binding_index, binding in enumerate(plan.bindings):
+            if not active_by_param[id(binding.param)]:
+                continue
+            local_param = binding.param.to_local()
+            local_offset = plan.local_offsets[binding_index]
+            local_update = local_buffer[
+                local_offset : local_offset + local_param.numel()
+            ].view(local_param.shape)
+            group = optimizer.param_groups[binding.group_index]
+            updated_param = cast(FlexShardOptimizer, optimizer).flex_shard_finalize(
+                local_param, local_update, group
+            )
+            self._validate_local_value(
+                updated_param,
+                local_param,
+                "flex_shard_finalize",
+            )
+            writebacks.append((binding.param, updated_param))
         for storage, local_value in state_writebacks:
             self._copy_local_to_storage(storage, local_value)
         for storage, local_value in writebacks:
@@ -1273,7 +1138,10 @@ class _OwnedFlexShardRuntime:
             with torch.enable_grad():
                 loss = closure()
 
-        active_by_param = self._validate_step_inputs(optimizer)
+        # TorchTitan executes one SPMD graph and optimizer configuration on all
+        # ranks. Rank-identical gradient presence is therefore a runtime
+        # precondition, not a per-step control-plane collective.
+        active_by_param = self._active_params()
         for plan in self._plans:
             self._step_bucket(optimizer, plan, active_by_param)
         return loss
@@ -1305,6 +1173,13 @@ def flex_shard(
     The optimizer declares its compute placement and implements plain-tensor
     math. FlexShard owns FQN resolution, owner assignment, redistribution,
     temporary buffers, and writeback into persistent storage placements.
+
+    Parameter-group membership, order, names, and compute requirements are
+    fixed after plan construction. Persistent parameters and optimizer state
+    must retain their planned DTensor storage layouts. Mutable optimizer
+    settings and per-parameter gradient presence must remain identical across
+    ranks. The training hot path treats these as SPMD preconditions and does
+    not launch control-plane collectives to diagnose rank divergence.
     """
     if getattr(optimizer, "_flex_shard_runtime", None) is not None:
         raise RuntimeError(f"{type(optimizer).__name__} is already flex-sharded")

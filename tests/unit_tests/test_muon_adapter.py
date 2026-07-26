@@ -92,7 +92,7 @@ def _run_bucketed_muon_parity(
             ),
         ]
 
-        def make_optimizer(optimizer_params):
+        def make_optimizer(optimizer_params, **overrides):
             optimizer = MuonAdapter(
                 [
                     {
@@ -109,7 +109,7 @@ def _run_bucketed_muon_parity(
                         "param_names": ["layers.0.feed_forward.w1.weight"],
                     },
                 ],
-                **kwargs,
+                **{**kwargs, **overrides},
             )
             return flex_shard(optimizer, bucket_spec=bucket_specs)
 
@@ -124,12 +124,30 @@ def _run_bucketed_muon_parity(
         )
 
         all_to_all_calls = 0
+        status_collective_calls = 0
         original_all_to_all = dist.all_to_all_single
+        original_all_gather = dist.all_gather
+        original_all_reduce = dist.all_reduce
 
         def counted_all_to_all(*args, **call_kwargs):
             nonlocal all_to_all_calls
             all_to_all_calls += 1
             return original_all_to_all(*args, **call_kwargs)
+
+        def counted_all_gather(*args, **call_kwargs):
+            nonlocal status_collective_calls
+            status_collective_calls += 1
+            return original_all_gather(*args, **call_kwargs)
+
+        def counted_all_reduce(*args, **call_kwargs):
+            nonlocal status_collective_calls
+            status_collective_calls += 1
+            return original_all_reduce(*args, **call_kwargs)
+
+        def optimizer_step_without_status_collectives(step_optimizer):
+            calls_before_step = status_collective_calls
+            step_optimizer.step()
+            assert status_collective_calls == calls_before_step
 
         persistent_params = list(params)
         param_ptrs = [param.to_local().data_ptr() for param in params]
@@ -171,7 +189,11 @@ def _run_bucketed_muon_parity(
                     assert momentum is persistent_momentum[index]
                     assert momentum.to_local().data_ptr() == momentum_ptrs[index]
 
-        with patch.object(dist, "all_to_all_single", side_effect=counted_all_to_all):
+        with (
+            patch.object(dist, "all_to_all_single", side_effect=counted_all_to_all),
+            patch.object(dist, "all_gather", side_effect=counted_all_gather),
+            patch.object(dist, "all_reduce", side_effect=counted_all_reduce),
+        ):
             for step in range(3):
                 torch.manual_seed(100 + step)
                 full_grads = [torch.randn_like(value) for value in full_values]
@@ -183,7 +205,7 @@ def _run_bucketed_muon_parity(
                     references[index].grad = full_grads[index].clone()
 
                 versions = [param._version for param in params]
-                optimizer.step()
+                optimizer_step_without_status_collectives(optimizer)
                 reference_optimizer.step()
                 assert all(
                     param._version == version + 1
@@ -200,7 +222,7 @@ def _run_bucketed_muon_parity(
             for reference in references[1:]:
                 reference.grad = None
             versions = [param._version for param in params]
-            optimizer.step()
+            optimizer_step_without_status_collectives(optimizer)
             reference_optimizer.step()
             assert params[0]._version == versions[0] + 1
             assert all(
@@ -238,8 +260,8 @@ def _run_bucketed_muon_parity(
             references[0].grad = continuation_grads[0].view(2, 3, 4).clone()
             for index in range(1, len(references)):
                 references[index].grad = continuation_grads[index].clone()
-            optimizer.step()
-            restored_optimizer.step()
+            optimizer_step_without_status_collectives(optimizer)
+            optimizer_step_without_status_collectives(restored_optimizer)
             reference_optimizer.step()
             assert_state_matches_reference()
             for param, restored_param in zip(params, restored_params, strict=True):
@@ -255,27 +277,16 @@ def _run_bucketed_muon_parity(
                     atol=0,
                 )
 
-            calls_before_mismatch = all_to_all_calls
-            params[0].grad = (
-                to_dtensor(torch.ones_like(full_values[0])) if rank == 0 else None
-            )
-            for param in params[1:]:
-                param.grad = None
-            try:
-                optimizer.step()
-            except RuntimeError as error:
-                assert "gradient presence differs" in str(error)
-            else:
-                raise AssertionError("Expected mismatched gradient presence to fail")
-            assert all_to_all_calls == calls_before_mismatch
-
-            optimizer.param_groups[0]["lr"] = 0.04 if rank == 0 else 0.03
+            mismatch_params = [
+                to_dtensor(value.clone()).requires_grad_() for value in full_values
+            ]
             with unittest.TestCase().assertRaisesRegex(
-                RuntimeError, "differ across ranks"
+                RuntimeError, "FlexShard plans differ across ranks"
             ):
-                optimizer.step()
-            optimizer.param_groups[0]["lr"] = 0.03
-            assert all_to_all_calls == calls_before_mismatch
+                make_optimizer(
+                    mismatch_params,
+                    lr=0.04 if rank == 0 else 0.03,
+                )
 
             bad_local_rows = 2 if rank == 0 else 3
             bad_param = DTensor.from_local(
@@ -305,37 +316,7 @@ def _run_bucketed_muon_parity(
                     ],
                 )
 
-            target_assignment = next(
-                assignment
-                for assignment in get_flex_shard_assignments(optimizer)
-                if assignment.owner_rank == 0
-            )
-            fqns = [
-                fqn for group in optimizer.param_groups for fqn in group["param_names"]
-            ]
-            target_index = fqns.index(target_assignment.fqn)
-            for index, param in enumerate(params):
-                param.grad = (
-                    to_dtensor(torch.ones_like(full_values[index]))
-                    if index == target_index
-                    else None
-                )
-            runtime = optimizer._flex_shard_runtime
-            original_compute = runtime._compute_owned_update
-
-            def fail_on_owner(*args):
-                binding = args[1]
-                if rank == 0 and binding.fqn == target_assignment.fqn:
-                    raise RuntimeError("injected owner failure")
-                return original_compute(*args)
-
-            with (
-                patch.object(runtime, "_compute_owned_update", new=fail_on_owner),
-                unittest.TestCase().assertRaisesRegex(RuntimeError, "owner compute"),
-            ):
-                optimizer.step()
-
-        assert all_to_all_calls == 3 * 2 * 2 + 2 + 2 * 2 * 2 + 1
+        assert all_to_all_calls == 3 * 2 * 2 + 2 + 2 * 2 * 2
     finally:
         dist.destroy_process_group()
 
