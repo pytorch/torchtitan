@@ -8,6 +8,9 @@ import unittest
 
 import torch
 import torch.nn as nn
+
+from spmd_types._test_utils import FakeProcessGroupTestCase
+from torch.distributed.tensor import DTensor, Partial, Replicate
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import (
     default_adamw,
@@ -63,13 +66,13 @@ class FakeMoEBlock(nn.Module):
 
 
 class FakeMoEModel(nn.Module):
-    def __init__(self, load_balance_coeffs=(0.1, 0.2)):
+    def __init__(self, load_balance_coeffs=(0.1, 0.3)):
         super().__init__()
         self.weight = nn.Parameter(torch.tensor([1.0]))
         self.layers = nn.ModuleDict(
             {
-                "0": FakeMoEBlock(load_balance_coeffs[0], [10, 0]),
-                "1": FakeMoEBlock(load_balance_coeffs[1], [0, 10]),
+                "0": FakeMoEBlock(load_balance_coeffs[0], [10, 8, 6]),
+                "1": FakeMoEBlock(load_balance_coeffs[1], [3, 1, 1]),
             }
         )
 
@@ -146,6 +149,12 @@ class TestParamGroupConfig(unittest.TestCase):
 
     def test_moe_load_balancing_updates_all_enabled_layers(self):
         model = FakeMoEModel()
+        first_bias = model.layers["0"].moe.expert_bias_E
+        second_bias = model.layers["1"].moe.expert_bias_E
+        first_tokens = model.layers["0"].moe.tokens_per_expert_E
+        second_tokens = model.layers["1"].moe.tokens_per_expert_E
+        first_bias.copy_(torch.tensor([1.0, 2.0, 3.0]))
+        second_bias.copy_(torch.tensor([-1.0, -2.0, -3.0]))
         config = OptimizersContainer.Config(
             implementation="for-loop",
             param_groups=[
@@ -165,21 +174,25 @@ class TestParamGroupConfig(unittest.TestCase):
 
         container.step()
 
+        self.assertIs(model.layers["0"].moe.expert_bias_E, first_bias)
+        self.assertIs(model.layers["1"].moe.expert_bias_E, second_bias)
+        self.assertIs(model.layers["0"].moe.tokens_per_expert_E, first_tokens)
+        self.assertIs(model.layers["1"].moe.tokens_per_expert_E, second_tokens)
         torch.testing.assert_close(
-            model.layers["0"].moe.expert_bias_E,
-            torch.tensor([-0.1, 0.1]),
+            first_bias,
+            torch.tensor([0.9, 2.0, 3.1]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.expert_bias_E,
-            torch.tensor([0.2, -0.2]),
+            second_bias,
+            torch.tensor([-1.4, -1.8, -2.8]),
         )
         torch.testing.assert_close(
-            model.layers["0"].moe.tokens_per_expert_E,
-            torch.tensor([0, 0]),
+            first_tokens,
+            torch.tensor([0, 0, 0]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.tokens_per_expert_E,
-            torch.tensor([0, 0]),
+            second_tokens,
+            torch.tensor([0, 0, 0]),
         )
 
     def test_moe_load_balancing_rejects_inconsistent_coeffs(self):
@@ -699,6 +712,90 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
                 self.assertAlmostEqual(base_lr, 5e-4, places=6)
             else:
                 self.assertAlmostEqual(base_lr, 1e-3, places=6)
+
+
+class TestMoELoadBalancingDTensor(FakeProcessGroupTestCase):
+    WORLD_SIZE = 2
+
+    def test_vectorized_update_preserves_dtensor_storage(self):
+        rows = (
+            ("0", [10.0, 8.0, 6.0], [1.0, 2.0, 3.0], [0.9, 2.0, 3.1]),
+            ("1", [3.0, 1.0, 1.0], [-1.0, -2.0, -3.0], [-1.4, -1.8, -2.8]),
+        )
+        for backend in ("default", "full_dtensor"):
+            with self.subTest(backend=backend):
+                model = FakeMoEModel(load_balance_coeffs=(0.1, 0.3))
+                refs = []
+                for key, counts, bias, expected in rows:
+                    moe = model.layers[key].moe
+                    moe.tokens_per_expert_E = DTensor.from_local(
+                        torch.tensor(counts),
+                        self.mesh,
+                        (Partial(),),
+                        run_check=False,
+                    )
+                    moe.expert_bias_E = DTensor.from_local(
+                        torch.tensor(bias),
+                        self.mesh,
+                        (Replicate(),),
+                        run_check=False,
+                    )
+                    counts_version = moe.tokens_per_expert_E._version
+                    bias_version = moe.expert_bias_E._version
+                    refs.append(
+                        (
+                            moe,
+                            moe.tokens_per_expert_E,
+                            moe.expert_bias_E,
+                            counts_version,
+                            bias_version,
+                            expected,
+                        )
+                    )
+
+                config = OptimizersContainer.Config(
+                    implementation="for-loop",
+                    param_groups=[
+                        ParamGroupConfig(
+                            pattern=r".*",
+                            optimizer_name="AdamW",
+                            optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                        )
+                    ],
+                )
+                container = config.build(model_parts=[model])
+                parallel_dims = FakeParallelDims()
+                parallel_dims.spmd_backend = backend
+                register_moe_load_balancing_hook(
+                    container,
+                    [model],
+                    parallel_dims,
+                )
+
+                container.step()
+
+                for (
+                    moe,
+                    counts_ref,
+                    bias_ref,
+                    counts_version,
+                    bias_version,
+                    expected,
+                ) in refs:
+                    self.assertIs(moe.tokens_per_expert_E, counts_ref)
+                    self.assertIs(moe.expert_bias_E, bias_ref)
+                    self.assertEqual(counts_ref.placements, (Partial(),))
+                    self.assertEqual(bias_ref.placements, (Replicate(),))
+                    self.assertEqual(counts_ref._version, counts_version + 1)
+                    self.assertEqual(bias_ref._version, bias_version + 1)
+                    torch.testing.assert_close(
+                        counts_ref.to_local(),
+                        torch.zeros(3),
+                    )
+                    torch.testing.assert_close(
+                        bias_ref.to_local(),
+                        torch.tensor(expected),
+                    )
 
 
 if __name__ == "__main__":
