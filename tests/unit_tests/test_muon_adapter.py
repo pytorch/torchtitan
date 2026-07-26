@@ -187,6 +187,20 @@ def _run_bucketed_muon_parity(
                 assert param.to_local().data_ptr() == param_ptrs[index]
                 assert param.placements == storage_placements[index]
 
+                grad = param.grad
+                reference_grad = reference.grad
+                if reference_grad is None:
+                    assert grad is None
+                else:
+                    assert isinstance(grad, DTensor)
+                    assert grad.placements == storage_placements[index]
+                    expected_grad = reference_grad.view(
+                        full_values[index].shape
+                    ).narrow(0, int(row_offset), int(rows))
+                    torch.testing.assert_close(
+                        grad.to_local(), expected_grad, rtol=0, atol=0
+                    )
+
                 momentum = optimizer.state[param]["momentum_buffer"]
                 reference_momentum = reference_optimizer.state[reference][
                     "momentum_buffer"

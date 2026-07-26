@@ -5,13 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.flex_shard import build_layer_bucket_specs, flex_shard
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.muon_adapter import MuonAdapter
 from torchtitan.components.optimizer import (
     default_adamw,
     OptimizersContainer,
     ParamGroupConfig,
+    register_moe_load_balancing_hook,
 )
 from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
@@ -36,6 +39,47 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
     ):
         assert override not in config.override.imports
         config.override.imports.append(override)
+
+
+def _register_moe_load_balancing_and_flex_shard(
+    optimizers,
+    model_parts,
+    parallel_dims,
+) -> None:
+    if (
+        parallel_dims.dp_replicate != 1
+        or parallel_dims.cp != 1
+        or parallel_dims.tp != 1
+        or parallel_dims.pp != 1
+        or parallel_dims.ep != 1
+        or parallel_dims.spmd_backend != "default"
+    ):
+        raise ValueError(
+            "The DeepSeek V3 FlexShard Muon recipe currently supports only "
+            "1D FSDP with the default SPMD backend"
+        )
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    fsdp_mesh = parallel_dims.get_mesh("fsdp")
+    for optimizer in optimizers:
+        if isinstance(optimizer, MuonAdapter):
+            flex_shard(
+                optimizer,
+                bucket_spec=build_layer_bucket_specs(
+                    optimizer,
+                    mesh=fsdp_mesh,
+                ),
+            )
+
+
+def _enable_flex_shard_muon(config: Trainer.Config) -> Trainer.Config:
+    assert config.model_spec is not None
+    assert config.model_spec.post_optimizer_build_fn is register_moe_load_balancing_hook
+    config.model_spec.post_optimizer_build_fn = (
+        _register_moe_load_balancing_and_flex_shard
+    )
+    # The current Owned runtime supports one Shard(0) storage mesh.
+    config.parallelism = ParallelismConfig(data_parallel_shard_degree=-1)
+    return config
 
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
@@ -84,6 +128,21 @@ def deepseek_v3_debugmodel_muon() -> Trainer.Config:
         lr=8e-4,
     )
     return config
+
+
+def deepseek_v3_debugmodel_flex_shard_muon() -> Trainer.Config:
+    """Debug 1D-FSDP recipe with Muon for rank-2 layer projections."""
+    config = deepseek_v3_debugmodel()
+    config.optimizer = _deepseek_v3_muon_optimizer(
+        n_layers=6,
+        n_dense_layers=1,
+        wq_matrix_shape=(192, 256),
+        wkv_b_matrix_shape=(256, 512),
+        lr=8e-4,
+        include_routed_experts=False,
+        include_ffn=True,
+    )
+    return _enable_flex_shard_muon(config)
 
 
 def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
@@ -183,6 +242,7 @@ def _deepseek_v3_muon_optimizer(
     wq_matrix_shape: tuple[int, int],
     wkv_b_matrix_shape: tuple[int, int],
     lr: float,
+    include_routed_experts: bool = True,
     include_ffn: bool = False,
 ) -> OptimizersContainer.Config:
     """Build bounded Muon groups for a DeepSeek V3 parameter layout."""
@@ -219,18 +279,19 @@ def _deepseek_v3_muon_optimizer(
                 )
             )
 
-    for layer_id in range(n_dense_layers, n_layers):
-        for projection in ("w1_EFD", "w2_EDF", "w3_EFD"):
-            param_groups.append(
-                ParamGroupConfig(
-                    pattern=(
-                        rf"layers\.{layer_id}\.moe\.routed_experts\."
-                        rf"inner_experts\.{projection}$"
-                    ),
-                    optimizer_name="Muon",
-                    optimizer_kwargs=muon_kwargs.copy(),
+    if include_routed_experts:
+        for layer_id in range(n_dense_layers, n_layers):
+            for projection in ("w1_EFD", "w2_EDF", "w3_EFD"):
+                param_groups.append(
+                    ParamGroupConfig(
+                        pattern=(
+                            rf"layers\.{layer_id}\.moe\.routed_experts\."
+                            rf"inner_experts\.{projection}$"
+                        ),
+                        optimizer_name="Muon",
+                        optimizer_kwargs=muon_kwargs.copy(),
+                    )
                 )
-            )
 
     for layer_id in range(n_layers):
         param_groups.append(
@@ -312,6 +373,21 @@ def deepseek_v3_16b_muon_with_ffn() -> Trainer.Config:
         include_ffn=True,
     )
     return config
+
+
+def deepseek_v3_16b_flex_shard_muon() -> Trainer.Config:
+    """16B 1D-FSDP recipe with Muon for rank-2 layer projections."""
+    config = deepseek_v3_16b()
+    config.optimizer = _deepseek_v3_muon_optimizer(
+        n_layers=27,
+        n_dense_layers=1,
+        wq_matrix_shape=(192, 2048),
+        wkv_b_matrix_shape=(256, 512),
+        lr=2.2e-4,
+        include_routed_experts=False,
+        include_ffn=True,
+    )
+    return _enable_flex_shard_muon(config)
 
 
 def deepseek_v3_16b_hybridep() -> Trainer.Config:
