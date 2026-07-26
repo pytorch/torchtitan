@@ -676,6 +676,9 @@ def _compile_graph_pp_module(
             compile_config,
             use_cudagraph=False,
             boxed_codegen=True,
+            # The complete stage joint graph was validated before partitioning.
+            # Extracted helper callables may legitimately contain no FP8 nodes.
+            fp8_strict_validation=False,
         ),
         compile_config=compile_config,
     )

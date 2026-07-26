@@ -136,6 +136,7 @@ def ensure_boxed_graph_module(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
 
 _MODULE_FQN = "module_fqn"
 _QUANTIZATION_KIND = "quantization_kind"
+_QUANTIZATION_EMULATE = "quantization_emulate"
 _EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
 _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
@@ -219,6 +220,9 @@ def annotate_module_fqns(model: nn.Module) -> None:
             quantization_kind = get_quantization_kind(submodule)
             if quantization_kind is not None:
                 metadata[_QUANTIZATION_KIND] = quantization_kind
+                metadata[_QUANTIZATION_EMULATE] = bool(
+                    getattr(submodule, "_torchtitan_quantization_emulate", False)
+                )
             submodule.forward = annotate_fn(metadata)(submodule.forward)
 
 

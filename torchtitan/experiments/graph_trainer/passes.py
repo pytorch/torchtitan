@@ -235,7 +235,6 @@ def compile_time_passes(
         if include_mandatory_normalization
         else []
     )
-    fp8_config = getattr(config.compile, "fp8", None)
     ep_overlap_chunk_passes: list[Callable] = []
     ep_overlap_module_fqn: str | None = None
     ep_overlap_chunk_strategy: str | None = None
@@ -373,7 +372,6 @@ def compile_time_passes(
         final_inductor_compile_passes(
             config.compile,
             use_cudagraph=use_cudagraph,
-            include_fp8_passes=fp8_config is not None and fp8_config.enabled,
         )
     )
     return passes
@@ -384,27 +382,34 @@ def final_inductor_compile_passes(
     *,
     use_cudagraph: bool = False,
     boxed_codegen: bool = False,
-    include_fp8_passes: bool = False,
+    fp8_strict_validation: bool | None = None,
 ) -> list[Callable]:
     """Return the terminal Inductor passes for a traced graph.
 
     GraphTrainer applies these to the full train-step graph. GraphPP applies
     the same pass list to each extracted stage callable after its PP-specific
     partitioning has chosen the callable boundary. Terminal Inductor selection
-    only depends on compile config. GraphPP leaves ``include_fp8_passes`` false
-    because it validates and identifies the complete stage joint graph before
-    partitioning.
+    only depends on compile config. GraphPP validates the complete stage joint
+    graph before partitioning, then re-identifies regions in each extracted
+    callable with strict validation disabled. FP8 pass inclusion is derived
+    directly from ``compile_config.fp8.enabled``.
     """
     from torchtitan.models.common.attention import FlexAttention
 
     passes: list[Callable] = []
     inductor_compilation = compile_config.inductor_compilation
+    fp8_enabled = compile_config.fp8.enabled
+    strict_validation = (
+        compile_config.fp8.strict_validation
+        if fp8_strict_validation is None
+        else fp8_strict_validation
+    )
     if inductor_compilation == "full":
-        if include_fp8_passes and compile_config.fp8.enabled:
+        if fp8_enabled:
             passes.append(
                 functools.partial(
                     validate_fp8_graph_pass,
-                    strict=compile_config.fp8.strict_validation,
+                    strict=strict_validation,
                 )
             )
         # Compile the entire graph into optimized Triton kernels. Must be
@@ -430,14 +435,13 @@ def final_inductor_compile_passes(
             )
 
             passes.append(annotate_rmsnorm_for_regional_inductor_pass)
-        if include_fp8_passes and compile_config.fp8.enabled:
+        if fp8_enabled:
             passes.append(
                 functools.partial(
                     identify_fp8_regions_for_regional_inductor_pass,
-                    strict=compile_config.fp8.strict_validation,
+                    strict=strict_validation,
                 )
             )
-        if compile_config.fp8.enabled:
             passes.append(annotate_complete_fp8_regions_for_regional_inductor_pass)
         passes.append(
             functools.partial(
