@@ -8,7 +8,7 @@
 
 from collections.abc import Mapping, MutableMapping
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -32,6 +32,10 @@ def _is_shard_like(placement: Placement) -> bool:
     return isinstance(placement, Shard) or (
         strided_shard_type is not None and isinstance(placement, strided_shard_type)
     )
+
+
+def _has_local_type(tensor: Tensor) -> bool:
+    return spmd.has_local_type(tensor)  # pyrefly: ignore [missing-attribute]
 
 
 class MuonAdapter(torch.optim.Muon):
@@ -68,8 +72,7 @@ class MuonAdapter(torch.optim.Muon):
                     "optimizer step; Partial storage is not a valid input"
                 )
             if _is_shard_like(placement):
-                # pyrefly: ignore [missing-attribute]
-                shard_dim = placement.dim % tensor.ndim
+                shard_dim = cast(Any, placement).dim % tensor.ndim
                 # A logical reshape makes every physical shard boundary
                 # ambiguous. Native [..., M, N] tensors may retain shards only
                 # on their leading matrix-batch dimensions.
@@ -99,13 +102,9 @@ class MuonAdapter(torch.optim.Muon):
                     writeback=writeback,
                 )
             )
-        tensor_is_typed = spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
-            tensor
-        )
+        tensor_is_typed = _has_local_type(tensor)
         if source is not None:
-            source_is_typed = spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
-                source
-            )
+            source_is_typed = _has_local_type(source)
             if source_is_typed:
                 spmd.assert_type_like(tensor, source)
             elif tensor_is_typed:
@@ -385,7 +384,7 @@ class MuonAdapter(torch.optim.Muon):
                 matrix_shape=matrix_shape,
                 writeback=False,
             )
-            if spmd.has_local_type(param):  # pyrefly: ignore [missing-attribute]
+            if _has_local_type(param):
                 spmd.assert_type_like(grad, param)
                 for compute_tensor in (param, grad):
                     spmd.assert_local_block(  # pyrefly: ignore [missing-attribute]
@@ -416,9 +415,7 @@ class MuonAdapter(torch.optim.Muon):
                 matrix_shape=matrix_shape,
                 writeback=True,
             )
-            if spmd.has_local_type(  # pyrefly: ignore [missing-attribute]
-                storage_param
-            ):
+            if _has_local_type(storage_param):
                 spmd.assert_type_like(momentum, storage_param)
                 spmd.assert_local_block(  # pyrefly: ignore [missing-attribute]
                     momentum, trailing_dims=2
