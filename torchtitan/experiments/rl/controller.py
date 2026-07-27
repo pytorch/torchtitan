@@ -590,28 +590,6 @@ class Controller(Configurable):
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
 
-            # Match TorchTitan's rank order (pp, batch, cp, tp), retaining all
-            # PP/CP/TP ranks when a microbatch is sent to one DP slice.
-            self.trainer = self.trainer.flatten("rank").split(
-                rank=("pp", "batch", "within_batch"),
-                pp=self.trainer_pp_degree,
-                batch=self.trainer_dp_degree,
-            )
-
-        reported_parallel_ranks = await asyncio.gather(
-            *[
-                self.trainer.slice(batch=dp_rank).get_parallel_ranks.call()
-                for dp_rank in range(self.trainer_dp_degree)
-            ]
-        )
-        for dp_rank, value_mesh in enumerate(reported_parallel_ranks):
-            actual_dp_ranks = [reported[1] for reported in value_mesh.values()]
-            if any(reported != dp_rank for reported in actual_dp_ranks):
-                raise ValueError(
-                    "Trainer Monarch layout does not match the SPMD batch axis: "
-                    f"batch slice {dp_rank} reported DP ranks {actual_dp_ranks}."
-                )
-
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
         # with the weight source for faster data access in the non-RDMA path.
@@ -1060,20 +1038,14 @@ class Controller(Configurable):
                     "timing/step/forward_backward"
                 ):
                     # fwd_bwd on all microbatches
-                    microbatch_metrics = []
-                    for microbatch in packed.microbatches:
-                        per_dp_rank_results = await asyncio.gather(
-                            *[
-                                self.trainer.slice(batch=dp_rank).forward_backward.call(
-                                    microbatch[dp_rank],
-                                    packed.num_global_valid_tokens,
-                                )
-                                for dp_rank in range(self.trainer_dp_degree)
-                            ]
+                    microbatch_metrics = [
+                        self._get_rank_0_value(
+                            await self.trainer.forward_backward.call(
+                                microbatch, packed.num_global_valid_tokens
+                            )
                         )
-                        microbatch_metrics.append(
-                            self._get_rank_0_value(per_dp_rank_results[0])
-                        )
+                        for microbatch in packed.microbatches
+                    ]
 
                     fwd_bwd_metrics = combine_microbatch_metrics(microbatch_metrics)
 

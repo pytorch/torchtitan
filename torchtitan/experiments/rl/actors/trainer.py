@@ -219,6 +219,13 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     def _pipeline_loss_fn(self, *args, **kwargs):
+        """Retain metrics that TorchTitan's pipeline loss adapter discards.
+
+        The pipeline builder wraps its loss function to return only the scalar
+        loss required by the schedule. RL also reports the diagnostic metrics
+        returned by ``GRPOLoss``, so capture them here for reduction after all
+        pipeline microbatches finish.
+        """
         loss, metrics = self.loss_fn(*args, **kwargs)
         self._pipeline_loss_metrics.append(metrics)
         return loss, metrics
@@ -357,58 +364,48 @@ class PolicyTrainer(Actor, Configurable):
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
-    @endpoint
-    async def get_parallel_ranks(self) -> tuple[int, int]:
-        """Return this actor's pipeline- and data-parallel ranks."""
-        pp_mesh = self.parallel_dims.get_optional_mesh("pp")
-        pp_rank = pp_mesh.get_local_rank() if pp_mesh is not None else 0
-        return pp_rank, self.dp_rank
-
     def reduce_forward_backward_metrics(
         self,
-        *,
-        sum_reduced_metrics: dict[str, torch.Tensor],
-        max_reduced_metrics: dict[str, torch.Tensor],
+        microbatch_metrics: list[dict[str, torch.Tensor]],
     ) -> dict[str, float]:
-        """Reduce forward/backward metrics across the loss mesh.
+        """Reduce pipeline microbatch metrics across the loss mesh.
 
-        Args:
-            sum_reduced_metrics: Per-rank shares to be SUM-reduced. Each
-                value must be pre-normalized so that summing across ranks
-                reconstructs the global metric.
-            max_reduced_metrics: Per-rank values to be MAX-reduced.
-
-        Returns:
-            {key: float} after collective reduction.
+        Pipeline schedules invoke the loss once per pipeline microbatch, while
+        the non-pipeline path invokes it once. Aggregate those local results
+        first so both paths use the same distributed reduction.
         """
-        # TODO: switch from plain tensors to DTensor / spmd_types so the
-        # reduction op is encoded in the placement instead of split across
-        # `sum_reduced_metrics` / `max_reduced_metrics` dicts.
-        loss_mesh = self.parallel_dims.get_optional_mesh("loss")
-
-        out: dict[str, float] = {
-            key: dist_utils.dist_sum(value.detach(), loss_mesh)
-            for key, value in sum_reduced_metrics.items()
+        sum_metrics = {
+            key: torch.stack([metrics[key] for metrics in microbatch_metrics]).sum()
+            for key in microbatch_metrics[0]
+            if not key.endswith("/max")
         }
-        out.update(
-            {
-                key: dist_utils.dist_max(value.detach(), loss_mesh)
-                for key, value in max_reduced_metrics.items()
-            }
-        )
-        return out
+        max_metrics = {
+            key: torch.stack([metrics[key] for metrics in microbatch_metrics]).max()
+            for key in microbatch_metrics[0]
+            if key.endswith("/max")
+        }
+
+        loss_mesh = self.parallel_dims.get_optional_mesh("loss")
+        return {
+            key: dist_utils.dist_sum(value.detach(), loss_mesh)
+            for key, value in sum_metrics.items()
+        } | {
+            key: dist_utils.dist_max(value.detach(), loss_mesh)
+            for key, value in max_metrics.items()
+        }
 
     @endpoint
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        local_batch: TrainingMicrobatch,
+        training_data: list[TrainingMicrobatch],
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            local_batch: This data-parallel rank's training microbatch.
+            training_data: One microbatch per data-parallel rank. Every
+                PP/CP/TP rank in a data-parallel replica selects the same entry.
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
                 sharding training_samples.
@@ -421,6 +418,7 @@ class PolicyTrainer(Actor, Configurable):
             f"step {self.policy_version}"
         )
 
+        local_batch = training_data[self.dp_rank]
         device = self.device
         token_ids = local_batch.token_ids.to(device)
         labels = local_batch.labels.to(device)
@@ -493,29 +491,8 @@ class PolicyTrainer(Actor, Configurable):
             reduced_metrics = None
             if self.pp_has_last_stage:
                 assert self._pipeline_loss_metrics
-                loss_metrics = {
-                    key: (
-                        torch.stack(
-                            [metrics[key] for metrics in self._pipeline_loss_metrics]
-                        ).max()
-                        if key.endswith("/max")
-                        else torch.stack(
-                            [metrics[key] for metrics in self._pipeline_loss_metrics]
-                        ).sum()
-                    )
-                    for key in self._pipeline_loss_metrics[0]
-                }
                 reduced_metrics = self.reduce_forward_backward_metrics(
-                    sum_reduced_metrics={
-                        key: value
-                        for key, value in loss_metrics.items()
-                        if not key.endswith("/max")
-                    },
-                    max_reduced_metrics={
-                        key: value
-                        for key, value in loss_metrics.items()
-                        if key.endswith("/max")
-                    },
+                    self._pipeline_loss_metrics
                 )
 
             metrics_object = [reduced_metrics]
@@ -549,19 +526,7 @@ class PolicyTrainer(Actor, Configurable):
             with sl.log_trace_span("model_backward"):
                 loss.backward()
 
-        sum_reduced_metrics = {
-            key: value
-            for key, value in loss_metrics.items()
-            if not key.endswith("/max")
-        }
-        max_reduced_metrics = {
-            key: value for key, value in loss_metrics.items() if key.endswith("/max")
-        }
-
-        return self.reduce_forward_backward_metrics(
-            sum_reduced_metrics=sum_reduced_metrics,
-            max_reduced_metrics=max_reduced_metrics,
-        )
+        return self.reduce_forward_backward_metrics([loss_metrics])
 
     @endpoint
     @sl.log_trace_span("optim_step")
