@@ -6,7 +6,6 @@
 
 from collections.abc import Callable
 from functools import partial
-from typing import Literal
 
 import torch.nn as nn
 
@@ -33,6 +32,7 @@ from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import (
+    GatedDeltaBackend,
     GatedDeltaKernel,
     GatedDeltaNet,
     OffsetRMSNorm,
@@ -252,9 +252,7 @@ def _qwen35_deltanet_config(
     value_head_dim: int,
     layer_id: int,
     conv_kernel_size: int = 4,
-    fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_native"
-    ] = "fla_chunked",
+    fla_backend: GatedDeltaBackend = "fla_chunked",
 ) -> GatedDeltaNet.Config:
     """Build a fully-specified GatedDeltaNet.Config."""
     key_dim = n_key_heads * key_head_dim
@@ -320,9 +318,7 @@ def _build_qwen35_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_native"
-    ] = "fla_chunked",
+    fla_backend: GatedDeltaBackend = "fla_chunked",
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3.5 models."""
     layers = []
@@ -393,9 +389,7 @@ def _build_qwen35_moe_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_native"
-    ] = "fla_chunked",
+    fla_backend: GatedDeltaBackend = "fla_chunked",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> list[Qwen35TransformerBlock.Config]:
