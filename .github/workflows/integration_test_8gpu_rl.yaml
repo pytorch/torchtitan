@@ -114,6 +114,9 @@ jobs:
           --assert-equal \
           --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
 
+        # Run Qwen3.5 GatedDeltaNet packed-sequence tests.
+        pytest torchtitan/experiments/rl/tests/test_gated_delta_net.py -v
+
         # Bitwise trainer/generator parity tests (batch-invariant). Varlen and Flex
         # (both TP=2) run as separate torchrun invocations so each backend gets a
         # fresh process group and vLLM engine; nproc matches each config's
