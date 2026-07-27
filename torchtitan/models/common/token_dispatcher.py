@@ -829,8 +829,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
     DeepEP v2 (>= 2.0.0) collapses the v1 high-throughput (HT) and low-latency (LL)
     paths into a single ``buffer.dispatch``/``combine``. The compact, expert-grouped
-    layout feeds the grouped-GEMM expert path directly (no permute). Combine is
-    asynchronous -- callers must call sync_combine() before using the result.
+    layout feeds the grouped-GEMM expert path directly (no permute). Combine
+    synchronizes before returning.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -941,18 +941,16 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     ) -> torch.Tensor:
         """Combine tokens via DeepEP.
 
-        When sp_size == 1, combine is async — sync_combine() is deferred
-        to MoE.forward, enabling overlap with shared_experts.
-        When sp_size > 1, there is no overlap: sync is forced here because
-        the SP expansion must read the combine result before returning.
+        The DeepEP backend launches combine asynchronously, so synchronize
+        before returning the combined tensor to callers.
         """
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
         # pyrefly: ignore [bad-argument-type]
         combined_TD = combine_tokens(routed_output_RD, metadata.state)
+        sync_combine()
 
         if self.sp_size > 1:
-            sync_combine()
             out_TD = torch.zeros(
                 num_local_tokens_after_padding * self.sp_size,
                 combined_TD.shape[-1],
