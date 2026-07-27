@@ -15,73 +15,30 @@ from unittest import mock
 import torch
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
-from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.decoder import TransformerBlock
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 
 from torchtitan.tools import module_profiler
 from torchtitan.tools.module_profiler import apply_module_profiler
 
 
-class _Attention(BaseAttention):
-    def __init__(self) -> None:
-        super().__init__()
-        self.proj = nn.Linear(4, 4)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x)
-
-
-class _FeedForward(FeedForward):
-    def __init__(self) -> None:
-        nn.Module.__init__(self)
-        self.proj = nn.Linear(4, 4)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x)
-
-
-class _MoE(MoE):
-    def __init__(self) -> None:
-        nn.Module.__init__(self)
-        self.proj = nn.Linear(4, 4)
-
-    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
-        return self.proj(x_BLD)
-
-
 class _Block(TransformerBlock):
     def __init__(self) -> None:
         super().__init__()
-        self.attention = _Attention()
-        self.feed_forward = _FeedForward()
+        self.proj = nn.Linear(4, 4)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attention(x)
-        return x + self.feed_forward(x)
-
-
-class _MoEBlock(TransformerBlock):
-    def __init__(self) -> None:
-        super().__init__()
-        self.attention = _Attention()
-        self.moe = _MoE()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attention(x)
-        return x + self.moe(x)
+        return self.proj(x)
 
 
 class _Model(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.layers = nn.ModuleDict({"0": _Block(), "1": _MoEBlock()})
+        self.layers = nn.ModuleDict({"0": _Block()})
         self.extra = nn.Linear(4, 4)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.layers["0"](x)
-        x = self.layers["1"](x)
         return self.extra(x)
 
 
@@ -105,11 +62,47 @@ class _PassthroughTorchDispatchMode(TorchDispatchMode):
 
 
 class TestModuleProfiler(unittest.TestCase):
+    def test_real_debug_model_modules_are_wrapped(self):
+        model = deepseek_v3_model_registry("debugmodel").model.build()
+        wrapped: dict[str, str] = {}
+
+        def fake_wrap_module_forward(
+            module: nn.Module,
+            *,
+            module_fqn: str,
+            model_part_idx: int,
+        ) -> bool:
+            self.assertEqual(model_part_idx, 0)
+            wrapped[module_fqn] = type(module).__name__
+            return True
+
+        with mock.patch(
+            "torchtitan.tools.module_profiler.wrap_module_forward",
+            side_effect=fake_wrap_module_forward,
+        ):
+            num_wrapped = apply_module_profiler([model])
+
+        self.assertEqual(num_wrapped, len(wrapped))
+
+        expected_wrapped_types = {
+            "layers.0": "DeepSeekV3TransformerBlock",
+            "layers.0.attention": "Attention",
+            "layers.0.feed_forward": "FeedForward",
+            "layers.1": "DeepSeekV3TransformerBlock",
+            "layers.1.attention": "Attention",
+            "layers.1.moe": "MoE",
+            "layers.1.moe.shared_experts": "FeedForward",
+        }
+        self.assertEqual(
+            {fqn: wrapped[fqn] for fqn in expected_wrapped_types},
+            expected_wrapped_types,
+        )
+
     def test_record_function_contexts_are_emitted_for_coarse_modules(self):
         model = _Model()
         num_wrapped = apply_module_profiler([model])
 
-        self.assertEqual(num_wrapped, 6)
+        self.assertEqual(num_wrapped, 1)
 
         x = torch.randn(2, 4)
         expected = model(x)
@@ -122,11 +115,6 @@ class TestModuleProfiler(unittest.TestCase):
         self.assertTrue(torch.allclose(actual, expected))
         keys = {event.key for event in prof.key_averages()}
         self.assertIn("layers.0", keys)
-        self.assertIn("layers.0.attention", keys)
-        self.assertIn("layers.0.feed_forward", keys)
-        self.assertIn("layers.1", keys)
-        self.assertIn("layers.1.attention", keys)
-        self.assertIn("layers.1.moe", keys)
 
     def test_record_function_contexts_nest_under_torch_dispatch_mode(self):
         model = _Model()
@@ -154,11 +142,6 @@ class TestModuleProfiler(unittest.TestCase):
         ]
         expected_names = {
             "layers.0",
-            "layers.0.attention",
-            "layers.0.feed_forward",
-            "layers.1",
-            "layers.1.attention",
-            "layers.1.moe",
         }
         module_events = [
             event for event in complete_events if event.get("name") in expected_names
@@ -201,7 +184,7 @@ class TestModuleProfiler(unittest.TestCase):
         first = apply_module_profiler([model])
         second = apply_module_profiler([model])
 
-        self.assertEqual(first, 6)
+        self.assertEqual(first, 1)
         self.assertEqual(second, 0)
 
     def test_mark_kernels_context_uses_same_annotation_metadata(self):
@@ -227,11 +210,6 @@ class TestModuleProfiler(unittest.TestCase):
             },
             {
                 "layers.0": "_Block",
-                "layers.0.attention": "_Attention",
-                "layers.0.feed_forward": "_FeedForward",
-                "layers.1": "_MoEBlock",
-                "layers.1.attention": "_Attention",
-                "layers.1.moe": "_MoE",
             },
         )
         self.assertTrue(
@@ -241,11 +219,6 @@ class TestModuleProfiler(unittest.TestCase):
             {annotation["name"] for annotation in annotations},
             {
                 "layers.0",
-                "layers.0.attention",
-                "layers.0.feed_forward",
-                "layers.1",
-                "layers.1.attention",
-                "layers.1.moe",
             },
         )
 
