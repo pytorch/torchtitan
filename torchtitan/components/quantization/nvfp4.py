@@ -19,6 +19,7 @@ TP: it runs the GEMM on local shards and returns the output with the colwise /
 rowwise placement so DTensor performs the (bf16) reduction.
 """
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -288,6 +289,31 @@ def _infer_tp_style(
     if isinstance(tp_placement, Shard) and tp_placement.dim == 1:
         return "rowwise"
     return "colwise"
+
+
+# Default fraction of decoder layers kept in bf16 at the tail (the final layers
+# are the most precision-sensitive) for the mixed-precision NVFP4 recipe.
+_NVFP4_BF16_TAIL_FRACTION = 0.15
+
+
+def nvfp4_bf16_tail_fqns(num_layers: int, bf16_tail_fraction: float) -> list[str]:
+    """Converter ``fqns`` selecting the leading decoder layers for NVFP4 while
+    keeping the last ``ceil(num_layers * bf16_tail_fraction)`` layers in bf16.
+
+    Each fqn has a trailing '.' so 'layers.1.' matches layer 1 only, not
+    'layers.10' (NVFP4LinearConverter.convert substring-matches). Raises if the
+    fraction would leave no layer to convert: an empty fqns list would instead
+    convert *all* Linears (the ``not fqns`` branch in convert), the opposite of
+    the intent.
+    """
+    num_bf16 = math.ceil(num_layers * bf16_tail_fraction)
+    convert_upto = num_layers - num_bf16
+    if convert_upto <= 0:
+        raise ValueError(
+            f"bf16_tail_fraction={bf16_tail_fraction} keeps all {num_layers} "
+            "layers in bf16; nothing to convert to NVFP4."
+        )
+    return [f"layers.{i}." for i in range(convert_upto)]
 
 
 class NVFP4LinearConverter(QuantizationConverter):

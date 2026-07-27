@@ -591,6 +591,23 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module llama3 --config llama3_debugmodel_nvfp4_mixed",
+                    "--parallelism.tensor_parallel_degree 2",
+                    # Mixed precision: leading layers are NVFP4, the bf16 tail
+                    # stays stock. Exercises a mixed NVFP4/bf16 stack under TP --
+                    # each module's sharding config is independent. Backend is
+                    # injected by _enable_spmd_backend (see nvfp4_converter above).
+                ],
+            ],
+            "NVFP4 converter: mixed-precision bf16 tail (FSDP2 + TP2, spmd_types)",
+            "nvfp4_converter_mixed",
+            ngpu=4,
+            skip_rocm_test=True,
+            skip_if_no_blackwell=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu,"
                     "torchtitan.overrides.fused_swiglu.fused_grouped_experts",

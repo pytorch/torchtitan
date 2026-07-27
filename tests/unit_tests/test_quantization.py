@@ -76,6 +76,64 @@ def test_nvfp4_converter_targets_layers_not_lm_head(monkeypatch):
     assert stock == ["lm_head"]
 
 
+def test_nvfp4_bf16_tail_fqns():
+    from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
+
+    # 32 layers, 15% tail -> ceil(4.8)=5 bf16, convert layers 0..26.
+    fqns = nvfp4_bf16_tail_fqns(32, 0.15)
+    assert fqns == [f"layers.{i}." for i in range(27)]
+    # Every fqn is trailing-dot anchored so "layers.2." matches layer 2 only,
+    # not "layers.20".."layers.29" (the converter substring-matches).
+    assert all(f.startswith("layers.") and f.endswith(".") for f in fqns)
+    # Fraction 0 keeps nothing in bf16 -> every layer converted.
+    assert nvfp4_bf16_tail_fqns(4, 0.0) == [
+        "layers.0.",
+        "layers.1.",
+        "layers.2.",
+        "layers.3.",
+    ]
+    # A fraction that rounds up to all layers leaves nothing to convert -> raise
+    # (an empty fqns list would instead convert *all* Linears).
+    with pytest.raises(ValueError, match="nothing to convert"):
+        nvfp4_bf16_tail_fqns(4, 1.0)
+
+
+def test_nvfp4_mixed_converts_only_leading_layers(monkeypatch):
+    pytest.importorskip("torchao")
+    from torchtitan.components.quantization import NVFP4Linear
+
+    if NVFP4Linear is None:
+        pytest.skip("torchao NVFP4 training prototype not available")
+    import math
+
+    import torchtitan.components.quantization.nvfp4 as nvfp4_mod
+
+    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+
+    config = ConfigManager().parse_args(
+        ["--module", "llama3", "--config", "llama3_debugmodel_nvfp4_mixed"]
+    )
+    model_config = config.model_spec.model
+    n_layers = len(model_config.layers)
+    cutoff = n_layers - math.ceil(n_layers * nvfp4_mod._NVFP4_BF16_TAIL_FRACTION)
+    assert 0 < cutoff < n_layers  # a real split: some NVFP4, some bf16
+
+    converted_layers, stock = set(), []
+    for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
+        if isinstance(lc, NVFP4Linear.Config):
+            converted_layers.add(int(fqn.split(".")[1]))
+        else:
+            stock.append(fqn)
+
+    # Only the leading layers are NVFP4; the bf16 tail + lm_head stay stock.
+    assert converted_layers == set(range(cutoff))
+    assert "lm_head" in stock
+    assert all(
+        not fqn.startswith("layers.") or int(fqn.split(".")[1]) >= cutoff
+        for fqn in stock
+    )
+
+
 def _nvfp4_linear_cls():
     pytest.importorskip("torchao")
     from torchtitan.components.quantization import NVFP4Linear
