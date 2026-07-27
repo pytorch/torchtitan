@@ -14,13 +14,13 @@ import heapq
 import math
 import re
 from collections.abc import Mapping, MutableMapping, Sequence
-from dataclasses import dataclass
-from types import MethodType
+from dataclasses import dataclass, field
+from types import MethodType, ModuleType
 from typing import Any, cast, Protocol, TYPE_CHECKING, TypeVar
 
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.device_mesh import _get_device_handle, DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.optim import Optimizer
 
@@ -326,6 +326,80 @@ class _BucketPlan:
     local_buffer_numel: int
     owner_buffer_numel: int
     owner_buffer_is_compute_layout: bool
+
+
+@dataclass(slots=True)
+class _BucketWork:
+    plan: _BucketPlan
+    active_by_param: dict[int, bool]
+    local_buffer: Tensor
+    owner_buffer: Tensor
+    reverse_buffer: Tensor | None = None
+    forward_ready: torch.Event | None = None
+    compute_done: torch.Event | None = None
+    done: torch.Event | None = None
+    compute_keepalives: list[Tensor] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _BucketBufferSlot:
+    local_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+        default_factory=dict
+    )
+    owner_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+        default_factory=dict
+    )
+
+    @staticmethod
+    def _ensure_capacity(
+        storage: dict[tuple[torch.device, torch.dtype], Tensor],
+        *,
+        numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        key = (device, dtype)
+        buffer = storage.get(key)
+        if buffer is None or buffer.numel() < numel:
+            buffer = torch.empty(numel, dtype=dtype, device=device)
+            storage[key] = buffer
+        return buffer[:numel]
+
+    def buffers(self, plan: _BucketPlan) -> tuple[Tensor, Tensor]:
+        local_buffer = self._ensure_capacity(
+            self.local_storage,
+            numel=plan.local_buffer_numel,
+            dtype=plan.dtype,
+            device=plan.device,
+        )
+        owner_buffer = self._ensure_capacity(
+            self.owner_storage,
+            numel=plan.owner_buffer_numel,
+            dtype=plan.dtype,
+            device=plan.device,
+        )
+        return local_buffer, owner_buffer
+
+
+@dataclass(slots=True)
+class _OwnedFlexShardCommContext:
+    device_handle: ModuleType
+    transfer_stream: torch.Stream
+    slots: tuple[_BucketBufferSlot, _BucketBufferSlot]
+
+    @classmethod
+    def create(cls, device: torch.device) -> _OwnedFlexShardCommContext:
+        device_handle = _get_device_handle(device.type)
+        stream = (
+            device_handle.Stream(priority=0)
+            if device.type == "cpu"
+            else device_handle.Stream(device=device, priority=0)
+        )
+        return cls(
+            device_handle=device_handle,
+            transfer_stream=stream,
+            slots=(_BucketBufferSlot(), _BucketBufferSlot()),
+        )
 
 
 def _mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
@@ -696,6 +770,9 @@ class _OwnedFlexShardRuntime:
         if not dist.is_available() or not dist.is_initialized():
             raise RuntimeError("Owned FlexShard requires distributed initialization")
 
+        self._max_in_flight_buckets = 2
+        self._step_started = False
+        self._comm_context: _OwnedFlexShardCommContext | None = None
         self._specs = tuple(bucket_specs)
         if any(spec.mesh.ndim != 1 for spec in self._specs):
             raise ValueError("Owned FlexShard currently requires 1D bucket meshes")
@@ -775,6 +852,36 @@ class _OwnedFlexShardRuntime:
         self._world_size = self._plans[0].world_size
         self._tensor_device = self._plans[0].device
         self._validate_groups(optimizer)
+
+    def set_max_in_flight_buckets(self, value: int) -> None:
+        value_is_valid = (
+            not isinstance(value, bool)
+            and isinstance(value, int)
+            and value in (1, 2)
+        )
+        local_config = torch.tensor(
+            [value if value_is_valid else 0, int(self._step_started)],
+            dtype=torch.int64,
+            device=self._tensor_device,
+        )
+        gathered_configs = [
+            torch.empty_like(local_config) for _ in range(self._world_size)
+        ]
+        dist.all_gather(
+            gathered_configs,
+            local_config,
+            group=self._process_group,
+        )
+        gathered_values = [int(config[0].item()) for config in gathered_configs]
+        if any(gathered_value not in (1, 2) for gathered_value in gathered_values):
+            raise ValueError("max_in_flight_buckets must be 1 or 2 on every rank")
+        if any(bool(config[1].item()) for config in gathered_configs):
+            raise RuntimeError(
+                "set_max_in_flight_buckets() must be called before the first step"
+            )
+        if any(gathered_value != value for gathered_value in gathered_values):
+            raise RuntimeError("max_in_flight_buckets differs across ranks")
+        self._max_in_flight_buckets = value
 
     def _synchronize_setup_error(self, error: Exception | None) -> None:
         if not self._specs:
@@ -1017,25 +1124,31 @@ class _OwnedFlexShardRuntime:
                 )
         return active_by_param
 
-    def _step_bucket(
+    def _prepare_bucket(
         self,
         optimizer: Optimizer,
         plan: _BucketPlan,
         active_by_param: dict[int, bool],
-    ) -> None:
-        if not any(active_by_param[id(binding.param)] for binding in plan.bindings):
-            return
-
-        local_buffer = torch.empty(
-            plan.local_buffer_numel,
-            dtype=plan.dtype,
-            device=plan.device,
-        )
-        owner_buffer = torch.empty(
-            plan.owner_buffer_numel,
-            dtype=plan.dtype,
-            device=plan.device,
-        )
+        *,
+        local_buffer: Tensor | None = None,
+        owner_buffer: Tensor | None = None,
+    ) -> _BucketWork:
+        if local_buffer is None:
+            local_buffer = torch.empty(
+                plan.local_buffer_numel,
+                dtype=plan.dtype,
+                device=plan.device,
+            )
+        if owner_buffer is None:
+            owner_buffer = torch.empty(
+                plan.owner_buffer_numel,
+                dtype=plan.dtype,
+                device=plan.device,
+            )
+        if local_buffer.numel() != plan.local_buffer_numel:
+            raise ValueError("FlexShard local buffer has incorrect capacity")
+        if owner_buffer.numel() != plan.owner_buffer_numel:
+            raise ValueError("FlexShard owner buffer has incorrect capacity")
         for binding_index, binding in enumerate(plan.bindings):
             local_offset = plan.local_offsets[binding_index]
             local_numel = binding.shard_numels[plan.group_rank]
@@ -1053,19 +1166,37 @@ class _OwnedFlexShardRuntime:
                 local_output.view(local_param.shape),
             )
 
+        return _BucketWork(
+            plan=plan,
+            active_by_param=active_by_param,
+            local_buffer=local_buffer,
+            owner_buffer=owner_buffer,
+        )
+
+    @staticmethod
+    def _forward_bucket(work: _BucketWork) -> None:
+        plan = work.plan
+
         dist.all_to_all_single(
-            owner_buffer,
-            local_buffer,
+            work.owner_buffer,
+            work.local_buffer,
             output_split_sizes=plan.output_split_sizes,
             input_split_sizes=plan.input_split_sizes,
             group=plan.process_group,
         )
 
+    def _compute_bucket(
+        self,
+        optimizer: Optimizer,
+        work: _BucketWork,
+    ) -> None:
+        plan = work.plan
+        owner_buffer = work.owner_buffer
         reverse_buffer = owner_buffer
         for binding_index, binding in enumerate(plan.bindings):
             if (
                 binding.owner_group_rank != plan.group_rank
-                or not active_by_param[id(binding.param)]
+                or not work.active_by_param[id(binding.param)]
             ):
                 continue
             if plan.owner_buffer_is_compute_layout:
@@ -1093,6 +1224,7 @@ class _OwnedFlexShardRuntime:
             flat_update = full_update.view(-1)
             if plan.owner_buffer_is_compute_layout:
                 reverse_buffer = flat_update
+                work.compute_keepalives.append(full_update)
             else:
                 for destination_rank in range(plan.world_size):
                     destination_numel = binding.shard_numels[destination_rank]
@@ -1103,21 +1235,35 @@ class _OwnedFlexShardRuntime:
                             destination_offset : destination_offset + destination_numel
                         ]
                     )
+        work.reverse_buffer = reverse_buffer
+
+    @staticmethod
+    def _reverse_bucket(work: _BucketWork) -> None:
+        plan = work.plan
+        reverse_buffer = work.reverse_buffer
+        if reverse_buffer is None:
+            raise AssertionError("FlexShard owner compute must precede reverse")
 
         dist.all_to_all_single(
-            local_buffer,
+            work.local_buffer,
             reverse_buffer,
             output_split_sizes=plan.input_split_sizes,
             input_split_sizes=plan.output_split_sizes,
             group=plan.process_group,
         )
 
+    @staticmethod
+    def _finalize_bucket(
+        optimizer: Optimizer,
+        work: _BucketWork,
+    ) -> None:
+        plan = work.plan
         for binding_index, binding in enumerate(plan.bindings):
-            if not active_by_param[id(binding.param)]:
+            if not work.active_by_param[id(binding.param)]:
                 continue
             local_param = binding.param._local_tensor
             local_offset = plan.local_offsets[binding_index]
-            local_update = local_buffer[
+            local_update = work.local_buffer[
                 local_offset : local_offset + local_param.numel()
             ].view(local_param.shape)
             group = optimizer.param_groups[binding.group_index]
@@ -1133,18 +1279,164 @@ class _OwnedFlexShardRuntime:
                 )
             torch.autograd.graph.increment_version(binding.param)
 
+    def _step_bucket(
+        self,
+        optimizer: Optimizer,
+        plan: _BucketPlan,
+        active_by_param: dict[int, bool],
+    ) -> None:
+        if not any(active_by_param[id(binding.param)] for binding in plan.bindings):
+            return
+
+        work = self._prepare_bucket(optimizer, plan, active_by_param)
+        self._forward_bucket(work)
+        self._compute_bucket(optimizer, work)
+        self._reverse_bucket(work)
+        self._finalize_bucket(optimizer, work)
+
+    def _begin_pipelined_bucket(
+        self,
+        optimizer: Optimizer,
+        plan: _BucketPlan,
+        active_by_param: dict[int, bool],
+        slot: _BucketBufferSlot,
+        caller_stream: torch.Stream,
+        context: _OwnedFlexShardCommContext,
+    ) -> _BucketWork:
+        device_handle = context.device_handle
+        transfer_stream = context.transfer_stream
+        with device_handle.stream(transfer_stream):
+            local_buffer, owner_buffer = slot.buffers(plan)
+            work = self._prepare_bucket(
+                optimizer,
+                plan,
+                active_by_param,
+                local_buffer=local_buffer,
+                owner_buffer=owner_buffer,
+            )
+            self._forward_bucket(work)
+            forward_ready = device_handle.Event()
+            forward_ready.record(transfer_stream)
+            work.forward_ready = forward_ready
+
+        with device_handle.stream(caller_stream):
+            caller_stream.wait_event(forward_ready)
+            self._compute_bucket(optimizer, work)
+            compute_done = device_handle.Event()
+            compute_done.record(caller_stream)
+            work.compute_done = compute_done
+        return work
+
+    def _complete_pipelined_bucket(
+        self,
+        optimizer: Optimizer,
+        work: _BucketWork,
+        context: _OwnedFlexShardCommContext,
+    ) -> None:
+        compute_done = work.compute_done
+        if compute_done is None:
+            raise AssertionError("FlexShard compute must precede reverse")
+
+        device_handle = context.device_handle
+        transfer_stream = context.transfer_stream
+        with device_handle.stream(transfer_stream):
+            # Queue the next forward redistribution before this wait. Delaying
+            # the lifetime back edge preserves the one-bucket overlap window.
+            transfer_stream.wait_event(compute_done)
+            self._reverse_bucket(work)
+            self._finalize_bucket(optimizer, work)
+            done = device_handle.Event()
+            done.record(transfer_stream)
+            work.done = done
+
+    @staticmethod
+    def _release_pipelined_bucket(
+        work: _BucketWork,
+        caller_stream: torch.Stream,
+    ) -> None:
+        done = work.done
+        if done is None:
+            raise AssertionError("FlexShard reverse must precede buffer release")
+
+        # The caller stream is the allocation stream for any distinct tensor
+        # returned by flex_shard_compute(). Enqueue the allocator-lifetime back
+        # edge before dropping its final Python reference. Do not use
+        # Tensor.record_stream() here.
+        caller_stream.wait_event(done)
+        work.compute_keepalives.clear()
+        work.reverse_buffer = None
+
+    def _pipelined_step(
+        self,
+        optimizer: Optimizer,
+        active_plans: list[_BucketPlan],
+        active_by_param: dict[int, bool],
+    ) -> None:
+        if not active_plans:
+            return
+        if self._comm_context is None:
+            self._comm_context = _OwnedFlexShardCommContext.create(
+                self._tensor_device
+            )
+        context = self._comm_context
+        device_handle = context.device_handle
+        caller_stream = device_handle.current_stream(self._tensor_device)
+        context.transfer_stream.wait_stream(caller_stream)
+
+        pending: list[_BucketWork] = []
+        try:
+            for bucket_index, plan in enumerate(active_plans):
+                work = self._begin_pipelined_bucket(
+                    optimizer,
+                    plan,
+                    active_by_param,
+                    context.slots[bucket_index % 2],
+                    caller_stream,
+                    context,
+                )
+                pending.append(work)
+                if len(pending) == 2:
+                    oldest = pending.pop(0)
+                    self._complete_pipelined_bucket(optimizer, oldest, context)
+                    self._release_pipelined_bucket(oldest, caller_stream)
+
+            for work in pending:
+                self._complete_pipelined_bucket(optimizer, work, context)
+                self._release_pipelined_bucket(work, caller_stream)
+        except Exception:
+            # Order both streams before releasing compute-owned temporaries.
+            # This is an error-path drain, not a host or device synchronization.
+            context.transfer_stream.wait_stream(caller_stream)
+            caller_stream.wait_stream(context.transfer_stream)
+            for work in pending:
+                work.compute_keepalives.clear()
+                work.reverse_buffer = None
+            raise
+
     def step(self, optimizer: Optimizer, closure=None):
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
+        self._step_started = True
+
         # TorchTitan executes one SPMD graph and optimizer configuration on all
         # ranks. Rank-identical gradient presence is therefore a runtime
         # precondition, not a per-step control-plane collective.
         active_by_param = self._active_params()
-        for plan in self._plans:
-            self._step_bucket(optimizer, plan, active_by_param)
+        active_plans = [
+            plan
+            for plan in self._plans
+            if any(
+                active_by_param[id(binding.param)] for binding in plan.bindings
+            )
+        ]
+        if self._max_in_flight_buckets == 1:
+            for plan in active_plans:
+                self._step_bucket(optimizer, plan, active_by_param)
+        else:
+            self._pipelined_step(optimizer, active_plans, active_by_param)
         return loss
 
 
@@ -1163,6 +1455,18 @@ def _reject_flex_shard_param_group(
         f"{type(optimizer).__name__} cannot add parameter groups after "
         "flex_shard plan construction"
     )
+
+
+def _set_max_in_flight_buckets(
+    optimizer: Optimizer,
+    value: int,
+) -> None:
+    runtime = optimizer.__dict__["_flex_shard_runtime"]
+    if not isinstance(runtime, _OwnedFlexShardRuntime):
+        raise RuntimeError(
+            "set_max_in_flight_buckets() requires an Owned FlexShard runtime"
+        )
+    runtime.set_max_in_flight_buckets(value)
 
 
 def flex_shard(
@@ -1213,4 +1517,8 @@ def flex_shard(
     if isinstance(runtime, _OwnedFlexShardRuntime):
         step = Optimizer.profile_hook_step(_run_owned_flex_shard_step)
         optimizer.step = MethodType(step, optimizer)  # type: ignore[method-assign]
+        optimizer.set_max_in_flight_buckets = MethodType(  # type: ignore[attr-defined]
+            _set_max_in_flight_buckets,
+            optimizer,
+        )
     return optimizer
