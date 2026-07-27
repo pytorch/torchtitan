@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 
@@ -16,9 +17,13 @@ from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
 )
+from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction
+from fla.ops.gated_delta_rule.fused_recurrent import FusedRecurrentFunction
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
+
+from torchtitan.distributed.utils import get_spmd_backend
 
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
@@ -33,10 +38,16 @@ from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 from .rope import MRoPE
-from .sharding import set_qwen35_sharding_config
+from .sharding import annotate_multimodal_input_spmd_types, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
+
+# The FLA kernels run on local shards inside the GatedDeltaKernel local_map
+# region and perform no collectives; register them as local-only so SPMD
+# typechecking propagates types through their autograd Functions.
+spmd.register_local_autograd_function(ChunkGatedDeltaRuleFunction)
+spmd.register_local_autograd_function(FusedRecurrentFunction)
 
 
 def _causal_conv1d_varlen(
@@ -336,6 +347,26 @@ class GatedDeltaNet(Module):
                 )
 
             x_BDL = self._local_map_conv(x_BDL, conv, _conv)
+        elif get_spmd_backend() == "spmd_types":
+            # Under spmd_types both the input and the Shard(0) conv weight are
+            # local tensors, but the module's configured groups is the global
+            # channel count; run the depthwise conv with local groups in a
+            # local region (no conv1d sharding strategy) and re-type the
+            # output.
+            w = conv.weight
+            with spmd.local():
+                x_BDL = F.conv1d(
+                    x_BDL,
+                    w,
+                    None,
+                    conv.stride,
+                    conv.padding,
+                    conv.dilation,
+                    w.size(0),
+                )
+                out_BLD = F.silu(x_BDL).transpose(1, 2)
+                spmd.assert_type(out_BLD, spmd.V, spmd.PartitionSpec("dp", None, "tp"))
+            return out_BLD
         else:
             x_BDL = conv(x_BDL)
         return F.silu(x_BDL).transpose(1, 2)
@@ -375,30 +406,50 @@ class GatedDeltaNet(Module):
                 return tensor
             return tensor.reshape(1, B * L, *tensor.shape[2:])
 
+        def local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
+            # Same pattern as SeparateQKVLinear.local_qkv_head_split: the
+            # S(-1) -> per-head unflatten cannot propagate through view.
+            with spmd.local():
+                t_BLNH = t.view(kernel_B, kernel_L, -1, head_dim)
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        t_BLNH, spmd.V, spmd.PartitionSpec("dp", None, "tp", None)
+                    )
+            return t_BLNH
+
         # Shapes:
         #   xq_BLNK, xk_BLNK: (B, L, n_key_heads, key_head_dim)
         #   xv_BLNV, xz_BLNV: (B, L, n_value_heads, value_head_dim)
         #   xa_BLN, xb_BLN: (B, L, n_value_heads)
-        xq_BLNK = self._causal_conv(
-            _maybe_flatten(self.in_proj_q(x_BLD)),
-            self.conv_q,
-            cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.key_head_dim)
-        xk_BLNK = self._causal_conv(
-            _maybe_flatten(self.in_proj_k(x_BLD)),
-            self.conv_k,
-            cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.key_head_dim)
-        xv_BLNV = self._causal_conv(
-            _maybe_flatten(self.in_proj_v(x_BLD)),
-            self.conv_v,
-            cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.value_head_dim)
-        xz_BLNV = _maybe_flatten(self.in_proj_z(x_BLD)).view(
-            kernel_B, kernel_L, -1, self.value_head_dim
+        xq_BLNK = local_head_split(
+            self._causal_conv(
+                _maybe_flatten(self.in_proj_q(x_BLD)),
+                self.conv_q,
+                cu_seqlens,
+                cu_seqlens_cpu,
+            ),
+            self.key_head_dim,
+        )
+        xk_BLNK = local_head_split(
+            self._causal_conv(
+                _maybe_flatten(self.in_proj_k(x_BLD)),
+                self.conv_k,
+                cu_seqlens,
+                cu_seqlens_cpu,
+            ),
+            self.key_head_dim,
+        )
+        xv_BLNV = local_head_split(
+            self._causal_conv(
+                _maybe_flatten(self.in_proj_v(x_BLD)),
+                self.conv_v,
+                cu_seqlens,
+                cu_seqlens_cpu,
+            ),
+            self.value_head_dim,
+        )
+        xz_BLNV = local_head_split(
+            _maybe_flatten(self.in_proj_z(x_BLD)), self.value_head_dim
         )
         xa_BLN = _maybe_flatten(self.in_proj_a(x_BLD))
         xb_BLN = _maybe_flatten(self.in_proj_b(x_BLD))
@@ -488,11 +539,22 @@ class Qwen35Attention(BaseAttention):
     ) -> torch.Tensor:
         B, L, _ = x_BLD.shape
 
+        def local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
+            # Same pattern as SeparateQKVLinear.local_qkv_head_split: the
+            # S(-1) -> per-head unflatten cannot propagate through view.
+            with spmd.local():
+                t_BLNH = t.view(B, L, -1, head_dim)
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        t_BLNH, spmd.V, spmd.PartitionSpec("dp", None, "tp", None)
+                    )
+            return t_BLNH
+
         # wq is 2x wider: produces query + gate
-        xq_gate_BLN2H = self.wq(x_BLD).view(B, L, -1, self.head_dim * 2)
+        xq_gate_BLN2H = local_head_split(self.wq(x_BLD), self.head_dim * 2)
         xq_BLNH, gate_BLNH = xq_gate_BLN2H.chunk(2, dim=-1)
-        xk_BLNH = self.wk(x_BLD).view(B, L, -1, self.head_dim)
-        xv_BLNH = self.wv(x_BLD).view(B, L, -1, self.head_dim)
+        xk_BLNH = local_head_split(self.wk(x_BLD), self.head_dim)
+        xv_BLNH = local_head_split(self.wv(x_BLD), self.head_dim)
 
         # QK norm (before RoPE)
         xq_BLNH = self.q_norm(xq_BLNH)
@@ -726,20 +788,26 @@ class Qwen35Model(Decoder):
         Returns:
             List of (item_idx, sample_idx, vision_start, n_tokens) tuples
         """
-        vision_mask = tokens == vision_token_id
-        flat_mask = vision_mask.view(-1)
-        prev_mask = torch.cat(
-            [torch.zeros(1, dtype=torch.bool, device=flat_mask.device), flat_mask[:-1]]
-        )
-        region_starts = torch.where(flat_mask & ~prev_mask)[0]
-        seq_len = tokens.shape[1]
+        # Per-rank index bookkeeping over the DP-sharded batch; the outputs
+        # are Python ints, so keep it outside SPMD typechecking.
+        with spmd.no_typecheck():
+            vision_mask = tokens == vision_token_id
+            flat_mask = vision_mask.view(-1)
+            prev_mask = torch.cat(
+                [
+                    torch.zeros(1, dtype=torch.bool, device=flat_mask.device),
+                    flat_mask[:-1],
+                ]
+            )
+            region_starts = torch.where(flat_mask & ~prev_mask)[0]
+            seq_len = tokens.shape[1]
 
-        positions = []
-        for i in range(num_tokens_per_item.shape[0]):
-            start = int(region_starts[i].item())
-            n_tokens = int(num_tokens_per_item[i].item())
-            positions.append((i, start // seq_len, start % seq_len, n_tokens))
-        return positions
+            positions = []
+            for i in range(num_tokens_per_item.shape[0]):
+                start = int(region_starts[i].item())
+                n_tokens = int(num_tokens_per_item[i].item())
+                positions.append((i, start // seq_len, start % seq_len, n_tokens))
+            return positions
 
     def _get_vision_embeds(
         self,
@@ -785,10 +853,13 @@ class Qwen35Model(Decoder):
         Returns:
             Updated embeddings
         """
-        for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            inputs_embeds[
-                sample_idx, vision_start : vision_start + n_tokens, :
-            ] = merged_embeds[item_idx, :n_tokens, :]
+        # Per-rank in-place copies between two DP batch-sharded tensors at
+        # local indices; the annotation on inputs_embeds is unchanged.
+        with spmd.no_typecheck():
+            for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
+                inputs_embeds[
+                    sample_idx, vision_start : vision_start + n_tokens, :
+                ] = merged_embeds[item_idx, :n_tokens, :]
         return inputs_embeds
 
     def _prepare_multimodal_embeds(
@@ -816,6 +887,10 @@ class Qwen35Model(Decoder):
         """
         image_token_id = special_tokens["image_id"]
         video_token_id = special_tokens["video_id"]
+
+        annotate_multimodal_input_spmd_types(
+            pixel_values, pixel_values_videos, grid_thw, grid_thw_videos
+        )
 
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
@@ -876,7 +951,9 @@ class Qwen35Model(Decoder):
         else:
             x = tokens
 
-        # 3D MRoPE positions for multimodal batches, else 2D text positions.
+        # 3D MRoPE positions for multimodal batches, else 2D text positions
+        # (2D positions are annotated by the trainer; mrope_positions are not).
+        annotate_multimodal_input_spmd_types(mrope_positions)
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
         for layer in self.layers.values():
