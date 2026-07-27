@@ -15,7 +15,8 @@ import torch
 import torch.distributed.tensor.placement_types as placement_types
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Partial, Placement, Replicate, Shard
-from torch.optim._muon import muon
+from torch.optim._muon import _compute_muon_update, muon
+from torch.optim.optimizer import _to_scalar
 
 from torchtitan.components.flex_shard import Owned
 
@@ -286,23 +287,23 @@ class MuonAdapter(torch.optim.Muon):
         logical_pre = self._logical_matrix_view(
             compute_input, group.get("matrix_shape")
         )
-        scratch_param = torch.zeros_like(logical_pre)
-        scratch_momentum = torch.zeros_like(logical_pre)
-        muon(
-            [scratch_param],
-            [logical_pre],
-            [scratch_momentum],
-            lr=group["lr"],
-            weight_decay=0.0,
-            momentum=0.0,
-            nesterov=False,
+        if logical_pre.numel() == 0:
+            return compute_input
+
+        direction, adjusted_lr = _compute_muon_update(
+            logical_pre,
+            logical_pre.shape,
+            lr=_to_scalar(group["lr"]),
             ns_coefficients=group["ns_coefficients"],
             eps=group["eps"],
             ns_steps=group["ns_steps"],
             adjust_lr_fn=group["adjust_lr_fn"],
-            has_complex=False,
         )
-        return scratch_param.view(compute_input.shape)
+        # Preserve core Muon's add_(..., alpha=...) cast and scaling order while
+        # reusing FlexShard's temporary input buffer for the signed update.
+        logical_pre.zero_()
+        logical_pre.add_(direction, alpha=-adjusted_lr)
+        return compute_input
 
     @staticmethod
     def flex_shard_finalize(
