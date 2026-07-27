@@ -257,6 +257,8 @@ def _deepseek_v3_muon_optimizer(
         "betas": (0.9, 0.95),
         "eps": 1e-8,
         "weight_decay": 0.1,
+        "fused": False,
+        "foreach": True,
     }
 
     param_groups: list[ParamGroupConfig] = []
@@ -343,7 +345,7 @@ def _deepseek_v3_muon_optimizer(
         ]
     )
     return OptimizersContainer.Config(
-        implementation="fused",
+        implementation="foreach",
         param_groups=param_groups,
     )
 

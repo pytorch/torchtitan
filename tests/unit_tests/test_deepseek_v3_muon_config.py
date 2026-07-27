@@ -101,7 +101,7 @@ class TestDeepSeekV3MuonConfig(unittest.TestCase):
         wkv_b_matrix_shape,
     ):
         optimizer_config = config.optimizer
-        self.assertEqual(optimizer_config.implementation, "fused")
+        self.assertEqual(optimizer_config.implementation, "foreach")
         impl_kwargs = OptimizersContainer._build_impl_kwargs(optimizer_config)
         groups_by_optimizer, _ = OptimizersContainer._build_param_groups(
             model,
@@ -150,8 +150,8 @@ class TestDeepSeekV3MuonConfig(unittest.TestCase):
         fallback_names = set(adamw_groups[1]["param_names"])
         self.assertEqual(fallback_names, all_names - expected_muon_names - wo_names)
         for group in adamw_groups:
-            self.assertTrue(group["fused"])
-            self.assertFalse(group["foreach"])
+            self.assertFalse(group["fused"])
+            self.assertTrue(group["foreach"])
 
         assigned_names = [
             name
