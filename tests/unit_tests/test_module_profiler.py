@@ -18,8 +18,8 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 
-from torchtitan.tools import module_profiler
-from torchtitan.tools.module_profiler import apply_module_profiler
+from torchtitan.tools import profiler as profiler_module
+from torchtitan.tools.profiler import Profiler
 
 
 class _Block(TransformerBlock):
@@ -77,10 +77,10 @@ class TestModuleProfiler(unittest.TestCase):
             return True
 
         with mock.patch(
-            "torchtitan.tools.module_profiler.wrap_module_forward",
+            "torchtitan.tools.profiler.Profiler.wrap_module_forward",
             side_effect=fake_wrap_module_forward,
         ):
-            num_wrapped = apply_module_profiler([model])
+            num_wrapped = Profiler.apply_module_profiler([model])
 
         self.assertEqual(num_wrapped, len(wrapped))
 
@@ -100,7 +100,7 @@ class TestModuleProfiler(unittest.TestCase):
 
     def test_record_function_contexts_are_emitted_for_coarse_modules(self):
         model = _Model()
-        num_wrapped = apply_module_profiler([model])
+        num_wrapped = Profiler.apply_module_profiler([model])
 
         self.assertEqual(num_wrapped, 1)
 
@@ -118,7 +118,7 @@ class TestModuleProfiler(unittest.TestCase):
 
     def test_record_function_contexts_nest_under_torch_dispatch_mode(self):
         model = _Model()
-        apply_module_profiler([model])
+        Profiler.apply_module_profiler([model])
 
         # Public torch.profiler.record_function regressed here because its
         # dispatcher ops are intercepted by TorchDispatchMode and create crossing
@@ -181,8 +181,8 @@ class TestModuleProfiler(unittest.TestCase):
 
     def test_wrapping_is_idempotent(self):
         model = _Model()
-        first = apply_module_profiler([model])
-        second = apply_module_profiler([model])
+        first = Profiler.apply_module_profiler([model])
+        second = Profiler.apply_module_profiler([model])
 
         self.assertEqual(first, 1)
         self.assertEqual(second, 0)
@@ -197,10 +197,10 @@ class TestModuleProfiler(unittest.TestCase):
             yield
 
         with mock.patch(
-            "torchtitan.tools.module_profiler.get_mark_kernels",
+            "torchtitan.tools.profiler.Profiler.get_mark_kernels",
             return_value=fake_mark_kernels,
         ):
-            apply_module_profiler([model])
+            Profiler.apply_module_profiler([model])
             model(torch.randn(2, 4))
 
         self.assertEqual(
@@ -236,10 +236,10 @@ class TestModuleProfiler(unittest.TestCase):
                 events.append(("exit", name))
 
         with mock.patch(
-            "torchtitan.tools.module_profiler.get_mark_kernels",
+            "torchtitan.tools.profiler.Profiler.get_mark_kernels",
             return_value=fake_mark_kernels,
         ):
-            self.assertEqual(apply_module_profiler([model]), 1)
+            self.assertEqual(Profiler.apply_module_profiler([model]), 1)
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 model(torch.randn(2, 4))
 
@@ -253,18 +253,18 @@ class TestModuleProfiler(unittest.TestCase):
                 raise ImportError("missing")
             return real_import(name, *args, **kwargs)
 
-        module_profiler.get_mark_kernels.cache_clear()
+        Profiler.get_mark_kernels.cache_clear()
         try:
             with (
                 mock.patch("builtins.__import__", side_effect=fake_import),
-                mock.patch.object(module_profiler.logger, "warning") as warning,
+                mock.patch.object(profiler_module.logger, "warning") as warning,
             ):
-                self.assertIsNone(module_profiler.get_mark_kernels())
-                self.assertIsNone(module_profiler.get_mark_kernels())
+                self.assertIsNone(Profiler.get_mark_kernels())
+                self.assertIsNone(Profiler.get_mark_kernels())
 
             self.assertEqual(warning.call_count, 1)
         finally:
-            module_profiler.get_mark_kernels.cache_clear()
+            Profiler.get_mark_kernels.cache_clear()
 
 
 if __name__ == "__main__":

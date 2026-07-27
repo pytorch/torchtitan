@@ -53,7 +53,6 @@ from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.module_profiler import apply_module_profiler
 from torchtitan.tools.profiler import Profiler
 
 
@@ -439,7 +438,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.model_parts = [model]
 
         if config.profiler.enable_profiling:
-            apply_module_profiler(self.model_parts)
+            Profiler.apply_module_profiler(self.model_parts)
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
