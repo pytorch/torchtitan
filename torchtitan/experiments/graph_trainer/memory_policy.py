@@ -49,7 +49,7 @@ from torchtitan.tools.logging import logger
 
 @dataclass(frozen=True)
 class NodePolicyKey:
-    target: object
+    target: str
     module_fqn: str
     occurrence: int
 

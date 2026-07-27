@@ -1633,7 +1633,7 @@ class TestApplySACPass(TestCase):
             base_policy=_make_default_memory_policy(set()),
             overrides={
                 NodePolicyKey(
-                    target=torch.ops.aten.add.Tensor,
+                    target="torch.ops.aten.add.Tensor",
                     module_fqn="layers.0.attention",
                     occurrence=2,
                 ): CheckpointPolicy.MUST_SAVE,
