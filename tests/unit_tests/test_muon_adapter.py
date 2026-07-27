@@ -38,7 +38,6 @@ def _run_bucketed_muon_parity(
     rank: int,
     world_size: int,
     store_path: str,
-    max_in_flight_buckets: int,
 ) -> None:
     dist.init_process_group(
         backend="gloo",
@@ -132,12 +131,7 @@ def _run_bucketed_muon_parity(
                 ],
                 **{**kwargs, **overrides},
             )
-            optimizer = flex_shard(optimizer, bucket_spec=bucket_specs)
-            if max_in_flight_buckets != 2:
-                optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
-                    max_in_flight_buckets
-                )
-            return optimizer
+            return flex_shard(optimizer, bucket_spec=bucket_specs)
 
         optimizer = make_optimizer(params)
         reference_optimizer = torch.optim.Muon(
@@ -152,21 +146,20 @@ def _run_bucketed_muon_parity(
         )
 
         pipeline_stages = []
-        if max_in_flight_buckets == 2:
-            runtime = optimizer.__dict__["_flex_shard_runtime"]
-            original_forward_bucket = runtime._forward_bucket
-            original_reverse_bucket = runtime._reverse_bucket
+        runtime = optimizer.__dict__["_flex_shard_runtime"]
+        original_forward_bucket = runtime._forward_bucket
+        original_reverse_bucket = runtime._reverse_bucket
 
-            def record_forward_bucket(work):
-                pipeline_stages.append(f"F:{work.plan.spec.name}")
-                return original_forward_bucket(work)
+        def record_forward_bucket(work):
+            pipeline_stages.append(f"F:{work.plan.spec.name}")
+            return original_forward_bucket(work)
 
-            def record_reverse_bucket(work):
-                pipeline_stages.append(f"R:{work.plan.spec.name}")
-                return original_reverse_bucket(work)
+        def record_reverse_bucket(work):
+            pipeline_stages.append(f"R:{work.plan.spec.name}")
+            return original_reverse_bucket(work)
 
-            runtime._forward_bucket = record_forward_bucket
-            runtime._reverse_bucket = record_reverse_bucket
+        runtime._forward_bucket = record_forward_bucket
+        runtime._reverse_bucket = record_reverse_bucket
 
         all_to_all_calls = 0
         status_collective_calls = 0
@@ -286,9 +279,7 @@ def _run_bucketed_muon_parity(
                         "F:layer-2",
                         "R:layer-1",
                         "R:layer-2",
-                    ]
-                    if max_in_flight_buckets == 2
-                    else None,
+                    ],
                 )
                 reference_optimizer.step()
                 assert all(
@@ -316,9 +307,7 @@ def _run_bucketed_muon_parity(
             versions = [param._version for param in params]
             optimizer_step_without_status_collectives(
                 optimizer,
-                ["F:layer-0", "F:layer-2", "R:layer-0", "R:layer-2"]
-                if max_in_flight_buckets == 2
-                else None,
+                ["F:layer-0", "F:layer-2", "R:layer-0", "R:layer-2"],
             )
             reference_optimizer.step()
             assert all(
@@ -367,9 +356,7 @@ def _run_bucketed_muon_parity(
                     "F:layer-2",
                     "R:layer-1",
                     "R:layer-2",
-                ]
-                if max_in_flight_buckets == 2
-                else None,
+                ],
             )
             optimizer_step_without_status_collectives(restored_optimizer)
             reference_optimizer.step()
@@ -1098,19 +1085,13 @@ class TestMuonAdapterStridedPolicy(DTensorTestBase):
 class TestDistributedBucketedMuonAdapter(unittest.TestCase):
     @unittest.skipUnless(_has_batched_muon(), "requires PyTorch PR #190597")
     def test_layer_buckets_match_full_muon(self):
-        for max_in_flight_buckets in (1, 2):
-            with self.subTest(max_in_flight_buckets=max_in_flight_buckets):
-                with tempfile.TemporaryDirectory() as store_dir:
-                    mp.spawn(
-                        _run_bucketed_muon_parity,
-                        args=(
-                            2,
-                            os.path.join(store_dir, "store"),
-                            max_in_flight_buckets,
-                        ),
-                        nprocs=2,
-                        join=True,
-                    )
+        with tempfile.TemporaryDirectory() as store_dir:
+            mp.spawn(
+                _run_bucketed_muon_parity,
+                args=(2, os.path.join(store_dir, "store")),
+                nprocs=2,
+                join=True,
+            )
 
     @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
     def test_pipeline_cuda_allocator_lifetime(self):
