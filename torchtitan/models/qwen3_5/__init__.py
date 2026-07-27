@@ -70,7 +70,7 @@ QWEN3_5_SPECIAL_TOKENS = {
 
 
 _LINEAR_INIT = {
-    "weight": partial(nn.init.trunc_normal_, std=0.02),
+    "weight": partial(nn.init.trunc_normal_, std=0.02, a=-3 * 0.02, b=3 * 0.02),
     "bias": nn.init.zeros_,
 }
 _OFFSET_NORM_INIT = {"weight": nn.init.zeros_}
@@ -89,17 +89,20 @@ def _output_linear_init(dim: int) -> dict[str, Callable]:
 
 
 def _depth_init(layer_id: int) -> dict[str, Callable]:
+    std = depth_scaled_std(0.02, layer_id)
     return {
-        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "weight": partial(nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std),
         "bias": nn.init.zeros_,
     }
 
 
 def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
+    # Only w2 (output projection) gets the depth-scaled std; w1/w3 are inputs.
+    std = depth_scaled_std(0.02, layer_id)
     return {
-        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
-        "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02, a=-3 * 0.02, b=3 * 0.02),
+        "w2_EDF": partial(nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02, a=-3 * 0.02, b=3 * 0.02),
     }
 
 
@@ -127,8 +130,8 @@ def _shared_experts_config(
     ffn = make_ffn_config(
         dim=dim,
         hidden_dim=hidden_dim,
-        w1_param_init=_LINEAR_INIT,
-        w2w3_param_init=_depth_init(layer_id),
+        w1w3_param_init=_LINEAR_INIT,
+        w2_param_init=_depth_init(layer_id),
     )
     return SigmoidGatedFeedForward.Config(
         w1=ffn.w1,
@@ -364,8 +367,8 @@ def _build_qwen35_layers(
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
-                    w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_depth_init(layer_id),
+                    w1w3_param_init=_LINEAR_INIT,
+                    w2_param_init=_depth_init(layer_id),
                 ),
                 attention_norm=_offset_norm(dim),
                 ffn_norm=_offset_norm(dim),
