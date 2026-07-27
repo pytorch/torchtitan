@@ -3,8 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -87,12 +85,6 @@ def _nvfp4_linear_cls():
     return NVFP4Linear
 
 
-def _stub_parallel_dims(*, tp_enabled, tp=4, spmd_backend="spmd_types"):
-    # NVFP4Linear._validate_tp_backend only reads these scalar fields; a stub
-    # keeps the test off the mesh so the backend gate runs on CPU.
-    return SimpleNamespace(tp_enabled=tp_enabled, tp=tp, spmd_backend=spmd_backend)
-
-
 def test_nvfp4_infer_tp_style():
     """colwise/rowwise is read back from the weight's declared TP placement."""
     _nvfp4_linear_cls()
@@ -113,31 +105,21 @@ def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
         NVFP4Linear.Config(in_features=in_features, out_features=out_features)
 
 
-def test_nvfp4_rejects_local_gemm_dims_below_128():
-    # Config dims are 128-multiples but a TP shard drops a local dim below 128.
-    # Simulate the post-shard weight shape (out=64 for out_features=256 at TP=4).
+def test_nvfp4_build_augments_sharding_config_with_local_map():
+    # The parallelize override is gone: Config.build() folds the stock colwise
+    # sharding into a local_map region for the opaque nvfp4 GEMM, which base
+    # Module.parallelize then consumes directly.
     NVFP4Linear = _nvfp4_linear_cls()
-    module = NVFP4Linear.Config(in_features=512, out_features=256).build()
-    module._validate_local_gemm_dims()  # unsharded (256, 512): both %128, no raise
-    module.weight = torch.nn.Parameter(torch.empty(64, 512, device="meta"))
-    with pytest.raises(ValueError, match="divisible by 128"):
-        module._validate_local_gemm_dims()
+    from torchtitan.models.common.decoder_sharding import colwise_config
 
-
-def test_nvfp4_validate_requires_spmd_types_for_tp():
-    NVFP4Linear = _nvfp4_linear_cls()
-    module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
-    module._validate_tp_backend(_stub_parallel_dims(tp_enabled=True))  # no raise
-    # TP disabled (single GPU / FSDP-only): backend is irrelevant.
-    module._validate_tp_backend(
-        _stub_parallel_dims(tp_enabled=False, spmd_backend="default")
-    )
-    # The nvfp4 GEMM is opaque to DTensor: TP requires the spmd_types backend.
-    for backend in ("default", "full_dtensor"):
-        with pytest.raises(ValueError, match="spmd_types"):
-            module._validate_tp_backend(
-                _stub_parallel_dims(tp_enabled=True, spmd_backend=backend)
-            )
+    module = NVFP4Linear.Config(
+        in_features=512, out_features=1024, sharding_config=colwise_config()
+    ).build()
+    sc = module._sharding_config
+    assert sc.local_map is not None
+    assert "x" in (sc.in_dst_shardings or {})
+    # The weight placement (colwise) is left untouched by the augmentation.
+    assert "weight" in sc.state_shardings
 
 
 def test_nvfp4_module_exposes_weight_and_two_buffers():
@@ -150,11 +132,16 @@ def test_nvfp4_module_exposes_weight_and_two_buffers():
     assert set(buffers) == {"_sr_seed", "_rht_sign_vector"}
     assert buffers["_sr_seed"].dtype == torch.int64
     assert tuple(buffers["_rht_sign_vector"].shape) == (16,)
+    # The RHT vector is the fixed v1-recipe constant, identical on every rank.
+    from torchtitan.components.quantization.nvfp4 import _HARDCODED_SIGN_VECTOR
+
+    assert tuple(int(v) for v in buffers["_rht_sign_vector"]) == _HARDCODED_SIGN_VECTOR
 
 
-def test_nvfp4_native_checkpoint_roundtrip_keeps_buffers():
-    """Native NVFP4 checkpoints persist and restore the RHT buffer. The SR seed is
-    a per-rank, non-persistent buffer, so it is intentionally absent."""
+def test_nvfp4_native_checkpoint_excludes_runtime_buffers():
+    """Both NVFP4 runtime buffers are non-persistent -- the RHT vector is a fixed
+    constant (recomputed on init) and the SR seed is per-rank -- so a native
+    checkpoint carries only the stock weight."""
     NVFP4Linear = _nvfp4_linear_cls()
 
     def _built():
@@ -164,9 +151,9 @@ def test_nvfp4_native_checkpoint_roundtrip_keeps_buffers():
 
     src, dst = _built(), _built()
     sd = src.state_dict()
-    assert set(sd) == {"weight", "_rht_sign_vector"}
-    assert "_sr_seed" not in sd  # non-persistent
+    assert set(sd) == {"weight"}
     dst.load_state_dict(sd)
+    # The fixed RHT constant is identical on both modules regardless of the load.
     assert torch.equal(dst._rht_sign_vector, src._rht_sign_vector)
 
 
@@ -203,9 +190,9 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     assert isinstance(model.get_submodule("layers.0.feed_forward.w1"), NVFP4Linear)
 
     sd = model.state_dict()
-    # The persistent RHT buffer is present natively; the per-rank SR seed is
-    # non-persistent, so it is absent from the state dict entirely.
-    assert any(k.endswith("feed_forward.w1._rht_sign_vector") for k in sd)
+    # Both NVFP4 runtime buffers are non-persistent, so neither the RHT vector
+    # nor the per-rank SR seed appears in the native state dict.
+    assert not any("_rht_sign_vector" in k for k in sd)
     assert not any("_sr_seed" in k for k in sd)
 
     hf_sd = Llama3StateDictAdapter(model_config, hf_assets_path=None).to_hf(sd)

@@ -24,19 +24,17 @@ from typing import Literal
 
 import spmd_types as spmd
 import torch
-from torch.distributed.tensor import distribute_tensor, DTensor, Shard
+from torch.distributed.tensor import DTensor, Shard
 
 from torchtitan.components.quantization import QuantizationConverter
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
-    resolve_placements,
     ShardingConfig,
-    SpmdLayout,
 )
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -46,6 +44,31 @@ TP = MeshAxisName.TP
 # TorchAO's NVFP4 Triton kernels require each local GEMM dimension to be a
 # multiple of 128.
 _NVFP4_BLOCK = 128
+
+# Fixed Random Hadamard Transform basis (the NVFP4 v1 recipe default in torchao
+# and Transformer Engine). It must be identical across TP ranks -- rowwise TP
+# shards the GEMM contraction dim, and the Hadamard transform only cancels
+# between the two operands when both use the same sign vector. Hardcoding it
+# makes every rank produce the same vector by construction (no cross-rank
+# broadcast). Per-recipe dynamic sign vectors are a future extension.
+_HARDCODED_SIGN_VECTOR = (
+    1,
+    1,
+    1,
+    -1,
+    1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    1,
+    -1,
+    1,
+    -1,
+    -1,
+)
 
 try:
     from torchao.prototype.moe_training.nvfp4_training.nvfp4_linear import (
@@ -70,8 +93,9 @@ try:
         Reuses TorchAO's ``NVFP4Linear`` (weight/bias, the ``_sr_seed`` /
         ``_rht_sign_vector`` runtime buffers, RHT logic, functional forward) and
         adds torchtitan's meta-init buffer protocol and a DTensor <-> local TP
-        bridge. Buffers are replicated over every mesh axis (the RHT block is
-        size-16 and contraction-agnostic; the seed is per-module).
+        bridge. Both runtime buffers are plain local (non-DTensor) tensors:
+        ``_rht_sign_vector`` is the fixed ``_HARDCODED_SIGN_VECTOR`` (identical on
+        every rank by construction) and ``_sr_seed`` is per-rank.
         """
 
         @dataclass(kw_only=True, slots=True)
@@ -82,7 +106,7 @@ try:
                 # NVFP4's Triton kernels need every GEMM dim to be a multiple of
                 # 128. in_features / out_features are known at config-build time
                 # (the TP degree is not), so reject the model-dim violations up
-                # front here; NVFP4Linear._validate_local_gemm_dims covers the
+                # front here; the AO kernel (nvfp4_mm_triton) itself raises on the
                 # per-rank local dims once TP has sharded the weight.
                 for name in ("in_features", "out_features"):
                     value = getattr(self, name)
@@ -92,6 +116,21 @@ try:
                             f"got {name}={value}. NVFP4 cannot quantize this Linear "
                             "(e.g. the LM head); exclude it from the converter fqns."
                         )
+
+            def build(self, **kwargs):
+                # sharding_config (the stock colwise/rowwise weight placement) is
+                # attached by update_from_config after this Config is built, so it
+                # is available here but not in __post_init__. Augment it into the
+                # local_map region for the opaque nvfp4_linear op now, so base
+                # Module.parallelize consumes it directly (no parallelize override).
+                # slots=True breaks zero-arg super(), so call the parent explicitly.
+                instance = Linear.Config.build(self, **kwargs)
+                if instance._sharding_config is not None:
+                    tp_style = _infer_tp_style(instance._sharding_config)
+                    instance._sharding_config = _augment_sharding_config(
+                        instance._sharding_config, tp_style
+                    )
+                return instance
 
         def __init__(self, config: "NVFP4Linear.Config"):
             TorchAONVFP4Linear.__init__(
@@ -110,11 +149,14 @@ try:
             # key needs no checkpointing). Re-register it None so it is not
             # distributed and is re-drawn per rank in _init_self_buffers.
             self.register_buffer("_sr_seed", None, persistent=False)
-            self._rht_sign_vector = None
+            # _rht_sign_vector is the fixed _HARDCODED_SIGN_VECTOR (see module
+            # top): identical on every rank, so it is non-persistent (a
+            # deterministic constant needs no checkpointing) and re-materialized
+            # per rank in _init_self_buffers with no cross-rank broadcast.
+            self.register_buffer("_rht_sign_vector", None, persistent=False)
             self._rht_sign_vector_tuple = None
-            self._buffer_spec: tuple | None = None
 
-        # -- runtime-buffer accessors (buffers may be replicated DTensors) --
+        # -- runtime-buffer accessors --
 
         def _local_sr_seed(self) -> torch.Tensor:
             return (
@@ -124,11 +166,9 @@ try:
             )
 
         def _local_rht_sign_vector(self) -> torch.Tensor:
-            sign_vector = (
-                self._rht_sign_vector.to_local()
-                if isinstance(self._rht_sign_vector, DTensor)
-                else self._rht_sign_vector
-            )
+            # _rht_sign_vector is always a plain per-rank-identical tensor (never
+            # distributed), so no DTensor unwrap is needed.
+            sign_vector = self._rht_sign_vector
             if sign_vector is not None and sign_vector.device.type != "meta":
                 sign_vector = sign_vector.reshape(-1)
             return sign_vector
@@ -151,118 +191,19 @@ try:
                 raise RuntimeError("rht_sign_vector is not materialized")
             return self._rht_sign_vector_tuple
 
-        # -- parallelization --
-
-        def parallelize(self, parallel_dims: ParallelDims) -> None:
-            if self._sharding_config is not None:
-                self._validate_tp_backend(parallel_dims)
-                tp_style = _infer_tp_style(self._sharding_config)
-                self._sharding_config = self._augment_sharding_config(
-                    self._sharding_config, tp_style
-                )
-                self._cache_buffer_spec(parallel_dims)
-            # super().parallelize() shards the weight; check the resulting local
-            # GEMM dims against the 128 constraint the config could not know.
-            super().parallelize(parallel_dims)
-            self._validate_local_gemm_dims()
-
-        def _augment_sharding_config(
-            self, sc: ShardingConfig, tp_style: Literal["colwise", "rowwise"] | None
-        ) -> ShardingConfig:
-            """Turn the stock colwise/rowwise Linear config into a local_map
-            region for the opaque ``nvfp4_linear`` op.
-
-            ``nvfp4_linear`` is opaque to the SPMD type system, so TP runs it on
-            local shards inside ``spmd.local_map``: the framework converts the
-            activation to local on entry and re-types the output on exit. We add
-            the activation's input layout (colwise consumes TP-Replicate; rowwise
-            consumes TP-Shard(-1)) and the input-gradient layout (colwise grad is
-            TP-Partial -- a per-rank partial sum over the output shard that must
-            be all-reduced; rowwise grad stays TP-Shard(-1)). ``out_src`` /
-            ``out_dst`` are inherited from colwise_config()/rowwise_config().
-            ``_rht_sign_vector`` is declared replicated so DCP checkpoints it as a
-            single replicated state; the cross-rank broadcast that makes it truly
-            replicated happens in _materialize_buffer (see the note there).
-            """
-            if tp_style == "rowwise":
-                in_layout = dense_activation_placement(tp=spmd.S(-1))
-                in_grad = dense_activation_placement(tp=spmd.S(-1))
-            else:
-                in_layout = dense_activation_placement(tp=spmd.R)
-                in_grad = dense_activation_placement(tp=spmd.P)
-            return replace(
-                sc,
-                state_shardings={
-                    **sc.state_shardings,
-                    # _sr_seed is a non-persistent per-rank buffer (drawn in
-                    # _init_self_buffers), so it is not a distributed state here.
-                    "_rht_sign_vector": _replicated_layout(),
-                },
-                in_src_shardings={**(sc.in_src_shardings or {}), "x": in_layout},
-                in_dst_shardings={**(sc.in_dst_shardings or {}), "x": in_layout},
-                local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
-            )
-
-        def _validate_tp_backend(self, parallel_dims: ParallelDims) -> None:
-            if parallel_dims.tp_enabled and parallel_dims.spmd_backend != "spmd_types":
-                raise ValueError(
-                    "NVFP4 tensor parallelism requires "
-                    "parallelism.spmd_backend='spmd_types' (got "
-                    f"'{parallel_dims.spmd_backend}'). The NVFP4 GEMM is opaque "
-                    "to DTensor; TP runs through the spmd_types local_map path."
-                )
-
-        def _validate_local_gemm_dims(self) -> None:
-            # After super().parallelize() the weight is TP-sharded, so its shape
-            # is the per-rank local (out, in) that the kernel actually sees --
-            # covers colwise and rowwise without recomputing the split by hand.
-            weight = (
-                self.weight.to_local()
-                if isinstance(self.weight, DTensor)
-                else self.weight
-            )
-            local_out, local_in = weight.shape
-            if local_in % _NVFP4_BLOCK or local_out % _NVFP4_BLOCK:
-                raise ValueError(
-                    f"NVFP4 requires each local GEMM dim divisible by "
-                    f"{_NVFP4_BLOCK}; Linear in={self.in_features} "
-                    f"out={self.out_features} shards to local "
-                    f"(in={local_in}, out={local_out}). Pick a TP degree that "
-                    f"keeps both a multiple of {_NVFP4_BLOCK}."
-                )
-
-        def _cache_buffer_spec(self, parallel_dims: ParallelDims) -> None:
-            layout = _replicated_layout()
-            mesh = parallel_dims.resolve_mesh(layout.axes())
-            self._buffer_spec = (
-                None if mesh is None else (mesh, resolve_placements(layout, mesh))
-            )
-
-        def _materialize_buffer(self, tensor: torch.Tensor) -> torch.Tensor:
-            # distribute_tensor with Replicate broadcasts rank 0's value to the
-            # whole mesh. This is load-bearing for _rht_sign_vector: it is drawn
-            # per-rank at random (_make_rht_sign_vector(None)) but the RHT basis
-            # must be identical across TP ranks -- rowwise TP shards the GEMM
-            # contraction dim, and the Hadamard transform only cancels between
-            # the two operands when both use the same sign vector. The spmd_types
-            # state path cannot stand in here: spmd_distribute_tensor only acts on
-            # Shard axes and would annotate a Replicate buffer without broadcasting.
-            if self._buffer_spec is None:
-                return tensor
-            mesh, placements = self._buffer_spec
-            return distribute_tensor(tensor, mesh, list(placements))
-
         def _init_self_buffers(
             self, *, buffer_device: torch.device | None = None
         ) -> None:
             dev = buffer_device or self.weight.device
             # Per-rank seed: a plain local tensor (not distributed), so each rank
-            # draws its own. _rht_sign_vector stays replicated.
+            # draws its own.
             self._sr_seed = torch.randint(
                 -(2**63), 2**63 - 1, (1,), dtype=torch.int64, device=dev
             )
-            self._rht_sign_vector = self._materialize_buffer(
-                _make_rht_sign_vector(None, device=dev)
+            # Static RHT basis: identical on every rank by construction, so it is
+            # a plain local tensor with no cross-rank broadcast.
+            self._rht_sign_vector = _make_rht_sign_vector(
+                _HARDCODED_SIGN_VECTOR, device=dev
             )
             self._refresh_rht_sign_vector_tuple()
 
@@ -301,9 +242,33 @@ except ImportError:
     NVFP4Linear = None
 
 
-def _replicated_layout() -> SpmdLayout:
-    """Replicated over every dense mesh axis."""
-    return SpmdLayout({MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R, TP: spmd.R})
+def _augment_sharding_config(
+    sc: ShardingConfig, tp_style: Literal["colwise", "rowwise"] | None
+) -> ShardingConfig:
+    """Turn the stock colwise/rowwise Linear config into a local_map region for
+    the opaque ``nvfp4_linear`` op.
+
+    ``nvfp4_linear`` is opaque to the SPMD type system, so TP runs it on local
+    shards inside ``spmd.local_map``: the framework converts the activation to
+    local on entry and re-types the output on exit. We add the activation's input
+    layout (colwise consumes TP-Replicate; rowwise consumes TP-Shard(-1)) and the
+    input-gradient layout (colwise grad is TP-Partial -- a per-rank partial sum
+    over the output shard that must be all-reduced; rowwise grad stays
+    TP-Shard(-1)). ``out_src`` / ``out_dst`` are inherited from
+    colwise_config()/rowwise_config().
+    """
+    if tp_style == "rowwise":
+        in_layout = dense_activation_placement(tp=spmd.S(-1))
+        in_grad = dense_activation_placement(tp=spmd.S(-1))
+    else:
+        in_layout = dense_activation_placement(tp=spmd.R)
+        in_grad = dense_activation_placement(tp=spmd.P)
+    return replace(
+        sc,
+        in_src_shardings={**(sc.in_src_shardings or {}), "x": in_layout},
+        in_dst_shardings={**(sc.in_dst_shardings or {}), "x": in_layout},
+        local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
+    )
 
 
 def _infer_tp_style(
