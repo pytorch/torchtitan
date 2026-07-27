@@ -75,6 +75,28 @@ class _MoELike(Protocol):
     expert_bias_E: torch.Tensor  # noqa: N815
 
 
+def _foreach_inplace_dtensor_version_compat(
+    foreach_op: Callable[..., Any],
+    tensors: list[torch.Tensor],
+    *args: Any,
+) -> None:
+    dtensor_versions = [
+        (tensor, tensor._version)
+        for tensor in tensors
+        if isinstance(tensor, torch.distributed.tensor.DTensor)
+    ]
+    foreach_op(tensors, *args)
+    # TODO: Remove this wrapper once https://github.com/pytorch/pytorch/pull/191154
+    # lands and TorchTitan's minimum PyTorch version includes the fix.
+    torch.autograd.graph.increment_version(
+        [
+            tensor
+            for tensor, version in dtensor_versions
+            if tensor._version == version
+        ]
+    )
+
+
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     """A container for multiple optimizers, supporting mixed optimizer types.
 
@@ -435,8 +457,9 @@ def register_moe_load_balancing_hook(
         loss_mesh = parallel_dims.get_optional_mesh("loss")
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
+        moe_layers = list(_iter_moe_layers(model_parts))
         tokens_per_expert_E_list = []
-        for transformer_block, moe in _iter_moe_layers(model_parts):
+        for transformer_block, moe in moe_layers:
             tokens_per_expert_E = moe.tokens_per_expert_E
             if _is_recomputation_enabled(transformer_block):
                 # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
@@ -492,33 +515,36 @@ def register_moe_load_balancing_hook(
                     run_check=False,
                 )
 
-        moe_layer_idx = 0
         with torch.no_grad():
-            for model_part in model_parts:
-                layers = model_part.get_submodule("layers")
-                assert isinstance(layers, nn.ModuleDict)
-                for transformer_block in layers.values():
-                    if not transformer_block.moe_enabled:
-                        continue
-                    moe = cast(_MoELike, transformer_block.moe)
-                    load_balance_coeff = moe.load_balance_coeff
-                    assert load_balance_coeff is not None
+            tokens_per_expert_LE = tokens_per_expert_E_by_layer.float()
+            expert_bias_direction_LE = torch.sign(
+                tokens_per_expert_LE.mean(dim=1, keepdim=True) - tokens_per_expert_LE
+            )
+            expert_bias_direction_rows = list(expert_bias_direction_LE.unbind(0))
+            load_balance_coeffs = []
+            expert_bias_buffers = []
+            token_count_buffers = []
+            for _transformer_block, moe in moe_layers:
+                load_balance_coeff = moe.load_balance_coeff
+                assert load_balance_coeff is not None
+                load_balance_coeffs.append(load_balance_coeff)
+                expert_bias_buffers.append(moe.expert_bias_E)
+                token_count_buffers.append(moe.tokens_per_expert_E)
+            torch._foreach_mul_(expert_bias_direction_rows, load_balance_coeffs)
+            expert_bias_direction_LE.sub_(
+                expert_bias_direction_LE.mean(dim=1, keepdim=True)
+            )
 
-                    tokens_per_expert_E = tokens_per_expert_E_by_layer[
-                        moe_layer_idx
-                    ].float()
-                    moe_layer_idx += 1
-
-                    # update the expert bias
-                    # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    expert_bias_delta_E = load_balance_coeff * torch.sign(
-                        tokens_per_expert_E.mean() - tokens_per_expert_E
-                    )
-                    expert_bias_delta_E = (
-                        expert_bias_delta_E - expert_bias_delta_E.mean()
-                    )
-                    moe.expert_bias_E.add_(expert_bias_delta_E)
-                    moe.tokens_per_expert_E.zero_()
+            # This is not exactly the same as
+            # https://arxiv.org/pdf/2408.15664 proposed.
+            _foreach_inplace_dtensor_version_compat(
+                torch._foreach_add_, expert_bias_buffers, expert_bias_direction_rows
+            )
+            # Multiplication by zero preserves Partial DTensor placement, unlike
+            # the foreach zero operator, which has no Partial strategy.
+            _foreach_inplace_dtensor_version_compat(
+                torch._foreach_mul_, token_count_buffers, 0
+            )
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(
