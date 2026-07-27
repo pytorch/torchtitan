@@ -336,9 +336,12 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         the document offsets (GatedDeltaNet); under varlen, a plain
         VarlenMetadata shared by both consumers.
         """
-        try:
-            from torch.nn.attention.flex_attention import BlockMask
+        from torch.nn.attention.flex_attention import BlockMask
 
+        # torchtitan.models.qwen3_5 imports the FLA (flash-linear-attention)
+        # kernels at module scope. FLA is a triton/CUDA-only optional
+        # dependency, so skip instead of erroring on environments without it.
+        try:
             from torchtitan.models.qwen3_5 import model_registry
             from torchtitan.models.qwen3_5.model import Qwen35AttentionMasks
         except ModuleNotFoundError as exc:
