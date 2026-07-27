@@ -218,17 +218,52 @@ class PolicyTrainer(Actor, Configurable):
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
 
-    def _pipeline_loss_fn(self, *args, **kwargs):
-        """Retain metrics that TorchTitan's pipeline loss adapter discards.
+    def _pipeline_loss_fn(
+        self,
+        pred: torch.Tensor,
+        packed_targets: torch.Tensor,
+        global_valid_tokens: int,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Unpack aligned RL targets and retain discarded loss metrics.
 
-        The pipeline builder wraps its loss function to return only the scalar
-        loss required by the schedule. RL also reports the diagnostic metrics
-        returned by ``GRPOLoss``, so capture them here for reduction after all
-        pipeline microbatches finish.
+        PyTorch splits ``target`` for each pipeline microbatch but passes
+        ``loss_kwargs`` through unchanged. Packing every per-token RL loss
+        input into ``target`` keeps them aligned for any pipeline schedule.
         """
-        loss, metrics = self.loss_fn(*args, **kwargs)
+        labels = packed_targets[..., 0].to(torch.int64)
+        generator_logprobs = packed_targets[..., 1].to(torch.float32)
+        loss_mask = packed_targets[..., 2].to(torch.bool)
+        advantages = packed_targets[..., 3].to(torch.float32)
+        loss, metrics = self.loss_fn(
+            pred,
+            labels,
+            global_valid_tokens,
+            generator_logprobs=generator_logprobs,
+            loss_mask=loss_mask,
+            advantages=advantages,
+        )
         self._pipeline_loss_metrics.append(metrics)
         return loss, metrics
+
+    @staticmethod
+    def _pack_pipeline_targets(
+        labels: torch.Tensor,
+        generator_logprobs: torch.Tensor,
+        loss_mask: torch.Tensor,
+        advantages: torch.Tensor,
+    ) -> torch.Tensor:
+        """Pack per-token loss inputs so PyTorch chunks them as one target."""
+        # Pipeline targets must have one dtype. float64 round-trips both token
+        # labels and the float32 RL inputs without changing their values.
+        return torch.stack(
+            (
+                labels.to(torch.float64),
+                generator_logprobs,
+                loss_mask,
+                advantages,
+            ),
+            dim=-1,
+        )
 
     def state_dict(self) -> dict[str, Any]:
         # Checkpoint "train_state": policy_version == completed optim steps, so it
@@ -457,16 +492,25 @@ class PolicyTrainer(Actor, Configurable):
 
         if self.parallel_dims.pp_enabled:
             self._pipeline_loss_metrics = []
-            targets, losses = (labels, []) if self.pp_has_last_stage else (None, None)
+            targets, losses = (
+                (
+                    self._pack_pipeline_targets(
+                        labels,
+                        generator_logprobs,
+                        loss_mask,
+                        advantages,
+                    ),
+                    [],
+                )
+                if self.pp_has_last_stage
+                else (None, None)
+            )
             model_kwargs = {
                 "positions": positions,
                 "attention_masks": attention_masks,
             }
             loss_kwargs = {
                 "global_valid_tokens": num_global_valid_tokens,
-                "generator_logprobs": generator_logprobs,
-                "loss_mask": loss_mask,
-                "advantages": advantages,
             }
 
             with self.train_context():

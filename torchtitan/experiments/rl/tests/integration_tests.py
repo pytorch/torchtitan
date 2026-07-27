@@ -34,44 +34,60 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_debug_flex_trainer_cp",
+                    "--config rl_grpo_qwen3_0_6b_flex_untied",
+                    "--async-loop.num-training-steps 1",
+                    "--async-loop.max-offpolicy-steps 0",
+                    "--async-loop.num-groups-per-train-step 1",
+                    "--async-loop.group-size 2",
+                    "--async-loop.validation.num-samples 0",
+                    "--async-loop.batcher.batch.seq-len 512",
+                    "--async-loop.training-sample-builder.no-drop-zero-std-reward-groups",
+                    "--trainer.parallelism.data-parallel-shard-degree 1",
+                    "--trainer.parallelism.tensor-parallel-degree 1",
+                    "--trainer.parallelism.pipeline-parallel-degree 2",
+                    "--trainer.parallelism.pipeline-parallel-schedule GPipe",
+                    "--trainer.parallelism.pipeline-parallel-microbatch-size 1",
+                    "--trainer.parallelism.context-parallel-degree 2",
+                    "--trainer.parallelism.context-parallel-load-balancer ptrr",
+                    "--generator.parallelism.tensor-parallel-degree 2",
+                    "--num-generators 2",
+                    "--generator.sampling.max-tokens 16",
+                    "--compile.no-enable",
+                    "--generator.cudagraph.no-enable",
+                    "--metrics.no-enable-wandb",
                 ]
             ],
-            "RL Qwen3 debug trainer CP=2 with TorchStore weight sync",
-            "rl_qwen3_debug_trainer_cp2",
-            ngpu=3,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_debug_flex_trainer_pp",
-                ]
-            ],
-            "RL Qwen3 debug trainer PP=2 with TorchStore stage aggregation",
-            "rl_qwen3_debug_trainer_pp2",
-            ngpu=3,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_debug_flex_trainer_pp_cp",
-                ]
-            ],
-            "RL Qwen3 debug trainer PP=2 CP=2 + two TP=2 generators",
-            "rl_qwen3_debug_trainer_pp2_cp2_two_generators",
+            "RL Qwen3-0.6B trainer PP=2 CP=2 + two TP=2 generators",
+            "rl_qwen3_0_6b_trainer_pp2_cp2_two_generators",
             ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_debug_flex_trainer_pp_dp",
+                    "--config rl_grpo_qwen3_0_6b_flex_untied",
+                    "--async-loop.num-training-steps 1",
+                    "--async-loop.max-offpolicy-steps 0",
+                    "--async-loop.num-groups-per-train-step 1",
+                    "--async-loop.group-size 4",
+                    "--async-loop.validation.num-samples 0",
+                    "--async-loop.batcher.batch.seq-len 512",
+                    "--async-loop.batcher.per-sample-pad-multiple 512",
+                    "--async-loop.training-sample-builder.no-drop-zero-std-reward-groups",
+                    "--trainer.parallelism.data-parallel-shard-degree 2",
+                    "--trainer.parallelism.tensor-parallel-degree 1",
+                    "--trainer.parallelism.pipeline-parallel-degree 2",
+                    "--trainer.parallelism.pipeline-parallel-schedule GPipe",
+                    "--trainer.parallelism.pipeline-parallel-microbatch-size 1",
+                    "--generator.parallelism.tensor-parallel-degree 1",
+                    "--generator.sampling.max-tokens 16",
+                    "--compile.no-enable",
+                    "--generator.cudagraph.no-enable",
+                    "--metrics.no-enable-wandb",
                 ]
             ],
-            "RL Qwen3 debug trainer PP=2 DP=2 batch distribution",
-            "rl_qwen3_debug_trainer_pp2_dp2",
+            "RL Qwen3-0.6B trainer PP=2 DP=2 batch distribution",
+            "rl_qwen3_0_6b_trainer_pp2_dp2",
             ngpu=5,
         ),
         OverrideDefinitions(

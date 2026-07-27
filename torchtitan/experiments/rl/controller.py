@@ -282,27 +282,6 @@ class Controller(Configurable):
             self.trainer.training.local_batch_size = (
                 self.async_loop.batcher.batch.local_batch_size
             )
-            if (
-                self.trainer.parallelism.pipeline_parallel_degree > 1
-                and self.trainer.parallelism.pipeline_parallel_microbatch_size
-                != self.trainer.training.local_batch_size
-            ):
-                raise ValueError(
-                    "RL pipeline parallelism currently requires one pipeline "
-                    "microbatch per packed trainer batch because the pipeline "
-                    "schedule does not shard loss kwargs. Set "
-                    "pipeline_parallel_microbatch_size to the batcher's "
-                    f"local_batch_size ({self.trainer.training.local_batch_size})."
-                )
-            if (
-                self.trainer.parallelism.pipeline_parallel_degree > 1
-                and self.trainer.parallelism.pipeline_parallel_schedule != "GPipe"
-            ):
-                raise ValueError(
-                    "RL pipeline parallelism currently requires the GPipe "
-                    "schedule because the packed trainer batch is one pipeline "
-                    "microbatch."
-                )
 
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
