@@ -287,11 +287,14 @@ class MuonAdapter(torch.optim.Muon):
             compute_input, group.get("matrix_shape")
         )
         scratch_param = torch.zeros_like(logical_pre)
-        scratch_momentum = torch.zeros_like(logical_pre)
+        # muon() requires a momentum buffer even though flex_shard_prepare()
+        # already applied momentum. With momentum=0, aliasing logical_pre makes
+        # its lerp_ a data no-op. Replace this compatibility path with
+        # _compute_muon_update after pytorch/pytorch#191168 lands.
         muon(
             [scratch_param],
             [logical_pre],
-            [scratch_momentum],
+            [logical_pre],
             lr=group["lr"],
             weight_decay=0.0,
             momentum=0.0,
