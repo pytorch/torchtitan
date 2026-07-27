@@ -68,6 +68,7 @@ def parallelize_qwen3_5(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
@@ -111,6 +112,11 @@ def parallelize_qwen3_5(
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
             apply_compile(model.vision_encoder, compile_config)
+
+    # Skip FSDP for inference (vLLM): FSDP forward hooks are incompatible with
+    # torch.inference_mode(). TP/EP sharding above is kept.
+    if skip_dp:
+        return model
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]

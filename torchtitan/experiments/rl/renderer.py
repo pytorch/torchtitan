@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 _RENDERER_BY_MODEL = {
     "qwen3": "qwen3",
     "qwen3_vl": "qwen3-vl",
+    # Map explicitly so a local/renamed checkpoint path resolves; "auto" only
+    # matches known HF repo ids and would raise for this family.
+    "qwen3_5": "qwen3.5",
     "gpt_oss": "gpt-oss",
     "deepseek_v3": "deepseek-v3",
     "default": "default",  # llama3
