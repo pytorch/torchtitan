@@ -134,8 +134,9 @@ class RoutedExperts(Module):
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
-        on exit. The forward body operates on plain local tensors.
+        DTensor->local conversion on entry and local->DTensor wrapping on exit
+        using the configured output placement. The forward body operates on
+        plain local tensors.
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
@@ -411,9 +412,9 @@ class MoE(Module):
         Under TP, the MoE wrapper's ``sharding_config`` (set by
         ``set_moe_sharding_config``) handles input/output redistribution:
         input is redistributed from sp_layout to desired_input_layouts;
-        output (Partial) is redistributed to sp_layout. MoE.forward()
-        operates on DTensors — the DTensor→local conversion happens at
-        the GroupedExperts boundary.
+        output is redistributed to sp_layout. MoE.forward() operates on
+        DTensors; the DTensor->local conversion happens at the GroupedExperts
+        boundary.
         """
         # ---------------------------------------------------------------------
         # TODO: Temporary workaround for #3622. Remove it once short-sequence
@@ -504,7 +505,7 @@ class MoE(Module):
             sync_combine()
 
         if seq_dim_pad_tokens:
-            # Combine constructs a sequence-dim padded SP view for each batch
+            # Combine returns a sequence-dim padded local shard for each batch
             # row. The input was not physically padded, so trim that logical
             # sequence tail before adding the shared expert output.
             out_BLD = out_BLD[:, :L, :]
