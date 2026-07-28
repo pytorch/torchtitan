@@ -915,8 +915,10 @@ class VLLMGenerator(Actor, Configurable):
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
-        # FA2 requires block_size to be a multiple of 256
-        if not has_cuda_capability(9, 0):
+        # FA3 runs on Hopper only; fall back to FA2 on other archs
+        # FA2 needs block_size divisible by 256
+        fa3_supported = has_cuda_capability(9, 0) and not has_cuda_capability(10, 0)
+        if not fa3_supported:
             engine_kwargs["block_size"] = 256
         expert_sequence_parallel_size = config.parallelism.expert_sequence_parallel_size
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
