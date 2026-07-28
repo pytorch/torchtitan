@@ -337,6 +337,7 @@ def minimal_fx_tracer(
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
     *,
+    record_stack_traces: bool = True,
     _insert_runtime_asserts: bool = False,
 ) -> Callable[..., TracedResult]:
     """Return a tracer that captures ``fn`` with implicit module/optimizer state.
@@ -374,6 +375,10 @@ def minimal_fx_tracer(
     calls) into the graph as ``_assert_scalar`` nodes. Off by default because
     cudagraph capture does not evaluate these nodes, and downstream graph
     passes generally don't need them.
+
+    ``record_stack_traces`` controls whether make_fx records Python stack traces
+    in node metadata. It defaults to on to preserve the existing debugging
+    behavior.
     """
     _check_optimizer_has_module(module, optimizer)
 
@@ -500,7 +505,7 @@ def minimal_fx_tracer(
         ):
             traced = make_fx(
                 fn_with_subclass_handling,
-                record_stack_traces=True,
+                record_stack_traces=record_stack_traces,
                 record_module_stack=False,  # don't need nn_module_stack for now
             )(*fake_args)
 
