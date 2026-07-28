@@ -177,12 +177,6 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         sp_layout if enable_ep else dense_activation_placement(tp=spmd.R)
     )
 
-    moe_output_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep
-        else dense_activation_placement(tp=spmd.P)
-    )
-
     return ShardingConfig(
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
@@ -190,7 +184,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         },
         in_src_shardings={"x_BLD": sp_layout},
         in_dst_shardings={"x_BLD": moe_desired_input_layouts},
-        out_src_shardings=moe_output_layout,
+        out_src_shardings=sp_layout,
         out_dst_shardings=sp_layout,
     )
 
@@ -244,13 +238,19 @@ def set_moe_sharding_config(
         enable_ep=enable_ep, enable_sp=enable_sp
     )
 
+    moe_branch_output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+
     # Shared experts: SwiGLU FFN run in parallel with the routed experts.
     # Keep the parent FeedForward input in its incoming layout so the
     # linear layers expose the TP collectives:
     # w1/w3 all-gather to Replicate when the input is sequence-sharded, and
-    # w2 reduces its Partial output to the MoE output layout. This matches
-    # the routed-expert output before the routed + shared add:
-    # sequence-sharded under EP, Partial without EP.
+    # w2 reduces its Partial output to the final MoE boundary layout used
+    # for the routed + shared add: sequence-sharded when SP is enabled and
+    # Replicate when SP is disabled.
     shared = moe_cfg.shared_experts
     if shared is not None:
         # Shared-expert input matches the MoE input: sequence-parallel under
@@ -265,11 +265,7 @@ def set_moe_sharding_config(
             in_dst_shardings={"x": shared_input},
         )
 
-        shared_output_layout = (
-            dense_sequence_parallel_placement()
-            if enable_ep
-            else dense_activation_placement(tp=spmd.P)
-        )
+        shared_output_layout = moe_branch_output_layout
         shared.w1.sharding_config = _shared_expert_colwise_config(
             input_layout=shared_input
         )
@@ -280,13 +276,14 @@ def set_moe_sharding_config(
             input_layout=shared_input
         )
 
-    # The three things that differ between EP and TP-only are the expert-weight
-    # state_shardings, input layout, and input grad layout.
-    experts_out_layout = (
+    # The expert-weight state shardings, activation input/output layouts,
+    # and input grad layout differ between EP and TP-only.
+    experts_out_src_layout = (
         dense_sequence_parallel_placement()
         if enable_ep
         else dense_activation_placement(tp=spmd.P)
     )
+    experts_out_dst_layout = moe_branch_output_layout
     if enable_ep:
         pre_experts_in_layout = (
             dense_sequence_parallel_placement()
@@ -325,8 +322,8 @@ def set_moe_sharding_config(
                 enable_ep=enable_ep
             ),
         },
-        out_src_shardings=experts_out_layout,
-        out_dst_shardings=experts_out_layout,
+        out_src_shardings=experts_out_src_layout,
+        out_dst_shardings=experts_out_dst_layout,
         local_map=LocalMapConfig(
             in_grad_placements=(
                 (
