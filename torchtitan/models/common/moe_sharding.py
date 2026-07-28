@@ -199,7 +199,7 @@ def _routed_experts_sharding_configs(
 ) -> tuple[ShardingConfig, ShardingConfig]:
     """Configs for RoutedExperts local_map and inner expert weight state."""
     if enable_ep:
-        pre_experts_in_layout = (
+        pre_experts_input_layout = (
             dense_sequence_parallel_placement()
             if enable_sp
             else dense_activation_placement(tp=spmd.I)
@@ -207,16 +207,16 @@ def _routed_experts_sharding_configs(
         state_shardings: dict[str, SpmdLayout] = {
             name: expert_param_placement_sparse() for name in expert_param_layout
         }
-        experts_in_layout = dense_sequence_parallel_placement()
-        experts_in_grad_layout = dense_sequence_parallel_placement()
+        experts_input_layout = dense_sequence_parallel_placement()
+        experts_input_grad_layout = dense_sequence_parallel_placement()
     else:
-        pre_experts_in_layout = dense_activation_placement(tp=spmd.R)
+        pre_experts_input_layout = dense_activation_placement(tp=spmd.R)
         state_shardings = {
             name: expert_param_placement_dense(tp_placement=placement)
             for name, placement in expert_param_layout.items()
         }
-        experts_in_layout = dense_activation_placement(tp=spmd.R)
-        experts_in_grad_layout = dense_activation_placement(tp=spmd.P)
+        experts_input_layout = dense_activation_placement(tp=spmd.R)
+        experts_input_grad_layout = dense_activation_placement(tp=spmd.P)
 
     tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=enable_ep)
 
@@ -234,15 +234,15 @@ def _routed_experts_sharding_configs(
     return (
         ShardingConfig(
             in_src_shardings={
-                "x_BLD": pre_experts_in_layout,
-                "topk_scores_BLK": experts_in_layout,
-                "topk_expert_ids_BLK": experts_in_layout,
+                "x_BLD": pre_experts_input_layout,
+                "topk_scores_BLK": experts_input_layout,
+                "topk_expert_ids_BLK": experts_input_layout,
                 "num_local_tokens_per_expert_E": tokens_per_expert_layout,
             },
             in_dst_shardings={
-                "x_BLD": experts_in_layout,
-                "topk_scores_BLK": experts_in_layout,
-                "topk_expert_ids_BLK": experts_in_layout,
+                "x_BLD": experts_input_layout,
+                "topk_scores_BLK": experts_input_layout,
+                "topk_expert_ids_BLK": experts_input_layout,
                 "num_local_tokens_per_expert_E": tokens_per_expert_layout,
             },
             out_src_shardings=experts_output_layout,
@@ -250,9 +250,9 @@ def _routed_experts_sharding_configs(
             local_map=LocalMapConfig(
                 in_grad_placements=(
                     (
-                        experts_in_grad_layout,
-                        experts_in_grad_layout,
-                        experts_in_grad_layout,
+                        experts_input_grad_layout,
+                        experts_input_grad_layout,
+                        experts_input_grad_layout,
                         # num_local_tokens_per_expert_E is routing metadata, but it is
                         # still a DTensor input to local_map and must have placements.
                         tokens_per_expert_layout,

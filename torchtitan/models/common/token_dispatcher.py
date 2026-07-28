@@ -62,10 +62,9 @@ class LocalTokenDispatcher(Configurable):
         self,
         *,
         ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
     ) -> None:
         """No-op for the EP=1 dispatcher. Subclasses override."""
-        del ep_mesh, tp_mesh
+        del ep_mesh
 
     def _local_reorder(
         self,
@@ -191,19 +190,14 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
-        # Sequence-parallel degree derived from tp_mesh. Defaults to TP=1.
-        self.sp_size: int = 1
 
     def wire_meshes(
         self,
         *,
         ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
     ) -> None:
-        """Install the EP mesh and SP coordinates used by dispatch / combine."""
+        """Install the EP mesh used by dispatch / combine."""
         self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
 
     def dispatch(self, *args, **kwargs):
         raise NotImplementedError("BaseEPTokenDispatcher does not implement dispatch")
@@ -218,9 +212,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     Handles the full token routing lifecycle:
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
-    ``ep_mesh`` and ``sp_size`` are wired
-    by the owning ``RoutedExperts.parallelize`` override via
-    ``wire_meshes``.
+    ``ep_mesh`` is wired by the owning ``RoutedExperts.parallelize`` override
+    via ``wire_meshes``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -825,15 +818,15 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
-    def wire_meshes(self, *, ep_mesh=None, tp_mesh=None) -> None:
-        """Wire EP/SP meshes. For the cudagraph (inference) path, EAGERLY create the
+    def wire_meshes(self, *, ep_mesh=None) -> None:
+        """Wire the EP mesh. For the cudagraph (inference) path, EAGERLY create the
         ElasticBuffer so its construction-time barrier runs at parallelize time, never
         inside a CUDA graph capture. The compact (training) path skips this: it sizes the
         buffer from the actual per-rank token count at first dispatch (no capture, so the
         one-time construction barrier there is fine), which frees the user from setting
         num_max_tokens_per_rank for training.
         """
-        super().wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
+        super().wire_meshes(ep_mesh=ep_mesh)
         # TODO(unify-ep-buffers): move this eager buffer creation into an init_buffer() like
         # MinimalAsyncEPTokenDispatcher, and unify DeepEP / HybridEP / MinimalAsyncEP buffer setup.
         if self.cudagraphable and ep_mesh is not None:
@@ -906,14 +899,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         Combine is async; ``MoE.forward`` calls ``sync_combine()`` before
         using the result, enabling overlap with ``shared_experts``.
         """
-        from torchtitan.distributed.deepep.deepep import combine_tokens
-
         del x_TD, num_local_tokens_after_padding
 
-        # pyrefly: ignore [bad-argument-type]
-        combined_TD = combine_tokens(routed_output_RD, metadata.state)
+        from torchtitan.distributed.deepep.deepep import combine_tokens
 
-        return combined_TD
+        # pyrefly: ignore [bad-argument-type]
+        return combine_tokens(routed_output_RD, metadata.state)
 
 
 class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
@@ -1013,27 +1004,25 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via HybridEP."""
-        from torchtitan.distributed.deepep import hybridep
-
         del x_TD, num_local_tokens_after_padding
 
-        combined_TD = hybridep.combine_tokens(
+        from torchtitan.distributed.deepep import hybridep
+
+        return hybridep.combine_tokens(
             routed_output_RD,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
             pad_multiple=self.pad_multiple,
         )
-        return combined_TD
 
 
 class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     """Token dispatcher using MinimalAsyncEP for constrained EP communication.
 
-    This first integration supports EP with ``sp_size == 1`` only. TP/SP, CP,
+    This first integration supports EP with SP degree 1 only. TP/SP, CP,
     PP, padding, and async combine overlap are intentionally out of scope.
     """
 
     ep_mesh: DeviceMesh | None
-    sp_size: int
     hidden_dim: int | None
     tokens_per_rank: int | None
     dtype: torch.dtype | None
@@ -1049,7 +1038,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
-        self.sp_size: int = 1
         self.hidden_dim = config.hidden_dim
         self.tokens_per_rank = config.tokens_per_rank
         self.dtype = config.dtype
@@ -1071,7 +1059,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self,
         *,
         ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
     ) -> None:
         """Install the EP mesh used by MinimalAsyncEP dispatch / combine."""
         if ep_mesh is None:
@@ -1079,9 +1066,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
                 "MinimalAsyncEPTokenDispatcher requires expert parallelism "
                 "(ep_mesh must be set)."
             )
-        del tp_mesh
         self.ep_mesh = ep_mesh
-        self.sp_size = 1
         self.init_buffer()
 
     def init_buffer(self) -> None:
