@@ -23,6 +23,7 @@ from typing import Any
 import torch
 import torch.fx as fx
 from torch._dynamo.graph_deduplication import _stable_topological_sort
+from torch._functorch.partitioners import get_default_op_list
 from torch._inductor.fx_passes.bucketing import (
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
@@ -43,16 +44,103 @@ from torch._inductor.fx_passes.overlap_scheduling import (
     schedule_overlap_bucketing,
 )
 from torch.utils._ordered_set import OrderedSet
+from torch.utils._pytree import tree_flatten
+from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
+    is_fsdp_unshard_all_gather,
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import find_fsdp_unshard_outputs
 from torchtitan.tools.logging import logger
 
 
 _FSDP_BUCKET_META = "fsdp_bucket"
+_FSDP_UNSHARD_REGION_META = "graph_trainer_subgraph_region"
+_FSDP_UNSHARD_ROLE_META = "graph_trainer_subgraph_region_role"
+_RESHARD_RECOMPUTE = {
+    CheckpointPolicy.PREFER_RECOMPUTE,
+    CheckpointPolicy.MUST_RECOMPUTE,
+}
+_RESHARD_PASSTHROUGH_TARGETS = frozenset(
+    {
+        operator.getitem,
+        torch.ops._c10d_functional.wait_tensor.default,
+        torch.ops.aten._to_copy.default,
+        torch.ops.prims.convert_element_type.default,
+    }
+)
+
+
+def _is_recompute(node: torch.fx.Node) -> bool:
+    return node.meta.get("recompute") in _RESHARD_RECOMPUTE
+
+
+def _has_recompute_arg(node: torch.fx.Node, arg_indices) -> bool:
+    for index in arg_indices:
+        if index < len(node.args):
+            arg = node.args[index]
+            if isinstance(arg, torch.fx.Node) and _is_recompute(arg):
+                return True
+    return False
+
+
+def fsdp_reshard_after_forward_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+    *,
+    recompute_consumer_arg_indices=None,
+    propagate_recompute_targets=_RESHARD_PASSTHROUGH_TARGETS,
+    skip_node_fn: Callable[[torch.fx.Node], bool] | None = None,
+) -> torch.fx.GraphModule:
+    """Tag forward SimpleFSDP all-gathers for recompute after forward use.
+
+    ``propagate_recompute_targets`` controls which non-view ops propagate
+    recompute from an input that is already tagged recompute. These targets
+    should be structural FSDP unshard materialization ops, such as wait_tensor,
+    getitem, and dtype conversions. They do not semantically consume the
+    unsharded parameter to produce a new activation, so saving them would keep
+    the unsharded parameter path live and defeat reshard-after-forward behavior.
+    View ops always propagate recompute through ``op_types.is_view(node)``.
+    Real compute consumers should be handled explicitly with
+    ``recompute_consumer_arg_indices``.
+
+    ``skip_node_fn`` can be used by callers to keep selected nodes unchanged,
+    for example when a caller wants a higher-level region pass to own those
+    nodes.
+    """
+    if recompute_consumer_arg_indices is None:
+        recompute_consumer_arg_indices = {}
+
+    op_types = get_default_op_list()
+    for node in gm.graph.nodes:
+        if node.op != "call_function" or node.meta.get("autograd_backward", False):
+            continue
+        if skip_node_fn is not None and skip_node_fn(node):
+            continue
+        if is_fsdp_unshard_all_gather(node):
+            if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE:
+                continue
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            continue
+
+        if (
+            node.target in propagate_recompute_targets or op_types.is_view(node)
+        ) and any(_is_recompute(inp) for inp in node.all_input_nodes):
+            if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE:
+                continue
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            continue
+
+        recompute_arg_indices = recompute_consumer_arg_indices.get(node.target)
+        if recompute_arg_indices is not None and _has_recompute_arg(
+            node, recompute_arg_indices
+        ):
+            if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE:
+                continue
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+    return gm
 
 
 def _chain_nodes_to_placeholder(
@@ -124,13 +212,274 @@ def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
     that can be arbitrarily prefetched, i.e., if all its recursive inputs are
     single-input operators that leads to a graph input.
     """
-    if is_wait_tensor(node) and is_all_gather(node.args[0]):
-        n: torch.fx.Node = node.all_input_nodes[0]
-        while len(n.all_input_nodes) == 1:
-            if n.all_input_nodes[0].op == "placeholder":
-                return True
-            n = n.all_input_nodes[0]
-    return False
+    return is_wait_tensor(node) and is_fsdp_unshard_all_gather(node.args[0])
+
+
+_FSDP_UNSHARD_CHAIN_TARGETS = frozenset(
+    {
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        operator.getitem,
+        torch.ops._c10d_functional.wait_tensor.default,
+        torch.ops.aten.constant_pad_nd.default,
+        torch.ops.aten._to_copy.default,
+        torch.ops.prims.convert_element_type.default,
+    }
+)
+
+
+def extract_common_fsdp_unshards_pass(
+    gm,
+    example_inputs=None,
+    *,
+    chain_targets=_FSDP_UNSHARD_CHAIN_TARGETS,
+    is_unshard_anchor=is_fsdp_unshard_all_gather,
+):
+    """Share identical forward FSDP unshard chains across same-role regions.
+
+    The pass expects candidate nodes to carry ``custom`` metadata with
+    ``_FSDP_UNSHARD_REGION_META`` and ``_FSDP_UNSHARD_ROLE_META`` keys. Regions
+    identify repeated graph sections, while roles identify sections that may
+    share an equivalent unshard chain.
+    """
+    for module in list(gm.modules()):
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        _extract_module_common_fsdp_unshards(
+            module,
+            chain_targets=chain_targets,
+            is_unshard_anchor=is_unshard_anchor,
+        )
+
+    return gm
+
+
+def _custom(node):
+    custom = node.meta.get("custom", {})
+    return custom if isinstance(custom, dict) else {}
+
+
+def _region(node):
+    return _custom(node).get(_FSDP_UNSHARD_REGION_META)
+
+
+def _role(node):
+    return _custom(node).get(_FSDP_UNSHARD_ROLE_META)
+
+
+def _drop_region_meta(node):
+    custom = dict(_custom(node))
+    custom.pop(_FSDP_UNSHARD_REGION_META, None)
+    custom.pop(_FSDP_UNSHARD_ROLE_META, None)
+    if custom:
+        node.meta["custom"] = custom
+    else:
+        node.meta.pop("custom", None)
+    node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+
+
+def _is_cse_target(node, repeated_roles, op_types, chain_targets):
+    if (
+        node.op != "call_function"
+        or node.meta.get("autograd_backward") is True
+        or _role(node) not in repeated_roles
+    ):
+        return False
+    return node.target in chain_targets or op_types.is_view(node)
+
+
+def _repeated_roles(graph):
+    regions_by_role = defaultdict(set)
+    for node in graph.nodes:
+        if _role(node) is not None and _region(node) is not None:
+            regions_by_role[_role(node)].add(_region(node))
+    return {role for role, regions in regions_by_role.items() if len(regions) > 1}
+
+
+def _candidate_nodes(
+    graph,
+    *,
+    chain_targets=_FSDP_UNSHARD_CHAIN_TARGETS,
+    is_unshard_anchor=is_fsdp_unshard_all_gather,
+):
+    repeated_roles = _repeated_roles(graph)
+    if not repeated_roles:
+        return set()
+
+    op_types = get_default_op_list()
+    base = {
+        node
+        for node in graph.nodes
+        if _is_cse_target(node, repeated_roles, op_types, chain_targets)
+    }
+
+    selected = set()
+
+    def local_inputs(node):
+        return [
+            inp
+            for inp in node.all_input_nodes
+            if _region(inp) == _region(node) and _role(inp) == _role(node)
+        ]
+
+    def collect_ancestors(node, result):
+        if node in result:
+            return True
+        if node not in base:
+            return False
+        for inp in local_inputs(node):
+            if not collect_ancestors(inp, result):
+                return False
+        result.add(node)
+        return True
+
+    for node in graph.nodes:
+        if not is_unshard_anchor(node):
+            continue
+        ancestors = set()
+        if collect_ancestors(node, ancestors):
+            selected.update(ancestors)
+
+    changed = True
+    while changed:
+        changed = False
+        for node in graph.nodes:
+            if node not in base or node in selected:
+                continue
+            inputs = local_inputs(node)
+            if (
+                inputs
+                and any(inp in selected for inp in inputs)
+                and all(inp in selected for inp in inputs)
+            ):
+                selected.add(node)
+                changed = True
+
+    return selected
+
+
+def _shared_candidates(graph, candidates):
+    shared = set()
+    for node in candidates:
+        user_regions = {
+            _region(user)
+            for user in node.users
+            if _region(user) is not None and _role(user) == _role(node)
+        }
+        if len(user_regions) > 1:
+            shared.add(node)
+
+    stack = list(shared)
+    while stack:
+        node = stack.pop()
+        for inp in node.all_input_nodes:
+            if inp in candidates and _role(inp) == _role(node) and inp not in shared:
+                shared.add(inp)
+                stack.append(inp)
+
+    return shared
+
+
+def _hoist_shared_candidates(graph, shared):
+    by_role = defaultdict(list)
+    for node in graph.nodes:
+        if node in shared:
+            by_role[_role(node)].append(node)
+
+    for role, nodes in by_role.items():
+        anchor = next(
+            (
+                node
+                for node in graph.nodes
+                if _role(node) == role and node not in shared
+            ),
+            None,
+        )
+        if anchor is not None:
+            for node in nodes:
+                anchor.prepend(node)
+        for node in nodes:
+            _drop_region_meta(node)
+
+
+def _cse_token(node, env):
+    def substitute(values):
+        flat, spec = tree_flatten(values)
+        result = []
+        for value in flat:
+            if isinstance(value, torch.fx.Node):
+                value = env.get(value, value)
+            elif isinstance(value, (torch.SymBool, torch.SymInt, torch.SymFloat)):
+                value = value.node
+            result.append(value)
+        return tuple(result), spec
+
+    args, args_spec = substitute(node.args)
+    kwargs, kwargs_spec = substitute(node.kwargs)
+    return {
+        "target": node.target,
+        "role": _role(node),
+        "args": args,
+        "args_spec": args_spec,
+        "kwargs": kwargs,
+        "kwargs_spec": kwargs_spec,
+    }
+
+
+def _cse_candidate_nodes(graph, candidates):
+    env = {}
+    seen = {}
+    to_erase = []
+    for node in graph.nodes:
+        if node not in candidates:
+            continue
+        token = _cse_token(node, env)
+        hash_val = (
+            node.target,
+            _role(node),
+            hash(
+                (
+                    tuple((arg, type(arg)) for arg in token["args"]),
+                    tuple((arg, type(arg)) for arg in token["kwargs"]),
+                )
+            ),
+        )
+        prev = seen.get(hash_val)
+        if prev is not None and prev[1] == token:
+            node.replace_all_uses_with(prev[0])
+            env[node] = prev[0]
+            to_erase.append(node)
+        else:
+            env[node] = node
+            seen[hash_val] = (node, token)
+
+    for node in reversed(to_erase):
+        graph.erase_node(node)
+
+
+def _extract_module_common_fsdp_unshards(
+    module,
+    *,
+    chain_targets=_FSDP_UNSHARD_CHAIN_TARGETS,
+    is_unshard_anchor=is_fsdp_unshard_all_gather,
+):
+    candidates = _candidate_nodes(
+        module.graph,
+        chain_targets=chain_targets,
+        is_unshard_anchor=is_unshard_anchor,
+    )
+    if not candidates:
+        return
+
+    _cse_candidate_nodes(module.graph, candidates)
+    candidates = _candidate_nodes(
+        module.graph,
+        chain_targets=chain_targets,
+        is_unshard_anchor=is_unshard_anchor,
+    )
+    shared = _shared_candidates(module.graph, candidates)
+    _hoist_shared_candidates(module.graph, shared)
+    module.graph.lint()
+    module.recompile()
 
 
 # Maps an FSDP group_name to an extra group_name created by this pass.
