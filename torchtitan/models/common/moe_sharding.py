@@ -198,16 +198,6 @@ def _routed_experts_sharding_configs(
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
 ) -> tuple[ShardingConfig, ShardingConfig]:
     """Configs for RoutedExperts local_map and inner expert weight state."""
-    experts_out_src_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep
-        else dense_activation_placement(tp=spmd.P)
-    )
-    experts_out_dst_layout = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.I)
-    )
     if enable_ep:
         pre_experts_in_layout = (
             dense_sequence_parallel_placement()
@@ -230,6 +220,17 @@ def _routed_experts_sharding_configs(
 
     tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=enable_ep)
 
+    experts_output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_ep
+        else dense_activation_placement(tp=spmd.P)
+    )
+    desired_experts_output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+
     return (
         ShardingConfig(
             in_src_shardings={
@@ -244,8 +245,8 @@ def _routed_experts_sharding_configs(
                 "topk_expert_ids_BLK": experts_in_layout,
                 "num_local_tokens_per_expert_E": tokens_per_expert_layout,
             },
-            out_src_shardings=experts_out_src_layout,
-            out_dst_shardings=experts_out_dst_layout,
+            out_src_shardings=experts_output_layout,
+            out_dst_shardings=desired_experts_output_layout,
             local_map=LocalMapConfig(
                 in_grad_placements=(
                     (
@@ -277,7 +278,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
-    moe_desired_input_layouts = (
+    desired_input_layout = (
         sp_layout if enable_ep else dense_activation_placement(tp=spmd.R)
     )
 
@@ -287,7 +288,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
             "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
         in_src_shardings={"x_BLD": sp_layout},
-        in_dst_shardings={"x_BLD": moe_desired_input_layouts},
+        in_dst_shardings={"x_BLD": desired_input_layout},
         out_src_shardings=sp_layout,
         out_dst_shardings=sp_layout,
     )
