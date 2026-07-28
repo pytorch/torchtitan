@@ -134,14 +134,13 @@ class RoutedExperts(Module):
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor->local conversion on entry and local->DTensor wrapping on exit
-        using the configured output placement. The forward body operates on
-        plain local tensors.
+        DTensor->local conversion from the configured input placements and
+        local->DTensor wrapping with the configured output placement. The
+        forward body operates on plain local tensors.
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
-        local_seq_len_after_padding = num_local_tokens_after_seq_dim_padding // B
         x_TD = x_BLD.view(T, D)
 
         topk_scores_TK = topk_scores_BLK.view(T, K)
@@ -165,7 +164,6 @@ class RoutedExperts(Module):
             metadata,
             x_TD,
             num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
-            local_seq_len_after_padding=local_seq_len_after_padding,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
@@ -350,12 +348,12 @@ class MoE(Module):
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
           - LocalTokenDispatcher (no EP): scatter_add only.
           - AllToAll: all-to-all communication, then scatter_add.
-          - DeepEP: async combine_tokens (sync deferred to step 4 when
-            sp_size == 1; forced inside combine when sp_size > 1).
+          - DeepEP: async combine_tokens; sync deferred to step 4.
           - HybridEP: synchronous combine_tokens.
     3. Shared experts run on DTensor. Overlaps with DeepEP async combine
-       when sp_size == 1; no overlap otherwise.
-    4. Routed and shared expert outputs are summed.
+       when the DeepEP dispatcher is used.
+    4. DeepEP combine is synced if needed, then routed and shared expert
+       outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -414,7 +412,7 @@ class MoE(Module):
         input is redistributed from sp_layout to desired_input_layouts;
         output is redistributed to sp_layout. MoE.forward() operates on
         DTensors; the DTensor->local conversion happens at the GroupedExperts
-        boundary.
+        boundary. GroupedExperts operates on local tensors.
         """
         # ---------------------------------------------------------------------
         # TODO: Temporary workaround for #3622. Remove it once short-sequence
@@ -493,10 +491,7 @@ class MoE(Module):
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
 
-        if (
-            isinstance(self.routed_experts.token_dispatcher, DeepEPTokenDispatcher)
-            and self.routed_experts.token_dispatcher.sp_size == 1
-        ):
+        if isinstance(self.routed_experts.token_dispatcher, DeepEPTokenDispatcher):
             # Sync the combine operation before using routed_output.
             # This inserts a CUDA stream wait, ensuring combine is complete before
             # the subsequent addition or view operations read routed output.
