@@ -244,11 +244,13 @@ def set_moe_sharding_config(
         enable_ep=enable_ep, enable_sp=enable_sp
     )
 
-    # Shared experts are a TP SwiGLU FFN. Keep the parent FeedForward input
-    # in its incoming layout so the linear layers expose the TP collectives:
+    # Shared experts: SwiGLU FFN run in parallel with the routed experts.
+    # Keep the parent FeedForward input in its incoming layout so the
+    # linear layers expose the TP collectives:
     # w1/w3 all-gather to Replicate when the input is sequence-sharded, and
-    # w2 reduces its Partial output to the MoE output layout. Under EP this
-    # matches the routed-expert output layout before the routed + shared add.
+    # w2 reduces its Partial output to the MoE output layout. This matches
+    # the routed-expert output before the routed + shared add:
+    # sequence-sharded under EP, Partial without EP.
     shared = moe_cfg.shared_experts
     if shared is not None:
         # Shared-expert input matches the MoE input: sequence-parallel under
@@ -278,8 +280,8 @@ def set_moe_sharding_config(
             input_layout=shared_input
         )
 
-    # The expert-weight state shardings, activation input/output layouts,
-    # and input grad layout differ between EP and TP-only.
+    # The three things that differ between EP and TP-only are the expert-weight
+    # state_shardings, input layout, and input grad layout.
     experts_out_layout = (
         dense_sequence_parallel_placement()
         if enable_ep
