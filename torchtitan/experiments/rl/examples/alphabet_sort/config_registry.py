@@ -40,6 +40,7 @@ from torchtitan.experiments.rl.controller import (
     ValidationConfig,
 )
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
+from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -135,6 +136,28 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
+    """GRPO config for Qwen3-0.6B varlen with MXFP8 (Blackwell/SM100 only).
+
+    Mirrors ``rl_grpo_qwen3_0_6b_varlen`` but quantizes the transformer-block
+    Linear layers (attention + feed-forward) to MXFP8 on both the trainer and
+    the generator. ``lm_head``/embeddings are left high precision (the
+    ``fqns=["layers"]`` filter also avoids clashing with LMHeadCastConverter).
+    """
+    config = rl_grpo_qwen3_0_6b_varlen()
+    config.model_spec = _qwen3_rl_model_registry(
+        "0.6B",
+        attn_backend="varlen",
+        converters=[
+            MXFP8LinearConverter.Config(fqns=["layers"], model_compile_enabled=True)
+        ],
+    )
+    # DIAGNOSTIC: generator TP=1 to test whether the MXFP8 _scaled_mm col-major
+    # failure is caused by TP weight sharding (Shard(dim=1)) in the generator.
+    config.generator.parallelism.tensor_parallel_degree = 1
+    return config
 
 
 def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
