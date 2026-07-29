@@ -308,6 +308,8 @@ def compile_time_passes(
                     getattr(config.parallelism, "expert_parallel_degree", 1) > 1
                 ),
                 pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,
+                schedule_name=config.compile.ep_overlap.schedule,
+                memory_policy=config.compile.memory_policy,
             )
         )
         passes.append(concretize_ep_chunk_symbolic_shapes_pass)

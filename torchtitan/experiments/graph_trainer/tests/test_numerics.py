@@ -399,6 +399,32 @@ def _run_minimal_async_ep_graph_chunk_loss_compare() -> bool:
     )
 
 
+def _run_minimal_async_ep_custom_schedule_loss_compare(strategy: str) -> bool:
+    """Compare a named custom schedule with auto for one chunk strategy."""
+    common_options = (
+        DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS
+        + f" --compile.ep_overlap.strategy {strategy}"
+        + " --compile.inductor_compilation regional"
+        + " --compile.memory_policy full"
+        + " --debug.moe_force_load_balance"
+    )
+    return run_loss_compare(
+        baseline_module="graph_trainer.deepseek_v3",
+        baseline_config="graph_trainer_deepseek_v3_debugmodel_minimal_async_ep",
+        test_module="graph_trainer.deepseek_v3",
+        test_config="graph_trainer_deepseek_v3_debugmodel_minimal_async_ep",
+        baseline_options=f"{DSV3_MINIMAL_ASYNC_EP_PARALLELISM} {common_options}",
+        test_options=(
+            f"{DSV3_MINIMAL_ASYNC_EP_PARALLELISM} {common_options}"
+            " --compile.ep_overlap.schedule deepseek_v3"
+        ),
+        baseline_ngpus=2,
+        test_ngpus=2,
+        compare_grad_norm=True,
+        use_seed_checkpoint=False,
+    )
+
+
 def _run_deepseek_v3_ep_overlap_moe_seq_loss_compare() -> bool:
     """Run distributed DeepSeek-v3 MoE seq overlap against eager chunking."""
     return _run_deepseek_v3_loss_compare(
@@ -692,6 +718,9 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_minimal_async_ep_graph_chunk_vs_eager_chunked(self):
         self.assertTrue(_run_minimal_async_ep_graph_chunk_loss_compare())
+
+    def test_moe_minimal_async_ep_graph_custom_schedule_matches_auto(self):
+        self.assertTrue(_run_minimal_async_ep_custom_schedule_loss_compare("graph"))
 
     def test_moe_dsv3_ep_overlap_moe_seq_aot_fx_trace_vs_eager_chunked(self):
         self.assertTrue(_run_deepseek_v3_ep_overlap_moe_seq_loss_compare())

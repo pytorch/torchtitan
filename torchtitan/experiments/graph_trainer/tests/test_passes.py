@@ -27,6 +27,7 @@ from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _ACTIVATION_RECOMPUTE,
     _EP_TOKEN_COUNT_EXCHANGE,
     _EP_TOKEN_COUNT_SYNC,
     _EP_TOKEN_EXCHANGE,
@@ -2611,12 +2612,16 @@ class TestChunkPasses(TestCase):
         *,
         module_pattern: str = "layers.*.moe",
         pair_first_token_exchange: bool = True,
+        schedule_name: str = "auto",
+        memory_policy: str = "default",
     ):
         _schedule_ep_overlap_regions(
             gm,
             module_pattern=module_pattern,
             require_token_exchange=True,
             pair_first_token_exchange=pair_first_token_exchange,
+            schedule_name=schedule_name,
+            memory_policy=memory_policy,
         )
         return {node: idx for idx, node in enumerate(gm.graph.nodes)}
 
@@ -3609,6 +3614,7 @@ class TestChunkPasses(TestCase):
             "normalize_chunked_grad_collective_chains_pass",
             disabled_names,
         )
+
         disabled_chunk_pass_idx = disabled_names.index("ep_overlap_chunk_pass")
         disabled_dead_code_indices = [
             i
@@ -3626,6 +3632,12 @@ class TestChunkPasses(TestCase):
         config.compile.ep_overlap.strategy = "eager"
         eager_names = self._compile_pass_names(traced_result, config)
         self.assertNotIn("assign_minimal_async_ep_buffer_sets_pass", eager_names)
+
+    def test_ep_overlap_rejects_unknown_schedule(self):
+        with self.assertRaisesRegex(ValueError, "Unknown EP-overlap schedule"):
+            validate_ep_overlap_config(
+                EpOverlapConfig(enabled=True, schedule="missing")
+            )
 
     def test_ep_overlap_rejects_invalid_minimal_async_ep_copy_grid(self):
         with self.assertRaisesRegex(ValueError, "must be positive or None"):
@@ -4105,6 +4117,40 @@ class TestChunkPasses(TestCase):
                 bwd[1]["dispatch_wait"],
                 bwd[0]["dispatch_wait"],
             ],
+        )
+
+    def test_deepseek_custom_schedule_matches_region_root(self):
+        from torchtitan.experiments.graph_trainer.ep_overlap_schedules import (
+            CustomScheduleContext,
+            deepseek_v3_schedule,
+        )
+
+        root_fqn = "blocks.0.moe"
+        context = CustomScheduleContext(
+            root_fqn=root_fqn,
+            direction="forward",
+            memory_policy="default",
+            exchange_signature=(("forward", "dispatch"), ("forward", "combine")),
+            module_fqns=frozenset(
+                {
+                    f"{root_fqn}.shared_experts",
+                    f"{root_fqn}.routed_experts.inner_experts",
+                }
+            ),
+        )
+        self.assertIsNotNone(deepseek_v3_schedule(context))
+        self.assertIsNone(
+            deepseek_v3_schedule(
+                CustomScheduleContext(
+                    root_fqn=root_fqn,
+                    direction="forward",
+                    memory_policy="default",
+                    exchange_signature=context.exchange_signature,
+                    module_fqns=frozenset(
+                        {"layers.0.moe.routed_experts.inner_experts"}
+                    ),
+                )
+            )
         )
 
     def test_ep_overlap_keeps_transformer_batch_first_marker_wait_gated(self):
@@ -6518,6 +6564,8 @@ class TestSelectiveActivationRematPass(TestCase):
         dups = [n for n in nodes if n.name.endswith("_recomputed")]
         # All 5 must_recompute nodes are transitive deps of bwd.
         self.assertEqual(len(dups), 5)
+        self.assertTrue(all(n.meta.get(_ACTIVATION_RECOMPUTE) for n in dups))
+        self.assertNotIn(_ACTIVATION_RECOMPUTE, bwd.meta)
 
         # Dup graph order matches the forward order of the originals
         # (a, b, d, c, e).

@@ -14,6 +14,9 @@ from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
+from torchtitan.experiments.graph_trainer.ep_overlap_schedules import (
+    validate_ep_overlap_schedule_name,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -51,6 +54,9 @@ class EpOverlapConfig:
     (``layers.*.moe``). The overlap scheduler consumes the common chunk metadata
     produced by either eager or graph chunking.
     """
+
+    schedule: str = "auto"
+    """EP-overlap schedule name. ``auto`` uses dependency-driven greedy fill."""
 
     minimal_async_ep_num_copy_ctas: int | None = 50
     """Persistent row-copy grid size used by MinimalAsyncEP during overlap.
@@ -220,6 +226,8 @@ def validate_ep_overlap_config(
             "--compile.ep_overlap.minimal_async_ep_num_copy_ctas must be "
             "positive or None"
         )
+
+    validate_ep_overlap_schedule_name(ep_overlap_config.schedule)
 
     return chunk_dim, chunk_strategy, module_fqn
 

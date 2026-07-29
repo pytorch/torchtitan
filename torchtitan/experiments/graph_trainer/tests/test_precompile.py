@@ -191,6 +191,14 @@ class TestConfigFingerprint(unittest.TestCase):
         )
         self.assertNotEqual(fp_graph_batch, fp_graph_seq)
 
+        cfg_custom_schedule = _StubCompileConfig(
+            ep_overlap=EpOverlapConfig(enabled=True, schedule="deepseek_v3")
+        )
+        fp_custom_schedule = compute_config_fingerprint(
+            _make_stub_model(), cfg_custom_schedule, dims
+        )
+        self.assertNotEqual(fp_graph_batch, fp_custom_schedule)
+
     def test_pass_order_sensitive(self):
         from torchtitan.experiments.graph_trainer.precompile import (
             compute_config_fingerprint,

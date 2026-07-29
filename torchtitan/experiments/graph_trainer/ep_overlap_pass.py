@@ -31,8 +31,9 @@ For each selected forward/backward region:
   wait-gated per-chunk closure schedule for every marker;
 * token-count sync CPU copies, when present in the first marker closure, are
   launched before their CPU scalar/list consumers;
-* after each marker pair, ready non-collective body work is emitted as filler
-  before advancing to the next marker pair;
+* the ``auto`` schedule emits ready non-collective body work as filler after
+  each marker pair; named schedules order typed token-exchange and module-FQN
+  anchors while preserving their dependency closures;
 * all graph nodes remain in the sorted graph exactly once and the final graph
   must lint.
 
@@ -47,8 +48,8 @@ Pseudo-code
    wait annotations inherited from traceback.
 3. Validate both chunks have the same marker signature, then build dependency
    closures needed to launch each marker.
-4. Emit wait-gated phases: marker pair in chunk order, ready filler work that
-   does not need token-exchange waits, then final tail work with waits allowed.
+4. Emit dependency-closed phases from either the default greedy fill or a
+   validated named schedule.
 5. Apply the requested region phases through a stable topological sort, lint,
    recompile, and validate that phase order materialized.
 """
@@ -56,6 +57,7 @@ Pseudo-code
 from __future__ import annotations
 
 import operator
+import warnings
 
 from dataclasses import dataclass
 from typing import Any
@@ -66,9 +68,20 @@ from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch.utils._ordered_set import OrderedSet
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _ACTIVATION_RECOMPUTE,
     _EP_TOKEN_COUNT_SYNC,
     _EP_TOKEN_EXCHANGE,
     _EP_TOKEN_EXCHANGE_WAIT,
+    _MODULE_FQN,
+)
+from torchtitan.experiments.graph_trainer.ep_overlap_schedules import (
+    CustomScheduleContext,
+    EpOverlapExecution,
+    EpOverlapScheduleAnchor,
+    matches_module_fqn_subtree,
+    ModuleFQNAnchor,
+    ReadyFillerAnchor,
+    TokenExchangeAnchor,
 )
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     ChunkBody,
@@ -79,6 +92,7 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     is_c10d_functional_node,
     ordered_nodes,
 )
+from torchtitan.experiments.graph_trainer.registry import EP_OVERLAP_SCHEDULE_REGISTRY
 from torchtitan.tools.logging import logger
 
 
@@ -96,6 +110,7 @@ _MINIMAL_ASYNC_EP_WAITS = {
 class _TokenExchange:
     label: str
     launch: fx.Node
+    execution: EpOverlapExecution
 
 
 @dataclass(frozen=True)
@@ -116,6 +131,12 @@ def _custom_meta(node: fx.Node) -> dict[str, Any]:
     """Return mutable custom metadata when present, otherwise an empty dict."""
     custom = node.meta.get("custom")
     return custom if isinstance(custom, dict) else {}
+
+
+def _execution(node: fx.Node, *, is_backward: bool) -> EpOverlapExecution:
+    if not is_backward:
+        return "forward"
+    return "recompute" if node.meta.get(_ACTIVATION_RECOMPUTE) else "backward"
 
 
 def _minimal_async_ep_op_name(node: fx.Node) -> str | None:
@@ -301,7 +322,13 @@ def _collect_token_exchanges(
         custom.pop(_EP_TOKEN_EXCHANGE, None)
         custom[_EP_TOKEN_EXCHANGE_WAIT] = label
         wait.meta["custom"] = custom
-        exchanges.append(_TokenExchange(label=label, launch=node))
+        exchanges.append(
+            _TokenExchange(
+                label=label,
+                launch=node,
+                execution=_execution(node, is_backward=body.owner.is_backward),
+            )
+        )
     return tuple(exchanges)
 
 
@@ -486,6 +513,93 @@ def _validate_token_count_sync_copies(
         )
 
 
+def _first_exchange_sync_parts(
+    *,
+    region: ChunkedRegion,
+    closures: dict[int, tuple[tuple[fx.Node, ...], ...]],
+    chunk_order: tuple[int, ...],
+    launch_nodes: set[fx.Node],
+    owner_by_node: dict[fx.Node, ChunkOwner],
+) -> dict[int, _SyncClosureParts | None]:
+    parts_by_chunk: dict[int, _SyncClosureParts | None] = {}
+    for chunk_id in chunk_order:
+        body = region.bodies_by_chunk[chunk_id]
+        first_closure = closures[chunk_id][0]
+        _validate_token_count_sync_copies(body, first_closure=first_closure)
+        parts_by_chunk[chunk_id] = _split_token_count_sync_closure(
+            first_closure,
+            body=body,
+            launch_nodes=launch_nodes,
+            owner_by_node=owner_by_node,
+        )
+    if any(parts is not None for parts in parts_by_chunk.values()) and not all(
+        parts is not None for parts in parts_by_chunk.values()
+    ):
+        direction = "backward" if region.is_backward else "forward"
+        raise ValueError(
+            "ep_overlap expected token-count sync CPU copies for both chunks "
+            f"of {region.root_fqn!r} ({direction}) when optimizing sync "
+            "copy scheduling."
+        )
+    return parts_by_chunk
+
+
+def _rewrite_sync_copies(copies: tuple[fx.Node, ...], *, enabled: bool) -> None:
+    if not enabled:
+        return
+    for idx, copy in enumerate(copies):
+        _set_copy_non_blocking(copy, idx + 1 != len(copies))
+
+
+def _paired_first_exchange_blocks(
+    *,
+    closures: dict[int, tuple[tuple[fx.Node, ...], ...]],
+    sync_parts_by_chunk: dict[int, _SyncClosureParts | None],
+    chunk_order: tuple[int, ...],
+    launch_nodes: set[fx.Node],
+    rewrite_token_count_sync_copies: bool,
+) -> tuple[tuple[fx.Node, ...], ...]:
+    """Pair both chunks' first setup while preserving their launch order."""
+    blocks: list[tuple[fx.Node, ...]] = []
+    emitted: set[fx.Node] = set()
+
+    def append_pending(nodes: tuple[fx.Node, ...]) -> None:
+        pending = tuple(node for node in nodes if node not in emitted)
+        if pending:
+            blocks.append(pending)
+            emitted.update(pending)
+
+    paired_parts = tuple(sync_parts_by_chunk[chunk_id] for chunk_id in chunk_order)
+    if all(parts is not None for parts in paired_parts):
+        for parts in paired_parts:
+            assert parts is not None
+            append_pending(parts.pre_copy)
+        copies = tuple(
+            copy
+            for parts in paired_parts
+            for copy in (parts.copies if parts is not None else ())
+        )
+        _rewrite_sync_copies(copies, enabled=rewrite_token_count_sync_copies)
+        append_pending(copies)
+        for parts in paired_parts:
+            assert parts is not None
+            append_pending(parts.post_copy)
+        for parts in paired_parts:
+            assert parts is not None
+            append_pending(parts.launches)
+        return tuple(blocks)
+
+    for chunk_id in chunk_order:
+        append_pending(
+            tuple(node for node in closures[chunk_id][0] if node not in launch_nodes)
+        )
+    for chunk_id in chunk_order:
+        append_pending(
+            tuple(node for node in closures[chunk_id][0] if node in launch_nodes)
+        )
+    return tuple(blocks)
+
+
 def _marker_closure(
     launch: fx.Node,
     *,
@@ -632,17 +746,14 @@ def _append_ready_blocks(
         made_progress = True
 
 
-def _build_region_phases(
+def _exchange_closures(
     *,
     region: ChunkedRegion,
     exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
+    chunk_order: tuple[int, ...],
     order: dict[fx.Node, int],
     owner_by_node: dict[fx.Node, ChunkOwner],
-    pair_first_token_exchange: bool,
-    rewrite_token_count_sync_copies: bool,
-) -> tuple[tuple[fx.Node, ...], ...]:
-    """Step 4: construct wait-gated phases for one scheduled region."""
-    chunk_order = (1, 0) if region.is_backward else (0, 1)
+) -> dict[int, tuple[tuple[fx.Node, ...], ...]]:
     exchange_indices = {
         chunk_id: {
             exchange.launch: idx
@@ -650,7 +761,7 @@ def _build_region_phases(
         }
         for chunk_id in chunk_order
     }
-    closures = {
+    return {
         chunk_id: tuple(
             _marker_closure(
                 exchange.launch,
@@ -664,6 +775,350 @@ def _build_region_phases(
         )
         for chunk_id in chunk_order
     }
+
+
+class _CustomScheduleMismatch(Exception):
+    pass
+
+
+def _custom_schedule_context(
+    *,
+    region: ChunkedRegion,
+    exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
+    memory_policy: str,
+) -> CustomScheduleContext:
+    return CustomScheduleContext(
+        root_fqn=region.root_fqn,
+        direction="backward" if region.is_backward else "forward",
+        memory_policy=memory_policy,
+        exchange_signature=tuple(
+            (exchange.execution, exchange.label) for exchange in exchanges_by_chunk[0]
+        ),
+        module_fqns=frozenset(
+            fqn
+            for body in region.bodies_by_chunk.values()
+            for node in body.nodes
+            if isinstance((fqn := _custom_meta(node).get(_MODULE_FQN)), str)
+        ),
+    )
+
+
+def _resolve_custom_anchor_targets(
+    anchor: EpOverlapScheduleAnchor,
+    *,
+    region: ChunkedRegion,
+    exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
+) -> tuple[fx.Node, ...]:
+    if isinstance(anchor, ReadyFillerAnchor):
+        return ()
+
+    body = region.bodies_by_chunk.get(anchor.chunk_id)
+    if body is None:
+        raise _CustomScheduleMismatch(f"chunk {anchor.chunk_id} is absent")
+
+    if isinstance(anchor, TokenExchangeAnchor):
+        matches = [
+            exchange.launch
+            for exchange in exchanges_by_chunk[anchor.chunk_id]
+            if exchange.execution == anchor.execution and exchange.label == anchor.phase
+        ]
+        if anchor.occurrence < 0 or anchor.occurrence >= len(matches):
+            raise _CustomScheduleMismatch(
+                f"token anchor {anchor} matched {len(matches)} launch(es)"
+            )
+        return (matches[anchor.occurrence],)
+
+    assert isinstance(anchor, ModuleFQNAnchor)
+    matches = tuple(
+        node
+        for node in body.nodes
+        if _execution(node, is_backward=region.is_backward) == anchor.execution
+        and isinstance((fqn := _custom_meta(node).get(_MODULE_FQN)), str)
+        and matches_module_fqn_subtree(anchor.module_fqn, fqn)
+    )
+    if not matches:
+        raise _CustomScheduleMismatch(f"module anchor {anchor} matched no nodes")
+    return matches
+
+
+def _validate_custom_anchor_targets(
+    *,
+    anchors: tuple[EpOverlapScheduleAnchor, ...],
+    targets: tuple[tuple[fx.Node, ...], ...],
+    exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
+) -> dict[fx.Node, int]:
+    anchor_by_node: dict[fx.Node, int] = {}
+    for index, nodes in enumerate(targets):
+        for node in nodes:
+            previous = anchor_by_node.setdefault(node, index)
+            if previous != index:
+                raise _CustomScheduleMismatch(
+                    f"anchors {previous} and {index} both match {node.name}"
+                )
+
+    expected_launches = {
+        exchange.launch
+        for exchanges in exchanges_by_chunk.values()
+        for exchange in exchanges
+    }
+    scheduled_launches = {
+        node
+        for anchor, nodes in zip(anchors, targets)
+        if isinstance(anchor, TokenExchangeAnchor)
+        for node in nodes
+    }
+    if scheduled_launches != expected_launches:
+        missing = expected_launches - scheduled_launches
+        extra = scheduled_launches - expected_launches
+        raise _CustomScheduleMismatch(
+            "token anchors do not cover the region exactly: "
+            f"missing={[node.name for node in missing]}, "
+            f"extra={[node.name for node in extra]}"
+        )
+
+    return anchor_by_node
+
+
+def _build_custom_region_phases(
+    *,
+    region: ChunkedRegion,
+    exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
+    anchors: tuple[EpOverlapScheduleAnchor, ...],
+    order: dict[fx.Node, int],
+    owner_by_node: dict[fx.Node, ChunkOwner],
+    pair_first_token_exchange: bool,
+    rewrite_token_count_sync_copies: bool,
+) -> tuple[tuple[fx.Node, ...], ...]:
+    targets = tuple(
+        _resolve_custom_anchor_targets(
+            anchor,
+            region=region,
+            exchanges_by_chunk=exchanges_by_chunk,
+        )
+        for anchor in anchors
+    )
+    anchor_by_node = _validate_custom_anchor_targets(
+        anchors=anchors,
+        targets=targets,
+        exchanges_by_chunk=exchanges_by_chunk,
+    )
+    chunk_order = (1, 0) if region.is_backward else (0, 1)
+    closures = _exchange_closures(
+        region=region,
+        exchanges_by_chunk=exchanges_by_chunk,
+        chunk_order=chunk_order,
+        order=order,
+        owner_by_node=owner_by_node,
+    )
+    exchange_index_by_launch = {
+        exchange.launch: index
+        for exchanges in exchanges_by_chunk.values()
+        for index, exchange in enumerate(exchanges)
+    }
+    launch_nodes = set(exchange_index_by_launch)
+    phases: list[tuple[fx.Node, ...]] = []
+    emitted: set[fx.Node] = set()
+    reserved = set(anchor_by_node)
+
+    def append_phase(nodes: tuple[fx.Node, ...], *, anchor_index: int) -> None:
+        later_anchor = next(
+            (
+                (node, index)
+                for node in nodes
+                if (index := anchor_by_node.get(node)) is not None
+                and index > anchor_index
+            ),
+            None,
+        )
+        if later_anchor is not None:
+            node, index = later_anchor
+            raise _CustomScheduleMismatch(
+                f"anchor {anchor_index} closure requires later anchor {index} "
+                f"node {node.name}"
+            )
+        pending = tuple(node for node in nodes if node not in emitted)
+        if pending:
+            phases.append(pending)
+            emitted.update(pending)
+
+    start_index = 0
+    if (
+        pair_first_token_exchange
+        and len(anchors) >= 2
+        and all(isinstance(anchor, TokenExchangeAnchor) for anchor in anchors[:2])
+    ):
+        first = anchors[0]
+        second = anchors[1]
+        assert isinstance(first, TokenExchangeAnchor)
+        assert isinstance(second, TokenExchangeAnchor)
+        first_launch = targets[0][0]
+        second_launch = targets[1][0]
+        if (
+            first.execution == second.execution
+            and first.phase == second.phase
+            and first.chunk_id != second.chunk_id
+            and exchange_index_by_launch[first_launch] == 0
+            and exchange_index_by_launch[second_launch] == 0
+        ):
+            paired_order = (first.chunk_id, second.chunk_id)
+            sync_parts = _first_exchange_sync_parts(
+                region=region,
+                closures=closures,
+                chunk_order=paired_order,
+                launch_nodes=launch_nodes,
+                owner_by_node=owner_by_node,
+            )
+            for block in _paired_first_exchange_blocks(
+                closures=closures,
+                sync_parts_by_chunk=sync_parts,
+                chunk_order=paired_order,
+                launch_nodes=launch_nodes,
+                rewrite_token_count_sync_copies=rewrite_token_count_sync_copies,
+            ):
+                append_phase(block, anchor_index=1)
+            start_index = 2
+
+    for index in range(start_index, len(anchors)):
+        anchor = anchors[index]
+        if isinstance(anchor, ReadyFillerAnchor):
+            candidates = {
+                chunk_id: {
+                    node
+                    for node in region.bodies_by_chunk[chunk_id].nodes
+                    if node not in reserved
+                    and _execution(node, is_backward=region.is_backward)
+                    == anchor.execution
+                }
+                for chunk_id in chunk_order
+            }
+            _append_ready_blocks(
+                phases,
+                emitted,
+                candidates_by_chunk=candidates,
+                region=region,
+                chunk_order=chunk_order,
+                order=order,
+                owner_by_node=owner_by_node,
+                include_waits=False,
+            )
+            continue
+        if any(node in emitted for node in targets[index]):
+            raise _CustomScheduleMismatch(
+                f"anchor {index} target was required by an earlier anchor"
+            )
+        if isinstance(anchor, TokenExchangeAnchor):
+            launch = targets[index][0]
+            closure = closures[anchor.chunk_id][exchange_index_by_launch[launch]]
+            append_phase(closure, anchor_index=index)
+        else:
+            body = region.bodies_by_chunk[anchor.chunk_id]
+            ancestors = _body_ancestors(
+                targets[index],
+                body=body,
+                owner_by_node=owner_by_node,
+                node_set=set(body.nodes),
+            )
+            append_phase(
+                tuple(
+                    node
+                    for node in body.nodes
+                    if node in ancestors or node in targets[index]
+                ),
+                anchor_index=index,
+            )
+
+    missing_targets = set(anchor_by_node) - emitted
+    if missing_targets:
+        raise _CustomScheduleMismatch(
+            "custom schedule did not emit targets: "
+            f"{[node.name for node in missing_targets]}"
+        )
+
+    remaining = {
+        chunk_id: set(region.bodies_by_chunk[chunk_id].nodes) - emitted
+        for chunk_id in chunk_order
+    }
+    _append_ready_blocks(
+        phases,
+        emitted,
+        candidates_by_chunk=remaining,
+        region=region,
+        chunk_order=chunk_order,
+        order=order,
+        owner_by_node=owner_by_node,
+        include_waits=False,
+    )
+    made_progress = True
+    while made_progress:
+        made_progress = False
+        for chunk_id in chunk_order:
+            made_progress |= _append_ready_blocks(
+                phases,
+                emitted,
+                candidates_by_chunk={chunk_id: remaining[chunk_id]},
+                region=region,
+                chunk_order=(chunk_id,),
+                order=order,
+                owner_by_node=owner_by_node,
+                include_waits=True,
+            )
+    missing = [
+        node
+        for chunk_id in chunk_order
+        for node in region.bodies_by_chunk[chunk_id].nodes
+        if node not in emitted
+    ]
+    if missing:
+        raise _CustomScheduleMismatch(
+            "custom schedule could not place all region nodes: "
+            f"{[node.name for node in missing[:8]]}"
+        )
+    _validate_custom_phase_dependencies(phases)
+    return tuple(phases)
+
+
+def _validate_custom_phase_dependencies(
+    phases: list[tuple[fx.Node, ...]],
+) -> None:
+    phase_by_node = {
+        node: phase_index for phase_index, phase in enumerate(phases) for node in phase
+    }
+    for phase_index, phase in enumerate(phases):
+        for node in phase:
+            seen: set[fx.Node] = set()
+            stack = list(node.all_input_nodes)
+            while stack:
+                dep = stack.pop()
+                if dep in seen:
+                    continue
+                seen.add(dep)
+                dep_phase = phase_by_node.get(dep)
+                if dep_phase is not None and dep_phase > phase_index:
+                    raise _CustomScheduleMismatch(
+                        f"phase {phase_index} node {node.name} depends on later "
+                        f"phase {dep_phase} node {dep.name}"
+                    )
+                stack.extend(dep.all_input_nodes)
+
+
+def _build_region_phases(
+    *,
+    region: ChunkedRegion,
+    exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
+    order: dict[fx.Node, int],
+    owner_by_node: dict[fx.Node, ChunkOwner],
+    pair_first_token_exchange: bool,
+    rewrite_token_count_sync_copies: bool,
+) -> tuple[tuple[fx.Node, ...], ...]:
+    """Step 4: construct wait-gated phases for one scheduled region."""
+    chunk_order = (1, 0) if region.is_backward else (0, 1)
+    closures = _exchange_closures(
+        region=region,
+        exchanges_by_chunk=exchanges_by_chunk,
+        chunk_order=chunk_order,
+        order=order,
+        owner_by_node=owner_by_node,
+    )
     closure_nodes = {
         chunk_id: {node for closure in chunk_closures for node in closure}
         for chunk_id, chunk_closures in closures.items()
@@ -699,78 +1154,26 @@ def _build_region_phases(
             blocks.append(pending)
             emitted.update(pending)
 
-    def rewrite_sync_copies(copies: tuple[fx.Node, ...]) -> None:
-        if not rewrite_token_count_sync_copies:
-            return
-        for idx, copy in enumerate(copies):
-            _set_copy_non_blocking(copy, idx + 1 != len(copies))
-
     sync_parts_by_chunk: dict[int, _SyncClosureParts | None] = {}
     if exchanges_by_chunk[0]:
-        for chunk_id in chunk_order:
-            body = region.bodies_by_chunk[chunk_id]
-            first_closure = closures[chunk_id][0]
-            _validate_token_count_sync_copies(body, first_closure=first_closure)
-            sync_parts_by_chunk[chunk_id] = _split_token_count_sync_closure(
-                first_closure,
-                body=body,
-                launch_nodes=launch_nodes,
-                owner_by_node=owner_by_node,
-            )
-        if any(parts is not None for parts in sync_parts_by_chunk.values()) and not all(
-            parts is not None for parts in sync_parts_by_chunk.values()
-        ):
-            direction = "backward" if region.is_backward else "forward"
-            raise ValueError(
-                "ep_overlap expected token-count sync CPU copies for both chunks "
-                f"of {region.root_fqn!r} ({direction}) when optimizing sync "
-                "copy scheduling."
-            )
+        sync_parts_by_chunk = _first_exchange_sync_parts(
+            region=region,
+            closures=closures,
+            chunk_order=chunk_order,
+            launch_nodes=launch_nodes,
+            owner_by_node=owner_by_node,
+        )
 
     for exchange_idx in range(len(exchanges_by_chunk[0])):
         if exchange_idx == 0 and pair_first_token_exchange:
-            paired_sync_parts = tuple(
-                sync_parts_by_chunk[chunk_id] for chunk_id in chunk_order
-            )
-            if all(parts is not None for parts in paired_sync_parts):
-                # Startup: issue both chunks' token-count D2H copies before any
-                # CPU split-size reads, so only the final copy has to block.
-                for parts in paired_sync_parts:
-                    assert parts is not None
-                    append_pending(parts.pre_copy)
-                paired_copies = tuple(
-                    copy
-                    for parts in paired_sync_parts
-                    for copy in (parts.copies if parts is not None else ())
-                )
-                rewrite_sync_copies(paired_copies)
-                append_pending(paired_copies)
-                for parts in paired_sync_parts:
-                    assert parts is not None
-                    append_pending(parts.post_copy)
-                for parts in paired_sync_parts:
-                    assert parts is not None
-                    append_pending(parts.launches)
-            else:
-                # Startup: emit both chunks up to the first token exchange before
-                # launching either chunk's exchange. This keeps count/sync setup
-                # together in forward and keeps backward combine launches paired.
-                for chunk_id in chunk_order:
-                    closure = closures[chunk_id][exchange_idx]
-                    deps = tuple(
-                        node
-                        for node in closure
-                        if node not in emitted and node not in launch_nodes
-                    )
-                    append_pending(deps)
-                for chunk_id in chunk_order:
-                    closure = closures[chunk_id][exchange_idx]
-                    launches = tuple(
-                        node
-                        for node in closure
-                        if node not in emitted and node in launch_nodes
-                    )
-                    append_pending(launches)
+            for block in _paired_first_exchange_blocks(
+                closures=closures,
+                sync_parts_by_chunk=sync_parts_by_chunk,
+                chunk_order=chunk_order,
+                launch_nodes=launch_nodes,
+                rewrite_token_count_sync_copies=rewrite_token_count_sync_copies,
+            ):
+                append_pending(block)
         else:
             # Regular wait-gated scheduling: emit each chunk's full closure
             # sequentially. Later closures may intentionally include waits
@@ -780,7 +1183,10 @@ def _build_region_phases(
                     sync_parts_by_chunk.get(chunk_id) if exchange_idx == 0 else None
                 )
                 if sync_parts is not None:
-                    rewrite_sync_copies(sync_parts.copies)
+                    _rewrite_sync_copies(
+                        sync_parts.copies,
+                        enabled=rewrite_token_count_sync_copies,
+                    )
                     append_pending(sync_parts.pre_copy)
                     append_pending(sync_parts.copies)
                     append_pending(sync_parts.post_copy)
@@ -851,6 +1257,9 @@ def _plan_region(
     owner_by_node: dict[fx.Node, ChunkOwner],
     pair_first_token_exchange: bool,
     rewrite_token_count_sync_copies: bool,
+    schedule_name: str,
+    memory_policy: str,
+    fallback_warning_keys: set[tuple[object, ...]],
 ) -> _ScheduledRegion | None:
     """Steps 2-4: validate one chunked region and build its schedule phases."""
     root = region.root_fqn
@@ -902,15 +1311,70 @@ def _plan_region(
         _exchange_labels(exchanges_by_chunk[1]),
     )
 
-    phases = _build_region_phases(
-        region=region,
-        exchanges_by_chunk=exchanges_by_chunk,
-        order=order,
-        owner_by_node=owner_by_node,
-        pair_first_token_exchange=pair_first_token_exchange,
-        rewrite_token_count_sync_copies=rewrite_token_count_sync_copies,
-    )
-    return _ScheduledRegion(region=region, phases=phases) if phases else None
+    phases: tuple[tuple[fx.Node, ...], ...] | None = None
+    if schedule_name != "auto":
+        provider = EP_OVERLAP_SCHEDULE_REGISTRY.get(schedule_name)
+        if provider is None:
+            raise ValueError(f"Unknown EP-overlap schedule {schedule_name!r}.")
+        context = _custom_schedule_context(
+            region=region,
+            exchanges_by_chunk=exchanges_by_chunk,
+            memory_policy=memory_policy,
+        )
+        peer_signature = tuple(
+            (exchange.execution, exchange.label) for exchange in exchanges_by_chunk[1]
+        )
+        if peer_signature != context.exchange_signature:
+            raise ValueError(
+                f"EP-overlap schedule {schedule_name!r} requires matching "
+                f"chunk execution signatures for {region.root_fqn!r} "
+                f"({context.direction}); found "
+                f"chunk0={context.exchange_signature}, chunk1={peer_signature}"
+            )
+        anchors = provider(context)
+        if anchors is None:
+            warning_key = (
+                schedule_name,
+                context.direction,
+                context.exchange_signature,
+            )
+            if warning_key not in fallback_warning_keys:
+                warnings.warn(
+                    f"EP-overlap schedule {schedule_name!r} does not match "
+                    f"{region.root_fqn!r} ({context.direction}): "
+                    "the policy has no variant for "
+                    f"signature={context.exchange_signature}, "
+                    f"memory_policy={memory_policy!r}. Falling back to 'auto'.",
+                    stacklevel=3,
+                )
+                fallback_warning_keys.add(warning_key)
+        else:
+            try:
+                phases = _build_custom_region_phases(
+                    region=region,
+                    exchanges_by_chunk=exchanges_by_chunk,
+                    anchors=tuple(anchors),
+                    order=order,
+                    owner_by_node=owner_by_node,
+                    pair_first_token_exchange=pair_first_token_exchange,
+                    rewrite_token_count_sync_copies=rewrite_token_count_sync_copies,
+                )
+            except _CustomScheduleMismatch as error:
+                raise ValueError(
+                    f"Invalid EP-overlap schedule {schedule_name!r} for "
+                    f"{region.root_fqn!r} ({context.direction}): {error}."
+                ) from error
+
+    if phases is None:
+        phases = _build_region_phases(
+            region=region,
+            exchanges_by_chunk=exchanges_by_chunk,
+            order=order,
+            owner_by_node=owner_by_node,
+            pair_first_token_exchange=pair_first_token_exchange,
+            rewrite_token_count_sync_copies=rewrite_token_count_sync_copies,
+        )
+    return _ScheduledRegion(region, phases) if phases else None
 
 
 def _phase_order_deps(
@@ -971,6 +1435,8 @@ def _schedule_ep_overlap_regions(
     require_token_exchange: bool,
     reorder: bool = True,
     pair_first_token_exchange: bool = False,
+    schedule_name: str = "auto",
+    memory_policy: str = "default",
 ) -> int:
     """Run validation or scheduling for all chunked regions matching a pattern."""
     order = ordered_nodes(gm)
@@ -981,25 +1447,28 @@ def _schedule_ep_overlap_regions(
         for body in region.bodies_by_chunk.values()
         for node in body.nodes
     }
-    scheduled_regions = [
-        planned
-        for region in chunked_regions
-        if (
-            planned := _plan_region(
-                region,
-                order=order,
-                owner_by_node=owner_by_node,
-                pair_first_token_exchange=pair_first_token_exchange,
-                rewrite_token_count_sync_copies=reorder,
-            )
+    fallback_warning_keys: set[tuple[object, ...]] = set()
+    scheduled_regions: list[_ScheduledRegion] = []
+    for region in chunked_regions:
+        planned = _plan_region(
+            region,
+            order=order,
+            owner_by_node=owner_by_node,
+            pair_first_token_exchange=pair_first_token_exchange,
+            rewrite_token_count_sync_copies=reorder,
+            schedule_name=schedule_name,
+            memory_policy=memory_policy,
+            fallback_warning_keys=fallback_warning_keys,
         )
-        is not None
-    ]
+        if planned is not None:
+            scheduled_regions.append(planned)
     logger.debug(
-        "ep_overlap discovered %d chunked region(s), scheduled %d: pattern=%s",
+        "ep_overlap discovered %d chunked region(s), scheduled %d: "
+        "pattern=%s schedule=%s",
         len(chunked_regions),
         len(scheduled_regions),
         module_pattern,
+        schedule_name,
     )
 
     if scheduled_regions and reorder:
@@ -1044,6 +1513,8 @@ def ep_overlap_schedule_pass(
     module_pattern: str,
     require_token_exchange: bool = True,
     pair_first_token_exchange: bool = False,
+    schedule_name: str = "auto",
+    memory_policy: str = "default",
 ) -> fx.GraphModule:
     """Reorder already chunked regions around EP token exchanges."""
     del example_inputs
@@ -1052,10 +1523,14 @@ def ep_overlap_schedule_pass(
         module_pattern=module_pattern,
         require_token_exchange=require_token_exchange,
         pair_first_token_exchange=pair_first_token_exchange,
+        schedule_name=schedule_name,
+        memory_policy=memory_policy,
     )
     logger.info(
-        "Applied ep_overlap scheduling to %d chunked region(s): module=%s",
+        "Applied ep_overlap scheduling to %d chunked region(s): "
+        "module=%s schedule=%s",
         scheduled,
         module_pattern,
+        schedule_name,
     )
     return gm
