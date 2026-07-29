@@ -32,6 +32,19 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
+def get_cuda_flash_attention_impl() -> str | None:
+    """Return the FlashAttention implementation for the current CUDA architecture."""
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        return None
+
+    major, _ = torch.cuda.get_device_capability()
+    if major == 9:
+        return "FA3"
+    if major == 10:
+        return "FA4"
+    return None
+
+
 def has_rocm_capability(major: int, minor: int) -> bool:
     is_rocm = torch.cuda.is_available() and torch.version.hip is not None
     return is_rocm and torch.cuda.get_device_capability() >= (
