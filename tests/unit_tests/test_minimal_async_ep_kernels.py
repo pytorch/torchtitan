@@ -146,21 +146,124 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
 
 
 def test_minimal_async_ep_wait_schemas_are_nonmutating_aliases():
-    dispatch_schema = str(torch.ops.minimal_async_ep.wait_dispatch.default._schema)
-    assert "Tensor(a) pending" in dispatch_schema
-    assert "Tensor(b) pending_counts" in dispatch_schema
-    assert "-> (Tensor(a), Tensor(b))" in dispatch_schema
-
-    dispatch_data_schema = str(
-        torch.ops.minimal_async_ep.wait_dispatch_data.default._schema
+    schemas = (
+        (torch.ops.minimal_async_ep.wait_dispatch.default._schema, ("a", "b")),
+        (torch.ops.minimal_async_ep.wait_dispatch_data.default._schema, ("a",)),
+        (torch.ops.minimal_async_ep.wait_combine.default._schema, ("a",)),
     )
-    assert "Tensor(a) pending" in dispatch_data_schema
-    assert "-> Tensor(a)" in dispatch_data_schema
+    for schema, aliases in schemas:
+        tensor_args = schema.arguments[: len(aliases)]
+        assert [arg.name for arg in tensor_args] == [
+            "pending",
+            *(("pending_counts",) if len(aliases) == 2 else ()),
+        ]
+        assert len(schema.returns) == len(aliases)
+        for arg, result, alias in zip(
+            tensor_args, schema.returns, aliases, strict=True
+        ):
+            assert arg.alias_info.before_set == {alias}
+            assert result.alias_info.before_set == {alias}
+            assert not arg.alias_info.is_write
+            assert not result.alias_info.is_write
 
-    combine_schema = str(torch.ops.minimal_async_ep.wait_combine.default._schema)
-    assert "Tensor(a) pending" in combine_schema
-    assert "-> Tensor(a)" in combine_schema
-    assert "Tensor(a!)" not in dispatch_schema + combine_schema
+
+def test_forced_load_balance_receive_capacity_matches_round_robin_routing():
+    cases = (
+        (4, 2, 4, 2),
+        (5, 3, 8, 4),
+        (17, 6, 64, 8),
+        (32_768, 8, 256, 64),
+    )
+    for num_tokens, top_k, num_experts, ep_size in cases:
+        assignments = torch.arange(num_tokens * top_k) % num_experts
+        num_local_experts = num_experts // ep_size
+        actual = max(
+            int(
+                (
+                    (assignments >= rank * num_local_experts)
+                    & (assignments < (rank + 1) * num_local_experts)
+                ).sum()
+            )
+            * ep_size
+            for rank in range(ep_size)
+        )
+        expected = minimal_async_ep_api._forced_load_balance_receive_capacity(
+            num_tokens,
+            top_k,
+            num_experts,
+            ep_size,
+        )
+        assert expected == actual
+
+
+def test_buffer_rows_only_use_tight_capacity_for_forced_load_balance():
+    forced = minimal_async_ep_api._buffer_rows_per_set(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        num_buffer_sets=2,
+        force_load_balance=True,
+    )
+    worst_case = minimal_async_ep_api._buffer_rows_per_set(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        num_buffer_sets=2,
+        force_load_balance=False,
+    )
+
+    assert forced == (131_072, 131_072)
+    assert worst_case == (4_194_304, 131_072)
+
+
+def test_671b_forced_load_balance_uses_tight_receive_capacity():
+    from torchtitan.distributed.activation_checkpoint import FullAC
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+    from torchtitan.models.deepseek_v3.config_registry import (
+        deepseek_v3_671b_bf16_minimal_async_ep,
+    )
+
+    config = deepseek_v3_671b_bf16_minimal_async_ep()
+    config.activation_checkpoint = FullAC.Config()
+    config.debug.moe_force_load_balance = True
+    config.model_spec.model.update_from_config(config=config)
+
+    moe_layers = [layer for layer in config.model_spec.model.layers if layer.moe]
+    assert moe_layers
+    for layer in moe_layers:
+        dispatcher = layer.moe.routed_experts.token_dispatcher
+        assert isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+        assert dispatcher.force_load_balance
+        assert dispatcher.receive_capacity == 131_072
+
+
+def test_overlap_copy_grid_propagates_to_minimal_async_ep_dispatchers():
+    from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+        graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep,
+    )
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+
+    config = graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep()
+    config.compile.memory_policy = "full"
+    config.model_spec.model.update_from_config(config=config)
+    dispatchers = [
+        layer.moe.routed_experts.token_dispatcher
+        for layer in config.model_spec.model.layers
+        if layer.moe is not None
+    ]
+    assert dispatchers
+    assert all(dispatcher.num_row_copy_ctas is None for dispatcher in dispatchers)
+
+    config.compile.ep_overlap.enabled = True
+    config.model_spec.model.update_from_config(config=config)
+
+    assert all(
+        isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+        and dispatcher.num_row_copy_ctas == 50
+        for dispatcher in dispatchers
+    )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -247,6 +350,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 dtype=torch.float32,
                 device=device,
                 num_buffer_sets=2,
+                num_row_copy_ctas=17,
             )
             rank = dist.get_rank()
             x = (
@@ -297,8 +401,32 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
 
             buffer_state = minimal_async_ep_api._buffer_state
             assert buffer_state is not None
-            comm_stream = buffer_state.comm_stream.cuda_stream
-            self.assertEqual({stream for _, stream in launch_streams}, {comm_stream})
+            prep_stream = buffer_state.prep_stream.cuda_stream
+            copy_stream = buffer_state.copy_stream.cuda_stream
+            self.assertNotEqual(prep_stream, copy_stream)
+            self.assertLess(
+                buffer_state.copy_stream.priority,
+                buffer_state.prep_stream.priority,
+            )
+            self.assertEqual(
+                buffer_state.num_row_copy_ctas,
+                17,
+            )
+            prep_functions = {
+                "copy_full_counts_to_peers_kernel",
+                "fill_dispatch_metadata_kernel",
+                "fill_combine_metadata_kernel",
+                "invert_flat_indices_kernel",
+            }
+            for name, stream in launch_streams:
+                if name in prep_functions:
+                    self.assertEqual(stream, prep_stream)
+                elif name == "copy_rows_to_peers_kernel":
+                    self.assertEqual(stream, copy_stream)
+            wait_streams = {
+                stream for name, stream in launch_streams if name == "_wait_ready"
+            }
+            self.assertEqual(wait_streams, {prep_stream, copy_stream})
             self.assertEqual(
                 {name for name, _ in launch_streams}, set(launch_functions)
             )
@@ -422,6 +550,98 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 routed_output[row] * grad_out[token]
             )
         assert_equal(grad_scores, expected_grad_scores)
+
+    def test_topk_backward_uses_int64_for_row_stride_arithmetic(self):
+        num_cols = 2048
+        top_k = 8
+        first_overflow_row = 2**31 // num_cols
+        num_rows = first_overflow_row + 2
+        num_tokens = (num_rows + top_k - 1) // top_k
+
+        free_bytes, _ = torch.cuda.mem_get_info()
+        required_bytes = (
+            (num_rows + num_tokens) * num_cols * 2 + num_rows * 8 + 512 * 1024**2
+        )
+        if free_bytes < required_bytes:
+            self.skipTest(
+                f"need at least {required_bytes} free CUDA bytes, got {free_bytes}"
+            )
+
+        grad_out = torch.ones(
+            num_tokens,
+            num_cols,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        flat_indices = torch.arange(num_rows, device="cuda", dtype=torch.int64)
+        grad_routed = expand_topk_grad_kernel(
+            grad_out,
+            flat_indices,
+            None,
+            top_k=top_k,
+            dtype=torch.bfloat16,
+        )
+        rows = torch.tensor(
+            [first_overflow_row - 1, first_overflow_row, num_rows - 1],
+            device="cuda",
+        )
+        assert_equal(
+            grad_routed[rows, 0],
+            torch.ones(rows.numel(), device="cuda", dtype=torch.bfloat16),
+        )
+
+        grad_scores = topk_scores_grad_kernel(
+            grad_routed,
+            grad_out,
+            flat_indices,
+            top_k=top_k,
+            dtype=torch.float32,
+            scores_are_slot_ordered=True,
+        )
+        assert_equal(
+            grad_scores[rows],
+            torch.full(
+                (rows.numel(),),
+                num_cols,
+                device="cuda",
+                dtype=torch.float32,
+            ),
+        )
+
+    def test_topk_reduce_uses_int64_for_output_stride_arithmetic(self):
+        num_cols = 2048
+        first_overflow_token = 2**31 // num_cols
+        num_tokens = first_overflow_token + 2
+
+        free_bytes, _ = torch.cuda.mem_get_info()
+        required_bytes = num_tokens * num_cols * 2 + num_tokens * 8 + 512 * 1024**2
+        if free_bytes < required_bytes:
+            self.skipTest(
+                f"need at least {required_bytes} free CUDA bytes, got {free_bytes}"
+            )
+
+        routed_output = torch.ones(
+            num_tokens,
+            num_cols,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+        slot_to_row = torch.arange(num_tokens, device="cuda", dtype=torch.int64)
+        out = reduce_topk_slots_kernel(
+            routed_output,
+            slot_to_row,
+            None,
+            num_tokens=num_tokens,
+            top_k=1,
+        )
+        tokens = torch.tensor(
+            [first_overflow_token - 1, first_overflow_token, num_tokens - 1],
+            device="cuda",
+        )
+        assert_equal(
+            out[tokens, 0],
+            torch.ones(tokens.numel(), device="cuda", dtype=torch.uint8),
+        )
 
     def test_metadata_kernels_match_reference(self):
         counts_storage = torch.tensor(
@@ -587,6 +807,26 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(row_dsts[0][4], src[0])
         assert_equal(row_dsts[1][5], torch.zeros(2, device="cuda"))
 
+        bounded_src = torch.arange(128, device="cuda", dtype=torch.float32).view(64, 2)
+        bounded_dst = torch.zeros_like(bounded_src)
+        bounded_dst_ptrs = torch.tensor(
+            [bounded_dst.data_ptr()], device="cuda", dtype=torch.int64
+        )
+        copy_rows_to_peers_kernel(
+            bounded_src,
+            [bounded_dst],
+            torch.zeros(64, device="cuda", dtype=torch.int64),
+            torch.arange(64, device="cuda", dtype=torch.int64),
+            ep_size=1,
+            num_rows=64,
+            num_cols=2,
+            dst_ptrs=bounded_dst_ptrs,
+            block_m=1,
+            num_ctas=2,
+        )
+        torch.cuda.synchronize()
+        assert_equal(bounded_dst, bounded_src)
+
     def test_copy_rows_uses_int64_for_source_stride_arithmetic(self):
         row = 1_048_576
         stride = 2048
@@ -617,7 +857,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         src_storage[base_offset + high_offset] = 93
         torch.cuda.synchronize()
 
-        _copy_rows_to_peer_ptrs_kernel[(metadata_numel, 1)](
+        _copy_rows_to_peer_ptrs_kernel[(20,)](
             src,
             dst_ptrs,
             dst_ranks,
@@ -635,6 +875,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             SRC_ROW_DIVISOR=1,
             BLOCK_M=1,
             BLOCK_N=1,
+            NUM_COL_TILES=1,
         )
         torch.cuda.synchronize()
 

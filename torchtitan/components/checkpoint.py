@@ -802,11 +802,11 @@ class CheckpointManager(Configurable):
         """Load the checkpoint for the given step.
 
         This function orchestrates the states loading process.
-        If the local checkpoint folder does not yet exist, it attempts an initial load
-        from a specified path (in either native or HF format) or performs loading using
-        provided HF assets path from the state dict adapter. Otherwise, it retrieves
-        the checkpoint corresponding to the specified step, defaulting to the latest
-        available if the `step` is -1.
+        If the local checkpoint folder contains a valid checkpoint, it retrieves the
+        checkpoint corresponding to the specified step, defaulting to the latest
+        available if the `step` is -1. Otherwise, it attempts an initial load from a
+        specified path (in either native or HF format) or performs loading using
+        provided HF assets path from the state dict adapter.
 
         Args:
             step (int, optional): The training step to restore.
@@ -823,7 +823,18 @@ class CheckpointManager(Configurable):
         from_hf = False
         from_quantized = False
 
-        if not filesystem.exists(self.folder):
+        has_checkpoint_folder = filesystem.exists(self.folder)
+        load_step = -1
+        if has_checkpoint_folder:
+            load_step = self._find_load_step() if step == -1 else step
+
+        if step != -1 and not has_checkpoint_folder:
+            raise FileNotFoundError(
+                f"--checkpoint.load_step={step} not found because "
+                f"checkpoint.folder {self.folder} does not exist"
+            )
+
+        if load_step == -1:
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
@@ -865,25 +876,16 @@ class CheckpointManager(Configurable):
                 )
 
             else:
+                logger.info("No checkpoint was provided, this is a fresh start.")
                 return False
 
         else:
-            if self.initial_load_path:
-                logger.warning(
-                    "checkpoint.initial_load_path is provided but the "
-                    "checkpoint.folder exists. Checkpointer will use the checkpoints "
-                    f"from the checkpoint.folder {self.folder}."
-                )
-            if self.initial_load_in_hf:
-                logger.warning(
-                    "checkpoint.initial_load_in_hf is True but the checkpoint.folder "
-                    "exists. Checkpointer will not load from HF safetensors"
-                )
-
-            step = self._find_load_step() if step == -1 else step
-            if step == -1:
-                return False
-
+            # This is the fault-tolerance branch: checkpoint.folder already
+            # contains valid checkpoints from a previous run, so we resume from
+            # it and all initial_* options are ignored by design. This allows a
+            # job to keep the same arguments across automatic restarts after
+            # failures.
+            step = load_step
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
 

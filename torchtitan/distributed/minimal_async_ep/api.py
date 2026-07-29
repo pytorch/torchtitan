@@ -105,7 +105,9 @@ class _MinimalAsyncEPBufferState:
     group: dist.ProcessGroup
     tokens_per_rank: int
     buffer_sets: list[_BufferSet]
-    comm_stream: torch.cuda.Stream
+    prep_stream: torch.cuda.Stream
+    copy_stream: torch.cuda.Stream
+    num_row_copy_ctas: int | None
     pending_events: dict[tuple[str, int], deque[_PendingEvent]] = field(
         default_factory=dict
     )
@@ -268,6 +270,11 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             "compile.enable_passes."
         )
     num_buffer_sets = 2 if overlap_enabled else 1
+    num_row_copy_ctas = (
+        getattr(overlap_config, "minimal_async_ep_num_copy_ctas", None)
+        if overlap_enabled
+        else None
+    )
 
     for token_dispatcher_cfg in dispatcher_cfgs:
         token_dispatcher_cfg.hidden_dim = model_config.dim
@@ -278,6 +285,16 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             config.training.mixed_precision_param
         ]
         token_dispatcher_cfg.num_buffer_sets = num_buffer_sets
+        token_dispatcher_cfg.num_row_copy_ctas = num_row_copy_ctas
+        token_dispatcher_cfg.force_load_balance = config.debug.moe_force_load_balance
+        token_dispatcher_cfg.receive_capacity = _buffer_rows_per_set(
+            token_dispatcher_cfg.tokens_per_rank,
+            token_dispatcher_cfg.top_k,
+            token_dispatcher_cfg.num_experts // parallelism.expert_parallel_degree,
+            parallelism.expert_parallel_degree,
+            num_buffer_sets,
+            token_dispatcher_cfg.force_load_balance,
+        )[0]
 
 
 @dataclass
@@ -308,6 +325,56 @@ class MinimalAsyncEPDispatchMetadata:
     top_k: int
 
 
+def _forced_load_balance_receive_capacity(
+    num_tokens: int,
+    top_k: int,
+    num_experts: int,
+    ep_size: int,
+) -> int:
+    """Return the exact per-rank receive bound for forced round-robin routing."""
+    assert num_experts % ep_size == 0
+    num_local_experts = num_experts // ep_size
+    complete_cycles, tail = divmod(num_tokens * top_k, num_experts)
+    max_rows_per_source = complete_cycles * num_local_experts + min(
+        tail, num_local_experts
+    )
+    return ep_size * max_rows_per_source
+
+
+def _buffer_rows_per_set(
+    tokens_per_rank: int,
+    top_k: int,
+    num_local_experts: int,
+    ep_size: int,
+    num_buffer_sets: int,
+    force_load_balance: bool,
+) -> tuple[int, int]:
+    if num_buffer_sets < 1:
+        raise ValueError(f"num_buffer_sets must be positive, got {num_buffer_sets}.")
+
+    if force_load_balance:
+        max_tokens_per_set = (tokens_per_rank + num_buffer_sets - 1) // num_buffer_sets
+        dispatch_rows = _forced_load_balance_receive_capacity(
+            max_tokens_per_set,
+            top_k,
+            ep_size * num_local_experts,
+            ep_size,
+        )
+        return dispatch_rows, max_tokens_per_set * top_k
+
+    max_routed_tokens = ep_size * tokens_per_rank * min(top_k, num_local_experts)
+    max_combined_tokens = tokens_per_rank * top_k
+    if max_routed_tokens % num_buffer_sets or max_combined_tokens % num_buffer_sets:
+        raise ValueError(
+            "MinimalAsyncEP buffer capacities must divide evenly across "
+            f"num_buffer_sets={num_buffer_sets}."
+        )
+    return (
+        max_routed_tokens // num_buffer_sets,
+        max_combined_tokens // num_buffer_sets,
+    )
+
+
 def init_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
@@ -317,35 +384,49 @@ def init_buffer(
     dtype: torch.dtype,
     device: torch.device,
     num_buffer_sets: int = 1,
+    force_load_balance: bool = False,
+    num_row_copy_ctas: int | None = None,
 ) -> None:
     """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
     global _buffer_state
 
     device = torch.device(device)
-    max_routed_tokens = group.size() * tokens_per_rank * min(top_k, num_local_experts)
-    max_combined_tokens = tokens_per_rank * top_k
+    ep_size = group.size()
     num_experts = group.size() * num_local_experts
     assert _buffer_state is None
 
-    if num_buffer_sets < 1:
-        raise ValueError(f"num_buffer_sets must be positive, got {num_buffer_sets}.")
-    if max_routed_tokens % num_buffer_sets or max_combined_tokens % num_buffer_sets:
+    if num_buffer_sets == 1:
+        num_row_copy_ctas = None
+    elif num_row_copy_ctas is not None and num_row_copy_ctas < 1:
         raise ValueError(
-            "MinimalAsyncEP buffer capacities must divide evenly across "
-            f"num_buffer_sets={num_buffer_sets}."
+            f"num_row_copy_ctas must be positive or None, got {num_row_copy_ctas}."
         )
+
+    dispatch_rows, combine_rows = _buffer_rows_per_set(
+        tokens_per_rank,
+        top_k,
+        num_local_experts,
+        ep_size,
+        num_buffer_sets,
+        force_load_balance,
+    )
+    capacity_mode = "forced_load_balance" if force_load_balance else "worst_case"
 
     logger.info(
         "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
-        "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d, "
-        "num_buffer_sets=%d",
+        "top_k=%d, num_local_experts=%d, ep_size=%d, capacity_mode=%s, "
+        "dispatch_rows_per_set=%d, combine_rows_per_set=%d, num_buffer_sets=%d, "
+        "num_row_copy_ctas=%s",
         hidden_dim,
         tokens_per_rank,
         top_k,
         num_local_experts,
-        group.size(),
-        max_routed_tokens,
+        ep_size,
+        capacity_mode,
+        dispatch_rows,
+        combine_rows,
         num_buffer_sets,
+        num_row_copy_ctas if num_row_copy_ctas is not None else "unbounded",
     )
     backend = symm_mem.get_backend(device)
     if backend != "CUDA":
@@ -354,8 +435,6 @@ def init_buffer(
             f"backend, got {backend}."
         )
 
-    dispatch_rows = max_routed_tokens // num_buffer_sets
-    combine_rows = max_combined_tokens // num_buffer_sets
     buffer_sets = []
     for _ in range(num_buffer_sets):
         dispatch_pool = _create_hidden_pool(
@@ -388,7 +467,9 @@ def init_buffer(
         group=group,
         tokens_per_rank=tokens_per_rank,
         buffer_sets=buffer_sets,
-        comm_stream=torch.cuda.Stream(device=device),
+        prep_stream=torch.cuda.Stream(device=device),
+        copy_stream=torch.cuda.Stream(device=device, priority=-1),
+        num_row_copy_ctas=num_row_copy_ctas,
     )
 
 
@@ -442,7 +523,7 @@ def _copy_rows_to_peers_async_cuda(
     num_valid_rows: torch.Tensor | None = None,
     retained: tuple[torch.Tensor, ...] = (),
 ) -> torch.Tensor:
-    """Launch a row copy through symmetric memory on the EP comm stream."""
+    """Launch a row copy through symmetric memory on the EP copy stream."""
     assert _buffer_state is not None
 
     pool = _buffer_state.buffer_sets[buffer_set].hidden_pools[exchange]
@@ -467,9 +548,9 @@ def _copy_rows_to_peers_async_cuda(
     )
 
     launch_stream = torch.cuda.current_stream(x.device)
-    comm_stream = _buffer_state.comm_stream
-    comm_stream.wait_stream(launch_stream)
-    with torch.cuda.stream(comm_stream):
+    copy_stream = _buffer_state.copy_stream
+    copy_stream.wait_stream(launch_stream)
+    with torch.cuda.stream(copy_stream):
         copy_rows_to_peers_kernel(
             x,
             hidden_recv_peer_buffers,
@@ -484,9 +565,10 @@ def _copy_rows_to_peers_async_cuda(
             src_row_divisor=src_row_divisor,
             dst_ptrs=hidden_recv_peer_ptrs,
             num_valid_rows=num_valid_rows,
+            num_ctas=_buffer_state.num_row_copy_ctas,
         )
         _wait_ready(hidden_recv_handle, _HIDDEN_READY_CHANNEL)
-        _record_pending_event(exchange, hidden_recv_view, comm_stream, retained)
+        _record_pending_event(exchange, hidden_recv_view, copy_stream, retained)
     return hidden_recv_view
 
 
@@ -756,9 +838,9 @@ def dispatch_op(
     )
 
     launch_stream = torch.cuda.current_stream(dispatch_input.device)
-    comm_stream = _buffer_state.comm_stream
-    comm_stream.wait_stream(launch_stream)
-    with torch.cuda.stream(comm_stream):
+    prep_stream = _buffer_state.prep_stream
+    prep_stream.wait_stream(launch_stream)
+    with torch.cuda.stream(prep_stream):
         torch.argsort(
             T_row_to_expert_N,
             stable=True,
@@ -855,6 +937,11 @@ def dispatch_op_fake(
 
 
 _WAIT_OPS_LIB = torch.library.Library("minimal_async_ep", "FRAGMENT")
+# Wait outputs alias their pending inputs so downstream consumers depend on the
+# stream join without introducing a copy. ``keepalives`` contains only storage
+# read asynchronously by the launch; routing metadata returned for later ops is
+# not a wait dependency. Alias ops need explicit autograd and functionalization
+# registrations to preserve this identity contract through full Inductor.
 _WAIT_OPS_LIB.define(
     "wait_dispatch(Tensor(a) pending, Tensor(b) pending_counts, "
     "Tensor[] keepalives) -> (Tensor(a), Tensor(b))"
@@ -904,7 +991,7 @@ def _wait_dispatch_meta(
     return pending, pending_counts
 
 
-def _wait_combine_meta(
+def _wait_tensor_meta(
     pending: torch.Tensor,
     keepalives: list[torch.Tensor],
 ) -> torch.Tensor:
@@ -1009,8 +1096,8 @@ def _wait_combine_functionalize(pending, keepalives):
 
 
 torch.library.register_fake("minimal_async_ep::wait_dispatch")(_wait_dispatch_meta)
-torch.library.register_fake("minimal_async_ep::wait_dispatch_data")(_wait_combine_meta)
-torch.library.register_fake("minimal_async_ep::wait_combine")(_wait_combine_meta)
+torch.library.register_fake("minimal_async_ep::wait_dispatch_data")(_wait_tensor_meta)
+torch.library.register_fake("minimal_async_ep::wait_combine")(_wait_tensor_meta)
 
 
 def dispatch(
@@ -1623,16 +1710,11 @@ for _side_effect_op in (
 __all__ = [
     "MinimalAsyncEPDispatchMetadata",
     "combine",
-    "combine_data",
-    "combine_data_op",
     "combine_op",
     "dispatch",
-    "dispatch_data",
-    "dispatch_data_op",
     "dispatch_op",
     "init_buffer",
     "maybe_update_minimal_async_ep_config",
-    "reduce_topk_no_scores_op",
     "reduce_topk_op",
     "wait_combine_op",
     "wait_dispatch_op",

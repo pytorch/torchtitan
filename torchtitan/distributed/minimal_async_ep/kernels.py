@@ -171,7 +171,7 @@ def _reduce_topk_slots_kernel(
         ``scores=[0.1, 0.2, 0.3, 0.4]``, the output is
         ``[[10], [15]]``.
     """
-    token = tl.program_id(0)
+    token = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
     acc = tl.zeros((BLOCK_N,), tl.float32)
@@ -223,7 +223,7 @@ def _expand_topk_grad_kernel(
         ``scores=[0.1, 0.2, 0.3, 0.4]``, the output is
         ``grad_routed=[[60], [10], [80], [20]]``.
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
     flat_index = tl.load(flat_indices + row)
@@ -269,7 +269,7 @@ def _topk_scores_grad_kernel(
         ``flat_indices=[2, 0, 3, 1]``, the slot-ordered output is
         ``grad_scores=[2000, 4000, 2000, 6000]``.
     """
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
     flat_index = tl.load(flat_indices + row)
@@ -307,6 +307,7 @@ def _copy_rows_to_peer_ptrs_kernel(
     SRC_ROW_DIVISOR: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    NUM_COL_TILES: tl.constexpr,
 ) -> None:
     """Copy rows into peer symmetric hidden buffers through pointer tables.
 
@@ -319,36 +320,39 @@ def _copy_rows_to_peer_ptrs_kernel(
         ``dst_rows=[3, 4]``, and ``src_rows=[2, 0]``, peer 1 row 3 receives
         ``[30]`` and peer 0 row 4 receives ``[10]``.
     """
-    row_start = tl.program_id(0) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_NUM_VALID_ROWS:
         row_limit = tl.load(num_valid_rows)
-        if row_start >= row_limit:
-            return
-    row = (row_start + tl.arange(0, BLOCK_M)).to(tl.int64)
-    col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
-    row_mask = row < row_limit
-    col_mask = col < NUM_COLS
-    mask = row_mask[:, None] & col_mask[None, :]
-    src_row = row
-    if HAS_SRC_ROWS:
-        src_row = tl.load(src_rows + row, mask=row_mask, other=0).to(tl.int64)
-        if SRC_ROW_DIVISOR != 1:
-            src_row = src_row // SRC_ROW_DIVISOR
-    dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
-    dst_row = tl.load(dst_rows + row, mask=row_mask, other=0).to(tl.int64)
-    dst_rank_mask = row_mask & (dst_rank >= 0)
-    values = tl.load(
-        src + src_row[:, None] * SRC_ROW_STRIDE + col[None, :] * SRC_COL_STRIDE,
-        mask=mask,
-    )
-    dst_base = tl.load(dst_ptrs + dst_rank, mask=dst_rank_mask, other=0)
-    dst_ptr = (
-        dst_base.to(tl.pointer_type(DST_DTYPE))[:, None]
-        + dst_row[:, None] * DST_ROW_STRIDE
-        + col[None, :]
-    )
-    tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
+    num_tiles = tl.cdiv(row_limit, BLOCK_M) * NUM_COL_TILES
+    tile = tl.program_id(0)
+    while tile < num_tiles:
+        row_tile = tile // NUM_COL_TILES
+        col_tile = tile % NUM_COL_TILES
+        row = (row_tile * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
+        col = col_tile * BLOCK_N + tl.arange(0, BLOCK_N)
+        row_mask = row < row_limit
+        col_mask = col < NUM_COLS
+        mask = row_mask[:, None] & col_mask[None, :]
+        src_row = row
+        if HAS_SRC_ROWS:
+            src_row = tl.load(src_rows + row, mask=row_mask, other=0).to(tl.int64)
+            if SRC_ROW_DIVISOR != 1:
+                src_row = src_row // SRC_ROW_DIVISOR
+        dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
+        dst_row = tl.load(dst_rows + row, mask=row_mask, other=0).to(tl.int64)
+        dst_rank_mask = row_mask & (dst_rank >= 0)
+        values = tl.load(
+            src + src_row[:, None] * SRC_ROW_STRIDE + col[None, :] * SRC_COL_STRIDE,
+            mask=mask,
+        )
+        dst_base = tl.load(dst_ptrs + dst_rank, mask=dst_rank_mask, other=0)
+        dst_ptr = (
+            dst_base.to(tl.pointer_type(DST_DTYPE))[:, None]
+            + dst_row[:, None] * DST_ROW_STRIDE
+            + col[None, :]
+        )
+        tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
+        tile += tl.num_programs(0)
 
 
 def copy_full_counts_to_peers_kernel(
@@ -397,12 +401,19 @@ def copy_rows_to_peers_kernel(
     src_rows: torch.Tensor | None = None,
     src_row_divisor: int = 1,
     num_valid_rows: torch.Tensor | None = None,
+    num_ctas: int | None = None,
 ) -> None:
     if len(dsts) != ep_size:
         raise ValueError(f"expected {ep_size} destination buffers, got {len(dsts)}.")
 
+    if num_ctas is not None and num_ctas <= 0:
+        raise ValueError(f"num_ctas must be positive, got {num_ctas}.")
+
     block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(num_cols))
-    grid = (triton.cdiv(num_rows, block_m), triton.cdiv(num_cols, block_n))
+    num_row_tiles = triton.cdiv(num_rows, block_m)
+    num_col_tiles = triton.cdiv(num_cols, block_n)
+    num_tiles = num_row_tiles * num_col_tiles
+    grid = (min(num_tiles, num_ctas) if num_ctas is not None else num_tiles,)
     dst_dtype = _HIDDEN_ROW_DTYPES.get(src.dtype)
     if dst_dtype is None:
         raise ValueError(f"Unsupported MinimalAsyncEP row-copy dtype: {src.dtype}.")
@@ -424,6 +435,7 @@ def copy_rows_to_peers_kernel(
         SRC_ROW_DIVISOR=src_row_divisor,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
+        NUM_COL_TILES=num_col_tiles,
         num_warps=num_warps,
     )
 
