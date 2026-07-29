@@ -45,6 +45,12 @@ class ModelSpec:
     pipelining_fn: Callable | None
     post_optimizer_build_fn: Callable | None
     state_dict_adapter: type[BaseStateDictAdapter] | None
+    metrics_fn: Callable | None = None
+    """Optional model-specific callback that returns a ``dict[str, Any]`` of
+    model-internal metrics to log each step. Called by the trainer during
+    metrics collection with ``(model_parts, parallel_dims)``; the result is
+    merged into ``extra_metrics``. ``None`` (default) means no model-internal
+    metrics are collected."""
 
     def traverse(
         self, config_cls: type, *, recurse: bool = False, _prefix: str = ""

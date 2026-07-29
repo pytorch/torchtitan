@@ -19,6 +19,7 @@ __all__ = [
     "ComplexRoPE",
     "CosSinRoPE",
     "RoPE",
+    "SingleComplexRoPE",
 ]
 
 
@@ -343,6 +344,37 @@ class CosSinRoPE(RoPE):
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
+
+
+class SingleComplexRoPE(ComplexRoPE):
+    """Apply complex RoPE to a single tensor."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ComplexRoPE.Config):
+        pass
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor:
+        rope_cache = self._reshape_cache(x, positions)
+        return self.apply_rotary_emb(x, rope_cache, inverse=inverse)
+
+    @staticmethod
+    def apply_rotary_emb(
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        *,
+        inverse: bool,
+    ) -> torch.Tensor:
+        if inverse:
+            rope_cache = rope_cache.conj()
+        x_ = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+        x_out = torch.view_as_real(x_ * rope_cache).flatten(-2)
+        return x_out.type_as(x)
 
 
 @spmd.local_map(out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R})
