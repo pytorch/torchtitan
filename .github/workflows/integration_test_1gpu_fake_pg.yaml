@@ -1,0 +1,85 @@
+name: 1 GPU Fake PG Feature Tests
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  schedule:
+    # Runs every 6 hours
+    - cron: '0 */6 * * *'
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+      id-token: write
+      contents: read
+
+jobs:
+  build-test:
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    with:
+      # 1x A10G from the same shared g5 pool as the 8-GPU runner. The fake
+      # process group runs each test as a single process, so one GPU suffices
+      # regardless of the test's simulated ngpu.
+      runner: linux.g5.4xlarge.nvidia.gpu
+      gpu-arch-type: cuda
+      gpu-arch-version: "13.0"
+      docker-image: torchtitan-ubuntu-22.04-clang12
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 30
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        # Log CUDA driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
+        pip config --user set global.progress_bar off
+
+        start=$(date +%s)
+        python -m pip install --force-reinstall --pre \
+          torch --index-url https://download.pytorch.org/whl/nightly/cu130
+        end=$(date +%s)
+        echo "pip install torch took $((end - start)) seconds"
+
+        start=$(date +%s)
+        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu130
+        end=$(date +%s)
+        echo "pip install torchao took $((end - start)) seconds"
+
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Fake process group: collectives are no-ops and each test runs a single
+        # process on one physical GPU regardless of its simulated ngpu. This is
+        # a construction/sharding-plan smoke check (does the parallelism plan
+        # build and run a step), not a collective-correctness or numerical
+        # check -- those stay on the 8-GPU feature job.
+        python -m tests.integration_tests.run_tests \
+          --gpu_arch_type cuda \
+          --test_suite features \
+          --comm-mode fake_backend \
+          --ngpu 1 \
+          "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Cleanup the checkpoints so that we don't waste network bandwidth and time.
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
+        rm -rf artifacts-to-be-uploaded/*/checkpoint
