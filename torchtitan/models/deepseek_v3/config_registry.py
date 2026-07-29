@@ -215,13 +215,16 @@ def deepseek_v3_671b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
+            local_batch_size=128,
+            global_batch_size=4096,
             seq_len=4096,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
+            pipeline_parallel_degree=8,
             pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=2,
+            pipeline_parallel_layers_per_stage=2,
+            expert_parallel_degree=32,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=SelectiveAC.Config(),
