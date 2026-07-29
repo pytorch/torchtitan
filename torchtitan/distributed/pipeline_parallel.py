@@ -9,6 +9,7 @@ import os
 from collections.abc import Callable
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
@@ -23,10 +24,19 @@ from torch.distributed.pipelining.schedules import (
     ScheduleZBVZeroBubble,
 )
 
-from torchtitan.components.loss import LossFunction
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
+from torchtitan.config import (
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed._pipeline_compat import (
+    ensure_fake_pg_static_metadata_support,
+)
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -35,6 +45,63 @@ from torchtitan.tools.logging import logger
 # pipeline_llm is the public entrypoint for model-specific PP setup. Helpers in
 # this module are implementation details and should stay private.
 __all__ = ["pipeline_llm"]
+
+
+def _build_fake_stage_args(
+    stage_idx: int,
+    num_stages: int,
+    *,
+    training: TrainingConfig,
+    parallelism: ParallelismConfig,
+    model_config: BaseModel.Config,
+    loss_fn: LossFunction,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        parallelism.spmd_backend != "default"
+        or parallelism.tensor_parallel_degree != 1
+        or parallelism.context_parallel_degree != 1
+    ):
+        raise ValueError(
+            "Fake pipeline execution currently requires spmd_backend='default', "
+            "tensor_parallel_degree=1, and context_parallel_degree=1. Fake PP "
+            "with TP, CP, or a typed SPMD backend requires distributed forward "
+            "and gradient metadata at pipeline boundaries."
+        )
+
+    if not isinstance(model_config, Decoder.Config):
+        raise TypeError(
+            "Fake pipeline stages require a Decoder model config, got "
+            f"{type(model_config).__qualname__}."
+        )
+
+    microbatch_shape = (
+        parallelism.pipeline_parallel_microbatch_size,
+        training.seq_len,
+    )
+    hidden_shape = (*microbatch_shape, model_config.dim)
+    hidden_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
+
+    if stage_idx == 0:
+        input_args = torch.empty(microbatch_shape, dtype=torch.int64, device=device)
+    else:
+        input_args = torch.empty(
+            hidden_shape,
+            dtype=hidden_dtype,
+            device=device,
+            requires_grad=True,
+        )
+
+    output_dim = model_config.dim
+    if stage_idx == num_stages - 1 and not isinstance(loss_fn, ChunkedLossWrapper):
+        output_dim = model_config.vocab_size
+    output_args = torch.empty(
+        (*microbatch_shape, output_dim),
+        dtype=hidden_dtype,
+        device=device,
+        requires_grad=True,
+    )
+    return input_args, output_args
 
 
 def _build_get_mesh_callback(
@@ -93,6 +160,10 @@ def pipeline_llm(
         logger.debug(f"Stage {i}: {stage_ms}")
 
     get_mesh_cb = _build_get_mesh_callback(parallel_dims)
+    pp_group = pp_mesh.get_group("pp")
+    use_fake_stage = dist.get_backend(pp_group) == "fake"
+    if use_fake_stage:
+        ensure_fake_pg_static_metadata_support()
     stages, model_parts = _pipeline_module_split(
         model,
         pp_mesh,
@@ -100,6 +171,21 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
+        fake_stage_args=(
+            (
+                lambda stage_idx, num_stages: _build_fake_stage_args(
+                    stage_idx,
+                    num_stages,
+                    training=training,
+                    parallelism=parallelism,
+                    model_config=model_config,
+                    loss_fn=loss_fn,
+                    device=device,
+                )
+            )
+            if use_fake_stage
+            else None
+        ),
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -534,6 +620,9 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
+    fake_stage_args: (
+        Callable[[int, int], tuple[torch.Tensor, torch.Tensor]] | None
+    ) = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -580,11 +669,18 @@ def _pipeline_module_split(
     for stage_idx in pp_rank_to_stage_indices:
         module_names = module_names_per_stage[stage_idx]
         model_chunk = _split_module(whole_model, module_names)
+        input_args, output_args = (
+            fake_stage_args(stage_idx, num_stages)
+            if fake_stage_args is not None
+            else (None, None)
+        )
         stage = PipelineStage(
             model_chunk,
             stage_idx,
             num_stages,
             device,
+            input_args=input_args,
+            output_args=output_args,
             group=pp_mesh.get_group("pp"),
             get_mesh=get_mesh,
         )
