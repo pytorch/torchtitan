@@ -34,14 +34,11 @@ def has_cuda_capability(major: int, minor: int) -> bool:
 
 def get_cuda_flash_attention_impl() -> str | None:
     """Return the FlashAttention implementation for the current CUDA architecture."""
-    if not torch.cuda.is_available() or torch.version.hip is not None:
-        return None
-
-    major, _ = torch.cuda.get_device_capability()
-    if major == 9:
-        return "FA3"
-    if major == 10:
+    # Blackwell (SM 10.0) and newer use FA4; Hopper (SM 9.0) uses FA3.
+    if has_cuda_capability(10, 0):
         return "FA4"
+    if has_cuda_capability(9, 0):
+        return "FA3"
     return None
 
 

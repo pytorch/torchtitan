@@ -18,7 +18,8 @@ from torchtitan.tools.utils import get_cuda_flash_attention_impl
         ((9, 1), "FA3"),
         ((10, 0), "FA4"),
         ((10, 3), "FA4"),
-        ((11, 0), None),
+        # SM 11.0+ falls through to the newest known impl (FA4).
+        ((11, 0), "FA4"),
     ],
 )
 def test_get_cuda_flash_attention_impl(monkeypatch, capability, expected_impl):
