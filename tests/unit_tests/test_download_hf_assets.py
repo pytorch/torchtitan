@@ -6,7 +6,7 @@
 
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from scripts.download_hf_assets import download_hf_assets
 
@@ -208,7 +208,7 @@ class TestDownloadHfAssets(unittest.TestCase):
     @patch("huggingface_hub.hf_hub_download")
     def test_download_failure_handling(self, mock_download, mock_list_files):
         """Test handling of download failures"""
-        from requests.exceptions import HTTPError
+        from huggingface_hub.errors import EntryNotFoundError
 
         self._setup_mocks(
             mock_download,
@@ -216,12 +216,10 @@ class TestDownloadHfAssets(unittest.TestCase):
             repo_files=["tokenizer.json", "missing_file.json"],
         )
 
-        # Mock 404 error for missing file
+        # Mock 404 error for missing file (new hub raises EntryNotFoundError)
         def download_side_effect(*args, **kwargs):
             if kwargs["filename"] == "missing_file.json":
-                response = Mock()
-                response.status_code = 404
-                raise HTTPError(response=response)
+                raise EntryNotFoundError("missing")
             return None
 
         mock_download.side_effect = download_side_effect

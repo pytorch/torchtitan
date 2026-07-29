@@ -78,6 +78,32 @@ def get_fsdp_reshard_after_forward_policy(
             )
 
 
+def apply_fsdp_to_vision_encoder(
+    vision_encoder: nn.Module,
+    dp_mesh: DeviceMesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    reshard_after_forward_policy: str = "default",
+    pp_enabled: bool = False,
+) -> None:
+    """FSDP a VLM vision encoder as a single unit.
+
+    One all-gather for all vision params is more efficient than per-layer sharding
+    (the vision encoder is small relative to the decoder). Call before
+    ``apply_fsdp_to_decoder`` so the encoder is already sharded.
+    """
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled=pp_enabled
+    )
+    fully_shard(
+        vision_encoder,
+        mesh=dp_mesh,
+        mp_policy=mp_policy,
+        reshard_after_forward=reshard_after_forward,
+    )
+
+
 def apply_fsdp_to_decoder(
     model: "Decoder",
     dp_mesh: DeviceMesh,

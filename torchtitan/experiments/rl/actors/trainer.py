@@ -82,8 +82,8 @@ class PolicyTrainer(Actor, Configurable):
             default_factory=CheckpointManager.Config
         )
         override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied to
-        this trainer's model spec after ``update_from_config`` and before build.
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu.fused_swiglu``)
+        applied to this trainer's model spec after ``update_from_config`` and before build.
         Separate from the generator's override so the two can differ."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
