@@ -116,8 +116,6 @@ uv pip install -r requirements.txt
 >   --find-links https://download.pytorch.org/whl/nightly/torchdata/ \
 >   torchdata
 > ```
->
-> Using the `torchdata` package page as `--find-links` prevents the resolver from selecting a different accelerator build of PyTorch from the aggregated nightly index.
 
 > **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `uv pip install -e . --no-deps`.
 
