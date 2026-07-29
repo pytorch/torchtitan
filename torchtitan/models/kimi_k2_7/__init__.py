@@ -174,7 +174,7 @@ def _vision_encoder_config(
 
 
 def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
-    """Thin wrapper: ``build_mla_moe_layers`` with Kimi K2.5's own inits."""
+    """Build MLA/MoE layers with the Kimi-family parameter initializers."""
     return build_mla_moe_layers(
         **kwargs,
         linear_init=_LINEAR_INIT,
@@ -323,12 +323,7 @@ def _moonlight_16b_a3b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> KimiK25Model.Config:
-    """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower).
-
-    Mirrors the released ``moonlight_16b_a3b`` config (``model_type
-    "deepseek_v3"``, rope_theta 50000). ``vision_encoder=None`` makes this a pure
-    text config of ``KimiK25Model``.
-    """
+    """Build the text-only Moonlight 16B-A3B sibling without a vision tower."""
     return _moonlight_16b_a3b_config(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
@@ -344,11 +339,11 @@ def _kimi_vl_a3b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> KimiK25Model.Config:
-    """Kimi-VL 16B-A3B: Moonlight 16B-A3B text tower (rope_theta 800000) + 2D MoonViT vision.
+    """Kimi-VL 16B-A3B: Moonlight text tower plus a 2D MoonViT vision tower.
 
-    Kimi-VL uses the original 2D MoonViT, which is the ``t=1`` case of MoonViT3d
-    It reuses ``KimiK25VisionEncoder``; with image inputs (``t=1``) the temporal
-    embedding is never applied.
+    Kimi-VL's original 2D MoonViT is the ``t=1`` case of MoonViT3d, so it reuses
+    ``KimiK25VisionEncoder``. With image inputs, the temporal embedding is not
+    applied.
     """
     config = _moonlight_16b_a3b_config(
         attn_backend=attn_backend,
@@ -375,11 +370,13 @@ def _kimi_k2_5(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> KimiK25Model.Config:
-    """Full Kimi K2.5: ~1T-total / ~32B-active DeepSeekV3-style text tower
-    (384 routed experts, top-8) + MoonViT3d vision tower.
+    """Architecture shared by Kimi K2.5, K2.6, and K2.7-Code: a ~1T-total /
+    ~32B-active DeepSeekV3-style text tower (384 routed experts, top-8) plus a
+    MoonViT3d vision tower.
 
-    Values mirror the released bf16 ``KimiK25Config`` (text_config is a
-    DeepSeekV3 config with model_type "kimi_k2").
+    All three checkpoints use the same parameterized architecture and tensor
+    schema. Their release-specific tokenizer and chat-template assets are
+    configured separately from this model definition.
     """
     dim = 7168
     n_layers = 61
