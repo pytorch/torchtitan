@@ -21,10 +21,10 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_experts_config,
     make_ffn_config,
     make_gqa_config,
     make_moe_config,
+    make_routed_experts_config,
     make_router_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -172,7 +172,7 @@ def _build_qwen3_moe_layers(
                         score_func="softmax",
                         route_norm=True,
                     ),
-                    experts=make_experts_config(
+                    routed_experts=make_routed_experts_config(
                         dim=dim,
                         hidden_dim=moe_hidden_dim,
                         num_experts=num_experts,

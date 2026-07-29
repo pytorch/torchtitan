@@ -491,7 +491,7 @@ def get_moe_model_nparams_and_flops(
             nparams_shared_experts += p.numel()
         elif "moe.router" in name:
             nparams_moe_router += p.numel()
-        elif "moe.experts" in name:
+        elif "moe.routed_experts" in name:
             nparams_experts += p.numel()
         else:
             nparams_dense += p.numel()

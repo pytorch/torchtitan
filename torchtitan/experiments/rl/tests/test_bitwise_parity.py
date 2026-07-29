@@ -253,11 +253,9 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop
     gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
-    num_group_workers = (
-        async_loop.max_offpolicy_steps + 1
-    ) * async_loop.num_groups_per_train_step
+    num_group_workers = async_loop.max_active_rollout_groups
     rollout_concurrency = max(
-        num_group_workers * async_loop.group_size,
+        num_group_workers * async_loop.num_samples_per_prompt,
         async_loop.validation.num_samples,
     )
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
@@ -679,8 +677,16 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        # Each class runs in its own torchrun process. Synchronize before
+        # releasing local resources, then leave process-group cleanup to exit.
+        # vLLM's internal shutdown destroys every registered process group,
+        # including the trainer's groups, and deadlocks during global teardown.
+        if dist.is_initialized():
+            dist.barrier()
         if hasattr(cls, "engine"):
-            cls.engine.engine_core.shutdown()
+            renderer = getattr(cls.engine, "renderer", None)
+            if renderer is not None:
+                renderer.shutdown()
             del cls.engine
         if hasattr(cls, "model"):
             del cls.model
