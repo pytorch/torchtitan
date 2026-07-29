@@ -177,6 +177,14 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
             config.training.mixed_precision_param
         ]
+        token_dispatcher_cfg.force_load_balance = config.debug.moe_force_load_balance
+        token_dispatcher_cfg.receive_capacity = _buffer_rows(
+            token_dispatcher_cfg.tokens_per_rank,
+            token_dispatcher_cfg.top_k,
+            token_dispatcher_cfg.num_experts // parallelism.expert_parallel_degree,
+            parallelism.expert_parallel_degree,
+            token_dispatcher_cfg.force_load_balance,
+        )[0]
 
 
 @dataclass
@@ -207,6 +215,43 @@ class MinimalAsyncEPDispatchMetadata:
     top_k: int
 
 
+def _forced_load_balance_receive_capacity(
+    num_tokens: int,
+    top_k: int,
+    num_experts: int,
+    ep_size: int,
+) -> int:
+    """Return the exact per-rank receive bound for forced round-robin routing."""
+    assert num_experts % ep_size == 0
+    num_local_experts = num_experts // ep_size
+    complete_cycles, tail = divmod(num_tokens * top_k, num_experts)
+    max_rows_per_source = complete_cycles * num_local_experts + min(
+        tail, num_local_experts
+    )
+    return ep_size * max_rows_per_source
+
+
+def _buffer_rows(
+    tokens_per_rank: int,
+    top_k: int,
+    num_local_experts: int,
+    ep_size: int,
+    force_load_balance: bool,
+) -> tuple[int, int]:
+    if force_load_balance:
+        dispatch_rows = _forced_load_balance_receive_capacity(
+            tokens_per_rank,
+            top_k,
+            ep_size * num_local_experts,
+            ep_size,
+        )
+        return dispatch_rows, tokens_per_rank * top_k
+
+    max_routed_tokens = ep_size * tokens_per_rank * min(top_k, num_local_experts)
+    max_combined_tokens = tokens_per_rank * top_k
+    return max_routed_tokens, max_combined_tokens
+
+
 def init_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
@@ -215,24 +260,37 @@ def init_buffer(
     top_k: int,
     dtype: torch.dtype,
     device: torch.device,
+    force_load_balance: bool = False,
 ) -> None:
     """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
     global _buffer_state
 
     device = torch.device(device)
-    max_routed_tokens = group.size() * tokens_per_rank * min(top_k, num_local_experts)
-    num_experts = group.size() * num_local_experts
+    ep_size = group.size()
+    num_experts = ep_size * num_local_experts
     assert _buffer_state is None
+
+    dispatch_rows, combine_rows = _buffer_rows(
+        tokens_per_rank,
+        top_k,
+        num_local_experts,
+        ep_size,
+        force_load_balance,
+    )
+    assert dispatch_rows >= combine_rows
+    capacity_mode = "forced_load_balance" if force_load_balance else "worst_case"
 
     logger.info(
         "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
-        "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d",
+        "top_k=%d, num_local_experts=%d, ep_size=%d, capacity_mode=%s, "
+        "buffer_rows=%d",
         hidden_dim,
         tokens_per_rank,
         top_k,
         num_local_experts,
-        group.size(),
-        max_routed_tokens,
+        ep_size,
+        capacity_mode,
+        dispatch_rows,
     )
     backend = symm_mem.get_backend(device)
     if backend != "CUDA":
@@ -243,7 +301,7 @@ def init_buffer(
 
     hidden_recv_buffers = [
         symm_mem.empty(
-            max_routed_tokens,
+            dispatch_rows,
             hidden_dim,
             dtype=dtype,
             device=device,

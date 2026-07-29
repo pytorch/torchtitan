@@ -167,6 +167,76 @@ def test_minimal_async_ep_wait_schemas_are_nonmutating_aliases():
             assert not result.alias_info.is_write
 
 
+def test_forced_load_balance_receive_capacity_matches_round_robin_routing():
+    cases = (
+        (4, 2, 4, 2),
+        (5, 3, 8, 4),
+        (17, 6, 64, 8),
+        (32_768, 8, 256, 64),
+    )
+    for num_tokens, top_k, num_experts, ep_size in cases:
+        assignments = torch.arange(num_tokens * top_k) % num_experts
+        num_local_experts = num_experts // ep_size
+        actual = max(
+            int(
+                (
+                    (assignments >= rank * num_local_experts)
+                    & (assignments < (rank + 1) * num_local_experts)
+                ).sum()
+            )
+            * ep_size
+            for rank in range(ep_size)
+        )
+        expected = minimal_async_ep_api._forced_load_balance_receive_capacity(
+            num_tokens,
+            top_k,
+            num_experts,
+            ep_size,
+        )
+        assert expected == actual
+
+
+def test_buffer_rows_only_use_tight_capacity_for_forced_load_balance():
+    forced = minimal_async_ep_api._buffer_rows(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        force_load_balance=True,
+    )
+    worst_case = minimal_async_ep_api._buffer_rows(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        force_load_balance=False,
+    )
+
+    assert forced == (262_144, 262_144)
+    assert worst_case == (8_388_608, 262_144)
+
+
+def test_671b_forced_load_balance_uses_tight_receive_capacity():
+    from torchtitan.distributed.activation_checkpoint import FullAC
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+    from torchtitan.models.deepseek_v3.config_registry import (
+        deepseek_v3_671b_bf16_minimal_async_ep,
+    )
+
+    config = deepseek_v3_671b_bf16_minimal_async_ep()
+    config.activation_checkpoint = FullAC.Config()
+    config.debug.moe_force_load_balance = True
+    config.model_spec.model.update_from_config(config=config)
+
+    moe_layers = [layer for layer in config.model_spec.model.layers if layer.moe]
+    assert moe_layers
+    for layer in moe_layers:
+        dispatcher = layer.moe.routed_experts.token_dispatcher
+        assert isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+        assert dispatcher.force_load_balance
+        assert dispatcher.receive_capacity == 131_072
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMinimalAsyncEPKernels(unittest.TestCase):
     @unittest.skipUnless(
