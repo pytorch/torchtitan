@@ -144,6 +144,27 @@ class TestConfigManager(unittest.TestCase):
             "lr_scheduler",
         ]
 
+    def test_parse_print_config_ranks(self):
+        """print_config_ranks defaults to all ranks and parses a comma separated list."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
+        )
+        assert config.debug.print_config_ranks == []
+
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--debug.print_config_ranks",
+                "0,7,15",
+            ]
+        )
+        assert config.debug.print_config_ranks == [0, 7, 15]
+
     def test_trainer_config_quantization_default(self):
         from torchtitan.components.quantization.utils import has_quantization
 

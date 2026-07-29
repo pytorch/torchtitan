@@ -336,6 +336,13 @@ class DebugConfig:
     print_config: bool = False
     """Print the job configs to terminal"""
 
+    print_config_ranks: list[int] = field(default_factory=list)
+    """Global ranks that print the job configs when ``print_config`` is set.
+    Empty (the default) prints on every rank. The printed config expands every
+    per-layer sub-config, so on large models it can reach hundreds of KB per
+    rank; setting this to e.g. ``0`` keeps combined launcher logs manageable
+    when the launcher does not already filter output by rank."""
+
     save_config_file: str | None = None
     """Path to save job config into"""
 

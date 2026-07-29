@@ -280,6 +280,21 @@ class ConfigManager:
                 str_from_instance=lambda instance: format_cli_imports(instance),
             )
 
+        @registry.primitive_rule
+        def list_int_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
+            """Support for comma separated integer parsing"""
+            if type_info.type != list[int]:
+                return None
+            return tyro.constructors.PrimitiveConstructorSpec(
+                nargs=1,
+                metavar="0,1,2,...",
+                instance_from_str=lambda args: [
+                    int(i) for i in args[0].split(",") if i != ""
+                ],
+                is_instance=lambda instance: all(isinstance(i, int) for i in instance),
+                str_from_instance=lambda instance: [",".join(str(i) for i in instance)],
+            )
+
 
 # Initialize the custom registry for tyro
 custom_registry = tyro.constructors.ConstructorRegistry()
