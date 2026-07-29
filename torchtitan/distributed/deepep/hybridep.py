@@ -14,8 +14,9 @@ Configuration (via HybridEPTokenDispatcher.Config):
         None = blocking mode (default).  HybridEP calls cudaStreamSynchronize
         after dispatch and computes the exact num_permuted_tokens on the host.
         float in (0, 1] = non-blocking mode; num_permuted_tokens is estimated as
-        num_tokens × ep_size × min(num_local_experts, top_k) × cf, aligned for
-        MXFP8.  See _num_permuted_tokens_for_non_blocking().
+        num_local_tokens_after_seq_dim_padding * ep_size *
+        min(num_local_experts, top_k) * capacity_factor, aligned for MXFP8.
+        See _num_permuted_tokens_for_non_blocking().
 """
 
 from dataclasses import dataclass
@@ -77,7 +78,7 @@ class DispatchState:
 
 
 def _num_permuted_tokens_for_non_blocking(
-    num_tokens: int,
+    num_local_tokens_after_seq_dim_padding: int,
     ep_size: int,
     num_local_experts: int,
     top_k: int,
@@ -86,18 +87,19 @@ def _num_permuted_tokens_for_non_blocking(
 ) -> int:
     """Pre-allocated output buffer size for non-blocking dispatch.
 
-    Formula: num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-    aligned to pad_multiple if set.
+    Formula: num_local_tokens_after_seq_dim_padding * ep_size *
+    min(num_local_experts, top_k) * capacity_factor, aligned to pad_multiple
+    if set.
 
     capacity_factor=1.0 sizes for the worst case (every token routed to
-    every local expert) — no tokens are dropped but memory usage is highest.
+    every local expert) -- no tokens are dropped but memory usage is highest.
     Values < 1.0 reduce memory at the cost of potentially dropping tokens
     when the permuted offset exceeds the buffer capacity.  With forced load
     balancing (e.g. routing_algo="round_robin"), token distribution across experts
     is roughly uniform, so values < 1.0 are safe in practice.
     """
     n = int(
-        num_tokens
+        num_local_tokens_after_seq_dim_padding
         * ep_size
         * min(num_local_experts, top_k)
         * moe_expert_capacity_factor
@@ -118,6 +120,7 @@ def _dispatch_impl(
     num_experts: int,
     ep_size: int,
     group_name: str,
+    num_local_tokens_after_seq_dim_padding: int,
     non_blocking: bool = False,
     moe_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
@@ -126,22 +129,23 @@ def _dispatch_impl(
     DeepEP's dispatch_with_permute needs to know the output buffer size
     (num_permuted_tokens) for the fused permute kernel.
 
-    * **non_blocking=True** — no D2H sync is allowed, so num_permuted_tokens
+    * **non_blocking=True** -- no D2H sync is allowed, so num_permuted_tokens
       must be supplied upfront via moe_expert_capacity_factor.
-    * **non_blocking=False (blocking)** — DeepEP does cudaStreamSynchronize,
+    * **non_blocking=False (blocking)** -- DeepEP does cudaStreamSynchronize,
       then reads tokens_per_expert from pinned CPU memory to compute the
       exact num_permuted_tokens on the host.
     """
-    num_local_experts = num_experts // ep_size
-
+    global _buffer
     # pyrefly: ignore [bad-argument-type]
     group = dist.distributed_c10d._resolve_process_group(group_name)
-    get_buffer(
-        group=group,
-        hidden_dim=x.shape[1],
-        num_tokens=x.shape[0],
-        num_local_experts=num_local_experts,
+    assert _buffer is not None, "HybridEP buffer must be initialized before dispatch"
+    assert _buffer.group == group
+    assert x.shape[0] <= num_local_tokens_after_seq_dim_padding
+    assert (
+        num_local_tokens_after_seq_dim_padding
+        <= _buffer.configurer.buffer_config.max_num_of_tokens_per_rank
     )
+    num_local_experts = num_experts // ep_size
 
     from deep_ep.hybrid_ep_buffer import indices_to_map
 
@@ -155,7 +159,7 @@ def _dispatch_impl(
             moe_expert_capacity_factor is not None
         ), "moe_expert_capacity_factor is required for non_blocking dispatch"
         num_permuted_tokens = _num_permuted_tokens_for_non_blocking(
-            x.shape[0],
+            num_local_tokens_after_seq_dim_padding,
             ep_size,
             num_local_experts,
             topk_idx.shape[1],
@@ -178,10 +182,10 @@ def _dispatch_impl(
     # (.item()) would force cudaStreamSynchronize, defeating the purpose.
     # Overflow is governed by num_permuted_tokens (the output buffer capacity
     # for the fused permute kernel) — tokens whose permuted offset exceeds
-    # that limit are silently dropped.  Correct sizing of num_permuted_tokens
+    # that limit are silently dropped. Correct sizing of num_permuted_tokens
     # via _num_permuted_tokens_for_non_blocking is therefore critical:
-    # capacity_factor=1.0 → worst-case sizing, no drops, most memory;
-    # capacity_factor<1.0 → less memory, but tokens may be dropped.
+    # capacity_factor=1.0 -> worst-case sizing, no drops, most memory;
+    # capacity_factor<1.0 -> less memory, but tokens may be dropped.
 
     if scores is None:
         scores = torch.empty(0, device=x.device, dtype=torch.float32)
@@ -199,6 +203,7 @@ def _dispatch_fake(
     num_experts: int,
     ep_size: int,
     group_name: str,
+    num_local_tokens_after_seq_dim_padding: int,
     non_blocking: bool = False,
     moe_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
@@ -207,7 +212,7 @@ def _dispatch_fake(
     num_local_experts = num_experts // ep_size
     if non_blocking:
         out_tokens = _num_permuted_tokens_for_non_blocking(
-            x.shape[0],
+            num_local_tokens_after_seq_dim_padding,
             ep_size,
             num_local_experts,
             topk_idx.shape[1],
@@ -335,7 +340,7 @@ def _combine_bwd_fake(
 def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
     """Backward: gather gradients via combine_bwd op."""
     if grad_hidden is None:
-        return None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None
 
     (topk_idx,) = ctx.saved_tensors
     num_tokens = topk_idx.shape[0]
@@ -351,13 +356,14 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
         else None
     )
     # Gradients for: x, topk_idx, topk_weights, num_experts, ep_size, group,
-    #                non_blocking, moe_expert_capacity_factor, pad_multiple
-    return grad_x, None, grad_weights, None, None, None, None, None, None
+    #                num_local_tokens_after_seq_dim_padding, non_blocking,
+    #                moe_expert_capacity_factor, pad_multiple
+    return grad_x, None, grad_weights, None, None, None, None, None, None, None
 
 
 def _dispatch_setup_context(ctx, inputs, output):
     """Save context for dispatch backward."""
-    x, topk_idx, _, num_experts, _, _, _, _, _ = inputs
+    x, topk_idx, _, num_experts, _, _, _, _, _, _ = inputs
     _, _, _, dispatch_handle = output
     ctx.dispatch_handle = dispatch_handle
     ctx.input_dtype = x.dtype
@@ -395,17 +401,16 @@ _NUM_SMS_COMBINE = 16
 def get_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
-    num_tokens: int,
+    num_max_tokens_per_rank: int,
     num_local_experts: int,
     fp8_dispatch: bool = False,
 ) -> None:
     """Ensure the global HybridEP buffer is initialized, reinitializing if config changed.
 
     Allocates the all-to-all communication buffers (RDMA inter-node + NVLink IPC
-    intra-node), sized by num_tokens as max_num_of_tokens_per_rank.  No capacity
-    factor is applied here — these buffers hold the per-rank input tokens, not the
-    fan-out permuted output.  HybridEP auto-grows via update_template_config if a
-    later dispatch has more tokens than the initial allocation.
+    intra-node) for ``num_max_tokens_per_rank``. No capacity factor is applied
+    here -- these buffers hold per-rank input tokens, not the fan-out permuted
+    output. Dispatch only creates logical views within this fixed allocation.
     """
     global _buffer
 
@@ -420,7 +425,7 @@ def get_buffer(
             "Install from: https://github.com/deepseek-ai/DeepEP, branch: hybrid-ep"
         ) from e
 
-    max_tokens_per_rank = num_tokens
+    max_tokens_per_rank = num_max_tokens_per_rank
 
     needs_reinit = (
         _buffer is None
@@ -461,6 +466,8 @@ def dispatch_tokens(
     num_local_experts: int,
     num_experts: int,
     group: dist.ProcessGroup,
+    *,
+    num_local_tokens_after_seq_dim_padding: int,
     non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
@@ -476,10 +483,15 @@ def dispatch_tokens(
         num_local_experts: Experts on this EP rank
         num_experts: Total experts across all ranks
         group: EP ProcessGroup
+        num_local_tokens_after_seq_dim_padding: Current logical per-rank input
+            capacity. It must be identical across the EP group and no larger
+            than the maximum used to initialize HybridEP storage. Blocking
+            dispatch uses exact routed counts; non-blocking dispatch uses this
+            value to size its current fused-permute output view.
         non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
-            tensor as num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-            aligned to pad_multiple.
+            tensor from the current logical input capacity, EP size, top-k,
+            local expert count, and capacity factor, aligned to pad_multiple.
         pad_multiple: Pad per-expert token groups to this multiple (e.g. 32 for
             MXFP8). None means no padding.
 
@@ -506,6 +518,7 @@ def dispatch_tokens(
         num_experts,
         ep_size,
         group_name,
+        num_local_tokens_after_seq_dim_padding,
         non_blocking,
         non_blocking_expert_capacity_factor,
         pad_multiple,

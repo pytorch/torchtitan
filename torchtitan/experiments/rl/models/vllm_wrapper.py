@@ -260,12 +260,21 @@ class VLLMModelWrapper(Module):
             parallelism: ParallelismConfig
             training: TrainingConfig
 
+        capture_limit = max(
+            vllm_config.compilation_config.cudagraph_capture_sizes or (), default=0
+        )
+        max_num_model_tokens = max(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            capture_limit,
+        )
         self.config.update_from_config(
             config=_InferenceConfig(
                 parallelism=training_parallelism,
                 training=TrainingConfig(
                     local_batch_size=1,
-                    seq_len=vllm_config.scheduler_config.max_num_batched_tokens,
+                    # This synthetic shape is used to derive the per-rank EP buffer
+                    # capacity. It does not change or bounded by the model's max_seq_len.
+                    seq_len=max_num_model_tokens,
                 ),
             )
         )

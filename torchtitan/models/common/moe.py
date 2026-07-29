@@ -165,6 +165,7 @@ class RoutedExperts(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
+            num_local_tokens_after_seq_dim_padding=num_local_tokens_after_seq_dim_padding,
         )
         with maybe_set_sparse_mesh():
             routed_output_RD = self.inner_experts(
