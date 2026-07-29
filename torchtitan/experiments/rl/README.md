@@ -48,10 +48,13 @@ uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/t
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 ```
 
-4. Install PyTorch nightly, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
+4. Install PyTorch and torchvision nightlies, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
+
+`torchvision` is only needed because the current vllm nightly imports it during kernel warmup; TorchTitan RL does not otherwise require it.
+
 ```bash
-# Install vllm with nightly torch
-uv pip install torch vllm torchcomms  --pre \
+# Install vllm with nightly torch and torchvision
+uv pip install torch torchvision vllm torchcomms --pre \
 --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
 --index-strategy unsafe-best-match
 ```

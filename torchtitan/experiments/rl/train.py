@@ -25,6 +25,7 @@ python3 -m torchtitan.experiments.rl.train \
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # must run before torch import. Set it as early as possible to avoid other
@@ -68,10 +69,42 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
 
 
 def _preimport_torch() -> None:
-    """``bootstrap`` setup callable: pre-import torch on the spawned proc.
-    """
+    """``bootstrap`` setup callable: pre-import torch on the spawned proc."""
     # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
     import torch  # noqa: F401
+
+
+def _bootstrap_generator() -> None:
+    """``bootstrap`` setup callable for VLLMGenerator."""
+    import os
+
+    # TODO: this can be removed if it is addressed upstream in: https://github.com/tile-ai/tvm/issues/55
+    # VLLMGenerator encounters the following issue:
+    # 1. vLLM's jit_monitor transitively imports readline through the following chain:
+    #      vLLM -> tilelang  -> tvm  -> tvm's base.py -> import readline
+    #      https://github.com/vllm-project/vllm/blob/b23bd73f540175f9e117eaee5029cd7d8df63964/vllm/utils/jit_monitor.py#L451
+    #      https://github.com/tile-ai/tvm/blob/28a0d34420d2fa9bc71fc891445a3f1396fca759/python/tvm/base.py#L71
+    #    readline does tcsetattr on its import, which touches the controlling terminal.
+    # 2. Monarch spawns procs in a background process group.
+    #
+    # As a result, when spawning the VLLMGenerator mesh, readline-import touches the
+    # controlling terminal in background processes, and kernel sends SIGTTOU, which stops
+    # the process.
+    #
+    # Strictly speaking this should be a tvm bug, since it should not assume the import
+    # happens in a foreground process. To workaround it, we do a proactive readline-import
+    # warmup here with SIGTTOU being temporarily blocked. Then the subsequent readline-import
+    # in tvm will not do tcsetattr again since it is already done here.
+    if os.isatty(0):
+        import signal
+
+        _prev_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+        try:
+            import readline  # noqa: F401
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, _prev_mask)
+
+    _preimport_torch()
 
 
 class PerHostProvisioner:
@@ -138,6 +171,7 @@ def _spawn_proc_mesh(
     role_world_size: int,
     gpus_per_node: int,
     *,
+    bootstrap: Callable[[], None],
     role: str,
     extra_env: dict[str, str] | None = None,
 ) -> ProcMesh:
@@ -154,7 +188,7 @@ def _spawn_proc_mesh(
     env = provisioner.allocate(role_gpus_per_node, extra_env=extra_env)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
-        bootstrap=_preimport_torch,
+        bootstrap=bootstrap,
         bootstrap_command=default_bootstrap_cmd().with_env(env),
     )
 
@@ -199,13 +233,18 @@ def spawn_proc_mesh(
         )
 
         trainer_mesh = _spawn_proc_mesh(
-            trainer_host_mesh, trainer_world_size, gpus_per_node, role="trainer"
+            trainer_host_mesh,
+            trainer_world_size,
+            gpus_per_node,
+            bootstrap=_preimport_torch,
+            role="trainer",
         )
         generator_meshes = [
             _spawn_proc_mesh(
                 gen_host_mesh,
                 per_generator_world_size,
                 gpus_per_node,
+                bootstrap=_bootstrap_generator,
                 role="generator",
                 extra_env=generator_env,
             )
@@ -226,7 +265,7 @@ def spawn_proc_mesh(
         generator_meshes = [
             host_mesh.spawn_procs(
                 per_host={"gpus": per_generator_world_size},
-                bootstrap=_preimport_torch,
+                bootstrap=_bootstrap_generator,
                 bootstrap_command=default_bootstrap_cmd().with_env(
                     provisioner.allocate(
                         per_generator_world_size, extra_env=generator_env
