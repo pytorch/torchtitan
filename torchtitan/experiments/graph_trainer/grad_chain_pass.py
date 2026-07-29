@@ -19,7 +19,8 @@ the collective:
 
 The normalization belongs after eager or graph chunking and before dense FSDP
 or EP overlap scheduling so those schedulers see the same grad buckets for both
-chunking implementations.
+chunking implementations. It changes floating-point operation order; strict
+bitwise comparisons disable the pass through EP-overlap configuration.
 """
 
 from __future__ import annotations
@@ -133,8 +134,9 @@ def _chain_from_add_input(node: fx.Node) -> _GradCollectiveChain | None:
     if (
         collective.op != "call_function"
         or collective.target not in _GRAD_COLLECTIVE_TARGETS
-        or not collective.args
+        or len(collective.args) < 2
         or not isinstance(collective.args[0], fx.Node)
+        or collective.args[1] != "sum"
     ):
         return None
 
@@ -267,20 +269,19 @@ def _rewrite_add_of_collective_chains(
             if set(current.users) != {user}:
                 return False
 
-    chains_by_chunk = {left.chunk_id: left, right.chunk_id: right}
-    chunk0, chunk1 = chains_by_chunk[0], chains_by_chunk[1]
-
     order = ordered_nodes(gm)
     insertion_chain = max((left, right), key=lambda chain: order[chain.collective])
     with gm.graph.inserting_before(insertion_chain.collective):
         grad_sum = gm.graph.call_function(
-            aten.add.Tensor, args=(chunk0.input, chunk1.input)
+            add_node.target,
+            args=(left.input, right.input, *add_node.args[2:]),
+            kwargs=dict(add_node.kwargs),
         )
-        grad_sum._rename(f"{chunk0.input.name}_chunk_normalized")
+        grad_sum._rename(f"{left.input.name}_chunk_normalized")
         grad_sum.meta = _materialization_meta(
-            chunk0.input,
-            root_fqn=chunk0.root_fqn,
-            val=tensor_meta(chunk0.input),
+            left.input,
+            root_fqn=left.root_fqn,
+            val=tensor_meta(left.input),
         )
 
         collective_args = (grad_sum, *insertion_chain.collective.args[1:])
