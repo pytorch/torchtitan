@@ -258,7 +258,9 @@ class VLLMAttentionWrapper(Module):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
-    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.
+    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs. Some
+    MLA models use a smaller V head dim than Q/K, which vLLM represents with
+    ``head_size_v``.
 
     Receives ``(bs, seq, heads, dim)`` layout from GQAttention.
 
@@ -278,6 +280,7 @@ class VLLMAttentionWrapper(Module):
         num_heads: int
         num_kv_heads: int
         head_dim: int
+        value_head_dim: int | None = None
         scale: float | None = None
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
@@ -312,29 +315,51 @@ class VLLMAttentionWrapper(Module):
         num_heads = num_heads // tp_degree
         num_kv_heads = num_kv_heads // tp_degree
         head_dim = config.head_dim
+        value_head_dim = config.value_head_dim or head_dim
         scale = config.scale if config.scale is not None else head_dim**-0.5
 
         self.hidden_size = config.hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
+        self.value_head_dim = value_head_dim
         self.scale = scale
 
         cache_config = (
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
+        attn_backend = None
+        if value_head_dim != head_dim:
+            requested = vllm_config.attention_config.backend
+            if requested is not None and requested.name.endswith("_DIFFKV"):
+                backend_enum = requested
+            else:
+                fa_backend = AttentionBackendEnum.FLASH_ATTN_DIFFKV.get_class()
+                if fa_backend.is_supported_on_current_device(
+                    head_size=head_dim,
+                    head_size_v=value_head_dim,
+                    has_sinks=False,
+                ):
+                    backend_enum = AttentionBackendEnum.FLASH_ATTN_DIFFKV
+                else:
+                    backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
+            attn_backend = backend_enum.get_class()
+            attn_backend.set_head_size_v(value_head_dim)
+
         # TODO: This need to be compatible with Pipeline Parallelism
         layer_id = next(VLLMAttentionWrapper._layer_counter)
         self.vllm_attn = Attention(
             num_heads=num_heads,
             head_size=head_dim,
+            head_size_v=value_head_dim,
             scale=scale,
             num_kv_heads=num_kv_heads,
             cache_config=cache_config,
             quant_config=None,
             per_layer_sliding_window=config.sliding_window_size,
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
+            attn_backend=attn_backend,
         )
 
     def forward(
@@ -351,10 +376,10 @@ class VLLMAttentionWrapper(Module):
         Args:
             q_BLNH: ``(batch, seq_len, num_heads, head_dim)``
             k_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
-            v_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
+            v_BLNH: ``(batch, seq_len, num_kv_heads, value_head_dim)``
 
         Returns:
-            ``(batch, seq_len, num_heads * head_dim)`` -- ready for
+            ``(batch, seq_len, num_heads, value_head_dim)`` -- ready for
             ``output.view(bs, seqlen, -1)`` in GQAttention.forward
         """
         if attention_masks is not None:
@@ -364,12 +389,13 @@ class VLLMAttentionWrapper(Module):
             )
 
         batch_size, seq_len, _, head_dim = q_BLNH.shape
+        value_head_dim = self.value_head_dim
 
         # vllm attention expects (bs*seqlen, n_heads, head_dim) == (T, N, H)
         # (bs, seq, heads, dim) is contiguous, so reshape is zero-copy
         q_TNH = q_BLNH.reshape(batch_size * seq_len, -1, head_dim)
         k_TNH = k_BLNH.reshape(batch_size * seq_len, -1, head_dim)
-        v_TNH = v_BLNH.reshape(batch_size * seq_len, -1, head_dim)
+        v_TNH = v_BLNH.reshape(batch_size * seq_len, -1, value_head_dim)
 
         out_TD = self.vllm_attn(q_TNH, k_TNH, v_TNH)
 
@@ -379,6 +405,6 @@ class VLLMAttentionWrapper(Module):
         out_TD = out_TD.narrow(0, 0, batch_size * seq_len)
 
         # Reshape back to the (B, L, N, H) format expected by GQAttention.forward()
-        out_BLNH = out_TD.view(batch_size, seq_len, -1, head_dim)
+        out_BLNH = out_TD.view(batch_size, seq_len, -1, value_head_dim)
 
         return out_BLNH
