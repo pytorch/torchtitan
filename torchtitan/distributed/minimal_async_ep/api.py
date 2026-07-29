@@ -753,6 +753,11 @@ def dispatch_op_fake(
 
 
 _WAIT_OPS_LIB = torch.library.Library("minimal_async_ep", "FRAGMENT")
+# Wait outputs alias their pending inputs so downstream consumers depend on the
+# stream join without introducing a copy. ``keepalives`` contains only storage
+# read asynchronously by the launch; routing metadata returned for later ops is
+# not a wait dependency. Alias ops need explicit autograd and functionalization
+# registrations to preserve this identity contract through full Inductor.
 _WAIT_OPS_LIB.define(
     "wait_dispatch(Tensor(a) pending, Tensor(b) pending_counts, "
     "Tensor[] keepalives) -> (Tensor(a), Tensor(b))"
@@ -802,7 +807,7 @@ def _wait_dispatch_meta(
     return pending, pending_counts
 
 
-def _wait_combine_meta(
+def _wait_tensor_meta(
     pending: torch.Tensor,
     keepalives: list[torch.Tensor],
 ) -> torch.Tensor:
@@ -907,8 +912,8 @@ def _wait_combine_functionalize(pending, keepalives):
 
 
 torch.library.register_fake("minimal_async_ep::wait_dispatch")(_wait_dispatch_meta)
-torch.library.register_fake("minimal_async_ep::wait_dispatch_data")(_wait_combine_meta)
-torch.library.register_fake("minimal_async_ep::wait_combine")(_wait_combine_meta)
+torch.library.register_fake("minimal_async_ep::wait_dispatch_data")(_wait_tensor_meta)
+torch.library.register_fake("minimal_async_ep::wait_combine")(_wait_tensor_meta)
 
 
 def dispatch(
@@ -1498,16 +1503,11 @@ for _side_effect_op in (
 __all__ = [
     "MinimalAsyncEPDispatchMetadata",
     "combine",
-    "combine_data",
-    "combine_data_op",
     "combine_op",
     "dispatch",
-    "dispatch_data",
-    "dispatch_data_op",
     "dispatch_op",
     "init_buffer",
     "maybe_update_minimal_async_ep_config",
-    "reduce_topk_no_scores_op",
     "reduce_topk_op",
     "wait_combine_op",
     "wait_dispatch_op",

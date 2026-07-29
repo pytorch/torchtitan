@@ -45,7 +45,7 @@ class TestFusedSwiGLUOverride(unittest.TestCase):
         config = deepseek_v3_debugmodel_minimal_async_ep()
 
         self.assertIn(
-            "torchtitan.overrides.fused_swiglu",
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
             config.override.imports,
         )
 
