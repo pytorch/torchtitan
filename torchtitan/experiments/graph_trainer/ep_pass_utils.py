@@ -31,7 +31,10 @@ import torch
 import torch.fx as fx
 from torch.utils._pytree import tree_leaves, tree_map
 
-from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _EP_TOKEN_EXCHANGE,
+    _is_backward_node,
+)
 from torchtitan.tools.logging import logger
 
 aten = torch.ops.aten
@@ -53,6 +56,13 @@ _DEAD_CHUNK_SCALAR_TARGETS = {
     operator.lt,
 }
 _ASSERT_TARGETS = {aten._assert_scalar.default}
+_EP_PHASES = {"dispatch", "combine"}
+_MINIMAL_ASYNC_EP_PHASES = {
+    "dispatch": "dispatch",
+    "dispatch_data": "dispatch",
+    "combine": "combine",
+    "combine_data": "combine",
+}
 
 
 def is_module_fqn_inside_root(fqn: str, root_fqn: str) -> bool:
@@ -73,6 +83,21 @@ def is_c10d_functional_node(node: fx.Node) -> bool:
         and isinstance(node.target, torch._ops.OpOverload)
         and node.target.namespace == "_c10d_functional"
     )
+
+
+def ep_token_exchange_launch_phase(node: fx.Node) -> str | None:
+    """Return the dispatch/combine phase for a graph-visible EP launch."""
+    if node.op != "call_function" or not isinstance(node.target, torch._ops.OpOverload):
+        return None
+    target = node.target
+    if target == torch.ops._c10d_functional.all_to_all_single.default:
+        custom = node.meta.get("custom", {})
+        phase = custom.get(_EP_TOKEN_EXCHANGE)
+        return phase if phase in _EP_PHASES else None
+    if target.namespace != "minimal_async_ep":
+        return None
+    name = target._schema.name.rsplit("::", 1)[-1]
+    return _MINIMAL_ASYNC_EP_PHASES.get(name)
 
 
 def is_view_target(target: object) -> bool:
