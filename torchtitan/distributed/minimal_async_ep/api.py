@@ -52,7 +52,7 @@ class _MinimalAsyncEPBufferState:
     """Process-local symmetric-memory state initialized as one unit."""
 
     group: dist.ProcessGroup
-    num_tokens_per_rank: int
+    num_max_tokens_per_rank: int
     hidden_recv_buffers: list[torch.Tensor]
     hidden_recv_handles: list[Any]
     hidden_recv_peer_buffers: list[list[torch.Tensor]]
@@ -137,7 +137,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
     if training is None:
         raise ValueError(
             "MinimalAsyncEP requires a training runtime config to set "
-            "hidden_dim, num_tokens_per_rank, and dtype."
+            "hidden_dim, num_max_tokens_per_rank, and dtype."
         )
 
     memory_policy = getattr(config.compile, "memory_policy", None)
@@ -153,7 +153,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
 
     for token_dispatcher_cfg in dispatcher_cfgs:
         token_dispatcher_cfg.hidden_dim = model_config.dim
-        token_dispatcher_cfg.num_tokens_per_rank = (
+        token_dispatcher_cfg.num_max_tokens_per_rank = (
             training.local_batch_size * training.seq_len
         )
         token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
@@ -190,7 +190,7 @@ class MinimalAsyncEPDispatchMetadata:
 def init_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
-    num_tokens_per_rank: int,
+    num_max_tokens_per_rank: int,
     num_local_experts: int,
     top_k: int,
     dtype: torch.dtype,
@@ -203,7 +203,7 @@ def init_buffer(
     buffer_key = (
         group,
         hidden_dim,
-        num_tokens_per_rank,
+        num_max_tokens_per_rank,
         num_local_experts,
         top_k,
         dtype,
@@ -218,15 +218,16 @@ def init_buffer(
         return
 
     max_routed_tokens = (
-        group.size() * num_tokens_per_rank * min(top_k, num_local_experts)
+        group.size() * num_max_tokens_per_rank * min(top_k, num_local_experts)
     )
     num_experts = group.size() * num_local_experts
 
     logger.info(
-        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, num_tokens_per_rank=%d, "
+        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, "
+        "num_max_tokens_per_rank=%d, "
         "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d",
         hidden_dim,
-        num_tokens_per_rank,
+        num_max_tokens_per_rank,
         top_k,
         num_local_experts,
         group.size(),
@@ -297,7 +298,7 @@ def init_buffer(
 
     _buffer_state = _MinimalAsyncEPBufferState(
         group=group,
-        num_tokens_per_rank=num_tokens_per_rank,
+        num_max_tokens_per_rank=num_max_tokens_per_rank,
         hidden_recv_buffers=hidden_recv_buffers,
         hidden_recv_handles=hidden_recv_handles,
         hidden_recv_peer_buffers=hidden_recv_peer_buffers,
@@ -446,7 +447,7 @@ def _compute_direct_metadata(
         local_count_starts_E,
         num_routed_tokens=num_routed_rows,
         num_local_experts=num_local_experts,
-        max_tokens_per_segment=_buffer_state.num_tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.num_max_tokens_per_rank,
     )
 
     segment_lens = counts_sde[:, rank, :].t().reshape(-1)
@@ -467,7 +468,7 @@ def _compute_direct_metadata(
         ep_size=ep_size,
         num_local_experts=num_local_experts,
         receive_capacity=receive_capacity,
-        max_tokens_per_segment=_buffer_state.num_tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.num_max_tokens_per_rank,
     )
 
     return (
@@ -535,8 +536,8 @@ def _dispatch_metadata(
     """Exchange per-expert local counts and build dispatch/combine metadata.
 
     Args:
-        num_local_tokens_per_expert_E: ``(E,)`` int64 counts for this rank's
-            local token shard over all global experts.
+        num_local_tokens_per_expert_E: ``(E,)`` int64 routing-assignment
+            counts from this rank's token shard to all global experts.
         num_routed_rows: ``N`` routed rows in local E-major order.
         receive_capacity: ``R_max``.
         ep_size: ``EP``.
@@ -597,8 +598,8 @@ def dispatch_op(
     Args:
         dispatch_input: ``(T, D)`` local token rows.
         topk_expert_ids_TK: ``(T, K)`` global expert ids.
-        num_local_tokens_per_expert_E: ``(E,)`` counts for this rank's token
-            shard over all global experts.
+        num_local_tokens_per_expert_E: ``(E,)`` routing-assignment
+            counts from this rank's token shard to all global experts.
         receive_capacity: ``R_max``.
         ep_size: ``EP``.
 

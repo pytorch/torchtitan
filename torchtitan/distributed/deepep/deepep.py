@@ -18,11 +18,11 @@ only by an inference forward (no grad) that also set ``cudagraphable=True`` -- w
 BOTH prefill and decode. Combine is handle-driven and mode-agnostic.
 
 - training (``cudagraphable=False``, the default; also forced under autograd): ``do_expand=False`` +
-  ``do_cpu_sync=True`` -- a compact layout ALREADY grouped by local expert
-  (``handle.num_recv_tokens_per_expert_list`` gives the per-expert token counts for the
-  grouped GEMM), so no manual permute is needed. Full autograd via the custom ops below
-  (dispatch backward is a combine, combine backward is a dispatch). The total received
-  count is data-dependent and needs a host sync, so this path is NOT cudagraph-able.
+  ``do_cpu_sync=True`` -- a compact, deduplicated layout. ``_permute_tokens`` gathers it
+  into expert-major order using ``handle.num_recv_tokens_per_expert_list`` for the grouped
+  GEMM. Full autograd is provided by the custom ops below (dispatch backward is a combine,
+  combine backward is a dispatch). The total received count is data-dependent and needs a
+  host sync, so this path is NOT cudagraph-able.
 - inference -- BOTH prefill and decode (``cudagraphable=True``, under no_grad): ``do_expand=True`` +
   ``do_cpu_sync=False`` -- the static "one-token-per-expert-slot" expanding layout,
   routing-independent (correct even as gating changes between captured replays) and with no
@@ -40,7 +40,6 @@ from dataclasses import dataclass
 
 import torch
 from torch.distributed import ProcessGroup
-from torch.utils._python_dispatch import _disable_current_modes
 
 try:
     from deep_ep import ElasticBuffer
@@ -93,7 +92,8 @@ _lib = torch.library.Library("deepep", "DEF")
 # whose static layout is already expert-grouped).
 _lib.define(
     "dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
-    "int num_experts, int num_max_tokens_per_rank, bool cudagraphable) "
+    "int num_experts, int num_local_tokens_after_seq_dim_padding, "
+    "bool cudagraphable) "
     "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
 )
 # combine returns: combined_x. ``will_backward`` is the caller's outer grad state
@@ -133,7 +133,7 @@ def _dispatch_op_impl(
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
     num_experts: int,
-    num_max_tokens_per_rank: int,
+    num_local_tokens_after_seq_dim_padding: int,
     cudagraphable: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Execute DeepEP v2 dispatch.
@@ -163,7 +163,7 @@ def _dispatch_op_impl(
         topk_idx=topk_idx,
         topk_weights=topk_weights,
         num_experts=num_experts,
-        num_max_tokens_per_rank=num_max_tokens_per_rank,
+        num_max_tokens_per_rank=num_local_tokens_after_seq_dim_padding,
         num_sms=num_sms,
         do_expand=cudagraphable,
         do_cpu_sync=not cudagraphable,
@@ -234,7 +234,8 @@ def _dispatch_backward(
         grad_scores.to(ctx.input_dtype) if grad_scores is not None else None
     )
     # Order matches op inputs:
-    # x, topk_idx, topk_weights, num_experts, num_max_tokens_per_rank, cudagraphable.
+    # x, topk_idx, topk_weights, num_experts,
+    # num_local_tokens_after_seq_dim_padding, cudagraphable.
     # Backward only runs on the compact (cudagraphable=False) path; the expand layout is
     # inference-only ("must not be backward").
     return grad_x, None, grad_topk_weights, None, None, None
@@ -373,6 +374,7 @@ def get_buffer(
         hidden=hidden,
         num_topk=num_topk,
         use_fp8_dispatch=use_fp8_dispatch,
+        deterministic=torch.are_deterministic_algorithms_enabled(),
         explicitly_destroy=True,
     )
     return _buffer
@@ -454,9 +456,8 @@ def dispatch_tokens(
     top_scores: torch.Tensor,
     num_local_experts: int,
     num_experts: int,
-    group: ProcessGroup,
     *,
-    num_max_tokens_per_rank: int | None,
+    num_local_tokens_after_seq_dim_padding: int,
     cudagraphable: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
@@ -473,13 +474,11 @@ def dispatch_tokens(
         top_scores: Routing scores per token [num_tokens, top_k]
         num_local_experts: Number of experts on this rank
         num_experts: Total number of experts across all ranks
-        group: EP process group
-        num_max_tokens_per_rank: Per-rank dispatch capacity. Required (non-None) only in
-            expand mode (cudagraphable=True): it fixes the static slab shape, and it is a
-            CAPACITY -- tokens a rank sends beyond it are DROPPED (masked layout), so set it
-            >= the max per-rank token count to stay dropless. Compact mode
-            (cudagraphable=False) ignores it and auto-sizes from the current per-rank token
-            count.
+        num_local_tokens_after_seq_dim_padding: Current logical input capacity
+            after sequence-dimension padding. All ranks must use the same value.
+            DeepEP uses it as the current per-rank layout stride within the
+            ElasticBuffer, whose default ``num_max_tokens_per_rank`` was fixed
+            separately during initialization.
         cudagraphable: If True, use the static, no-host-sync expand layout so the forward is
             cudagraph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -498,13 +497,18 @@ def dispatch_tokens(
     # safely falls back to compact rather than hitting the no-backward kernel error.
     cudagraphable = cudagraphable and not torch.is_grad_enabled()
 
-    if not cudagraphable:
-        num_max_tokens_per_rank = hidden_states.shape[0]
-    elif num_max_tokens_per_rank is None:
-        raise ValueError(
-            "num_max_tokens_per_rank is required in expand mode (cudagraphable=True): "
-            "it fixes the static dispatch-slab shape."
-        )
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before dispatch"
+    num_input_tokens = hidden_states.shape[0]
+    assert num_input_tokens <= num_local_tokens_after_seq_dim_padding, (
+        f"DeepEP input has {num_input_tokens} tokens on this rank, exceeding the "
+        f"current logical capacity of {num_local_tokens_after_seq_dim_padding}."
+    )
+    assert num_local_tokens_after_seq_dim_padding <= buffer.num_max_tokens_per_rank, (
+        "DeepEP current logical capacity "
+        f"{num_local_tokens_after_seq_dim_padding} exceeds the "
+        f"preallocated capacity of {buffer.num_max_tokens_per_rank}."
+    )
 
     selected_experts_indices = selected_experts_indices.contiguous()
     top_scores = top_scores.contiguous()
@@ -512,16 +516,6 @@ def dispatch_tokens(
     selected_experts_indices = selected_experts_indices.masked_fill(top_scores == 0, -1)
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
-
-    # Buffer setup is infrastructure, not model compute. At a fixed training shape or
-    # during CUDA graph capture this is a no-op because init_buffer() allocated it.
-    with _disable_current_modes():
-        get_buffer(
-            group,
-            hidden=hidden_states.shape[1],
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-            num_topk=selected_experts_indices.shape[1],
-        )
 
     (
         recv_x,
@@ -534,7 +528,7 @@ def dispatch_tokens(
         selected_experts_indices,
         top_scores,
         num_experts,
-        num_max_tokens_per_rank,
+        num_local_tokens_after_seq_dim_padding,
         cudagraphable,
     )
 

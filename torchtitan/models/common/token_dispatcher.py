@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -112,6 +112,8 @@ class LocalTokenDispatcher(Configurable):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
         """Reorder tokens by expert assignment for local expert computation.
 
@@ -119,21 +121,28 @@ class LocalTokenDispatcher(Configurable):
             x_TD: ``(T, D)`` all input tokens
             topk_scores_TK: ``(T, K)`` routing scores
             topk_expert_ids_TK: ``(T, K)`` expert indices per token
-            num_local_tokens_per_expert_E: ``(E,)`` token counts per expert
+            num_local_tokens_per_expert_E: ``(E,)`` local routing
+                assignment counts per global expert
+            num_local_tokens_after_seq_dim_padding: Current logical input
+                capacity on every rank in the EP group. It includes
+                sequence-dimension padding, so it can exceed ``T``. Local
+                dispatch uses it only to validate the common dispatch contract
+                and has no preallocated communication buffer.
 
         Returns:
             routed_input_RD: ``[R = sum(num_local_tokens_per_expert_E), input_dim(D)]``.
                 Tokens sorted by expert index.
-            num_local_tokens_per_expert_E: ``(E,)`` token counts per expert
+            num_local_tokens_per_expert_E: ``(E,)`` local routing
+                assignment counts per global expert
             metadata: LocalDispatchMetadata for combine()
         """
+        assert x_TD.shape[0] <= num_local_tokens_after_seq_dim_padding
         # R = N (no EP all-to-all)
         (
             routed_input_RD,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
-
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
@@ -242,8 +251,25 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[torch.Tensor, torch.Tensor, object]:
-        """Dispatch tokens and return routed input, local counts, and metadata."""
+        """Dispatch tokens using the current rank-wide logical input capacity.
+
+        ``x_TD.shape[0]`` is the number of physically materialized local input
+        rows. ``num_local_tokens_after_seq_dim_padding`` is the current logical
+        capacity after sequence-dimension padding and must be identical across
+        the EP group, so the materialized rows must fit this capacity. Backends
+        with persistent storage allocate it separately from their configured
+        ``num_max_tokens_per_rank`` and require the current logical capacity to
+        fit the configured maximum.
+
+        A backend maps the current capacity to its native logical view: DeepEP
+        uses it as the dispatch stride, HybridEP uses it for its current output
+        view, and AllToAll uses exact tensor/count shapes without persistent
+        storage. MinimalAsyncEP currently requires it to equal the backend's
+        fixed input capacity.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -412,6 +438,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[
         torch.Tensor, torch.Tensor, AllToAllDispatchMetadata | LocalDispatchMetadata
     ]:
@@ -427,8 +455,12 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             x_TD: ``(T, D)`` local token shard
             topk_scores_TK: ``(T, K)`` routing scores
             topk_expert_ids_TK: ``(T, K)`` expert indices
-            num_local_tokens_per_expert_E: ``(E,)`` token counts for this local
-                token shard
+            num_local_tokens_per_expert_E: ``(E,)`` routing-assignment
+                counts from this local token shard to every global expert
+            num_local_tokens_after_seq_dim_padding: Current logical input capacity after sequence
+                padding. AllToAll has no persistent maximum-sized communication
+                buffer; it uses exact tensor and split sizes after validating that
+                the materialized local input fits this common capacity.
 
         Returns:
             routed_input_RD: ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
@@ -436,6 +468,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             num_tokens_per_local_expert_e: ``(num_local_experts,)`` token counts
             metadata: dispatch metadata for combine()
         """
+        assert x_TD.shape[0] <= num_local_tokens_after_seq_dim_padding
         # EP=1: fall back to local dispatch (no all-to-all needed)
         if self.ep_mesh is None:
             return LocalTokenDispatcher.dispatch(
@@ -444,6 +477,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 topk_scores_TK,
                 topk_expert_ids_TK,
                 num_local_tokens_per_expert_E,
+                num_local_tokens_after_seq_dim_padding=num_local_tokens_after_seq_dim_padding,
             )
 
         ep_size = self.ep_mesh.size()
@@ -460,7 +494,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         ):  # sparse mesh reinterpret
             for axis in ["dp", "cp", "tp"]:
                 spmd.mutate_type(
-                    num_local_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V
+                    num_local_tokens_per_expert_E,
+                    axis,
+                    src=spmd.P,
+                    dst=spmd.V,
                 )
 
         # generate the input splits and output splits for all-to-all
@@ -719,11 +756,25 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         topk_scores_TK,
         topk_expert_ids_TK,
         num_local_tokens_per_expert_E,
+        *,
+        num_local_tokens_after_seq_dim_padding: int,
     ):
+        """Dispatch using exact tensors plus the common current input capacity.
+
+        With EP enabled, AllToAll validates and otherwise uses dynamic split
+        sizes. With EP disabled, the current capacity only bounds the materialized
+        input before TorchAO pads routed expert groups to ``pad_multiple``.
+        """
         if self.ep_mesh is not None:
             return super().dispatch(
-                x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+                num_local_tokens_after_seq_dim_padding=num_local_tokens_after_seq_dim_padding,
             )
+
+        assert x_TD.shape[0] <= num_local_tokens_after_seq_dim_padding
 
         # EP=1: no all-to-all. Locally reorder tokens to expert-sorted order,
         # then apply the padded permute so the quantized grouped GEMM sees
@@ -853,9 +904,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using DeepEP v2's unified ``ElasticBuffer`` dispatch/combine.
 
     DeepEP v2 (>= 2.0.0) collapses the v1 high-throughput (HT) and low-latency (LL)
-    paths into a single ``buffer.dispatch``/``combine``. The compact, expert-grouped
-    layout feeds the grouped-GEMM expert path directly (no permute). Combine is
-    synchronized before returning its result.
+    paths into a single ``buffer.dispatch``/``combine``. Compact dispatch is gathered
+    from its deduplicated output into expert-major order; expand dispatch already returns
+    the static expert-major layout. Combine is synchronized before returning its result.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -866,17 +917,25 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # prefill and decode, since both run under no_grad), no backward. The deepep
         # primitives gate on grad context, so a True spec falls back to compact in training.
         cudagraphable: bool = False
-        # EXPAND (cudagraphable=True, inference) ONLY: the per-rank dispatch CAPACITY. It
-        # fixes the static output-slab shape; tokens a rank sends beyond it are DROPPED
-        # (masked layout), so set it >= the largest per-rank token count for droplessness
-        # (e.g. max_num_batched_tokens / sp). Trainer config derives the compact-mode
-        # value from its fixed input shape.
+        # Hard upper bound on physical input tokens per rank. update_from_config derives it
+        # from the fixed training shape or inference scheduler/cudagraph limits. It remains
+        # optional here because model configs are created before runtime configuration is
+        # applied, but it is required before the dispatcher is built.
         num_max_tokens_per_rank: int | None = None
         # Model hidden dim, threaded by the builder for eager buffer initialization.
         hidden_dim: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
+        if config.num_max_tokens_per_rank is None:
+            raise ValueError(
+                "DeepEP requires num_max_tokens_per_rank for buffer initialization."
+            )
+        if config.num_max_tokens_per_rank <= 0:
+            raise ValueError(
+                "DeepEP num_max_tokens_per_rank must be positive, got "
+                f"{config.num_max_tokens_per_rank}."
+            )
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden_dim = config.hidden_dim
         self.cudagraphable = config.cudagraphable
@@ -889,13 +948,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """Eagerly create the DeepEP buffer."""
         assert self.ep_mesh is not None
         assert self.hidden_dim is not None
-
-        if self.num_max_tokens_per_rank is None:
-            if self.cudagraphable:
-                raise ValueError(
-                    "DeepEP cudagraphable dispatch requires num_max_tokens_per_rank."
-                )
-            return
 
         from torchtitan.distributed.deepep.deepep import get_buffer
 
@@ -913,7 +965,17 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
+        """Dispatch through a current logical view of the ElasticBuffer.
+
+        ``self.num_max_tokens_per_rank`` sized the persistent buffer during
+        ``wire_meshes``. ``num_local_tokens_after_seq_dim_padding`` is the
+        current common logical capacity and becomes DeepEP's per-rank layout
+        stride without reallocating storage. ``x_TD.shape[0]`` may be smaller
+        because sequence padding can be virtual rather than materialized.
+        """
         # Ignore input num_local_tokens_per_expert_E. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
         del num_local_tokens_per_expert_E
@@ -932,8 +994,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             topk_scores_TK,
             num_local_experts,
             self.num_experts,
-            ep_group,
-            num_max_tokens_per_rank=self.num_max_tokens_per_rank,
+            num_local_tokens_after_seq_dim_padding=num_local_tokens_after_seq_dim_padding,
             cudagraphable=self.cudagraphable,
         )
 
@@ -993,11 +1054,12 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
                 with a given capacity factor.
 
                 Setting this to a float in (0, 1] enables CPU-free non-blocking
-                dispatch and controls num_permuted_tokens — the fused-permute
+                dispatch and controls num_permuted_tokens -- the fused-permute
                 output capacity, estimated as:
-                num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-                aligned for MXFP8.  Tokens whose permuted offset exceeds this
-                limit are silently dropped (overflow_flag is set on GPU).
+                num_local_tokens_after_seq_dim_padding * ep_size *
+                min(num_local_experts, top_k) * capacity_factor, aligned for
+                MXFP8. Tokens whose permuted offset exceeds this limit are
+                silently dropped (overflow_flag is set on GPU).
 
                 - None = blocking mode (default).  HybridEP calls
                   cudaStreamSynchronize after dispatch, copies
@@ -1012,20 +1074,20 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 
                 This factor does not affect the all-to-all communication
                 buffer, which is initialized separately from
-                num_tokens_per_rank.
+                ``num_max_tokens_per_rank``.
         """
 
         non_blocking_capacity_factor: float | None = None
         pad_multiple: int | None = None
         hidden_dim: int | None = None
-        num_tokens_per_rank: int | None = None
+        num_max_tokens_per_rank: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
         self.hidden_dim = config.hidden_dim
-        self.num_tokens_per_rank = config.num_tokens_per_rank
+        self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -1036,15 +1098,17 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         assert self.ep_mesh is not None
         assert self.hidden_dim is not None
 
-        if self.num_tokens_per_rank is None:
-            return
+        if self.num_max_tokens_per_rank is None:
+            raise ValueError(
+                "HybridEP requires num_max_tokens_per_rank for buffer initialization."
+            )
 
         from torchtitan.distributed.deepep.hybridep import get_buffer
 
         get_buffer(
             group=self.ep_mesh.get_group(),
             hidden_dim=self.hidden_dim,
-            num_tokens=self.num_tokens_per_rank,
+            num_max_tokens_per_rank=self.num_max_tokens_per_rank,
             num_local_experts=self.num_experts // self.ep_mesh.size(),
         )
 
@@ -1055,7 +1119,16 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
+        """Dispatch with a current view over the preallocated HybridEP buffer.
+
+        The configured maximum sizes persistent all-to-all storage.
+        ``num_local_tokens_after_seq_dim_padding`` bounds the current
+        materialized rows and sizes the non-blocking fused-permute output;
+        dispatch must not allocate or grow the communication buffer.
+        """
         # Ignore input num_local_tokens_per_expert_E. HybridEP returns the
         # number of global routed tokens for every local expert using other inputs.
         del num_local_tokens_per_expert_E
@@ -1075,6 +1148,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts,
             self.num_experts,
             ep_group,
+            num_local_tokens_after_seq_dim_padding=num_local_tokens_after_seq_dim_padding,
             non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
             pad_multiple=self.pad_multiple,
         )
@@ -1131,21 +1205,21 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
     ep_mesh: DeviceMesh | None
     sp_size: int
     hidden_dim: int | None
-    num_tokens_per_rank: int | None
+    num_max_tokens_per_rank: int | None
     dtype: torch.dtype | None
     buffer_device: torch.device
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
         hidden_dim: int | None = None
-        num_tokens_per_rank: int | None = None
+        num_max_tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.hidden_dim = config.hidden_dim
-        self.num_tokens_per_rank = config.num_tokens_per_rank
+        self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.dtype = config.dtype
         if config.device is None:
             buffer_device = torch.device(device_type, device_module.current_device())
@@ -1176,7 +1250,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             field
             for field, value in (
                 ("hidden_dim", self.hidden_dim),
-                ("num_tokens_per_rank", self.num_tokens_per_rank),
+                ("num_max_tokens_per_rank", self.num_max_tokens_per_rank),
                 ("dtype", self.dtype),
                 ("device", self.buffer_device),
             )
@@ -1190,7 +1264,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             )
 
         assert self.hidden_dim is not None
-        assert self.num_tokens_per_rank is not None
+        assert self.num_max_tokens_per_rank is not None
         assert self.dtype is not None
         assert self.buffer_device is not None
 
@@ -1201,7 +1275,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         minimal_async_ep_init_buffer(
             group=ep_group,
             hidden_dim=self.hidden_dim,
-            num_tokens_per_rank=self.num_tokens_per_rank,
+            num_max_tokens_per_rank=self.num_max_tokens_per_rank,
             num_local_experts=num_local_experts,
             top_k=self.top_k,
             dtype=self.dtype,
@@ -1215,14 +1289,20 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
-        """Dispatch tokens to expert ranks with MinimalAsyncEP.
+        """Dispatch through fixed-size symmetric-memory storage.
 
         Args:
             x_TD, topk_scores_TK, topk_expert_ids_TK,
                 num_local_tokens_per_expert_E: standard ``RoutedExperts``
                 dispatch inputs; see ``torchtitan.models.common.moe`` for shape
                 suffix definitions.
+            num_local_tokens_after_seq_dim_padding: Current logical input
+                capacity. MinimalAsyncEP currently requires this to equal the
+                materialized input rows and its fixed symmetric-memory
+                capacity.
 
         Returns:
             routed_input_RD: local-expert rows for grouped-mm.
@@ -1237,8 +1317,10 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
 
         ep_size = ep_group.size()
         num_tokens = x_TD.shape[0]
+        assert num_tokens == num_local_tokens_after_seq_dim_padding
+        assert self.num_max_tokens_per_rank is not None
+        assert num_local_tokens_after_seq_dim_padding == self.num_max_tokens_per_rank
         num_local_experts = num_local_tokens_per_expert_E.numel() // ep_size
-        # TODO(xmfan): make this capacity configurable by user
         num_receive_rows_per_source_rank = num_tokens * min(top_k, num_local_experts)
         receive_capacity = ep_size * num_receive_rows_per_source_rank
 
@@ -1303,3 +1385,74 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             state.top_k,
         )
         return combined_TD
+
+
+def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
+    """Validate and fill EP token dispatcher configs from runtime config."""
+    parallelism = config.parallelism
+    training = getattr(config, "training", None)
+    required_num_max_tokens_per_rank = None
+    if training is not None:
+        # CP and TP/SP shard the token axis before MoE, so derive the
+        # per-rank capacity from the configured input shape.
+        num_token_shards = (
+            parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
+        )
+        required_num_max_tokens_per_rank = training.local_batch_size * (
+            (training.seq_len + num_token_shards - 1) // num_token_shards
+        )
+
+    for layer_cfg in model_config.layers:
+        moe_cfg = getattr(layer_cfg, "moe", None)
+        if moe_cfg is None:
+            continue
+        token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
+        if not isinstance(
+            token_dispatcher_cfg,
+            (
+                DeepEPTokenDispatcher.Config,
+                HybridEPTokenDispatcher.Config,
+            ),
+        ):
+            continue
+
+        if parallelism.expert_parallel_degree == 1:
+            raise ValueError(
+                f"{type(token_dispatcher_cfg).__qualname__} requires expert "
+                "parallelism (expert_parallel_degree > 1)."
+            )
+
+        token_dispatcher_cfg.hidden_dim = model_config.dim
+        configured_capacity = token_dispatcher_cfg.num_max_tokens_per_rank
+        if configured_capacity is not None and configured_capacity <= 0:
+            raise ValueError(
+                f"{type(token_dispatcher_cfg).__qualname__} "
+                "num_max_tokens_per_rank must be positive, got "
+                f"{configured_capacity}."
+            )
+        if configured_capacity is None and required_num_max_tokens_per_rank is not None:
+            token_dispatcher_cfg.num_max_tokens_per_rank = (
+                required_num_max_tokens_per_rank
+            )
+        elif configured_capacity is None:
+            raise ValueError(
+                f"{type(token_dispatcher_cfg).__qualname__} requires "
+                "num_max_tokens_per_rank when the runtime configuration does "
+                "not provide a token bound."
+            )
+        elif (
+            required_num_max_tokens_per_rank is not None
+            and configured_capacity < required_num_max_tokens_per_rank
+        ):
+            raise ValueError(
+                f"{type(token_dispatcher_cfg).__qualname__} "
+                f"num_max_tokens_per_rank ({configured_capacity}) is smaller "
+                "than the required per-rank capacity "
+                f"({required_num_max_tokens_per_rank})."
+            )
+
+    from torchtitan.distributed.minimal_async_ep.api import (
+        maybe_update_minimal_async_ep_config,
+    )
+
+    maybe_update_minimal_async_ep_config(model_config, config)

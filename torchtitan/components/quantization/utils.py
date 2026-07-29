@@ -54,7 +54,7 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
             non_blocking_capacity_factor=dispatcher.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
             hidden_dim=dispatcher.hidden_dim,
-            num_tokens_per_rank=dispatcher.num_tokens_per_rank,
+            num_max_tokens_per_rank=dispatcher.num_max_tokens_per_rank,
         )
     else:
         raise ValueError(
