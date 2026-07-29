@@ -66,6 +66,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 from typing import Any
 
 # =============================================================================
@@ -92,6 +93,17 @@ def log_print(message: str = "") -> None:
         print(f"{LOG_PREFIX} {message}")
     else:
         print(f"{LOG_PREFIX}")
+
+
+def maybe_revert_inductor_190402_for_ci() -> None:
+    """Apply the temporary PyTorch PR 190402 probe in GitHub Actions only."""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    if os.environ.get("TORCHTITAN_REVERT_INDUCTOR_190402", "1") == "0":
+        return
+
+    patch_script = Path(__file__).with_name("revert_torch_inductor_190402.py")
+    subprocess.run([sys.executable, str(patch_script)], check=True)
 
 
 def get_log_path(scenario: str, output_folder: str | None) -> str:
@@ -1070,6 +1082,8 @@ def main() -> None:
     """Main function that orchestrates the entire comparison process."""
     # Parse and validate arguments
     args = parse_arguments()
+    maybe_revert_inductor_190402_for_ci()
+
     baseline_only_mode = validate_arguments(
         args.baseline_commit,
         args.test_commit,
