@@ -49,7 +49,7 @@ class BatchConfig:
     TODO: Refactor the pre-training trainer to use an owned batch config
     instead of keeping batch shape fields directly on TrainingConfig.
     NOTE: in pretraining we would have global_batch_size. But now we have
-    num_groups_per_train_step. This will need to be addressed.
+    num_prompts_per_train_step. This will need to be addressed.
     """
 
     local_batch_size: int = 8
@@ -62,14 +62,14 @@ class BatchConfig:
 
 
 class Batcher(Configurable):
-    """Accumulate `num_groups_per_train_step` groups and packs
+    """Accumulate `num_prompts_per_train_step` groups and packs
     `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[local_batch_size, seq_len]`.
 
     Example:
-        # num_groups_per_train_step=2, dp_degree=2, local_batch_size=2
+        # num_prompts_per_train_step=2, dp_degree=2, local_batch_size=2
         # The trigger is 2 trainable GROUPS, regardless of how many samples/tokens each contains.
         batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
-            num_groups_per_train_step=2, dp_degree=2, pad_id=0,
+            num_prompts_per_train_step=2, dp_degree=2, pad_id=0,
         )
         _ = batcher.add_training_samples(training_sample_group=group0)  # -> None (only 1 trainable group)
         batch = batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
@@ -88,7 +88,7 @@ class Batcher(Configurable):
         self,
         config: Config,
         *,
-        num_groups_per_train_step: int,
+        num_prompts_per_train_step: int,
         dp_degree: int,
         pad_id: int,
     ) -> None:
@@ -96,7 +96,7 @@ class Batcher(Configurable):
         self.seq_len = config.batch.seq_len
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
-        self._num_groups_per_train_step = num_groups_per_train_step
+        self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
 
@@ -109,7 +109,7 @@ class Batcher(Configurable):
             training_sample_group: One rollout group's trainable samples plus rollout metrics.
 
         Example:
-            batcher = Batcher.Config().build(num_groups_per_train_step=2, dp_degree=1, pad_id=0)
+            batcher = Batcher.Config().build(num_prompts_per_train_step=2, dp_degree=1, pad_id=0)
             batcher.add_training_samples(training_sample_group=group0)  # -> None
             batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
         """
@@ -140,18 +140,18 @@ class Batcher(Configurable):
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
-        if num_trainable_groups < self._num_groups_per_train_step:
+        if num_trainable_groups < self._num_prompts_per_train_step:
             return None  # accumulate until one full batch is ready
         return self._pack_one_training_batch()
 
     def _pack_one_training_batch(self) -> TrainingBatch:
-        """Pack the oldest accumulated groups (up to `num_groups_per_train_step` trainable groups) into one batch."""
+        """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""
         (
             training_samples,
             metrics,
             num_rollout_groups,
             num_metric_only_groups,
-        ) = self._take_groups_for_train_step()
+        ) = self._take_groups()
         # Next-fit all taken training_samples into rows.
         rows = self._assign_training_samples_to_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
@@ -177,16 +177,16 @@ class Batcher(Configurable):
             ],
         )
 
-    def _take_groups_for_train_step(
+    def _take_groups(
         self,
     ) -> tuple[list[TrainingSample], list[m.Metric], int, int]:
-        """Pop accumulated groups oldest-first until `num_groups_per_train_step` are taken."""
+        """Pop accumulated groups oldest-first until `num_prompts_per_train_step` are taken."""
         taken_training_samples: list[TrainingSample] = []
         taken_metrics: list[m.Metric] = []
         num_trainable_groups = 0
         cut = 0
         for group in self._groups_for_next_batch:
-            if num_trainable_groups >= self._num_groups_per_train_step:
+            if num_trainable_groups >= self._num_prompts_per_train_step:
                 break
             cut += 1
 

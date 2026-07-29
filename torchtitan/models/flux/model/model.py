@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 

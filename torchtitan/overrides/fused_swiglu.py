@@ -24,8 +24,11 @@ override mechanism, *without touching core*:
 This module also defines the ``torchtitan::silu_and_mul`` custom CUDA op (a fused
 SiLU-and-mul Triton kernel) and :class:`FusedGroupedExperts`, which applies the
 same gate+up fusion to MoE experts. Both the ``fused_swiglu`` (``FeedForward``)
-and ``fused_grouped_experts`` (``GroupedExperts``) overrides are registered here,
-so ``--override.imports torchtitan.overrides.fused_swiglu`` activates both.
+and ``fused_grouped_experts`` (``GroupedExperts``) overrides are registered here;
+activate each by naming its factory, e.g. ``--override.imports
+torchtitan.overrides.fused_swiglu.fused_swiglu,torchtitan.overrides.fused_swiglu.fused_grouped_experts``.
+For the DeepEP inference path, pair it with the sibling ``deepep_override`` dispatcher
+override (``torchtitan.overrides.moe_token_dispatcher``).
 
 Tensor parallelism — the ``(hidden_dim, 2, dim)`` layout is what makes TP work.
 ``w13`` is sharded ``Shard(0)`` on the ``hidden_dim`` axis, so each TP rank holds
@@ -481,7 +484,6 @@ class FusedSwiGLU(FeedForward):
 
 
 @override(
-    "fused_swiglu",
     target=FeedForward.Config,
     description="Fuse SwiGLU gate+up into one weight (FSDP + TP).",
 )
@@ -504,7 +506,7 @@ def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
 
 
 class FusedGroupedExperts(GroupedExperts):
-    """Grouped experts with the gate and up projections fused into one weight.
+    """Routed experts (grouped GEMM) with the gate and up projections fused.
 
     ``w13`` has shape ``(num_experts, hidden_dim, 2, dim)``: ``w13[:, :, 0]`` is
     the gate (original ``w1_EFD``) and ``w13[:, :, 1]`` the up (original ``w3_EFD``). A
@@ -513,10 +515,10 @@ class FusedGroupedExperts(GroupedExperts):
     capacity-padding rows via grouped_mm offsets). The down projection
     ``w2_EDF`` is reused as-is.
 
-    The explicit ``2`` axis stays unsharded so that its the same as dense FusedSwiGLU
+    The explicit ``2`` axis stays unsharded so that it matches the dense FusedSwiGLU
     ``(hidden_dim, 2, dim)`` layout: TP shards ``hidden_dim`` (dim 1) and EP
     shards the expert axis (dim 0), so each rank keeps matching gate/up slices.
-    Checkpoints save original ``w1_EFD`` / ``w3_EFD`` separately
+    Checkpoints save original ``w1_EFD`` / ``w3_EFD`` separately.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -536,7 +538,7 @@ class FusedGroupedExperts(GroupedExperts):
         self.register_state_dict_post_hook(self._split_w13_on_save)
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
-    def _experts_forward(
+    def forward(
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
@@ -577,7 +579,7 @@ class FusedGroupedExperts(GroupedExperts):
             )
 
 
-def _fuse_w13_param_init(param_init: dict | None) -> dict | None:
+def _fuse_w13_grouped_experts_param_init(param_init: dict | None) -> dict | None:
     """Remap ``w1_EFD`` / ``w3_EFD`` initializers onto the fused ``w13``.
 
     Other entries (e.g. ``w2_EDF``) are kept as-is.
@@ -592,7 +594,7 @@ def _fuse_w13_param_init(param_init: dict | None) -> dict | None:
     return fused or None
 
 
-def _fuse_w13_sharding(base: ShardingConfig) -> ShardingConfig:
+def _fuse_w13_grouped_experts_sharding(base: ShardingConfig) -> ShardingConfig:
     """Replace the ``w1_EFD`` / ``w3_EFD`` state shardings with one for ``w13``.
 
     ``w13`` (E, F, 2, D) shards on the same axes as ``w1_EFD`` (E, F, D): EP on
@@ -607,19 +609,21 @@ def _fuse_w13_sharding(base: ShardingConfig) -> ShardingConfig:
 
 
 @override(
-    "fused_grouped_experts",
     target=GroupedExperts.Config,
-    description="Fuse grouped-experts gate+up into one weight; fused SiLU-and-mul.",
+    description="Fuse routed-experts gate+up into one weight; fused SiLU-and-mul.",
 )
 def fused_grouped_experts(
     cfg: GroupedExperts.Config,
 ) -> GroupedExperts.Config:
+    # Remap w1_EFD/w3_EFD param-init and state shardings onto the fused w13.
+    # Idempotent: return cfg unchanged if it is not a stock GroupedExperts.Config
+    # (already fused, or a subclass like GptOssGroupedExperts).
     if type(cfg) is not GroupedExperts.Config:
         return cfg
 
-    param_init = _fuse_w13_param_init(cfg.param_init)
+    param_init = _fuse_w13_grouped_experts_param_init(cfg.param_init)
     fused = derive(cfg, FusedGroupedExperts.Config, param_init=param_init)
     base = cfg.sharding_config
     if base is not None:
-        fused.sharding_config = _fuse_w13_sharding(base)
+        fused.sharding_config = _fuse_w13_grouped_experts_sharding(base)
     return fused

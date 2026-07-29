@@ -157,6 +157,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     d["model_spec"] = {
                         "name": self.model_spec.name,
                         "flavor": self.model_spec.flavor,
+                        "model": self.model_spec.model.to_dict(),
                     }
                 else:
                     val = getattr(self, f.name)
@@ -674,6 +675,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
+                self.config.parallelism.context_parallel_ptrr_mask_key,
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual

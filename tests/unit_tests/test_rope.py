@@ -13,7 +13,7 @@ from torchtitan.models.common.attention import (
     QKVLinear,
     ScaledDotProductAttention,
 )
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import (
     _maybe_check_max_pos,
     ComplexRoPE,

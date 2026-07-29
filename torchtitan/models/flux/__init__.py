@@ -9,7 +9,8 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import validate_converter_order
 
 from torchtitan.protocols.model import ModelConfigConverter

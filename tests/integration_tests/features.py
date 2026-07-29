@@ -562,7 +562,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--override.imports torchtitan.overrides.fused_swiglu",
+                    "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
@@ -574,7 +574,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
-                    "--override.imports torchtitan.overrides.fused_swiglu",
+                    "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu,"
+                    "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                 ],
