@@ -9,8 +9,8 @@ import os
 
 from torchtitan.tools.logging import logger
 
-from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.run_tests import _run_cmd
+from tests.integration_tests import OverrideDefinitions, requires_real_pg
+from tests.integration_tests.run_tests import _run_cmd, add_comm_mode_arg
 
 
 def build_flux_test_list() -> list[OverrideDefinitions]:
@@ -58,7 +58,11 @@ _TEST_SUITES_FUNCTION = {
 }
 
 
-def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
+def run_single_test(
+    test_flavor: OverrideDefinitions,
+    output_dir: str,
+    comm_mode: str | None = None,
+):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
@@ -76,9 +80,10 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     hf_assets_path_arg = "--hf_assets_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
+    comm_mode_prefix = f"COMM_MODE={comm_mode} " if comm_mode else ""
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
+        cmd = f"{comm_mode_prefix}NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 
@@ -86,7 +91,7 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
         if test_name == "hsdp+cp+validation+inference" and idx == 1:
             # For flux generation, test using inference script
             cmd = (
-                f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"{comm_mode_prefix}NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 f"torchtitan/models/flux/run_infer.sh"
             )
 
@@ -116,19 +121,28 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
     Override the run_tests function in run_tests.py because FLUX model
     uses different train.py in command to run the model"""
 
+    comm_mode = args.comm_mode
+
     for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
 
-        # Check if we have enough GPUs
-        if args.ngpu < test_flavor.ngpu:
+        if comm_mode:
+            # Under a fake process group each test runs a single process on one
+            # physical GPU regardless of its simulated ngpu, so the ngpu check
+            # does not apply; instead skip flavors whose variants need a real
+            # process group (checkpointing, validation, PP>1).
+            if any(requires_real_pg(v) for v in test_flavor.override_args):
+                continue
+        elif args.ngpu < test_flavor.ngpu:
             logger.info(
                 f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
                 f" because --ngpu arg is {args.ngpu}"
             )
-        else:
-            run_single_test(test_flavor, args.output_dir)
+            continue
+
+        run_single_test(test_flavor, args.output_dir, comm_mode=comm_mode)
 
 
 def main():
@@ -140,6 +154,7 @@ def main():
         help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
     )
     parser.add_argument("--ngpu", default=8, type=int)
+    add_comm_mode_arg(parser)
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
