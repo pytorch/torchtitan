@@ -29,6 +29,11 @@ eval "$(conda shell.bash hook)"
 CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
 conda activate "${CONDA_ENV}"
 
+# ARC H100 runners mount the shared HF cache at /mnt/hf_cache read-only.
+# Point datasets at per-job writable storage so c4_test can create its cache root.
+export HF_HOME="$RUNNER_TEMP/hf_home"
+export HF_DATASETS_CACHE="$RUNNER_TEMP/hf_home/datasets"
+
 # Log CUDA driver version for debugging.
 DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
 echo "CUDA driver version: ${DRIVER_VERSION}"
