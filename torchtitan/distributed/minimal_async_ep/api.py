@@ -88,7 +88,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         moe_cfg = getattr(layer_cfg, "moe", None)
         if moe_cfg is None:
             continue
-        token_dispatcher_cfg = moe_cfg.experts.token_dispatcher
+        token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
         if isinstance(token_dispatcher_cfg, MinimalAsyncEPTokenDispatcher.Config):
             dispatcher_cfgs.append(token_dispatcher_cfg)
 

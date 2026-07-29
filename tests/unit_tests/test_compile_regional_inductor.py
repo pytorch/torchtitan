@@ -15,7 +15,7 @@ from torchtitan.distributed.compile import (
     maybe_regional_inductor,
 )
 from torchtitan.models.common.attention import FlexAttention
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.linear import Linear
 
 
 class TestRegionalInductorBackend(unittest.TestCase):
