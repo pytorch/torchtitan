@@ -70,8 +70,10 @@ repos:
     - id: pyrefly-check
       name: Pyrefly (type checking)
       pass_filenames: false
+      # The Pyrefly version comes from the project dev dependencies; `rev`
+      # only selects the hook wrapper when using the system environment.
       language: system
-      args: ["--remove-unused-ignores", "--summarize-errors"]
+      args: ["--summarize-errors"]
 
 
 - repo: local
