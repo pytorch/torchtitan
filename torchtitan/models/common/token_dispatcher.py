@@ -1114,6 +1114,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     tokens_per_rank: int | None
     dtype: torch.dtype | None
     buffer_device: torch.device
+    num_row_copy_ctas: int | None
     force_load_balance: bool
     receive_capacity: int | None
 
@@ -1123,6 +1124,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
+        num_row_copy_ctas: int | None = None
         force_load_balance: bool = False
         receive_capacity: int | None = None
 
@@ -1133,6 +1135,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self.hidden_dim = config.hidden_dim
         self.tokens_per_rank = config.tokens_per_rank
         self.dtype = config.dtype
+        self.num_row_copy_ctas = config.num_row_copy_ctas
         self.force_load_balance = config.force_load_balance
         self.receive_capacity = config.receive_capacity
         if config.device is None:
@@ -1154,6 +1157,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             int,
             torch.dtype,
             torch.device,
+            int | None,
             bool,
             int,
         ]
@@ -1217,6 +1221,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             self.top_k,
             self.dtype,
             self.buffer_device,
+            self.num_row_copy_ctas,
             self.force_load_balance,
             self.receive_capacity,
         )
@@ -1237,6 +1242,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             dtype=self.dtype,
             device=self.buffer_device,
             force_load_balance=self.force_load_balance,
+            num_row_copy_ctas=self.num_row_copy_ctas,
         )
         MinimalAsyncEPTokenDispatcher._global_buffer_key = buffer_key
 
