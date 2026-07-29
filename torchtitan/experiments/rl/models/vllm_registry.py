@@ -71,12 +71,18 @@ class InferenceParallelismConfig:
     spmd_backend: Literal["default", "spmd_types"] = "default"
     """SPMD backend used by TorchTitan model parallelization in the generator."""
 
+    enable_async_tensor_parallel: bool = False
+    """Whether to enable async tensor parallel in the TorchTitan generator wrapper."""
+
+    enable_sequence_parallel: bool = False
+    """Whether to enable sequence parallelism inside the TorchTitan model."""
+
     def to_training(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
         the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
 
-        Pins the inference-only invariants: no DP replication, no CP/PP, no
-        sequence parallel, and loss parallel disabled.
+        Pins the inference-only invariants: no DP replication, no CP/PP, and
+        loss parallel disabled.
         """
         return ParallelismConfig(
             # Carry the vLLM DP factor on dp_shard (not dp_replicate) so the
@@ -91,8 +97,9 @@ class InferenceParallelismConfig:
             data_parallel_replicate_degree=1,
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
-            enable_sequence_parallel=False,
+            enable_sequence_parallel=self.enable_sequence_parallel,
             spmd_backend=self.spmd_backend,
+            enable_async_tensor_parallel=self.enable_async_tensor_parallel,
         )
 
 
@@ -134,8 +141,12 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     )
 
     n_heads = attn.n_heads
-    n_kv_heads = attn.n_kv_heads or n_heads
-    head_dim = attn.head_dim if attn.head_dim is not None else cfg.dim // n_heads
+    n_kv_heads = getattr(attn, "n_kv_heads", None) or n_heads
+    head_dim = getattr(attn, "head_dim", None)
+    if head_dim is None and hasattr(attn, "qk_nope_head_dim"):
+        head_dim = attn.qk_nope_head_dim + attn.qk_rope_head_dim
+    if head_dim is None:
+        head_dim = cfg.dim // n_heads
 
     hf: dict[str, Any] = {
         # Value used

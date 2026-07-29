@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 
@@ -129,34 +130,93 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     hf_state_dict.update(local_expert_fqn)
 
                 else:
-                    # keep this path for offline conversion
                     moe_layer = next(
                         l
                         for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
                         if l.moe is not None
                     )
-                    split_values = self._split_experts_weights(
-                        value,
-                        moe_layer.moe.num_experts,
-                    )
+                    num_experts = moe_layer.moe.num_experts
+                    num_local_experts = value.shape[0]
 
-                    for expert_num in range(0, moe_layer.moe.num_experts):
-                        new_key = new_abstract_key.format(layer_num, expert_num)
-                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
+                    if num_local_experts < num_experts:
+                        if num_experts % num_local_experts != 0:
+                            raise ValueError(
+                                f"Local expert shard has {num_local_experts} experts, "
+                                f"which does not divide global num_experts={num_experts}"
+                            )
+                        ep_size = num_experts // num_local_experts
+                        ep_rank = (
+                            dist.get_rank() % ep_size
+                            if dist.is_available() and dist.is_initialized()
+                            else 0
+                        )
+                        start_index = ep_rank * num_local_experts
+                        end_index = start_index + num_local_experts
+                        self.local_experts_indices[abstract_key] = (
+                            start_index,
+                            end_index,
+                        )
+
+                        for local_idx, expert_num in enumerate(
+                            range(start_index, end_index)
+                        ):
+                            new_key = new_abstract_key.format(layer_num, expert_num)
+                            hf_state_dict[new_key] = value[local_idx].squeeze()
+                    else:
+                        # keep this path for offline conversion
+                        split_values = self._split_experts_weights(
+                            value,
+                            num_experts,
+                        )
+
+                        for expert_num in range(0, num_experts):
+                            new_key = new_abstract_key.format(layer_num, expert_num)
+                            hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
+
+                if abstract_key not in to_hf_map:
+                    continue
                 new_key = to_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)
                 hf_state_dict[new_key] = value
 
             else:
+                if key not in to_hf_map:
+                    continue
+                if (
+                    key == "lm_head.weight"
+                    and value.shape[0] != self.model_config.vocab_size
+                ):
+                    continue
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
         return hf_state_dict
+
+    def _concatenate_local_expert_weights(
+        self,
+        expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]],
+        abstract_key: str,
+        layer_num: str,
+    ) -> torch.Tensor | None:
+        experts = expert_weights_by_layer[layer_num][abstract_key]
+        start_index, end_index = self.local_experts_indices[abstract_key]
+        expected_num_experts = end_index - start_index
+        if len(experts) < expected_num_experts:
+            return None
+
+        local_weights = [experts[i] for i in range(start_index, end_index)]
+        stacked_value = torch.stack(local_weights, dim=0)
+
+        del expert_weights_by_layer[layer_num][abstract_key]
+        if not expert_weights_by_layer[layer_num]:
+            del expert_weights_by_layer[layer_num]
+
+        return stacked_value
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -188,11 +248,18 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 # Use stored metadata to decide path (online vs offline)
                 # Online mode: local_experts_indices was populated during to_hf()
                 if titan_abstract_key in self.local_experts_indices:
-                    stacked_value = self._concatenate_expert_weights_dtensor(
-                        expert_weights_by_layer,
-                        titan_abstract_key,
-                        layer_num,
-                    )
+                    if titan_abstract_key in self.grouped_expert_weight_mesh:
+                        stacked_value = self._concatenate_expert_weights_dtensor(
+                            expert_weights_by_layer,
+                            titan_abstract_key,
+                            layer_num,
+                        )
+                    else:
+                        stacked_value = self._concatenate_local_expert_weights(
+                            expert_weights_by_layer,
+                            titan_abstract_key,
+                            layer_num,
+                        )
                 else:  # keep this path to be compatible with offline conversion
                     stacked_value = self._concatenate_expert_weights(
                         expert_weights_by_layer,
