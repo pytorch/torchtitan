@@ -237,6 +237,33 @@ def test_671b_forced_load_balance_uses_tight_receive_capacity():
         assert dispatcher.receive_capacity == 131_072
 
 
+def test_overlap_copy_grid_propagates_to_minimal_async_ep_dispatchers():
+    from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+        graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep,
+    )
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+
+    config = graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep()
+    config.compile.memory_policy = "full"
+    config.model_spec.model.update_from_config(config=config)
+    dispatchers = [
+        layer.moe.routed_experts.token_dispatcher
+        for layer in config.model_spec.model.layers
+        if layer.moe is not None
+    ]
+    assert dispatchers
+    assert all(dispatcher.num_row_copy_ctas is None for dispatcher in dispatchers)
+
+    config.compile.ep_overlap.enabled = True
+    config.model_spec.model.update_from_config(config=config)
+
+    assert all(
+        isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+        and dispatcher.num_row_copy_ctas == 50
+        for dispatcher in dispatchers
+    )
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMinimalAsyncEPKernels(unittest.TestCase):
     @unittest.skipUnless(
@@ -306,6 +333,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 top_k=2,
                 dtype=torch.float32,
                 device=device,
+                num_row_copy_ctas=17,
             )
             rank = dist.get_rank()
             x = (
@@ -356,8 +384,32 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
 
             buffer_state = minimal_async_ep_api._buffer_state
             assert buffer_state is not None
-            comm_stream = buffer_state.comm_stream.cuda_stream
-            self.assertEqual({stream for _, stream in launch_streams}, {comm_stream})
+            prep_stream = buffer_state.prep_stream.cuda_stream
+            copy_stream = buffer_state.copy_stream.cuda_stream
+            self.assertNotEqual(prep_stream, copy_stream)
+            self.assertLess(
+                buffer_state.copy_stream.priority,
+                buffer_state.prep_stream.priority,
+            )
+            self.assertEqual(
+                buffer_state.num_row_copy_ctas,
+                17,
+            )
+            prep_functions = {
+                "copy_full_counts_to_peers_kernel",
+                "fill_dispatch_metadata_kernel",
+                "fill_combine_metadata_kernel",
+                "invert_flat_indices_kernel",
+            }
+            for name, stream in launch_streams:
+                if name in prep_functions:
+                    self.assertEqual(stream, prep_stream)
+                elif name == "copy_rows_to_peers_kernel":
+                    self.assertEqual(stream, copy_stream)
+            wait_streams = {
+                stream for name, stream in launch_streams if name == "_wait_ready"
+            }
+            self.assertEqual(wait_streams, {prep_stream, copy_stream})
             self.assertEqual(
                 {name for name, _ in launch_streams}, set(launch_functions)
             )
@@ -736,6 +788,26 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(row_dsts[0][4], src[0])
         assert_equal(row_dsts[1][5], torch.zeros(2, device="cuda"))
 
+        bounded_src = torch.arange(128, device="cuda", dtype=torch.float32).view(64, 2)
+        bounded_dst = torch.zeros_like(bounded_src)
+        bounded_dst_ptrs = torch.tensor(
+            [bounded_dst.data_ptr()], device="cuda", dtype=torch.int64
+        )
+        copy_rows_to_peers_kernel(
+            bounded_src,
+            [bounded_dst],
+            torch.zeros(64, device="cuda", dtype=torch.int64),
+            torch.arange(64, device="cuda", dtype=torch.int64),
+            ep_size=1,
+            num_rows=64,
+            num_cols=2,
+            dst_ptrs=bounded_dst_ptrs,
+            block_m=1,
+            num_ctas=2,
+        )
+        torch.cuda.synchronize()
+        assert_equal(bounded_dst, bounded_src)
+
     def test_copy_rows_uses_int64_for_source_stride_arithmetic(self):
         row = 1_048_576
         stride = 2048
@@ -766,7 +838,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         src_storage[base_offset + high_offset] = 93
         torch.cuda.synchronize()
 
-        _copy_rows_to_peer_ptrs_kernel[(metadata_numel, 1)](
+        _copy_rows_to_peer_ptrs_kernel[(20,)](
             src,
             dst_ptrs,
             dst_ranks,
@@ -784,6 +856,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             SRC_ROW_DIVISOR=1,
             BLOCK_M=1,
             BLOCK_N=1,
+            NUM_COL_TILES=1,
         )
         torch.cuda.synchronize()
 
