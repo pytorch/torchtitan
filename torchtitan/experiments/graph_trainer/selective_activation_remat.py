@@ -19,6 +19,7 @@ from torch._functorch.partitioners import (
 )
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _ACTIVATION_RECOMPUTE,
     _get_module_fqn,
     _is_backward_node,
 )
@@ -367,6 +368,7 @@ def selective_activation_remat_pass(
             _privatize_custom_meta(dup)  # node_copy shares fwd_node's custom dict
         dup.name = fwd_node.name + "_recomputed"
         dup.meta["autograd_backward"] = True
+        dup.meta[_ACTIVATION_RECOMPUTE] = True
         recomputed_nodes[fwd_node] = dup
         log.debug(
             "Recomputing %s before backward node %s", fwd_node.name, bwd_target.name

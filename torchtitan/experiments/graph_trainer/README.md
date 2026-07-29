@@ -157,6 +157,23 @@ Supported graph-chunking selections are:
 - `--compile.ep_overlap.chunk_dim seq --compile.ep_overlap.module_fqn layers.*.moe`
   for MoE-only sequence chunking.
 
+`--compile.ep_overlap.schedule auto` uses the default dependency-driven greedy
+schedule. `--compile.ep_overlap.schedule deepseek_v3` expresses that order with
+explicit token-exchange and ready-filler anchors for DeepSeek MoE regions. A
+named policy may warn and fall back to `auto` when it has no variant for the
+traced region; anchors returned by a policy must cover the token exchanges
+exactly and preserve dependencies.
+Token anchors include only the dependency closure needed to launch that
+exchange. Named schedules may place independent module subtrees explicitly or
+request ready non-wait work as filler; all remaining work is scheduled before
+the final waits. This keeps backward weight gradients out of the
+dgrad-to-combine critical path.
+
+MinimalAsyncEP overlap defaults to a persistent 50-CTA row-copy grid. Set
+`--compile.ep_overlap.minimal_async_ep_num_copy_ctas` to tune the bound, or to
+`None` for an unbounded overlap ablation. The no-overlap path is always
+unbounded because its copies are on the critical path.
+
 Graph chunking intentionally couples the tracer and EP-overlap passes through
 the `ep_overlap` trace-input preparer: before `minimal_fx_tracer` fakeifies
 inputs, the preparer marks token-grid dimensions with Dynamo symbolic-shape

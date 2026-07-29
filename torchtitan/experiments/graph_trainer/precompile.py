@@ -68,6 +68,9 @@ def compute_config_fingerprint(
         f"compile:ep_overlap:module_fqn:{compile_config.ep_overlap.module_fqn}\n".encode()
     )
     h.update(
+        f"compile:ep_overlap:schedule:{compile_config.ep_overlap.schedule}\n".encode()
+    )
+    h.update(
         "compile:ep_overlap:disable_early_grad_accumulation:"
         f"{compile_config.ep_overlap.disable_early_grad_accumulation}\n".encode()
     )
