@@ -11,7 +11,7 @@ This swaps :class:`CosSinRoPE` and :class:`ComplexRoPE` for versions that fuse
 the cache gather and rotation into a single Helion kernel (forward and
 backward), without touching core.
 
-    torchtitan_train ... --override.imports torchtitan.overrides.helion_rope
+    torchtitan_train ... --override.imports torchtitan.overrides.helion_rope.helion_cos_sin_rope
 
 Scope and fallbacks (the kernel is opt-in and never changes default behavior):
 
@@ -985,12 +985,11 @@ class HelionComplexRoPE(ComplexRoPE):
 
 
 @override(
-    "helion_rope",
     target=CosSinRoPE.Config,
     exact=True,
     description="Fused Helion cos/sin rotary embedding (CUDA).",
 )
-def helion_rope(cfg: CosSinRoPE.Config) -> HelionCosSinRoPE.Config:
+def helion_cos_sin_rope(cfg: CosSinRoPE.Config) -> HelionCosSinRoPE.Config:
     if _HELION_IMPORT_ERROR is not None:
         raise ImportError(
             "HelionCosSinRoPE override was requested but `helion` is not installed; "
@@ -1000,7 +999,6 @@ def helion_rope(cfg: CosSinRoPE.Config) -> HelionCosSinRoPE.Config:
 
 
 @override(
-    "helion_complex_rope",
     target=ComplexRoPE.Config,
     exact=True,
     description="Fused Helion complex rotary embedding (CUDA).",

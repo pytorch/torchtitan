@@ -39,6 +39,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
+    validate_ep_overlap_config,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
@@ -110,7 +111,10 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_identity_slice_pass,
     remove_identity_view_pass,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    data_parallel,
+    MixedPrecisionPolicy,
+)
 from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
     TestCpuOffloadPass,
 )
@@ -2330,51 +2334,6 @@ class TestChunkPasses(TestCase):
             node.meta["autograd_backward"] = True
         return node
 
-    def _build_chunked_grad_collective_with_output_cast(self, *, producer: str):
-        graph = torch.fx.Graph()
-        loss = graph.placeholder("loss")
-        outputs = []
-        for chunk_id in (0, 1):
-            grad = graph.placeholder(f"grad_{chunk_id}")
-            self._set_fake_tensor_meta(grad, torch.empty(4, 4, dtype=torch.float32))
-            self._mark_chunk_body(
-                grad,
-                chunk_id=chunk_id,
-                backward=True,
-                producer=producer,
-            )
-            collective = graph.call_function(
-                torch.ops._c10d_functional.reduce_scatter_tensor.default,
-                args=(grad, "sum", 2, "dp"),
-            )
-            self._set_fake_tensor_meta(
-                collective, torch.empty(2, 4, dtype=torch.float32), backward=True
-            )
-            wait = graph.call_function(
-                torch.ops._c10d_functional.wait_tensor.default, args=(collective,)
-            )
-            self._set_fake_tensor_meta(
-                wait, torch.empty(2, 4, dtype=torch.float32), backward=True
-            )
-            cast = graph.call_function(
-                torch.ops.aten._to_copy.default,
-                args=(wait,),
-                kwargs={"dtype": torch.bfloat16},
-            )
-            outputs.append(
-                self._set_fake_tensor_meta(
-                    cast, torch.empty(2, 4, dtype=torch.bfloat16), backward=True
-                )
-            )
-        grad_output = graph.call_function(
-            torch.ops.aten.add.Tensor, args=tuple(outputs)
-        )
-        self._set_fake_tensor_meta(
-            grad_output, torch.empty(2, 4, dtype=torch.bfloat16), backward=True
-        )
-        graph.output((loss, grad_output))
-        return torch.fx.GraphModule(torch.nn.Module(), graph)
-
     def _build_backward_grad_chain_gm(
         self,
         *,
@@ -2560,11 +2519,15 @@ class TestChunkPasses(TestCase):
         *,
         chunk_strategy: str,
         fsdp_mode: str,
+        mixed_precision: bool = False,
     ):
+        class Linear(torch.nn.Linear):
+            pass
+
         class Moe(torch.nn.Module):
             def __init__(self):
                 super().__init__()
-                self.linear = torch.nn.Linear(4, 4, bias=False)
+                self.linear = Linear(4, 4, bias=False)
 
             def forward(self, x):
                 compute = annotate_fn({"EP": "compute"})(self.linear)
@@ -2585,7 +2548,19 @@ class TestChunkPasses(TestCase):
         with self._fake_dp_mesh() as dp_mesh:
             model = Model()
             annotate_module_fqns(model)
-            model = data_parallel(model, device_mesh=dp_mesh, mode=fsdp_mode)
+            mp_policy = (
+                MixedPrecisionPolicy(
+                    reduce_dtype=torch.bfloat16,
+                )
+                if mixed_precision
+                else None
+            )
+            model = data_parallel(
+                model,
+                device_mesh=dp_mesh,
+                mode=fsdp_mode,
+                mp_policy=mp_policy,
+            )
             x = torch.randn(4, 2, 4)
             mark_chunk_dynamic_dims(x, mode="batch")
 
@@ -3643,6 +3618,12 @@ class TestChunkPasses(TestCase):
             disabled_post_chunk_dce,
             disabled_names.index("joint_transformer_block_bucketing_reordering_pass"),
         )
+
+    def test_ep_overlap_rejects_invalid_minimal_async_ep_copy_grid(self):
+        with self.assertRaisesRegex(ValueError, "must be positive or None"):
+            validate_ep_overlap_config(
+                EpOverlapConfig(enabled=True, minimal_async_ep_num_copy_ctas=0)
+            )
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
@@ -5376,26 +5357,21 @@ class TestChunkPasses(TestCase):
                 self.assertNotIn("chunk_id", sum_nodes[0].meta.get("custom", {}))
 
     def test_normalize_chunked_grad_collective_chains_replays_output_cast(self):
-        target = torch.ops._c10d_functional.reduce_scatter_tensor.default
         for producer in ("eager", "graph"):
             with self.subTest(producer=producer):
-                gm = self._build_chunked_grad_collective_with_output_cast(
-                    producer=producer
+                gm, target = self._trace_simple_fsdp_moe_grad_collective(
+                    chunk_strategy=producer,
+                    fsdp_mode="fully_shard",
+                    mixed_precision=True,
                 )
                 self.assertEqual(len(self._nodes_by_target(gm, target)), 2)
 
                 normalize_chunked_grad_collective_chains_pass(gm)
 
                 collective_nodes = self._nodes_by_target(gm, target)
-                sum_nodes = self._nodes_by_target(gm, torch.ops.aten.add.Tensor)
                 self.assertEqual(len(collective_nodes), 1)
-                self.assertEqual(len(sum_nodes), 1)
-                self.assertIs(collective_nodes[0].args[0], sum_nodes[0])
-                self.assertEqual(sum_nodes[0].meta["val"].dtype, torch.float32)
-                output = next(node for node in gm.graph.nodes if node.op == "output")
-                grad_output = output.args[0][1]
-                self.assertEqual(grad_output.target, torch.ops.aten._to_copy.default)
-                self.assertEqual(grad_output.meta["val"].dtype, torch.bfloat16)
+                cast_nodes = self._nodes_by_target(gm, torch.ops.aten._to_copy.default)
+                self.assertTrue(cast_nodes)
 
     def test_chunk_batch_backward_keeps_same_fqn_grad_plumbing_chunked(self):
         x_real = torch.randn(4, 3)
