@@ -106,31 +106,42 @@ This method requires the nightly build of PyTorch, or the latest PyTorch built [
 ```bash
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
-pip install -r requirements.txt
-pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly/cpu
+uv pip install -r requirements.txt
 ```
 
-> **Note:** The nightly build of `torchdata` is required when using a PyTorch nightly. Install it from the nightly index as shown above.
+> **Note:** When using a PyTorch nightly, upgrade `torchdata` to its nightly build without changing the installed PyTorch build:
+>
+> ```bash
+> uv pip install --prerelease=allow --upgrade-package torchdata \
+>   --find-links https://download.pytorch.org/whl/nightly/torchdata/ \
+>   torchdata
+> ```
+>
+> Using the `torchdata` package page as `--find-links` prevents the resolver from selecting a different accelerator build of PyTorch from the aggregated nightly index.
 
-> **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `pip install -e . --no-deps`.
+> **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `uv pip install -e . --no-deps`.
 
 ### Nightly builds
 
-This method requires the nightly build of PyTorch. You can replace `cu130` with another version of cuda or an AMD GPU (e.g. `rocm6.3`).
+This method requires the nightly build of PyTorch. You can replace `cu130` with another version of CUDA or an AMD GPU (e.g. `rocm6.3`).
 
 ```sh
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu130 --force-reinstall
-pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu130
+uv pip install --prerelease=allow --reinstall-package torch --index-url https://download.pytorch.org/whl/nightly/cu130 torch
+uv pip install --prerelease=allow --reinstall-package torchtitan --extra-index-url https://download.pytorch.org/whl/nightly/cu130 torchtitan
 ```
 
 ### Stable releases
-One can install the latest [stable release](https://github.com/pytorch/torchtitan/releases) of `torchtitan` via `pip` or `conda`.
+
+One can install the latest [stable release](https://github.com/pytorch/torchtitan/releases) of `torchtitan` via `uv` or `conda`.
+
 ```sh
-pip install torchtitan
+uv pip install torchtitan
 ```
+
 ```sh
 conda install conda-forge::torchtitan
 ```
+
 Note that each stable release pins the nightly versions of `torch` and `torchao`. Please see [release.md](docs/release.md) for more details.
 
 ### Downloading a tokenizer
