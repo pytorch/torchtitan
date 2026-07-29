@@ -330,11 +330,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
         self._assert_packed_run_matches_per_document(model, x, positions, masks)
 
-    def test_get_attention_masks_pairs_flex_mask_with_deltanet_offsets(self):
+    def test_get_attention_masks_pairs_flex_mask_with_deltanet_positions(self):
         """Under the flex backend, Qwen35Model.get_attention_masks must return
         a composite carrying both the BlockMask (full-attention layers) and
-        the document offsets (GatedDeltaNet); under varlen, a plain
-        VarlenMetadata shared by both consumers.
+        batch-aligned document positions (GatedDeltaNet); under varlen, a
+        plain VarlenMetadata shared by both consumers.
         """
         from torch.nn.attention.flex_attention import BlockMask
 
@@ -343,7 +343,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         # dependency, so skip instead of erroring on environments without it.
         try:
             from torchtitan.models.qwen3_5 import model_registry
-            from torchtitan.models.qwen3_5.model import Qwen35AttentionMasks
+            from torchtitan.models.qwen3_5.model import Qwen35AttentionMaskInputs
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
                 f"Qwen3.5 optional dependency unavailable: {exc.name}"
@@ -361,17 +361,66 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         flex_model = model_registry("debugmodel").model.build()
         masks = flex_model.get_attention_masks(positions)
-        self.assertIsInstance(masks, Qwen35AttentionMasks)
+        self.assertIsInstance(masks, Qwen35AttentionMaskInputs)
         self.assertIsInstance(masks.full_attention, BlockMask)
-        self.assertIsInstance(masks.deltanet, VarlenMetadata)
-        # Row 0 packs docs of length 3 and 2; row 1 is one doc of length 5.
-        self.assertEqual(masks.deltanet.cu_seq_q_host, (0, 3, 5, 10))
+        self.assertTrue(torch.equal(masks.deltanet_positions, positions))
 
         varlen_model = model_registry("debugmodel", attn_backend="varlen").model.build()
         varlen_masks = varlen_model.get_attention_masks(positions)
-        self.assertNotIsInstance(varlen_masks, Qwen35AttentionMasks)
+        self.assertNotIsInstance(varlen_masks, Qwen35AttentionMaskInputs)
         self.assertIsInstance(varlen_masks, VarlenMetadata)
         self.assertEqual(varlen_masks.cu_seq_q_host, (0, 3, 5, 10))
+
+    def test_flex_mask_inputs_split_by_pipeline_microbatch(self):
+        """Pipeline splitting must preserve each microbatch's document positions."""
+        from torch.distributed.pipelining.microbatch import (
+            split_args_kwargs_into_chunks,
+        )
+
+        try:
+            from torchtitan.models.qwen3_5 import model_registry
+            from torchtitan.models.qwen3_5.model import Qwen35AttentionMaskInputs
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(
+                f"Qwen3.5 optional dependency unavailable: {exc.name}"
+            ) from exc
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        positions = torch.tensor(
+            [
+                [0, 1, 2, 0, 1],
+                [0, 1, 2, 3, 4],
+            ],
+            dtype=torch.int32,
+            device=device,
+        )
+        model = model_registry("debugmodel").model.build()
+        masks = model.get_attention_masks(positions)
+        self.assertIsInstance(masks, Qwen35AttentionMaskInputs)
+
+        _, kwargs_chunks = split_args_kwargs_into_chunks(
+            (torch.zeros(2, 5, device=device),),
+            {"attention_masks": masks},
+            chunks=2,
+        )
+
+        expected_offsets = [(0, 3, 5), (0, 5)]
+        for batch_idx, (kwargs_chunk, offsets) in enumerate(
+            zip(kwargs_chunks, expected_offsets, strict=True)
+        ):
+            chunk_masks = kwargs_chunk["attention_masks"]
+            self.assertIsInstance(chunk_masks, Qwen35AttentionMaskInputs)
+            self.assertTrue(
+                torch.equal(
+                    chunk_masks.deltanet_positions,
+                    positions[batch_idx : batch_idx + 1],
+                )
+            )
+            deltanet_masks = create_varlen_metadata_for_document(
+                chunk_masks.deltanet_positions,
+                include_host_offsets=True,
+            )
+            self.assertEqual(deltanet_masks.cu_seq_q_host, offsets)
 
     def _assert_fla_varlen_matches_per_document(
         self, backend: str, *, atol: float, rtol: float
@@ -451,6 +500,49 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self._assert_fla_varlen_matches_per_document(
             "fla_fused_recurrent", atol=2e-2, rtol=2e-2
         )
+
+    def test_varlen_offsets_are_fresh_per_deltanet_invocation(self):
+        """Successive DeltaNet invocations must not share FLA's cache key."""
+        torch.manual_seed(42)
+        model = self._make_deltanet()
+        x_BLD = torch.randn(1, 8, 4)
+        positions = torch.tensor(
+            [[0, 1, 2, 0, 1, 2, 3, 4]],
+            dtype=torch.int32,
+        )
+        attention_masks = create_varlen_metadata_for_document(
+            positions,
+            include_host_offsets=True,
+        )
+        captured_cu_seqlens = []
+
+        def record_cu_seqlens(x_BLD, weight, cu_seqlens, cu_seqlens_cpu):
+            captured_cu_seqlens.append(cu_seqlens)
+            return _reference_causal_conv1d_varlen(
+                x_BLD,
+                weight,
+                cu_seqlens,
+                cu_seqlens_cpu,
+            )
+
+        with mock.patch(
+            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
+            side_effect=record_cu_seqlens,
+        ):
+            model(x_BLD, attention_masks)
+            model(x_BLD, attention_masks)
+
+        self.assertEqual(len(captured_cu_seqlens), 6)
+        first_invocation = captured_cu_seqlens[:3]
+        second_invocation = captured_cu_seqlens[3:]
+        self.assertTrue(
+            all(cu_seqlens is first_invocation[0] for cu_seqlens in first_invocation)
+        )
+        self.assertTrue(
+            all(cu_seqlens is second_invocation[0] for cu_seqlens in second_invocation)
+        )
+        self.assertIsNot(first_invocation[0], attention_masks.cu_seq_q)
+        self.assertIsNot(second_invocation[0], first_invocation[0])
 
 
 if __name__ == "__main__":
