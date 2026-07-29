@@ -46,7 +46,7 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.models.common.attention import ScaledDotProductAttention
-from torchtitan.models.kimi_k2_5 import model_registry
+from torchtitan.models.kimi_k2_7 import model_registry
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 _MEDIA_TOKEN_ID = 163605
@@ -241,7 +241,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     return logits[:, -1, :].float().cpu().squeeze()
 
 
-def compare(ref_logits, tt_logits):
+def compare(ref_logits, tt_logits) -> bool:
     ref, tt = ref_logits.squeeze(), tt_logits.squeeze()
     pq = F.log_softmax(ref, dim=-1)
     qq = F.log_softmax(tt, dim=-1)
@@ -255,11 +255,13 @@ def compare(ref_logits, tt_logits):
         f"  KL={kl:.4e}  cos={cos:.6f}  max_diff={max_diff:.4e}  "
         f"top1={'Y' if top1 else 'N'}  top5={ov5:.0%}"
     )
+    passed = abs(kl) < 1e-3  # pyrefly: ignore [bad-argument-type]
     print(
         "RESULT: PASS (KL < 1e-3 -- fp noise)."
-        if abs(kl) < 1e-3  # pyrefly: ignore [bad-argument-type]
+        if passed
         else "RESULT: FAIL (KL >= 1e-3)."
     )
+    return passed
 
 
 @torch.no_grad()
@@ -307,7 +309,8 @@ def main():
         vision_dtype,
         args.force_hf_routing,
     )
-    compare(ref["last_logits"], tt_logits)
+    if not compare(ref["last_logits"], tt_logits):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

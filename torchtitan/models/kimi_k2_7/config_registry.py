@@ -9,10 +9,6 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
-from torchtitan.components.quantization import (
-    Float8GroupedExpertsConverter,
-    Float8LinearConverter,
-)
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -34,7 +30,7 @@ def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
         spatial_merge_size=2,
         patch_order="raster",
         resize_fn=resize_to_patch_budget,
-        max_patches=4096,
+        max_patches=16384,
         max_patches_per_side=512,
         min_pixels=65536,
         max_pixels=16777216,
@@ -128,6 +124,8 @@ def kimi_vl_a3b() -> Trainer.Config:
             **{**KIMI_K2_5_SPECIAL_TOKENS, "vision_start_token": "<|media_start|>"}
         ),
         model_spec=model_spec,
+        # Kimi-VL is a compatibility flavor; resizing intentionally follows
+        # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
         dataloader=_mm_dataloader("cc12m"),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -152,22 +150,8 @@ def kimi_vl_a3b() -> Trainer.Config:
 def kimi_k2_5() -> Trainer.Config:
     """Full Kimi K2.5 (~1T-total / ~32B-active)."""
     compile_config = CompileConfig(enable=True, components=["loss"])
-    model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
-    )
-    model_spec = model_registry(
-        "Kimi-K2.5",
-        attn_backend="flex",
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["lm_head", "router.gate"],
-                model_compile_enabled=model_compile_enabled,
-            ),
-            Float8GroupedExpertsConverter.Config(
-                model_compile_enabled=model_compile_enabled
-            ),
-        ],
-    )
+    # The report uses BF16 compute; its FP8 path only compresses saved activations.
+    model_spec = model_registry("Kimi-K2.5", attn_backend="flex")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(

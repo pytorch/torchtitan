@@ -155,9 +155,9 @@ def resize_to_patch_budget(
     max_patches_per_side: int,
     **_: object,
 ) -> tuple[int, int, int, int]:
-    """Cap the raw-patch count at ``max_patches`` (scale down,
-    aspect-preserving) then pad right/bottom to a ``patch_size * merge_size``
-    multiple. Small images are not upscaled.
+    """Cap the total and per-side raw-patch counts (scale down,
+    aspect-preserving), then pad right/bottom to a ``patch_size * merge_size``
+    multiple. Small images within both limits are not upscaled.
 
     A resize strategy (``resize_fn``) for ``process_image`` -- extra budget
     kwargs (e.g. ``min_pixels`` / ``max_pixels``) are accepted and ignored via
@@ -173,26 +173,26 @@ def resize_to_patch_budget(
 
     Returns:
         ``(resize_h, resize_w, pad_h, pad_w)`` -- resize to the first two, then
-        pad right/bottom by the last two. Raises if the padded grid exceeds
-        ``max_patches_per_side``.
+        pad right/bottom by the last two.
     """
-    h, w = height, width
-    num_patches = (h // patch_size) * (w // patch_size)
-    if num_patches > max_patches:
-        scale = math.sqrt(max_patches / num_patches)
-        h, w = int(h * scale), int(w * scale)
+    num_patches_h = max(1.0, height // patch_size)
+    num_patches_w = max(1.0, width // patch_size)
+    num_patches = num_patches_h * num_patches_w
+
+    scale = min(
+        1.0,
+        math.sqrt(max_patches / num_patches),
+        max_patches_per_side * patch_size / height,
+        max_patches_per_side * patch_size / width,
+    )
+    h = max(1, int(height * scale))
+    w = max(1, int(width * scale))
+    h = min(h, max_patches_per_side * patch_size)
+    w = min(w, max_patches_per_side * patch_size)
 
     factor = patch_size * merge_size
     pad_h = (factor - h % factor) % factor
     pad_w = (factor - w % factor) % factor
-
-    side = max((h + pad_h) // patch_size, (w + pad_w) // patch_size)
-    if side >= max_patches_per_side:
-        raise ValueError(
-            f"image grid {(h + pad_h) // patch_size}x{(w + pad_w) // patch_size} "
-            f"patches exceeds the vision position-embedding limit "
-            f"{max_patches_per_side} per side"
-        )
     return h, w, pad_h, pad_w
 
 

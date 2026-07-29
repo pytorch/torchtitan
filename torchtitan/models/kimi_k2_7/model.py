@@ -51,12 +51,17 @@ class KimiK25Model(DeepSeekV3Model):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
-            # TP must divide the attention head count.
+            # Decoder.Config validates the text attention heads. Vision attention
+            # is also head-sharded, so validate its head count independently.
             tp = parallelism.tensor_parallel_degree
-            if tp > 1 and self.layers[0].attention.n_heads % tp != 0:
+            if (
+                tp > 1
+                and self.vision_encoder is not None
+                and self.vision_encoder.num_heads % tp != 0
+            ):
                 raise ValueError(
                     f"tensor_parallel_degree ({tp}) must divide "
-                    f"n_heads ({self.layers[0].attention.n_heads})."
+                    f"vision num_heads ({self.vision_encoder.num_heads})."
                 )
 
             set_kimi_k2_5_sharding_config(

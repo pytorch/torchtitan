@@ -78,7 +78,13 @@ class KimiK25StateDictAdapter(DeepSeekV3StateDictAdapter):
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         if self.vision_encoder is None:
-            return super().from_hf(hf_state_dict)
+            return super().from_hf(
+                {
+                    key: value
+                    for key, value in hf_state_dict.items()
+                    if not key.endswith("rotary_emb.inv_freq")
+                }
+            )
 
         lm_hf: dict[str, Any] = {}
         vision: dict[str, Any] = {}
@@ -163,6 +169,10 @@ class KimiK25StateDictAdapter(DeepSeekV3StateDictAdapter):
             return super().to_hf(state_dict)
 
         to_hf_map = {v: k for k, v in self.vision_from_hf_map.items()}
+        use_kimi_vl_projector_names = (
+            self.fqn_to_index_mapping is not None
+            and "multi_modal_projector.pre_norm.weight" in self.fqn_to_index_mapping
+        )
         lm_titan: dict[str, Any] = {}
         hf_state_dict: dict[str, Any] = {}
         # Buffer separate vision q/k/v per layer to re-fuse into one HF tensor.
@@ -189,7 +199,13 @@ class KimiK25StateDictAdapter(DeepSeekV3StateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
                 hf_state_dict[to_hf_map[abstract_key].format(layer_num)] = value
             else:
-                hf_state_dict[to_hf_map[key]] = value
+                hf_key = to_hf_map[key]
+                # Normalize the K2.5 and Kimi-VL projector naming conventions.
+                if use_kimi_vl_projector_names and hf_key.startswith("mm_projector."):
+                    hf_key = hf_key.replace("mm_projector.", "multi_modal_projector.")
+                    hf_key = hf_key.replace("proj.0", "linear_1")
+                    hf_key = hf_key.replace("proj.2", "linear_2")
+                hf_state_dict[hf_key] = value
 
         # Fuse vision q/k/v -> single HF qkv tensor per (layer, weight|bias).
         for (layer_num, kind), parts in vision_qkv.items():

@@ -33,7 +33,7 @@ from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_conf
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 if TYPE_CHECKING:
-    from torchtitan.models.kimi_k2_5.model import KimiK25Model
+    from torchtitan.models.kimi_k2_7.model import KimiK25Model
 
 _REPLICATE_PARAM = dense_param_placement(tp=spmd.R)
 _REPLICATE_ACT = dense_activation_placement(tp=spmd.R)

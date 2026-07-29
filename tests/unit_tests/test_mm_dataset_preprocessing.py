@@ -7,8 +7,8 @@
 """CPU unit tests for the multimodal dataset image preprocessing.
 
 ``resize_to_patch_budget`` is the NaViT patch-budget protocol: cap raw patches
-at ``max_patches``, then pad to a ``patch_size * merge_size`` multiple. These
-pin that pure-geometry behavior.
+at the total and per-side limits, then pad to a ``patch_size * merge_size``
+multiple. These pin that pure-geometry behavior.
 """
 
 import math
@@ -91,18 +91,23 @@ class TestResizeToPatchBudget(unittest.TestCase):
         )
         self.assertEqual((rh, rw), (30, 30))
 
-    def test_per_side_cap_raises(self):
-        # An extreme aspect ratio that pushes one side past max_patches_per_side
-        # (with a high max_patches so the patch cap doesn't scale it down).
-        with self.assertRaises(ValueError):
-            resize_to_patch_budget(
-                14 * 600,
-                28,
-                patch_size=self.PS,
-                merge_size=self.MERGE,
-                max_patches=10**9,
-                max_patches_per_side=512,
-            )
+    def test_per_side_cap_scales_down(self):
+        # The per-side limit scales an extreme aspect ratio instead of dropping it.
+        final_h, final_w = self._final(self.PS * 600, self.PS * 2)
+        self.assertEqual(final_h // self.PS, self.SIDE)
+        self.assertEqual(final_w % (self.PS * self.MERGE), 0)
+
+    def test_per_side_cap_is_inclusive(self):
+        height, width = self.PS * self.SIDE, self.PS * self.MERGE
+        rh, rw, ph, pw = resize_to_patch_budget(
+            height,
+            width,
+            patch_size=self.PS,
+            merge_size=self.MERGE,
+            max_patches=self.LIMIT,
+            max_patches_per_side=self.SIDE,
+        )
+        self.assertEqual((rh, rw, ph, pw), (height, width, 0, 0))
 
 
 class TestProcessImagePatchBudget(unittest.TestCase):

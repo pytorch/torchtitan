@@ -13,7 +13,7 @@ from tests.integration_tests import OverrideDefinitions
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
     """Use ``backend`` for every variant, or return an unsupported test unchanged."""
     if backend == "spmd_types" and any(
-        "--module qwen3_5" in arg or "--module kimi_k2_5" in arg
+        "--module qwen3_5" in arg or "--module kimi_k2_7" in arg
         for variant in t.override_args
         for arg in variant
     ):
@@ -243,7 +243,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module kimi_k2_5 --config kimi_k2_5_debugmodel",
+                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--training.local_batch_size 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -251,7 +251,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.expert_parallel_degree 2",
                 ],
             ],
-            "Kimi K2.5 multimodal FSDP+TP+EP+PP",
+            "Kimi K2.7 multimodal FSDP+TP+EP+PP",
             "kimi_k2_5_mm_fsdp+tp+ep+pp",
             ngpu=8,
         ),
