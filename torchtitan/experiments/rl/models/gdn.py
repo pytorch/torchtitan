@@ -37,8 +37,6 @@ from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
 )
-from torch.distributed.tensor import DTensor
-
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.protocols.module import Module
 
@@ -430,57 +428,42 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
 
     def forward(
         self,
-        mixed_qkv: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        conv_weight: torch.Tensor,
-        A_log: torch.Tensor,
-        dt_bias: torch.Tensor,
-        cu_seqlens: torch.Tensor | None = None,
+        mixed_qkv_BLC: torch.Tensor,
+        a_BLN: torch.Tensor,
+        b_BLN: torch.Tensor,
+        conv_weight_CW: torch.Tensor,
+        A_log_N: torch.Tensor,
+        dt_bias_N: torch.Tensor,
+        cu_seqlens: torch.Tensor,
         *,
         cu_seqlens_host: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
-        """Bridge TorchTitan's layout to the flattened vLLM cache operation."""
-        del cu_seqlens_host
-        mesh = None
-        placements = None
-        # The enclosing module is head-sharded, but vLLM's paged cache and FLA
-        # kernels operate on the rank-local head tensors.
-        if isinstance(mixed_qkv, DTensor):
-            mesh = mixed_qkv.device_mesh
-            placements = mixed_qkv.placements
-            mixed_qkv = mixed_qkv.to_local()
-            a = a.to_local()
-            b = b.to_local()
-            conv_weight = conv_weight.to_local()
-            A_log = A_log.to_local()
-            dt_bias = dt_bias.to_local()
+        """Run the flattened vLLM cache operation on rank-local tensors."""
+        del cu_seqlens, cu_seqlens_host
 
-        batch_size, seq_len, num_channels = mixed_qkv.shape
+        batch_size, seq_len, num_channels = mixed_qkv_BLC.shape
         num_tokens = batch_size * seq_len
-        mixed_qkv = mixed_qkv.reshape(num_tokens, num_channels)
-        a = a.reshape(num_tokens, a.shape[-1])
-        b = b.reshape(num_tokens, b.shape[-1])
+        mixed_qkv_TC = mixed_qkv_BLC.reshape(num_tokens, num_channels)
+        a_TN = a_BLN.reshape(num_tokens, a_BLN.shape[-1])
+        b_TN = b_BLN.reshape(num_tokens, b_BLN.shape[-1])
         # Padded rows must remain defined across vLLM graph replays.
-        output = mixed_qkv.new_zeros(
+        output_TNV = mixed_qkv_TC.new_zeros(
             num_tokens, self.local_num_v_heads, self.head_v_dim
         )
         self._forward(
-            mixed_qkv,
-            a,
-            b,
-            conv_weight,
+            mixed_qkv_TC,
+            a_TN,
+            b_TN,
+            conv_weight_CW,
             None,
-            A_log,
-            dt_bias,
-            output,
+            A_log_N,
+            dt_bias_N,
+            output_TNV,
         )
-        output = output.reshape(
+        output_BLNV = output_TNV.reshape(
             batch_size,
             seq_len,
             self.local_num_v_heads,
             self.head_v_dim,
         )
-        if mesh is not None:
-            return DTensor.from_local(output, mesh, placements)
-        return output
+        return output_BLNV

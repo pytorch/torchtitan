@@ -44,6 +44,73 @@ from vllm.utils import torch_utils as _torch_utils
 
 logger = init_logger(__name__)
 
+
+def _replace_vllm_layer_configs(model_config):
+    """Replace model compute-core configs with vLLM generation variants."""
+    # These modules inspect the breakable-cudagraph environment at import time.
+    # Defer imports until vLLM constructs the model, after the generator has set
+    # that environment. Import the GDN adapter only for hybrid models so other
+    # models do not acquire FLA as an optional dependency.
+    from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
+
+    new_layers = []
+    for layer_idx, layer_cfg in enumerate(model_config.layers):
+        new_layer_cfg = layer_cfg
+
+        attention_cfg = getattr(layer_cfg, "attention", None)
+        if attention_cfg is not None:
+            num_heads = attention_cfg.n_heads
+            num_kv_heads = attention_cfg.n_kv_heads or num_heads
+            head_dim = (
+                attention_cfg.head_dim
+                if attention_cfg.head_dim is not None
+                else model_config.dim // num_heads
+            )
+            vllm_attention_cfg = VLLMAttentionWrapper.Config(
+                hidden_size=model_config.dim,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                attention=dataclasses.replace(
+                    attention_cfg,
+                    inner_attention=vllm_attention_cfg,
+                ),
+            )
+
+        delta_net_cfg = getattr(layer_cfg, "delta_net", None)
+        if delta_net_cfg is not None:
+            from torchtitan.experiments.rl.models.gdn import VLLMGatedDeltaNetCore
+
+            vllm_gdn_core_cfg = VLLMGatedDeltaNetCore.Config(
+                layer_idx=layer_idx,
+                num_k_heads=(
+                    delta_net_cfg.in_proj_q.out_features // delta_net_cfg.key_head_dim
+                ),
+                num_v_heads=(
+                    delta_net_cfg.in_proj_v.out_features // delta_net_cfg.value_head_dim
+                ),
+                head_k_dim=delta_net_cfg.key_head_dim,
+                head_v_dim=delta_net_cfg.value_head_dim,
+                conv_kernel_size=delta_net_cfg.conv_kernel_size,
+                activation=delta_net_cfg.core.activation,
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                delta_net=dataclasses.replace(
+                    delta_net_cfg,
+                    core=vllm_gdn_core_cfg,
+                ),
+            )
+
+        new_layers.append(new_layer_cfg)
+
+    return dataclasses.replace(model_config, layers=new_layers)
+
+
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
 # This is because piecewise CUDA-graph capture calls weak_ref_tensor()
 # on every subgraphoutput (see vllm/compilation/cuda_graph.py).
@@ -193,43 +260,7 @@ class VLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # The decorator on VLLMAttentionWrapper reads the breakable-cudagraph
-        # environment at import time. Import it only when vLLM constructs the
-        # model, after the generator configuration has set that environment.
-        from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
-
-        # Replace inner_attention with VLLMAttentionWrapper in config
-        model_config = model_spec.model
-        # Hybrid models (e.g. Qwen3.5) interleave full-attention layers with
-        # linear-attention (GatedDeltaNet) layers that have no ``.attention``; the
-        # paged GDN core for those is swapped in post-build by _replace_gdn_cores().
-        new_layers = []
-        for layer_cfg in model_config.layers:
-            a_cfg = getattr(layer_cfg, "attention", None)
-            if a_cfg is None:
-                new_layers.append(layer_cfg)  # linear-attention layer: nothing to swap
-                continue
-            n_heads = a_cfg.n_heads
-            n_kv_heads = a_cfg.n_kv_heads or n_heads
-            head_dim = (
-                a_cfg.head_dim
-                if a_cfg.head_dim is not None
-                else model_config.dim // n_heads
-            )
-            vllm_backend = VLLMAttentionWrapper.Config(
-                hidden_size=model_config.dim,
-                num_heads=n_heads,
-                num_kv_heads=n_kv_heads,
-                head_dim=head_dim,
-                sliding_window_size=getattr(a_cfg, "sliding_window_size", None),
-            )
-            new_layers.append(
-                dataclasses.replace(
-                    layer_cfg,
-                    attention=dataclasses.replace(a_cfg, inner_attention=vllm_backend),
-                )
-            )
-        self.config = dataclasses.replace(model_config, layers=new_layers)
+        self.config = _replace_vllm_layer_configs(model_spec.model)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # Translate the inference parallelism into torchtitan's full
@@ -257,8 +288,8 @@ class VLLMModelWrapper(Module):
 
         # Fill sharding configs on the config BEFORE build so every sub-module
         # is constructed with its ShardingConfig attached (required by the
-        # declarative model.parallelize() API). Need to be called after Attention
-        # module replacement.
+        # declarative model.parallelize() API). This also gives the replacement
+        # attention and GDN configs their rank-local compute boundaries.
         # Provides the generic config shape (has .parallelism) so
         # update_from_config can extract parallelism uniformly.
         @dataclass(kw_only=True, slots=True)
@@ -330,67 +361,10 @@ class VLLMModelWrapper(Module):
         # TP-sharded.
         self._inject_attention_sinks()
 
-        # Replace each linear-attention layer's compute core with the paged-cache
-        # GDN generation core (unified path).
-        self._replace_gdn_cores()
-
         # Route the TP all-reduce through vLLM's custom AR (off under
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
-
-    def _replace_gdn_cores(self) -> None:
-        """Replace each linear-attention (GatedDeltaNet) layer's ``.core`` compute
-        slot with a paged-cache GDN generation core so the unified model path runs --
-        the layer keeps its projections/conv weights/gates/norm/out_proj and delegates
-        only its stateful conv + recurrence to the swapped-in core. Creating each core
-        registers it in vLLM's ``static_forward_context``, which is how vLLM's hybrid
-        KV-cache allocator discovers the GDN layers and selects the GDN attention
-        backend (``AttentionCGSupport.UNIFORM_BATCH`` -> decode cudagraph). No-op for
-        non-GDN models. Duck-typed on ``delta_net`` so this generic wrapper stays
-        decoupled from Qwen3.5 specifics."""
-        layers = getattr(self.model, "layers", None)
-        if layers is None:
-            return
-        gdn_layers = []
-        for key, block in layers.items():
-            # Qwen3.5 blocks store the mixer (full attention OR GatedDeltaNet) as
-            # ``block.attn``, with ``block.full_attn`` selecting which. Attach a core
-            # only to linear-attention (GatedDeltaNet) mixers.
-            if getattr(block, "full_attn", True):
-                continue
-            gdn = getattr(block, "attn", None)
-            # ``core`` is the swappable compute slot (dense GatedDeltaNetCore in
-            # training); replace it with the paged generation core here.
-            if gdn is None or not hasattr(gdn, "core"):
-                continue
-            gdn_layers.append((key, gdn))
-
-        if not gdn_layers:
-            return
-
-        # Like the attention wrapper, this core has an import-time
-        # eager_break_during_capture decorator. Import it only after model
-        # construction has identified GDN layers and the generator environment
-        # has been configured.
-        from torchtitan.experiments.rl.models.gdn import VLLMGatedDeltaNetCore
-
-        for key, gdn in gdn_layers:
-            core = VLLMGatedDeltaNetCore(
-                VLLMGatedDeltaNetCore.Config(
-                    layer_idx=int(key),
-                    num_k_heads=gdn.key_dim // gdn.key_head_dim,
-                    num_v_heads=gdn.n_value_heads,
-                    head_k_dim=gdn.key_head_dim,
-                    head_v_dim=gdn.value_head_dim,
-                    conv_kernel_size=gdn.conv_kernel_size,
-                )
-            )
-            gdn.core = core
-        logger.info(
-            f"[gdn-unified] replaced {len(gdn_layers)} GDN compute cores with "
-            "paged-cache generation cores (unified model path)"
-        )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:

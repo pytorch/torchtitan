@@ -474,7 +474,7 @@ class GatedDeltaNet(Module):
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        core: GatedDeltaNetCore.Config
+        core: Module.Config
         norm: RMSNormGated.Config
         out_proj: Linear.Config
 
