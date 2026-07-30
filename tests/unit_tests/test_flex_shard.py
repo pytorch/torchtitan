@@ -4,12 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import datetime
+import os
+import tempfile
+import unittest
 from collections.abc import Mapping, MutableMapping
 from typing import Any
 from unittest import mock
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.optim import Optimizer
@@ -68,6 +73,154 @@ class _OwnedTestOptimizer(Optimizer):
         if out is not param:
             out.copy_(param)
         out.add_(update, alpha=-group["lr"])
+
+
+def _run_cuda_pipeline_lifetime(
+    rank: int,
+    world_size: int,
+    store_path: str,
+) -> None:
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{store_path}",
+        rank=rank,
+        world_size=world_size,
+        timeout=datetime.timedelta(seconds=60),
+    )
+    try:
+        device = torch.device("cuda", rank)
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
+        full_values = [
+            torch.arange(1, 2049, device=device, dtype=torch.float32).reshape(64, 32)
+            / 2049,
+            torch.arange(1, 1537, device=device, dtype=torch.float32).reshape(48, 32)
+            / 1537,
+            torch.arange(1, 1025, device=device, dtype=torch.float32).reshape(32, 32)
+            / 1025,
+        ]
+
+        def to_dtensor(tensor: torch.Tensor) -> DTensor:
+            rows, row_offset = Shard.local_shard_size_and_offset(
+                tensor.shape[0], world_size, rank
+            )
+            local = tensor.narrow(0, int(row_offset), int(rows)).contiguous()
+            return DTensor.from_local(
+                local,
+                device_mesh=mesh,
+                placements=(Shard(0),),
+                run_check=False,
+                shape=tensor.shape,
+                stride=tensor.stride(),
+            )
+
+        serial_params = [
+            to_dtensor(value.clone()).requires_grad_() for value in full_values
+        ]
+        pipeline_params = [
+            to_dtensor(value.clone()).requires_grad_() for value in full_values
+        ]
+        bucket_specs = [
+            BucketSpec(
+                name=f"layer-{index}",
+                patterns=(f"layers.{index}.weight",),
+                mesh=mesh,
+            )
+            for index in range(len(full_values))
+        ]
+
+        def make_optimizer(params):
+            optimizer = _OwnedTestOptimizer(
+                [
+                    {
+                        "params": [param],
+                        "param_names": [f"layers.{index}.weight"],
+                    }
+                    for index, param in enumerate(params)
+                ],
+                lr=0.03,
+            )
+            return flex_shard(optimizer, bucket_spec=bucket_specs)
+
+        serial_optimizer = make_optimizer(serial_params)
+        pipeline_optimizer = make_optimizer(pipeline_params)
+        serial_optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+            1
+        )
+
+        runtime = pipeline_optimizer.__dict__["_flex_shard_runtime"]
+        original_reverse_bucket = runtime._reverse_bucket
+
+        def delayed_reverse_bucket(work):
+            torch.cuda._sleep(500_000)
+            return original_reverse_bucket(work)
+
+        runtime._reverse_bucket = delayed_reverse_bucket
+        caller_stream = torch.cuda.Stream()
+        active_bytes = []
+
+        def forbid_record_stream(*args, **kwargs):
+            raise AssertionError("optimizer FlexShard must not call record_stream")
+
+        for step in range(3):
+            torch.manual_seed(1000 + step)
+            full_grads = [torch.randn_like(value) for value in full_values]
+            for serial_param, pipeline_param, grad in zip(
+                serial_params,
+                pipeline_params,
+                full_grads,
+                strict=True,
+            ):
+                serial_param.grad = to_dtensor(grad.clone())
+                pipeline_param.grad = to_dtensor(grad.clone())
+
+            serial_optimizer.step()
+            caller_stream.wait_stream(torch.cuda.current_stream(device))
+            with (
+                torch.cuda.stream(caller_stream),
+                mock.patch.object(
+                    torch.Tensor,
+                    "record_stream",
+                    new=forbid_record_stream,
+                ),
+            ):
+                pipeline_optimizer.step()
+                snapshots = [param._local_tensor.clone() for param in pipeline_params]
+                poison = [
+                    torch.empty_like(param._local_tensor).fill_(step + rank + 1)
+                    for param in pipeline_params
+                    for _ in range(8)
+                ]
+            caller_stream.synchronize()
+
+            for snapshot, serial_param, pipeline_param in zip(
+                snapshots,
+                serial_params,
+                pipeline_params,
+                strict=True,
+            ):
+                torch.testing.assert_close(snapshot, serial_param._local_tensor)
+                torch.testing.assert_close(
+                    pipeline_param._local_tensor,
+                    serial_param._local_tensor,
+                )
+                torch.testing.assert_close(
+                    pipeline_optimizer.state[pipeline_param][
+                        "accumulator"
+                    ]._local_tensor,
+                    serial_optimizer.state[serial_param]["accumulator"]._local_tensor,
+                )
+
+            del full_grads, poison, snapshots
+            torch.cuda.synchronize(device)
+            active_bytes.append(torch.cuda.memory_allocated(device))
+
+        if max(active_bytes[1:]) - min(active_bytes[1:]) > 1024 * 1024:
+            raise AssertionError(
+                f"pipelined FlexShard retained CUDA memory: {active_bytes}"
+            )
+    finally:
+        dist.destroy_process_group()
 
 
 class TestFlexShard(DTensorTestBase):
@@ -197,6 +350,66 @@ class TestFlexShard(DTensorTestBase):
             self.assertIsInstance(accumulator, DTensor)
             self.assertEqual(accumulator.placements, placements[index])
             torch.testing.assert_close(accumulator.to_local(), param.grad.to_local())
+
+    @with_comms
+    def test_pipeline_prefetches_one_bucket_and_validates_configuration(self):
+        optimizer, params, _full_values, _full_grads = self._owned_optimizer()
+        optimizer.param_groups[0]["param_names"] = [
+            "layers.0.first.weight",
+            "layers.1.second.weight",
+            "layers.2.third.weight",
+        ]
+        flex_shard(optimizer, bucket_spec=build_layer_bucket_specs(optimizer))
+        runtime = optimizer.__dict__["_flex_shard_runtime"]
+
+        self.assertEqual(runtime._max_in_flight_buckets, 2)
+        for invalid in (False, 0, 3):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "must be 1 or 2"):
+                    optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+                        invalid
+                    )
+
+        with self.assertRaisesRegex(ValueError, "on every rank"):
+            optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+                3 if dist.get_rank() == 0 else 2
+            )
+        with self.assertRaisesRegex(RuntimeError, "differs across ranks"):
+            optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+                1 if dist.get_rank() == 0 else 2
+            )
+
+        stages = []
+        original_forward_bucket = runtime._forward_bucket
+        original_reverse_bucket = runtime._reverse_bucket
+
+        def record_forward_bucket(work):
+            stages.append(f"F:{work.plan.spec.name}")
+            return original_forward_bucket(work)
+
+        def record_reverse_bucket(work):
+            stages.append(f"R:{work.plan.spec.name}")
+            return original_reverse_bucket(work)
+
+        runtime._forward_bucket = record_forward_bucket
+        runtime._reverse_bucket = record_reverse_bucket
+        optimizer.step()
+        self.assertEqual(
+            stages,
+            [
+                "F:layers.0",
+                "F:layers.1",
+                "R:layers.0",
+                "F:layers.2",
+                "R:layers.1",
+                "R:layers.2",
+            ],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "before the first step"):
+            optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+                1
+            )
 
     @with_comms
     def test_layer_buckets_resolve_fqns_balance_and_freeze_groups(self):
@@ -339,4 +552,16 @@ class TestFlexShard(DTensorTestBase):
             flex_shard(
                 torch.optim.SGD([torch.nn.Parameter(torch.ones(2, 2))]),
                 bucket_spec=[],
+            )
+
+
+class TestDistributedFlexShard(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+    def test_pipeline_cuda_allocator_lifetime(self):
+        with tempfile.TemporaryDirectory() as store_dir:
+            mp.spawn(
+                _run_cuda_pipeline_lifetime,
+                args=(2, os.path.join(store_dir, "store")),
+                nprocs=2,
+                join=True,
             )
