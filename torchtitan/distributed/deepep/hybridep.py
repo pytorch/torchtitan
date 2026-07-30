@@ -92,7 +92,7 @@ def _num_permuted_tokens_for_non_blocking(
     if set.
 
     capacity_factor=1.0 sizes for the worst case (every token routed to
-    every local expert) -- no tokens are dropped but memory usage is highest.
+    every local expert) — no tokens are dropped but memory usage is highest.
     Values < 1.0 reduce memory at the cost of potentially dropping tokens
     when the permuted offset exceeds the buffer capacity.  With forced load
     balancing (e.g. routing_algo="round_robin"), token distribution across experts
@@ -129,9 +129,9 @@ def _dispatch_impl(
     DeepEP's dispatch_with_permute needs to know the output buffer size
     (num_permuted_tokens) for the fused permute kernel.
 
-    * **non_blocking=True** -- no D2H sync is allowed, so num_permuted_tokens
+    * **non_blocking=True** — no D2H sync is allowed, so num_permuted_tokens
       must be supplied upfront via moe_expert_capacity_factor.
-    * **non_blocking=False (blocking)** -- DeepEP does cudaStreamSynchronize,
+    * **non_blocking=False (blocking)** — DeepEP does cudaStreamSynchronize,
       then reads tokens_per_expert from pinned CPU memory to compute the
       exact num_permuted_tokens on the host.
     """
@@ -182,10 +182,10 @@ def _dispatch_impl(
     # (.item()) would force cudaStreamSynchronize, defeating the purpose.
     # Overflow is governed by num_permuted_tokens (the output buffer capacity
     # for the fused permute kernel) — tokens whose permuted offset exceeds
-    # that limit are silently dropped. Correct sizing of num_permuted_tokens
+    # that limit are silently dropped.  Correct sizing of num_permuted_tokens
     # via _num_permuted_tokens_for_non_blocking is therefore critical:
-    # capacity_factor=1.0 -> worst-case sizing, no drops, most memory;
-    # capacity_factor<1.0 -> less memory, but tokens may be dropped.
+    # capacity_factor=1.0 → worst-case sizing, no drops, most memory;
+    # capacity_factor<1.0 → less memory, but tokens may be dropped.
 
     if scores is None:
         scores = torch.empty(0, device=x.device, dtype=torch.float32)
@@ -490,8 +490,9 @@ def dispatch_tokens(
             value to size its current fused-permute output view.
         non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
-            tensor from the current logical input capacity, EP size, top-k,
-            local expert count, and capacity factor, aligned to pad_multiple.
+            tensor as num_local_tokens_after_seq_dim_padding * ep_size *
+            min(num_local_experts, top_k) * capacity_factor, aligned to
+            pad_multiple.
         pad_multiple: Pad per-expert token groups to this multiple (e.g. 32 for
             MXFP8). None means no padding.
 

@@ -272,8 +272,8 @@ class VLLMModelWrapper(Module):
                 parallelism=training_parallelism,
                 training=TrainingConfig(
                     local_batch_size=1,
-                    # This synthetic shape is used to derive the per-rank EP buffer
-                    # capacity. It does not change or bounded by the model's max_seq_len.
+                    # Use the scheduler/capture bound as a synthetic sequence length
+                    # solely to derive the per-rank EP buffer capacity.
                     seq_len=max_num_model_tokens,
                 ),
             )
