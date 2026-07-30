@@ -203,7 +203,6 @@ def test_nvfp4_build_configures_local_spmd_sharding(
     [
         "llama3_debugmodel_nvfp4",
         "llama3_debugmodel_nvfp4_mixed",
-        "llama3_8b_nvfp4",
         "llama3_8b_nvfp4_mixed",
     ],
 )

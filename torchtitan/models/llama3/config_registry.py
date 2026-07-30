@@ -197,25 +197,6 @@ def llama3_8b() -> Trainer.Config:
     )
 
 
-def llama3_8b_nvfp4() -> Trainer.Config:
-    config = llama3_8b()
-    config.parallelism.spmd_backend = "spmd_types"
-    # Enable compile so NVFP4's dynamic quantization runs at competitive perf.
-    config.compile = CompileConfig(enable=True, components=["model"])
-    # fqns=["layers"] converts every in-layer Linear while leaving the lm_head
-    # stock (NVFP4 requires each GEMM dim divisible by 128; vocab does not).
-    config.model_spec = model_registry(
-        "8B",
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=["layers"],
-                model_compile_enabled=True,
-            ),
-        ],
-    )
-    return config
-
-
 def llama3_8b_nvfp4_mixed() -> Trainer.Config:
     config = llama3_8b()
     config.parallelism.spmd_backend = "spmd_types"
