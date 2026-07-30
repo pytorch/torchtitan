@@ -96,6 +96,11 @@ def _run_bucketed_muon_parity(
                 patterns=("layers.1.*",),
                 mesh=mesh,
             ),
+            BucketSpec(
+                name="layer-2",
+                patterns=("layers.2.*",),
+                mesh=mesh,
+            ),
         ]
 
         def make_optimizer(optimizer_params, **overrides):
@@ -112,7 +117,7 @@ def _run_bucketed_muon_parity(
                     },
                     {
                         "params": [optimizer_params[2]],
-                        "param_names": ["layers.0.feed_forward.w1.weight"],
+                        "param_names": ["layers.2.feed_forward.w1.weight"],
                     },
                     {
                         "params": [optimizer_params[3]],
@@ -139,6 +144,22 @@ def _run_bucketed_muon_parity(
             **kwargs,
         )
 
+        pipeline_stages = []
+        runtime = optimizer.__dict__["_flex_shard_runtime"]
+        original_forward_bucket = runtime._forward_bucket
+        original_reverse_bucket = runtime._reverse_bucket
+
+        def record_forward_bucket(work):
+            pipeline_stages.append(f"F:{work.plan.spec.name}")
+            return original_forward_bucket(work)
+
+        def record_reverse_bucket(work):
+            pipeline_stages.append(f"R:{work.plan.spec.name}")
+            return original_reverse_bucket(work)
+
+        runtime._forward_bucket = record_forward_bucket
+        runtime._reverse_bucket = record_reverse_bucket
+
         all_to_all_calls = 0
         status_collective_calls = 0
         original_all_to_all = dist.all_to_all_single
@@ -160,10 +181,16 @@ def _run_bucketed_muon_parity(
             status_collective_calls += 1
             return original_all_reduce(*args, **call_kwargs)
 
-        def optimizer_step_without_status_collectives(step_optimizer):
+        def optimizer_step_without_status_collectives(
+            step_optimizer,
+            expected_pipeline_stages=None,
+        ):
             calls_before_step = status_collective_calls
             step_optimizer.step()
             assert status_collective_calls == calls_before_step
+            if expected_pipeline_stages is not None:
+                assert pipeline_stages == expected_pipeline_stages
+                pipeline_stages.clear()
 
         persistent_params = list(params)
         param_ptrs = [param.to_local().data_ptr() for param in params]
@@ -242,7 +269,17 @@ def _run_bucketed_muon_parity(
                     references[index].grad = full_grads[index].clone()
 
                 versions = [param._version for param in params]
-                optimizer_step_without_status_collectives(optimizer)
+                optimizer_step_without_status_collectives(
+                    optimizer,
+                    [
+                        "F:layer-0",
+                        "F:layer-1",
+                        "R:layer-0",
+                        "F:layer-2",
+                        "R:layer-1",
+                        "R:layer-2",
+                    ],
+                )
                 reference_optimizer.step()
                 assert all(
                     param._version == version + 1
@@ -251,20 +288,32 @@ def _run_bucketed_muon_parity(
                 assert_state_matches_reference()
 
             torch.manual_seed(200)
-            active_grad = torch.randn_like(full_values[0])
-            params[0].grad = to_dtensor(active_grad.clone())
-            for param in params[1:]:
-                param.grad = None
-            references[0].grad = active_grad.view(2, 3, 4).clone()
-            for reference in references[1:]:
-                reference.grad = None
+            active_grads = {
+                0: torch.randn_like(full_values[0]),
+                2: torch.randn_like(full_values[2]),
+            }
+            for index, (param, reference) in enumerate(
+                zip(params, references, strict=True)
+            ):
+                grad = active_grads.get(index)
+                param.grad = None if grad is None else to_dtensor(grad.clone())
+                if grad is None:
+                    reference.grad = None
+                elif index == 0:
+                    reference.grad = grad.view(2, 3, 4).clone()
+                else:
+                    reference.grad = grad.clone()
             versions = [param._version for param in params]
-            optimizer_step_without_status_collectives(optimizer)
+            optimizer_step_without_status_collectives(
+                optimizer,
+                ["F:layer-0", "F:layer-2", "R:layer-0", "R:layer-2"],
+            )
             reference_optimizer.step()
-            assert params[0]._version == versions[0] + 1
             assert all(
-                param._version == version
-                for param, version in zip(params[1:], versions[1:], strict=True)
+                param._version == version + int(index in active_grads)
+                for index, (param, version) in enumerate(
+                    zip(params, versions, strict=True)
+                )
             )
             assert_state_matches_reference()
 
@@ -297,7 +346,17 @@ def _run_bucketed_muon_parity(
             references[0].grad = continuation_grads[0].view(2, 3, 4).clone()
             for index in range(1, len(references)):
                 references[index].grad = continuation_grads[index].clone()
-            optimizer_step_without_status_collectives(optimizer)
+            optimizer_step_without_status_collectives(
+                optimizer,
+                [
+                    "F:layer-0",
+                    "F:layer-1",
+                    "R:layer-0",
+                    "F:layer-2",
+                    "R:layer-1",
+                    "R:layer-2",
+                ],
+            )
             optimizer_step_without_status_collectives(restored_optimizer)
             reference_optimizer.step()
             assert_state_matches_reference()
@@ -353,7 +412,171 @@ def _run_bucketed_muon_parity(
                     ],
                 )
 
-        assert all_to_all_calls == 3 * 2 * 2 + 2 + 2 * 2 * 2
+        assert all_to_all_calls == 3 * 3 * 2 + 2 * 2 + 2 * 3 * 2
+    finally:
+        dist.destroy_process_group()
+
+
+def _run_cuda_pipeline_lifetime(
+    rank: int,
+    world_size: int,
+    store_path: str,
+) -> None:
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{store_path}",
+        rank=rank,
+        world_size=world_size,
+        timeout=datetime.timedelta(seconds=60),
+    )
+    try:
+        device = torch.device("cuda", rank)
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
+        full_values = [
+            torch.arange(1, 2049, device=device, dtype=torch.float32).reshape(64, 32)
+            / 2049,
+            torch.arange(1, 1537, device=device, dtype=torch.float32).reshape(48, 32)
+            / 1537,
+            torch.arange(1, 1025, device=device, dtype=torch.float32).reshape(32, 32)
+            / 1025,
+        ]
+
+        def to_dtensor(tensor: torch.Tensor) -> DTensor:
+            rows, row_offset = Shard.local_shard_size_and_offset(
+                tensor.shape[0], world_size, rank
+            )
+            local = tensor.narrow(0, int(row_offset), int(rows)).contiguous()
+            return DTensor.from_local(
+                local,
+                device_mesh=mesh,
+                placements=(Shard(0),),
+                run_check=False,
+                shape=tensor.shape,
+                stride=tensor.stride(),
+            )
+
+        serial_params = [
+            to_dtensor(value.clone()).requires_grad_() for value in full_values
+        ]
+        pipeline_params = [
+            to_dtensor(value.clone()).requires_grad_() for value in full_values
+        ]
+        bucket_specs = [
+            BucketSpec(
+                name=f"layer-{index}",
+                patterns=(f"layers.{index}.weight",),
+                mesh=mesh,
+            )
+            for index in range(len(full_values))
+        ]
+        kwargs = {
+            "lr": 0.03,
+            "weight_decay": 0.2,
+            "momentum": 0.8,
+            "nesterov": True,
+            "ns_steps": 2,
+            "adjust_lr_fn": "match_rms_adamw",
+        }
+
+        def make_optimizer(params):
+            optimizer = MuonAdapter(
+                [
+                    {
+                        "params": [param],
+                        "param_names": [f"layers.{index}.weight"],
+                    }
+                    for index, param in enumerate(params)
+                ],
+                **kwargs,
+            )
+            return flex_shard(optimizer, bucket_spec=bucket_specs)
+
+        serial_optimizer = make_optimizer(serial_params)
+        pipeline_optimizer = make_optimizer(pipeline_params)
+        serial_optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+            1
+        )
+
+        original_compute = pipeline_optimizer.flex_shard_compute
+
+        def distinct_compute(compute_input, group):
+            return original_compute(compute_input, group).clone()
+
+        pipeline_optimizer.flex_shard_compute = distinct_compute
+        runtime = pipeline_optimizer.__dict__["_flex_shard_runtime"]
+        original_reverse_bucket = runtime._reverse_bucket
+
+        def delayed_reverse_bucket(work):
+            torch.cuda._sleep(500_000)
+            return original_reverse_bucket(work)
+
+        runtime._reverse_bucket = delayed_reverse_bucket
+        caller_stream = torch.cuda.Stream()
+        active_bytes = []
+
+        def forbid_record_stream(*args, **kwargs):
+            raise AssertionError("optimizer FlexShard must not call record_stream")
+
+        for step in range(3):
+            torch.manual_seed(1000 + step)
+            full_grads = [torch.randn_like(value) for value in full_values]
+            for serial_param, pipeline_param, grad in zip(
+                serial_params,
+                pipeline_params,
+                full_grads,
+                strict=True,
+            ):
+                serial_param.grad = to_dtensor(grad.clone())
+                pipeline_param.grad = to_dtensor(grad.clone())
+
+            serial_optimizer.step()
+            caller_stream.wait_stream(torch.cuda.current_stream(device))
+            with (
+                torch.cuda.stream(caller_stream),
+                patch.object(
+                    torch.Tensor,
+                    "record_stream",
+                    new=forbid_record_stream,
+                ),
+            ):
+                pipeline_optimizer.step()
+                snapshots = [param._local_tensor.clone() for param in pipeline_params]
+                poison = [
+                    torch.empty_like(param._local_tensor).fill_(step + rank + 1)
+                    for param in pipeline_params
+                    for _ in range(8)
+                ]
+            caller_stream.synchronize()
+
+            for snapshot, serial_param, pipeline_param in zip(
+                snapshots,
+                serial_params,
+                pipeline_params,
+                strict=True,
+            ):
+                torch.testing.assert_close(snapshot, serial_param._local_tensor)
+                torch.testing.assert_close(
+                    pipeline_param._local_tensor,
+                    serial_param._local_tensor,
+                )
+                torch.testing.assert_close(
+                    pipeline_optimizer.state[pipeline_param][
+                        "momentum_buffer"
+                    ]._local_tensor,
+                    serial_optimizer.state[serial_param][
+                        "momentum_buffer"
+                    ]._local_tensor,
+                )
+
+            del full_grads, poison, snapshots
+            torch.cuda.synchronize(device)
+            active_bytes.append(torch.cuda.memory_allocated(device))
+
+        if max(active_bytes[1:]) - min(active_bytes[1:]) > 1024 * 1024:
+            raise AssertionError(
+                f"pipelined FlexShard retained CUDA memory: {active_bytes}"
+            )
     finally:
         dist.destroy_process_group()
 
@@ -427,6 +650,38 @@ class TestMuonAdapter(DTensorTestBase):
             ]
         )
         return optimizer, first, second
+
+    @with_comms
+    def test_max_in_flight_buckets_is_configured_before_step(self):
+        optimizer, first, second = self._bucketed_optimizer()
+        flex_shard(optimizer, bucket_spec=build_layer_bucket_specs(optimizer))
+        runtime = optimizer.__dict__["_flex_shard_runtime"]
+
+        self.assertEqual(runtime._max_in_flight_buckets, 2)
+        for invalid in (False, 0, 3):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "must be 1 or 2"):
+                    optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+                        invalid
+                    )
+
+        with self.assertRaisesRegex(ValueError, "on every rank"):
+            optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+                3 if dist.get_rank() == 0 else 2
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "differs across ranks"):
+            optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
+                1 if dist.get_rank() == 0 else 2
+            )
+        optimizer.set_max_in_flight_buckets(1)  # pyrefly: ignore [missing-attribute]
+        self.assertEqual(runtime._max_in_flight_buckets, 1)
+
+        first.grad = None
+        second.grad = None
+        optimizer.step()
+        with self.assertRaisesRegex(RuntimeError, "before the first step"):
+            optimizer.set_max_in_flight_buckets(2)  # pyrefly: ignore [missing-attribute]
 
     @with_comms
     def test_declares_owned_compute_requirement(self):
@@ -672,6 +927,16 @@ class TestDistributedBucketedMuonAdapter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store_dir:
             mp.spawn(
                 _run_bucketed_muon_parity,
+                args=(2, os.path.join(store_dir, "store")),
+                nprocs=2,
+                join=True,
+            )
+
+    @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+    def test_pipeline_cuda_allocator_lifetime(self):
+        with tempfile.TemporaryDirectory() as store_dir:
+            mp.spawn(
+                _run_cuda_pipeline_lifetime,
                 args=(2, os.path.join(store_dir, "store")),
                 nprocs=2,
                 join=True,
