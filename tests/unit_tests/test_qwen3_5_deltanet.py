@@ -181,6 +181,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             from torchtitan.models.qwen3_5.model import (
                 GatedDeltaKernel,
                 GatedDeltaNet,
+                GatedDeltaNetCore,
                 RMSNormGated,
             )
         except ModuleNotFoundError as exc:
@@ -220,10 +221,17 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_q=conv(key_dim),
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
-            kernel=(
-                GatedDeltaKernel.Config()
-                if backend is None
-                else GatedDeltaKernel.Config(backend=backend)
+            core=GatedDeltaNetCore.Config(
+                key_head_dim=key_head_dim,
+                value_head_dim=value_head_dim,
+                key_dim=key_dim,
+                value_dim=value_dim,
+                conv_kernel_size=conv_kernel_size,
+                kernel=(
+                    GatedDeltaKernel.Config()
+                    if backend is None
+                    else GatedDeltaKernel.Config(backend=backend)
+                ),
             ),
             norm=RMSNormGated.Config(dim=value_head_dim),
             out_proj=Linear.Config(
@@ -233,7 +241,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ),
         ).build()
         if backend is None:
-            model.kernel = ReferenceGatedDeltaKernel()
+            model.core.kernel = ReferenceGatedDeltaKernel()
 
         model = model.to(device=device, dtype=dtype)
         with torch.no_grad():

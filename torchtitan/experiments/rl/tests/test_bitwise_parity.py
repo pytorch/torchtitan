@@ -355,7 +355,11 @@ def _build_padded_varlen_metadata(batch_size, max_len, device):
         0, (batch_size + 1) * max_len, max_len, dtype=torch.int32, device=device
     )
     return VarlenMetadata(
-        cu_seq_q=cu_seqs, cu_seq_k=cu_seqs, max_q=max_len, max_k=max_len
+        cu_seq_q=cu_seqs,
+        cu_seq_k=cu_seqs,
+        max_q=max_len,
+        max_k=max_len,
+        cu_seq_q_host=tuple(range(0, (batch_size + 1) * max_len, max_len)),
     )
 
 

@@ -913,14 +913,14 @@ def _qwen3_5_rl_model_registry(
 
 def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
     """Qwen3.5-9B GRPO with trainer and generator TP=2 (6 GPUs)."""
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=_qwen3_5_rl_model_registry("9B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3.5-9B",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=2048),
@@ -970,7 +970,11 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
 def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5-9B GRPO with matching TP=2."""
     config = rl_grpo_qwen3_5_9b_varlen()
-    config.async_loop = dataclasses.replace(config.async_loop, max_offpolicy_steps=0)
+    config.async_loop = dataclasses.replace(
+        config.async_loop,
+        target_offpolicy_steps=0,
+        window_fraction=None,
+    )
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -989,14 +993,14 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
 
 def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
     """Random-init Qwen3.5 GRPO config for CI."""
-    group_size = 8
+    num_samples_per_prompt = 8
     return Controller.Config(
         model_spec=_qwen3_5_rl_model_registry("debugmodel", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
-            num_groups_per_train_step=8,
-            group_size=group_size,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=2048),
@@ -1040,7 +1044,11 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
 def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5 GRPO config for CI."""
     config = rl_grpo_qwen3_5_debug_varlen()
-    config.async_loop = dataclasses.replace(config.async_loop, max_offpolicy_steps=0)
+    config.async_loop = dataclasses.replace(
+        config.async_loop,
+        target_offpolicy_steps=0,
+        window_fraction=None,
+    )
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,

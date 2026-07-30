@@ -437,8 +437,11 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
         A_log: torch.Tensor,
         dt_bias: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
+        *,
+        cu_seqlens_host: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
         """Bridge TorchTitan's layout to the flattened vLLM cache operation."""
+        del cu_seqlens_host
         mesh = None
         placements = None
         # The enclosing module is head-sharded, but vLLM's paged cache and FLA
