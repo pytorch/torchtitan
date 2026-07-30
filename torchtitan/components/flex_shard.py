@@ -390,6 +390,10 @@ class _OwnedFlexShardCommContext:
     @classmethod
     def create(cls, device: torch.device) -> _OwnedFlexShardCommContext:
         device_handle = _get_device_handle(device.type)
+        if device_handle is None:
+            raise RuntimeError(
+                f"Optimizer FlexShard does not support device type {device.type!r}"
+            )
         stream = (
             device_handle.Stream(priority=0)
             if device.type == "cpu"
