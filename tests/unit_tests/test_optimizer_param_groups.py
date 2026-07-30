@@ -8,6 +8,9 @@ import unittest
 
 import torch
 import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper,
+)
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Partial, Replicate
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -117,6 +120,29 @@ def _get_default_groups(model, config):
 
 
 class TestParamGroupConfig(unittest.TestCase):
+    def test_patterns_match_canonical_checkpoint_wrapper_fqns(self):
+        model = SimpleModel()
+        model.layers["0"]["attention"] = checkpoint_wrapper(
+            model.layers["0"]["attention"]
+        )
+        config = OptimizersContainer.Config(
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"layers\.0\.attention\.weight$",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 1e-3},
+                ),
+                _DEFAULT_ADAMW,
+            ]
+        )
+
+        groups = _get_default_groups(model, config)
+
+        self.assertEqual(
+            groups[0]["param_names"],
+            ["layers.0.attention.weight"],
+        )
+
     def test_default_no_param_groups(self):
         """Empty param_groups produces a single group with all params."""
         model = SimpleModel()
