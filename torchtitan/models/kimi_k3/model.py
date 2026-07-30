@@ -547,8 +547,8 @@ class KimiLatentMoE(Module):
 
         for expert_idx, expert in enumerate(self.routed_experts):
             token_and_slot = torch.nonzero(expert_ids_TK == expert_idx, as_tuple=False)
-            if token_and_slot.numel() == 0:
-                continue
+            # Keep empty experts in the autograd graph so every FSDP rank
+            # produces zero gradients instead of rank-dependent None gradients.
             token_ids = token_and_slot[:, 0]
             route_slots = token_and_slot[:, 1]
             expert_output = expert(latent_TD.index_select(0, token_ids))

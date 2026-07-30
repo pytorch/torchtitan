@@ -312,6 +312,31 @@ class TestKimiK3(unittest.TestCase):
             self.assertIsNotNone(tensor.grad)
             self.assertTrue(torch.isfinite(tensor.grad).all())
 
+    def test_unused_moe_experts_receive_zero_gradients(self):
+        torch.manual_seed(2)
+        model = _small_model_config().build()
+        model.init_states()
+        moe = model.layers["1"].moe
+        assert moe is not None
+        with torch.no_grad():
+            moe.router.gate.weight.zero_()
+
+        inputs = torch.randn(2, 4, 16, requires_grad=True)
+        expert_ids, _ = moe.router(inputs, moe.expert_bias_E)
+        selected_experts = set(expert_ids.flatten().tolist())
+        unused_experts = set(range(moe.num_experts)) - selected_experts
+        self.assertTrue(unused_experts)
+
+        moe(inputs).float().sum().backward()
+        for expert_idx in unused_experts:
+            for parameter in moe.routed_experts[expert_idx].parameters():
+                self.assertIsNotNone(parameter.grad)
+                assert parameter.grad is not None
+                torch.testing.assert_close(
+                    parameter.grad,
+                    torch.zeros_like(parameter.grad),
+                )
+
     def test_small_multimodal_model_forward_backward_and_adapter(self):
         torch.manual_seed(2)
         config = _small_model_config()
