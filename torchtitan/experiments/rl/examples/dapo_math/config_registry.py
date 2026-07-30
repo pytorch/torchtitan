@@ -62,9 +62,9 @@ def _qwen3_4b_dapo_math_config(
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
             num_training_steps=150,
-            num_groups_per_train_step=8,
-            group_size=16,
-            max_offpolicy_steps=4,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=16,
+            target_offpolicy_steps=4,
             validation=ValidationConfig(
                 num_samples=num_validation_samples,
             ),

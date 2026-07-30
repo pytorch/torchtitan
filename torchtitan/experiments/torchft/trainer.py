@@ -91,16 +91,17 @@ class FaultTolerantTrainer(Trainer):
         )
 
         # build dataloader
+        dataloader_batch_size = (
+            config.parallelism.pipeline_parallel_microbatch_size
+            if parallel_dims.pp_enabled
+            else config.training.local_batch_size
+        )
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
-            local_batch_size=(
-                config.parallelism.pipeline_parallel_microbatch_size
-                if parallel_dims.pp_enabled
-                else config.training.local_batch_size
-            ),
+            local_batch_size=dataloader_batch_size,
         )
 
         # build model (using meta init)
@@ -388,15 +389,16 @@ class FaultTolerantTrainer(Trainer):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
-        batch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
+        # All groups form one optimizer step; each group feeds one fwd-bwd call.
+        microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
-            batch_group = []
+            microbatches = []
             for _ in range(self.num_pipeline_parallel_microbatches):
                 input_dict, labels = next(data_iterator)
                 local_valid_tokens += (labels != IGNORE_INDEX).sum()
-                batch_group.append((input_dict, labels))
-            batch_groups.append(batch_group)
+                microbatches.append((input_dict, labels))
+            microbatch_groups.append(microbatches)
 
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
@@ -409,10 +411,10 @@ class FaultTolerantTrainer(Trainer):
             global_valid_tokens = float(local_valid_tokens.item())
 
         accumulated_losses = []
-        for batch_group in batch_groups:
+        for microbatches in microbatch_groups:
             input_dict_mbs = []
             label_mbs = []
-            for input_dict, labels in batch_group:
+            for input_dict, labels in microbatches:
                 for key, value in input_dict.items():
                     if isinstance(value, torch.Tensor):
                         input_dict[key] = value.to(self.device)
@@ -420,16 +422,16 @@ class FaultTolerantTrainer(Trainer):
                 label_mbs.append(labels.to(self.device))
 
             if parallel_dims.pp_enabled:
-                step_input_dict = input_dict_mbs
-                step_labels = label_mbs
+                fwd_bwd_input_dict = input_dict_mbs
+                fwd_bwd_labels = label_mbs
             else:
                 assert len(input_dict_mbs) == len(label_mbs) == 1
-                step_input_dict = input_dict_mbs[0]
-                step_labels = label_mbs[0]
+                fwd_bwd_input_dict = input_dict_mbs[0]
+                fwd_bwd_labels = label_mbs[0]
 
             loss = self.forward_backward_step(
-                input_dict=step_input_dict,
-                labels=step_labels,
+                input_dict=fwd_bwd_input_dict,
+                labels=fwd_bwd_labels,
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())
