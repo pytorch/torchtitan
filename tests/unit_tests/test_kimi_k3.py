@@ -22,6 +22,7 @@ from torchtitan.models.kimi_k3 import (
     kimi_k3_configs,
 )
 from torchtitan.models.kimi_k3.model import (
+    _replace_vision_embeds,
     KimiK3Model,
     KimiK3TransformerBlock,
     KimiKDAKernel,
@@ -169,6 +170,60 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_replace_vision_embeds_is_out_of_place(self):
+        inputs_embeds = torch.arange(30.0).view(2, 5, 3).requires_grad_()
+        vision_embeds = torch.arange(12.0).view(2, 2, 3).requires_grad_()
+        inputs_before = inputs_embeds.detach().clone()
+
+        actual = _replace_vision_embeds(
+            inputs_embeds,
+            vision_embeds=vision_embeds,
+            vision_positions=[
+                (0, 0, 1, 1),
+                (1, 1, 2, 2),
+            ],
+        )
+        expected = torch.stack(
+            (
+                torch.cat(
+                    (
+                        inputs_before[0, :1],
+                        vision_embeds.detach()[0, :1],
+                        inputs_before[0, 2:],
+                    )
+                ),
+                torch.cat(
+                    (
+                        inputs_before[1, :2],
+                        vision_embeds.detach()[1],
+                        inputs_before[1, 4:],
+                    )
+                ),
+            )
+        )
+
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(inputs_embeds, inputs_before)
+        self.assertNotEqual(actual.data_ptr(), inputs_embeds.data_ptr())
+
+        actual.sum().backward()
+        expected_input_grad = torch.tensor(
+            [[1, 0, 1, 1, 1], [1, 1, 0, 0, 1]],
+            dtype=inputs_embeds.dtype,
+        ).unsqueeze(-1)
+        expected_vision_grad = torch.tensor(
+            [[1, 0], [1, 1]],
+            dtype=vision_embeds.dtype,
+        ).unsqueeze(-1)
+        torch.testing.assert_close(
+            inputs_embeds.grad,
+            expected_input_grad.expand_as(inputs_embeds),
+        )
+        torch.testing.assert_close(
+            vision_embeds.grad,
+            expected_vision_grad.expand_as(vision_embeds),
+        )
+
     def test_exact_gelu_matches_pytorch_reference(self):
         x = torch.linspace(-4.0, 4.0, 257)
         actual = KimiExactGELU.Config().build()(x)
@@ -264,11 +319,15 @@ class TestKimiK3(unittest.TestCase):
         model.verify_module_protocol()
         model.init_states()
 
-        tokens_BL = torch.randint(0, config.vocab_size, (2, 6))
         image_token_id = 7
-        tokens_BL[0, 2] = image_token_id
-        pixel_values_NPK = torch.randn(1, 4, 3 * 2 * 2)
-        grid_thw_N3 = torch.tensor([[1, 2, 2]])
+        tokens_BL = torch.tensor(
+            [
+                [1, 2, image_token_id, 3, 4, 5],
+                [6, image_token_id, image_token_id, 8, 9, 10],
+            ]
+        )
+        pixel_values_NPK = torch.randn(2, 8, 3 * 2 * 2)
+        grid_thw_N3 = torch.tensor([[1, 2, 2], [1, 4, 2]])
         logits_BLV = model(
             tokens_BL,
             pixel_values=pixel_values_NPK,
@@ -277,6 +336,13 @@ class TestKimiK3(unittest.TestCase):
         )
 
         self.assertEqual(logits_BLV.shape, (2, 6, config.vocab_size))
+        moe = model.layers["1"].moe
+        assert moe is not None
+        self.assertIs(
+            moe._buffers["tokens_per_expert_E"],
+            moe.tokens_per_expert_E,
+        )
+        self.assertEqual(moe.tokens_per_expert_E.sum().item(), tokens_BL.numel())
         logits_BLV.float().square().mean().backward()
         for parameter in model.parameters():
             if parameter.grad is not None:

@@ -23,10 +23,7 @@ from torch import nn
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.multimodal import (
-    get_vision_positions,
-    scatter_vision_embeds,
-)
+from torchtitan.models.common.multimodal import get_vision_positions
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.vision_encoder import KimiK3VisionEncoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -36,6 +33,36 @@ from torchtitan.protocols.module import Module, ModuleList
 # B = batch, L = sequence length, D = model dimension, H = heads,
 # K = key head dimension, V = value head dimension, E = experts,
 # T = flattened tokens, N = attention-residual entries.
+
+
+def _replace_vision_embeds(
+    inputs_embeds: torch.Tensor,
+    *,
+    vision_embeds: torch.Tensor,
+    vision_positions: list[tuple[int, int, int, int]],
+) -> torch.Tensor:
+    """Return text embeddings with vision spans replaced out of place."""
+    seq_len = inputs_embeds.shape[1]
+    flat_positions = []
+    valid_vision_embeds = []
+    for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
+        flat_start = sample_idx * seq_len + vision_start
+        flat_positions.append(
+            torch.arange(
+                flat_start,
+                flat_start + n_tokens,
+                device=inputs_embeds.device,
+            )
+        )
+        valid_vision_embeds.append(vision_embeds[item_idx, :n_tokens])
+
+    indices = torch.cat(flat_positions)
+    replacements = torch.cat(valid_vision_embeds).to(inputs_embeds.dtype)
+    return (
+        inputs_embeds.flatten(0, 1)
+        .index_copy(0, indices, replacements)
+        .view_as(inputs_embeds)
+    )
 
 
 class KimiRMSNorm(RMSNorm):
@@ -507,9 +534,11 @@ class KimiLatentMoE(Module):
             self.num_experts,
             dtype=torch.bool,
             device=x_BLD.device,
-        ).scatter_(-1, expert_ids_BLK, True)
+        ).scatter(-1, expert_ids_BLK, True)
         with torch.no_grad():
-            self.tokens_per_expert_E.add_(routing_map_BLE.sum(dim=(0, 1)).float())
+            self.tokens_per_expert_E = (
+                self.tokens_per_expert_E + routing_map_BLE.sum(dim=(0, 1)).float()
+            )
 
         latent_TD = self.routed_down(x_BLD).reshape(B * L, -1)
         expert_ids_TK = expert_ids_BLK.reshape(B * L, -1)
@@ -764,7 +793,7 @@ class KimiK3Model(Decoder):
             raise ValueError(
                 "pixel_values were provided but no image placeholder tokens were found."
             )
-        return scatter_vision_embeds(
+        return _replace_vision_embeds(
             embeddings,
             vision_embeds=vision_embeds,
             vision_positions=vision_positions,
