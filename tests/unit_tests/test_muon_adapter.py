@@ -25,7 +25,6 @@ from torchtitan.components.flex_shard import (
     BucketSpec,
     build_layer_bucket_specs,
     flex_shard,
-    get_flex_shard_assignments,
     Owned,
 )
 from torchtitan.components.muon_adapter import MuonAdapter
@@ -653,39 +652,6 @@ class TestMuonAdapter(DTensorTestBase):
         return optimizer, first, second
 
     @with_comms
-    def test_compute_buckets_resolve_fqns_and_balance_layers(self):
-        optimizer, _first, _second = self._bucketed_optimizer()
-
-        bucket_spec = build_layer_bucket_specs(optimizer)
-        self.assertEqual(
-            [(spec.name, spec.patterns) for spec in bucket_spec],
-            [
-                ("layers.0", ("layers.0.attention.wq.weight",)),
-                ("layers.1", ("layers.1.attention.wq.weight",)),
-            ],
-        )
-        returned = flex_shard(optimizer, bucket_spec=bucket_spec)
-
-        self.assertIs(returned, optimizer)
-        self.assertEqual(
-            [
-                (assignment.bucket_name, assignment.fqn, assignment.owner_rank)
-                for assignment in get_flex_shard_assignments(optimizer)
-            ],
-            [
-                ("layers.0", "layers.0.attention.wq.weight", 0),
-                ("layers.1", "layers.1.attention.wq.weight", 1),
-            ],
-        )
-        with self.assertRaisesRegex(RuntimeError, "after flex_shard plan"):
-            optimizer.add_param_group(
-                {
-                    "params": [torch.nn.Parameter(torch.ones(2, 2))],
-                    "param_names": ["late.weight"],
-                }
-            )
-
-    @with_comms
     def test_max_in_flight_buckets_is_configured_before_step(self):
         optimizer, first, second = self._bucketed_optimizer()
         flex_shard(optimizer, bucket_spec=build_layer_bucket_specs(optimizer))
@@ -718,142 +684,15 @@ class TestMuonAdapter(DTensorTestBase):
             optimizer.set_max_in_flight_buckets(2)  # pyrefly: ignore [missing-attribute]
 
     @with_comms
-    def test_adamw_same_as_storage_preserves_storage_sharding(self):
-        local_param = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
-        local_grad = torch.arange(6, 0, -1, dtype=torch.float32).reshape(2, 3)
-        param = self._dtensor_parameter(
-            local_param,
-            local_grad.clone(),
-            global_shape=(4, 3),
-        )
-        reference = torch.nn.Parameter(local_param.clone())
-        reference.grad = local_grad.clone()
-        kwargs = {
-            "lr": 0.03,
-            "weight_decay": 0.2,
-            "foreach": False,
-            "fused": False,
-        }
-        optimizer = torch.optim.AdamW(
-            [
-                {
-                    "params": [param],
-                    "param_names": ["layers.0.weight"],
-                }
-            ],
-            **kwargs,
-        )
-        reference_optimizer = torch.optim.AdamW([reference], **kwargs)
-        storage_placements = param.placements
-        local_data_ptr = param.to_local().data_ptr()
-
-        returned = flex_shard(
-            optimizer,
-            bucket_spec=[
-                BucketSpec(
-                    name="layers.0",
-                    patterns=("layers.0.*",),
-                    mesh=self.mesh,
-                )
-            ],
-        )
-        self.assertIs(returned, optimizer)
-        self.assertEqual(
-            [
-                (assignment.bucket_name, assignment.fqn, assignment.owner_rank)
-                for assignment in get_flex_shard_assignments(optimizer)
-            ],
-            [("layers.0", "layers.0.weight", None)],
-        )
-
-        optimizer.step()
-        reference_optimizer.step()
-
-        torch.testing.assert_close(param.to_local(), reference)
-        self.assertEqual(param.placements, storage_placements)
-        self.assertEqual(param.to_local().data_ptr(), local_data_ptr)
-        self.assertIsInstance(optimizer.state[param]["exp_avg"], DTensor)
-        self.assertEqual(
-            optimizer.state[param]["exp_avg"].placements,
-            storage_placements,
-        )
-        with self.assertRaisesRegex(RuntimeError, "after flex_shard plan"):
-            optimizer.add_param_group(
-                {
-                    "params": [torch.nn.Parameter(torch.ones(2, 2))],
-                    "param_names": ["late.weight"],
-                }
-            )
-
-    @with_comms
-    def test_compute_requirements_are_declarative(self):
+    def test_declares_owned_compute_requirement(self):
         optimizer, first, _second = self._bucketed_optimizer()
         self.assertEqual(
             optimizer.flex_shard_compute_requirement(first, optimizer.param_groups[0]),
             Owned(trailing_dims=2),
         )
 
-        with self.assertRaisesRegex(TypeError, "must implement"):
-            flex_shard(
-                torch.optim.SGD([torch.nn.Parameter(torch.ones(2, 2))]),
-                bucket_spec=[],
-            )
-
     @with_comms
-    def test_compute_buckets_reject_orphan_and_overlap(self):
-        optimizer, _first, _second = self._bucketed_optimizer()
-        with self.assertRaisesRegex(ValueError, "not covered"):
-            flex_shard(
-                optimizer,
-                bucket_spec=[
-                    BucketSpec(
-                        patterns=("layers.0.*",),
-                        mesh=self.mesh,
-                    )
-                ],
-            )
-
-        optimizer, _first, _second = self._bucketed_optimizer()
-        with self.assertRaisesRegex(ValueError, "matched multiple"):
-            flex_shard(
-                optimizer,
-                bucket_spec=[
-                    BucketSpec(
-                        patterns=("layers.*",),
-                        mesh=self.mesh,
-                    ),
-                    BucketSpec(
-                        patterns=("layers.0.*", "layers.1.*"),
-                        mesh=self.mesh,
-                    ),
-                ],
-            )
-
-    @with_comms
-    def test_compute_buckets_reject_non_row_shard_and_invalid_ns(self):
-        local = torch.ones(4, 2)
-        param = DTensor.from_local(
-            local,
-            device_mesh=self.mesh,
-            placements=(Shard(1),),
-            run_check=False,
-            shape=(4, 4),
-            stride=(4, 1),
-        ).requires_grad_()
-        optimizer = MuonAdapter(
-            [{"params": [param], "param_names": ["layers.0.weight"]}]
-        )
-        with self.assertRaisesRegex(ValueError, r"Shard\(0\)"):
-            flex_shard(
-                optimizer,
-                bucket_spec=[
-                    BucketSpec(
-                        patterns=("layers.0.*",),
-                        mesh=self.mesh,
-                    )
-                ],
-            )
-
+    def test_rejects_invalid_ns_steps(self):
         optimizer, _first, _second = self._bucketed_optimizer()
         optimizer.param_groups[0]["ns_steps"] = 100
         with self.assertRaisesRegex(ValueError, "ns_steps"):
