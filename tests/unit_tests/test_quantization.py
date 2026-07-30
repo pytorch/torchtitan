@@ -269,9 +269,14 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert "model" in config.compile.components
 
 
-def test_nvfp4_module_exposes_weight_and_two_buffers():
-    """Built module has the stock weight param and the two NVFP4 runtime buffers."""
+def test_nvfp4_module_buffers_and_native_checkpoint():
+    """Built module has the stock weight param plus the two NVFP4 runtime
+    buffers, and both buffers are non-persistent -- the RHT vector is a fixed
+    constant and the SR seed is per-rank -- so a native checkpoint carries only
+    the stock weight."""
     NVFP4Linear = _nvfp4_linear_cls()
+    from torchtitan.components.quantization.nvfp4 import _HARDCODED_SIGN_VECTOR
+
     module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
     assert {name for name, _ in module.named_parameters()} == {"weight"}
     module.init_states()
@@ -280,28 +285,10 @@ def test_nvfp4_module_exposes_weight_and_two_buffers():
     assert buffers["_sr_seed"].dtype == torch.int64
     assert tuple(buffers["_rht_sign_vector"].shape) == (16,)
     # The RHT vector is the fixed v1-recipe constant, identical on every rank.
-    from torchtitan.components.quantization.nvfp4 import _HARDCODED_SIGN_VECTOR
-
     assert tuple(int(v) for v in buffers["_rht_sign_vector"]) == _HARDCODED_SIGN_VECTOR
-
-
-def test_nvfp4_native_checkpoint_excludes_runtime_buffers():
-    """Both NVFP4 runtime buffers are non-persistent -- the RHT vector is a fixed
-    constant (recomputed on init) and the SR seed is per-rank -- so a native
-    checkpoint carries only the stock weight."""
-    NVFP4Linear = _nvfp4_linear_cls()
-
-    def _built():
-        module = NVFP4Linear.Config(in_features=512, out_features=1024).build()
-        module.init_states()
-        return module
-
-    src, dst = _built(), _built()
-    sd = src.state_dict()
-    assert set(sd) == {"weight"}
-    dst.load_state_dict(sd)
-    # The fixed RHT constant is identical on both modules regardless of the load.
-    assert torch.equal(dst._rht_sign_vector, src._rht_sign_vector)
+    # Both runtime buffers are non-persistent, so a native checkpoint carries
+    # only the stock weight.
+    assert set(module.state_dict()) == {"weight"}
 
 
 def test_nvfp4_stock_checkpoint_loads_before_init_states():
