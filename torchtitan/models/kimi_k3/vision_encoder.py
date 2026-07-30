@@ -71,6 +71,19 @@ def _get_temporal_pos_embed(
     return torch.cat((angles.sin(), angles.cos()), dim=-1)
 
 
+def _pad_sequence(x: torch.Tensor, target_length: int) -> torch.Tensor:
+    """Pad the leading sequence dimension without modifying ``x`` in place."""
+    padding_length = target_length - x.shape[0]
+    if padding_length < 0:
+        raise ValueError(
+            f"Cannot pad a sequence of length {x.shape[0]} to {target_length}."
+        )
+    if padding_length == 0:
+        return x
+    padding = x.new_zeros(padding_length, *x.shape[1:])
+    return torch.cat((x, padding), dim=0)
+
+
 def _compute_learned_pos_embeds(
     pos_embed: torch.Tensor,
     grids: list[list[int]],
@@ -80,11 +93,11 @@ def _compute_learned_pos_embeds(
 ) -> torch.Tensor:
     """Interpolate the learned 2D table and add fixed temporal embeddings."""
     height, width, dim = pos_embed.shape
-    result = pos_embed.new_zeros(len(grids), max_num_patches, dim)
     pos_grid = pos_embed.permute(2, 0, 1).unsqueeze(0).float()
 
     cached_spatial: dict[tuple[int, int], torch.Tensor] = {}
-    for item_idx, (num_frames, grid_h, grid_w) in enumerate(grids):
+    padded_positions = []
+    for num_frames, grid_h, grid_w in grids:
         if num_frames > max_num_frames:
             raise ValueError(
                 f"Vision grid has {num_frames} frames, exceeding "
@@ -114,9 +127,9 @@ def _compute_learned_pos_embeds(
             temporal = _get_temporal_pos_embed(num_frames, dim, device=pos_embed.device)
             item_pos = spatial.unsqueeze(0) + temporal.unsqueeze(1).to(spatial.dtype)
             item_pos = item_pos.reshape(num_frames * grid_h * grid_w, dim)
-        result[item_idx, : item_pos.shape[0]] = item_pos
+        padded_positions.append(_pad_sequence(item_pos, max_num_patches))
 
-    return result
+    return torch.stack(padded_positions)
 
 
 def _compute_2d_rope_cache(
@@ -126,15 +139,9 @@ def _compute_2d_rope_cache(
     head_dim: int,
 ) -> torch.Tensor:
     """Build the real-valued 2D RoPE cache in raster patch order."""
-    angles = torch.zeros(
-        len(grids),
-        max_num_patches,
-        head_dim // 2,
-        dtype=freq_table.dtype,
-        device=freq_table.device,
-    )
     cached_spatial: dict[tuple[int, int], torch.Tensor] = {}
-    for item_idx, (num_frames, grid_h, grid_w) in enumerate(grids):
+    padded_angles = []
+    for num_frames, grid_h, grid_w in grids:
         spatial = cached_spatial.get((grid_h, grid_w))
         if spatial is None:
             flat = torch.arange(grid_h * grid_w, device=freq_table.device)
@@ -145,8 +152,9 @@ def _compute_2d_rope_cache(
             )
             cached_spatial[(grid_h, grid_w)] = spatial
         item_angles = spatial.repeat(num_frames, 1)
-        angles[item_idx, : item_angles.shape[0]] = item_angles
+        padded_angles.append(_pad_sequence(item_angles, max_num_patches))
 
+    angles = torch.stack(padded_angles)
     return torch.stack((angles.cos(), angles.sin()), dim=-1).unsqueeze(2)
 
 
@@ -175,14 +183,14 @@ def _temporal_pool_and_merge(
     merge_kernel_size: tuple[int, int],
 ) -> torch.Tensor:
     """Temporally pool and concatenate neighboring spatial patch features."""
-    num_items, _, dim = hidden_NPD.shape
+    _, _, dim = hidden_NPD.shape
     kernel_h, kernel_w = merge_kernel_size
     merged_dim = kernel_h * kernel_w * dim
     max_merged = max(
         (grid_h // kernel_h) * (grid_w // kernel_w) for _, grid_h, grid_w in grids
     )
-    merged_NMK = hidden_NPD.new_zeros(num_items, max_merged, merged_dim)
 
+    padded_items = []
     for item_idx, (num_frames, grid_h, grid_w) in enumerate(grids):
         merged_h = grid_h // kernel_h
         merged_w = grid_w // kernel_w
@@ -196,9 +204,9 @@ def _temporal_pool_and_merge(
         )
         item = item.permute(0, 1, 3, 2, 4, 5).mean(dim=0)
         item = item.reshape(merged_h * merged_w, merged_dim)
-        merged_NMK[item_idx, : item.shape[0]] = item
+        padded_items.append(_pad_sequence(item, max_merged))
 
-    return merged_NMK
+    return torch.stack(padded_items)
 
 
 class VisionRotaryEmbedding2D(Module):
@@ -292,7 +300,7 @@ class KimiK3VisionAttention(Module):
         )
         q_NPHK, k_NPHK = _apply_2d_rope(q_NPHK, k_NPHK, rope_cache)
 
-        output_NPHK = torch.zeros_like(v_NPHK)
+        padded_outputs = []
         for item_idx, item_length in enumerate(num_patches):
             q_HPK = q_NPHK[item_idx, :item_length].transpose(0, 1)
             k_HPK = k_NPHK[item_idx, :item_length].transpose(0, 1)
@@ -303,8 +311,9 @@ class KimiK3VisionAttention(Module):
                 q_HPK.dtype
             )
             output_PHK = torch.matmul(probs_HPP, v_HPK).transpose(0, 1)
-            output_NPHK[item_idx, :item_length] = output_PHK
+            padded_outputs.append(_pad_sequence(output_PHK, max_num_patches))
 
+        output_NPHK = torch.stack(padded_outputs)
         return self.proj(output_NPHK.flatten(start_dim=-2))
 
 
