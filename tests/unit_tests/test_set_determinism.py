@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from torch.func._random import StatefulPRNG
 from torchtitan.config import DebugConfig
 from torchtitan.distributed.utils import set_determinism
 
@@ -119,6 +120,7 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
         base_seed = 1000
 
         seeds_by_coord = {}
+        base_seeds = set()
 
         # Test all possible rank coordinates
         for dp_rank in range(mesh_sizes[0]):
@@ -131,12 +133,13 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
 
                 # Call set_determinism with distinct seeds only on PP dimension
                 debug_config = DebugConfig(seed=base_seed, deterministic=False)
-                set_determinism(
+                returned_base_seed = set_determinism(
                     parallel_dims=fake_mesh,
                     device=self.device,
                     debug_config=debug_config,
                     distinct_seed_mesh_dims=["pp"],
                 )
+                base_seeds.add(returned_base_seed)
 
                 # Capture the seed that was set
                 rng_state = torch.get_rng_state()
@@ -171,6 +174,7 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
             mesh_sizes[1],
             f"Expected {mesh_sizes[1]} unique seeds for PP dimension",
         )
+        self.assertEqual(base_seeds, {base_seed})
 
     @patch("torch.distributed.distributed_c10d.get_world_size")
     @patch("torch.distributed.distributed_c10d.get_rank")
@@ -269,11 +273,58 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
         fake_mesh.get_all_meshes.return_value = {}
 
         debug_config = DebugConfig(seed=base_seed, deterministic=False)
-        set_determinism(
+        returned_base_seed = set_determinism(
             parallel_dims=fake_mesh,
             device=self.device,
             debug_config=debug_config,
             distinct_seed_mesh_dims=["pp"],
+        )
+        self.assertEqual(returned_base_seed, base_seed)
+        self.assertEqual(torch.initial_seed(), base_seed)
+
+    @patch("torch.distributed.distributed_c10d.get_world_size")
+    @patch("torch.distributed.distributed_c10d.get_rank")
+    def test_set_determinism_single_gpu_without_seed_preserves_rng_state(
+        self, mock_get_rank, mock_get_world_size
+    ):
+        mock_get_world_size.return_value = 1
+        mock_get_rank.return_value = 0
+
+        fake_mesh = MagicMock()
+        fake_mesh.world_size = 1
+
+        torch.manual_seed(42)
+        torch.rand(1)
+        rng_state = torch.get_rng_state().clone()
+        initial_seed = torch.initial_seed()
+
+        returned_base_seed = set_determinism(
+            parallel_dims=fake_mesh,
+            device=self.device,
+            debug_config=DebugConfig(seed=None, deterministic=False),
+            distinct_seed_mesh_dims=["pp"],
+        )
+
+        self.assertEqual(returned_base_seed, initial_seed)
+        self.assertTrue(torch.equal(torch.get_rng_state(), rng_state))
+
+    @patch("torch.distributed.distributed_c10d.get_world_size")
+    def test_set_determinism_normalizes_negative_seed(self, mock_get_world_size):
+        mock_get_world_size.return_value = 1
+        fake_mesh = MagicMock()
+        fake_mesh.world_size = 1
+
+        returned_base_seed = set_determinism(
+            parallel_dims=fake_mesh,
+            device=self.device,
+            debug_config=DebugConfig(seed=-1, deterministic=False),
+            distinct_seed_mesh_dims=["pp"],
+        )
+
+        self.assertEqual(returned_base_seed, 2**64 - 1)
+        self.assertEqual(torch.initial_seed(), 2**64 - 1)
+        self.assertEqual(
+            StatefulPRNG(returned_base_seed).get_state().dtype, torch.uint64
         )
 
     @patch("torch.distributed.distributed_c10d.get_world_size")

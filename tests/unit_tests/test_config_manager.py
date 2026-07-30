@@ -97,6 +97,18 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.training.steps == 5
 
+    def test_keyed_parameter_init_flag(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--debug.enable_keyed_parameter_init",
+            ]
+        )
+        assert config.debug.enable_keyed_parameter_init
+
     def test_cli_override_dump_folder(self):
         """CLI args override config defaults for nested fields."""
         config_manager = ConfigManager()

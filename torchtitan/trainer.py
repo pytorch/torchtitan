@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
 import json
 import math
@@ -19,6 +20,7 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.func._random import StatefulPRNG
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
@@ -45,6 +47,11 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.distributed.keyed_parameter_init import (
+    capture_parameter_init_registry,
+    keyed_parameter_init,
+    ParameterInitRegistry,
+)
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
@@ -254,6 +261,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
         # backends share one runtime mesh/type mechanism.
         dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
+        if (
+            config.debug.enable_keyed_parameter_init
+            and config.parallelism.spmd_backend == "spmd_types"
+        ):
+            raise NotImplementedError(
+                "keyed parameter initialization is not supported with the "
+                "spmd_types backend"
+            )
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -271,11 +286,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
-        dist_utils.set_determinism(
+        base_seed = dist_utils.set_determinism(
             parallel_dims,
             self.device,
             config.debug,
             distinct_seed_mesh_dims=["pp"],
+        )
+        parameter_init_rng = (
+            StatefulPRNG(base_seed)
+            if config.debug.enable_keyed_parameter_init
+            else None
         )
 
         # build model (using meta init)
@@ -309,6 +329,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # On the other hand, some parallelism wrappers don't
         # have this guanrantee, e.g., fully_shard.
         model.verify_module_protocol()
+        parameter_init_registry: ParameterInitRegistry | None = (
+            capture_parameter_init_registry(model)
+            if config.debug.enable_keyed_parameter_init
+            else None
+        )
 
         # metrics logging
         self.metrics_processor = config.metrics.build(
@@ -399,21 +424,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # when PP is enabled, `model` obj is no longer used after this point,
                 # model_parts is used instead
                 del model
-
-                for m in self.model_parts:
-                    m.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
-                    m.train()
-
-                # confirm that user will be able to view loss metrics on the console
-                ensure_pp_loss_visible(
-                    parallel_dims=parallel_dims,
-                    pp_schedule=config.parallelism.pipeline_parallel_schedule,
-                    color=color,
-                )
             else:
                 if not config.checkpoint.create_seed_checkpoint:
                     # Skip parallelize_fn for seed checkpoints — nothing from
@@ -428,14 +438,39 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
+                self.model_parts = [model]
+
+            for model_part in self.model_parts:
+                model_part.to_empty(device=init_device)
+
+            init_context = (
+                keyed_parameter_init(
+                    self.model_parts,
+                    parameter_init_rng,
+                    registry=parameter_init_registry,
+                )
+                if parameter_init_rng is not None
+                and parameter_init_registry is not None
+                else contextlib.nullcontext()
+            )
+            with torch.no_grad(), init_context:
+                for model_part in self.model_parts:
                     # TODO: Change this back to init_weights once
                     # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-                model.train()
+                    cast(BaseModel, model_part).init_weights(
+                        buffer_device=buffer_device
+                    )
 
-                self.model_parts = [model]
+            for model_part in self.model_parts:
+                model_part.train()
+
+            if parallel_dims.pp_enabled:
+                # confirm that user will be able to view loss metrics on the console
+                ensure_pp_loss_visible(
+                    parallel_dims=parallel_dims,
+                    pp_schedule=config.parallelism.pipeline_parallel_schedule,
+                    color=color,
+                )
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
