@@ -74,7 +74,7 @@ fi
 # Install DeepEP for the HybridEP integration test. DeepEP (NVSHMEM) is
 # CUDA-only, so skip it on ROCm.
 if [[ "${GPU_ARCH_TYPE}" != "rocm" ]]; then
-  bash /install_deepep.sh
+  bash .github/scripts/install_deepep_ci.sh
 fi
 
 # Enable CPP stacktraces for debugging symmetric memory initialization errors.
