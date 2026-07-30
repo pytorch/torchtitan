@@ -48,7 +48,16 @@ def test_float8_applied_by_model_registry():
     assert len(converted) > 0
 
 
-def test_nvfp4_converter_targets_layers_not_lm_head(monkeypatch):
+@pytest.mark.parametrize(
+    "module, recipe, expected_num_layers",
+    [
+        ("llama3", "llama3_debugmodel_nvfp4", 6),
+        ("qwen3", "qwen3_debugmodel_nvfp4", 8),
+    ],
+)
+def test_nvfp4_converter_targets_layers_not_lm_head(
+    monkeypatch, module, recipe, expected_num_layers
+):
     pytest.importorskip("torchao")
     from torchtitan.components.quantization import NVFP4Linear
 
@@ -62,9 +71,7 @@ def test_nvfp4_converter_targets_layers_not_lm_head(monkeypatch):
     monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
 
     config_manager = ConfigManager()
-    config = config_manager.parse_args(
-        ["--module", "llama3", "--config", "llama3_debugmodel_nvfp4"]
-    )
+    config = config_manager.parse_args(["--module", module, "--config", recipe])
     model_config = config.model_spec.model
     assert has_quantization(model_config)
 
@@ -75,6 +82,9 @@ def test_nvfp4_converter_targets_layers_not_lm_head(monkeypatch):
     # Every in-layer linear is swapped; the lm_head stays stock (NVFP4 requires
     # each GEMM dim divisible by 128, which the vocab projection violates).
     assert converted and all("layers" in fqn for fqn in converted)
+    assert {int(fqn.split(".")[1]) for fqn in converted} == set(
+        range(expected_num_layers)
+    )
     assert stock == ["lm_head"]
 
 
@@ -100,7 +110,18 @@ def test_nvfp4_bf16_tail_fqns():
         nvfp4_bf16_tail_fqns(4, 1.0)
 
 
-def test_nvfp4_mixed_converts_only_leading_layers(monkeypatch):
+@pytest.mark.parametrize(
+    "module, recipe, expected_cutoff",
+    [
+        ("llama3", "llama3_debugmodel_nvfp4_mixed", 5),
+        ("llama3", "llama3_8b_nvfp4_mixed", 27),
+        ("qwen3", "qwen3_debugmodel_nvfp4_mixed", 6),
+        ("qwen3", "qwen3_8b_nvfp4_mixed", 30),
+    ],
+)
+def test_nvfp4_mixed_converts_only_leading_layers(
+    monkeypatch, module, recipe, expected_cutoff
+):
     pytest.importorskip("torchao")
     from torchtitan.components.quantization import NVFP4Linear
 
@@ -112,12 +133,11 @@ def test_nvfp4_mixed_converts_only_leading_layers(monkeypatch):
 
     monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
 
-    config = ConfigManager().parse_args(
-        ["--module", "llama3", "--config", "llama3_debugmodel_nvfp4_mixed"]
-    )
+    config = ConfigManager().parse_args(["--module", module, "--config", recipe])
     model_config = config.model_spec.model
     n_layers = len(model_config.layers)
     cutoff = n_layers - math.ceil(n_layers * nvfp4_mod._NVFP4_BF16_TAIL_FRACTION)
+    assert cutoff == expected_cutoff
     assert 0 < cutoff < n_layers  # a real split: some NVFP4, some bf16
 
     converted_layers, stock = set(), []
@@ -199,21 +219,24 @@ def test_nvfp4_build_configures_local_spmd_sharding(
 
 
 @pytest.mark.parametrize(
-    "recipe",
+    "module, recipe",
     [
-        "llama3_debugmodel_nvfp4",
-        "llama3_debugmodel_nvfp4_mixed",
-        "llama3_8b_nvfp4_mixed",
+        ("llama3", "llama3_debugmodel_nvfp4"),
+        ("llama3", "llama3_debugmodel_nvfp4_mixed"),
+        ("llama3", "llama3_8b_nvfp4_mixed"),
+        ("qwen3", "qwen3_debugmodel_nvfp4"),
+        ("qwen3", "qwen3_debugmodel_nvfp4_mixed"),
+        ("qwen3", "qwen3_8b_nvfp4_mixed"),
     ],
 )
 def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
-    monkeypatch, recipe
+    monkeypatch, module, recipe
 ):
     _nvfp4_linear_cls()
     import torchtitan.components.quantization.nvfp4 as nvfp4_mod
 
     monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
-    base_args = ["--module", "llama3", "--config", recipe]
+    base_args = ["--module", module, "--config", recipe]
 
     config = ConfigManager().parse_args(base_args)
     assert config.parallelism.spmd_backend == "spmd_types"
@@ -222,6 +245,28 @@ def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
         [*base_args, "--parallelism.spmd_backend", "default"]
     )
     assert overridden.parallelism.spmd_backend == "default"
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "qwen3_debugmodel_nvfp4",
+        "qwen3_debugmodel_nvfp4_mixed",
+        "qwen3_8b_nvfp4_mixed",
+    ],
+)
+def test_qwen3_recipes_resolve(monkeypatch, recipe):
+    _nvfp4_linear_cls()
+    import torchtitan.components.quantization.nvfp4 as nvfp4_mod
+
+    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    config = ConfigManager().parse_args(["--module", "qwen3", "--config", recipe])
+    assert config.model_spec.name == "qwen3"
+    if recipe == "qwen3_8b_nvfp4_mixed":
+        assert config.dataloader.dataset_path == "openai/gsm8k"
+        assert config.checkpoint.initial_load_in_hf
+        assert config.compile.enable
+        assert "model" in config.compile.components
 
 
 def test_nvfp4_module_exposes_weight_and_two_buffers():
