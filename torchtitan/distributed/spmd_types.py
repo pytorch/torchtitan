@@ -233,6 +233,17 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
                 "spmd_redistribute_per_axis only supports one single-axis "
                 "redistribution."
             )
+        if changed_axes and (
+            src_types[changed_axes[0]] is spmd.V
+            or dst_types[changed_axes[0]] is spmd.V
+        ):
+            axis = changed_axes[0]
+            raise ValueError(
+                f"{name}: SpmdLayout-based redistribution changes mesh axis "
+                f"{axis.value!r} with spmd.V as the source or destination type. "
+                "Config-based redistribution requires non-V types; write an "
+                "explicit collective when the value semantics are unclear."
+            )
 
         # 2) If neither has PartitionSpec, comparing per_axis_spmd_types() is sufficient.
         if src.partition_spec is None and dst.partition_spec is None:
