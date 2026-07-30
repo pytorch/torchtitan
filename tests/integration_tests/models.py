@@ -63,7 +63,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel_mtp",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
@@ -71,8 +71,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "torchtitan.overrides.helion_rope.helion_complex_rope",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP+compile (+ Helion RoPE override)",
-            "deepseek_v3_fsdp+ep+compile",
+            "DeepSeek V3 MTP FSDP+EP+compile",
+            "deepseek_v3_mtp_fsdp+ep+compile",
             ngpu=4,
             # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
             # H100/GB200; skip on ROCm where they are unvalidated.
