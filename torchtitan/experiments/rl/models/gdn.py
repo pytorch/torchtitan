@@ -10,18 +10,17 @@ The enclosing Qwen3.5 module owns all parameters. This adapter runs the same FLA
 convolution and recurrence kernels as training while reading and updating vLLM's
 paged convolution and SSM states.
 
-Batch-invariant execution has three additional requirements:
+Batch-invariant execution has two additional requirements:
 
-* Convolution and SSM cache states use float32. Decode otherwise rounds the state
-  through bfloat16 after every token, unlike a single prefill call.
-* Recurrence inputs use float32. FLA's recurrent kernel has small shape-dependent
-  bfloat16 differences between one-token decode and multi-token prefill.
+* The accumulated SSM cache state uses float32. Decode otherwise rounds the state
+  through bfloat16 after every token, unlike a single prefill call. The convolution
+  cache stays in model dtype because it only stores trailing input columns.
 * Every recurrence receives a materialized initial state and ``cu_seqlens``. This
   keeps FLA's Triton specialization identical for fresh prefill and resumed state.
 
 The recurrent kernel and materialized state are also used outside batch-invariant
-mode because vLLM generation must support prefix continuation. Only the cache and
-input precision differ by mode.
+mode because vLLM generation must support prefix continuation. SSM cache precision
+and prefill kernel selection differ by mode.
 """
 
 from dataclasses import dataclass
@@ -114,9 +113,9 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
         self.local_key_dim = self.local_num_k_heads * self.head_k_dim
 
         if is_in_batch_invariant_mode():
-            # vLLM's allocator reads these fields for both dtype and page-size
-            # accounting, so configure them before it allocates the cache.
-            self.cache_config.mamba_cache_dtype = "float32"
+            # The recurrent state accumulates in float32 inside FLA, so preserving
+            # it across scheduler calls avoids per-token bfloat16 rounding. The
+            # convolution cache only stores model-dtype input columns verbatim.
             self.cache_config.mamba_ssm_cache_dtype = "float32"
 
         # vLLM populates this via the KV-cache allocator: (conv_state, ssm_state).
@@ -210,14 +209,6 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
 
         decay = (negative_exp_A * F.softplus(a.float() + dt_bias)).unsqueeze(0)
         update_gate = torch.sigmoid(b).unsqueeze(0)
-
-        # The batch-invariant trainer passes these recurrence inputs in float32;
-        # matching that dtype keeps generator outputs and final states identical.
-        if is_in_batch_invariant_mode():
-            query = query.float()
-            key = key.float()
-            value = value.float()
-            update_gate = update_gate.float()
 
         # Non-batch-invariant prefill/mixed batches use the parallel chunk kernel
         # (far faster than the O(seqlen) sequential recurrence). Batch-invariant
