@@ -182,6 +182,7 @@ class TestKimiK3(unittest.TestCase):
     def test_debugmodel_preserves_reduced_k3_topology(self):
         config = kimi_k3_configs["debugmodel"]("eager")
 
+        self.assertEqual(config.vocab_size, 163840)
         self.assertEqual(len(config.layers), 13)
         self.assertEqual(
             [
@@ -197,6 +198,11 @@ class TestKimiK3(unittest.TestCase):
         assert moe_config is not None
         self.assertEqual(moe_config.num_experts, 8)
         self.assertEqual(moe_config.router.top_k, 2)
+        self.assertEqual(moe_config.routed_experts[0].w1.out_features, 128)
+        vision_config = config.vision_encoder
+        assert vision_config is not None
+        self.assertEqual(vision_config.dim, 256)
+        self.assertEqual(vision_config.num_layers, 4)
 
     def test_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)

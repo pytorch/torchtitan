@@ -349,7 +349,7 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
         raise ValueError("Kimi K3 v1 only provides the device-neutral 'eager' backend.")
 
     dim = 256
-    vocab_size = 2048
+    vocab_size = 163840
     num_layers = 13
     full_attention_layers = {4, 8, 12}
     num_heads = 4
@@ -398,7 +398,7 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
                     else _latent_moe_config(
                         dim=dim,
                         latent_dim=128,
-                        expert_hidden_dim=64,
+                        expert_hidden_dim=128,
                         num_experts=8,
                         top_k=2,
                         num_shared_experts=2,
@@ -432,10 +432,10 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
         output_res_proj=_linear(dim, 1),
         vision_encoder=_vision_encoder_config(
             text_dim=dim,
-            dim=128,
-            qkv_dim=192,
-            hidden_dim=512,
-            num_layers=2,
+            dim=256,
+            qkv_dim=384,
+            hidden_dim=1024,
+            num_layers=4,
             num_heads=3,
         ),
         spatial_merge_size=2,

@@ -32,20 +32,25 @@ reducing widths, expert count, and depth.
 | Component | Released Kimi K3 | `debugmodel` |
 |---|---:|---:|
 | Decoder dimension | 7168 | 256 |
-| Vocabulary size | 163840 | 2048 |
+| Vocabulary size | 163840 | 163840 |
 | Decoder layers | 93 | 13 |
 | Full MLA layers (1-based) | 4, 8, ..., 92, 93 | 4, 8, 12 |
 | KDA layers | 69 | 10 |
 | Dense FFN layers | 1 | 1 |
 | Attention residual block size | 12 | 12 |
 | Routed experts / top-k | 896 / 16 | 8 / 2 |
+| Routed latent / expert hidden dimension | 3584 / 3072 | 128 / 128 |
 | Shared experts | 2 | 2 |
-| Vision dimension | 1024 | 128 |
-| Vision layers | 27 | 2 |
-| Vision QKV dimension / heads | 1536 / 12 | 192 / 3 |
+| Vision dimension | 1024 | 256 |
+| Vision layers | 27 | 4 |
+| Vision QKV dimension / heads | 1536 / 12 | 384 / 3 |
 
 Thirteen decoder layers are intentional. They exercise two attention-residual
 blocks and preserve the released model's 1-based full-attention cadence.
+The released vocabulary size is retained, following other TorchTitan
+multimodal debug models and making FSDP state sharding measurable while the
+decoder widths and depths remain reduced. The resulting model has about 100
+million parameters.
 
 ## Forward structure
 
