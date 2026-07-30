@@ -75,7 +75,7 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     # Quantize the MoE expert grouped GEMMs to MXFP8, plus the dense Linear
     # layers in attention, the shared experts, and the dense-layer feed-forward.
     # fqns is an include-list (substring match), so the MoE router gate
-    # (moe.router.gate) and lm_head (output) are left in bf16.
+    # (moe.router.gate) and lm_head are left in bf16.
     # pad_multiple=128 is required by the CuTeDSL quantization kernel
     # on sm_100 (e.g. B200)
     model_compile_enabled = (
@@ -243,7 +243,7 @@ def deepseek_v3_671b_float8() -> Trainer.Config:
         attn_backend="flex",
         converters=[
             Float8LinearConverter.Config(
-                filter_fqns=["output", "router.gate"],
+                filter_fqns=["lm_head", "router.gate"],
                 model_compile_enabled=model_compile_enabled,
             ),
             Float8GroupedExpertsConverter.Config(

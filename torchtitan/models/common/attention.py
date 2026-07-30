@@ -102,12 +102,14 @@ class VarlenAttention(Module):
         super().__init__()
         self.window_size = config.window_size
 
-        from torchtitan.tools.utils import has_cuda_capability
+        from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
-        # Hopper (SM 9.0) uses FA3
-        if has_cuda_capability(9, 0):
-            if current_flash_attention_impl() != "FA3":
-                activate_flash_attention_impl("FA3")
+        flash_attention_impl = get_cuda_flash_attention_impl()
+        if (
+            flash_attention_impl is not None
+            and current_flash_attention_impl() != flash_attention_impl
+        ):
+            activate_flash_attention_impl(flash_attention_impl)
 
     def forward(
         self,
