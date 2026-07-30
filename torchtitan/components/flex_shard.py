@@ -109,6 +109,18 @@ class _Binding:
         return self.global_shape.numel()
 
 
+@dataclass(frozen=True, slots=True)
+class _StateStorageLayout:
+    global_shape: torch.Size
+    global_stride: tuple[int, ...]
+    local_shape: torch.Size
+    local_stride: tuple[int, ...]
+    dtype: torch.dtype
+    device: torch.device
+    mesh_ranks: tuple[int, ...]
+    placements: tuple[Any, ...]
+
+
 @dataclass(slots=True)
 class _BucketPlan:
     spec: BucketSpec
@@ -223,14 +235,20 @@ def _shard_metadata(
     return tuple(shard_numels), tuple(shard_offsets)
 
 
-def _compute_sharding_requirement(unit: OptimizationUnit) -> Owned:
-    requirement = unit.compute_requirement
+def _compute_sharding_requirement(unit: OptimizationUnit) -> tuple[str, Owned]:
+    if len(unit.compute_requirements) != 1:
+        raise TypeError(
+            "Owned FlexShard currently requires exactly one named compute value"
+        )
+    value_name, requirement = next(iter(unit.compute_requirements.items()))
+    if not isinstance(value_name, str) or not value_name:
+        raise TypeError("FlexShard compute value names must be non-empty strings")
     if not isinstance(requirement, Owned):
         raise TypeError(
             "FlexShard optimization units must require Owned compute, "
             f"got {requirement!r}"
         )
-    return requirement
+    return value_name, requirement
 
 
 def _bind_optimizer_params(
@@ -279,7 +297,7 @@ def _bind_optimizer_params(
                 raise ValueError(f"FlexShard parameter {fqn!r} appears more than once")
             seen_param_ids.add(id(param))
 
-            requirement = _compute_sharding_requirement(unit)
+            _value_name, requirement = _compute_sharding_requirement(unit)
 
             if not isinstance(param, DTensor):
                 raise ValueError(f"Owned FlexShard parameter {fqn!r} must be a DTensor")
@@ -554,13 +572,18 @@ class FlexShardStepExecutor:
         self._comm_context: _OwnedFlexShardCommContext | None = None
         self._ops = ops
         units = tuple(ops.optimization_units(optimizer))
+        self._unit_param_ids = tuple(id(unit.parameter) for unit in units)
         self._units_by_param = {id(unit.parameter): unit for unit in units}
+        self._state_layouts_by_param: dict[
+            int, dict[str, _StateStorageLayout]
+        ] = {}
         self._specs = tuple(bucket_specs)
         if any(spec.mesh.ndim != 1 for spec in self._specs):
             raise ValueError("Owned FlexShard currently requires 1D bucket meshes")
         setup_error = None
         try:
             self._initialize_local(optimizer, units)
+            self._validate_state_layouts(units, initialize_active=False)
         except Exception as error:
             setup_error = error
         self._synchronize_setup_error(setup_error)
@@ -572,9 +595,12 @@ class FlexShardStepExecutor:
         ops: OptimizerStepOps,
     ) -> None:
         units = tuple(ops.optimization_units(optimizer))
+        unit_param_ids = tuple(id(unit.parameter) for unit in units)
+        if unit_param_ids != self._unit_param_ids:
+            if set(unit_param_ids) != set(self._unit_param_ids):
+                raise RuntimeError("FlexShard optimization-unit membership changed")
+            raise RuntimeError("FlexShard optimization-unit order changed")
         units_by_param = {id(unit.parameter): unit for unit in units}
-        if units_by_param.keys() != self._units_by_param.keys():
-            raise RuntimeError("FlexShard optimization-unit membership changed")
         bindings_by_param = {
             id(binding.param): binding for binding in self._bindings
         }
@@ -586,10 +612,57 @@ class FlexShardStepExecutor:
                 or unit.parameter_group
                 is not optimizer.param_groups[binding.group_index]
                 or unit.name != planned_unit.name
-                or unit.compute_requirement != planned_unit.compute_requirement
+                or unit.compute_requirements != planned_unit.compute_requirements
             ):
                 raise RuntimeError("FlexShard optimization-unit plan changed")
         self._units_by_param = units_by_param
+
+    @staticmethod
+    def _state_storage_layout(value: DTensor) -> _StateStorageLayout:
+        local_value = value._local_tensor
+        return _StateStorageLayout(
+            global_shape=torch.Size(value.shape),
+            global_stride=tuple(value.stride()),
+            local_shape=torch.Size(local_value.shape),
+            local_stride=tuple(local_value.stride()),
+            dtype=value.dtype,
+            device=local_value.device,
+            mesh_ranks=_mesh_ranks(value.device_mesh),
+            placements=tuple(value.placements),
+        )
+
+    def _validate_state_layouts(
+        self,
+        units: Sequence[OptimizationUnit],
+        *,
+        initialize_active: bool,
+    ) -> None:
+        for unit in units:
+            layouts = {}
+            for name, value in unit.state.items():
+                if not isinstance(value, torch.Tensor):
+                    continue
+                if not isinstance(value, DTensor):
+                    raise TypeError(
+                        f"Owned FlexShard state {name!r} must be stored as a DTensor"
+                    )
+                layouts[name] = self._state_storage_layout(value)
+
+            param_id = id(unit.parameter)
+            planned = self._state_layouts_by_param.get(param_id)
+            if planned is None:
+                if layouts or (initialize_active and unit.gradient is not None):
+                    self._state_layouts_by_param[param_id] = layouts
+                continue
+            if layouts.keys() != planned.keys():
+                raise RuntimeError(
+                    "FlexShard optimizer-state tensor membership changed"
+                )
+            for name, layout in layouts.items():
+                if layout != planned[name]:
+                    raise RuntimeError(
+                        f"FlexShard optimizer-state storage layout changed for {name!r}"
+                    )
 
     def _initialize_local(
         self,
@@ -741,7 +814,9 @@ class FlexShardStepExecutor:
         compute_input: Tensor,
     ) -> Tensor:
         unit = self._units_by_param[id(binding.param)]
-        result = ops.compute(unit.metadata, compute_input, out=compute_input)
+        value_name, _requirement = _compute_sharding_requirement(unit)
+        values = {value_name: compute_input}
+        result = ops.compute(unit.metadata, values, out=values)
         if result is not None:
             raise TypeError("OptimizerStepOps.compute() must write to out and return None")
         return compute_input
@@ -792,7 +867,8 @@ class FlexShardStepExecutor:
             gradient=grad.to_local(),
             state=local_state,
         )
-        result = ops.prepare(local_unit, out=out)
+        value_name, _requirement = _compute_sharding_requirement(unit)
+        result = ops.prepare(local_unit, out={value_name: out})
         if result is not None:
             raise TypeError("OptimizerStepOps.prepare() must write to out and return None")
         if local_state.keys() != tensor_state.keys() or any(
@@ -988,7 +1064,10 @@ class FlexShardStepExecutor:
                 gradient=grad.to_local(),
                 state=local_state,
             )
-            result = ops.apply_updates(local_unit, local_update)
+            value_name, _requirement = _compute_sharding_requirement(unit)
+            result = ops.apply_updates(
+                local_unit, {value_name: local_update}
+            )
             if result is not None:
                 raise TypeError(
                     "OptimizerStepOps.apply_updates() must return None"
@@ -1130,7 +1209,6 @@ class FlexShardStepExecutor:
     ):
         if ops is not self._ops:
             raise RuntimeError("FlexShard optimizer step operations changed")
-        self._refresh_units(optimizer, ops)
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -1141,6 +1219,10 @@ class FlexShardStepExecutor:
         # precondition, not a per-step control-plane collective.
         context = ops.begin_step(optimizer)
         try:
+            self._refresh_units(optimizer, ops)
+            self._validate_state_layouts(
+                tuple(self._units_by_param.values()), initialize_active=True
+            )
             active_by_param = self._active_params()
             active_plans = [
                 plan

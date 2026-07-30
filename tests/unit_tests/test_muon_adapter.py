@@ -542,10 +542,28 @@ class TestMuonAdapter(DTensorTestBase):
 
     @with_comms
     def test_declares_owned_compute_requirement(self):
-        optimizer, first, _second = self._bucketed_optimizer()
+        optimizer, first, second = self._bucketed_optimizer()
+        first.grad = None
+        second.grad = None
         units = optimizer._step_ops.optimization_units(optimizer)
         self.assertIs(units[0].parameter, first)
-        self.assertEqual(units[0].compute_requirement, Owned(trailing_dims=2))
+        self.assertEqual(
+            units[0].compute_requirements,
+            {"update": Owned(trailing_dims=2)},
+        )
+        self.assertEqual(len(optimizer.state), 0)
+
+        flex_shard(
+            optimizer,
+            bucket_spec=[
+                BucketSpec(
+                    patterns=("layers.*.attention.wq.weight",),
+                    mesh=self.mesh,
+                )
+            ],
+        )
+        self.assertEqual(len(optimizer.state), 0)
+        self.assertEqual(optimizer.state_dict()["state"], {})
 
     def test_rejects_invalid_ns_steps(self):
         with self.assertRaisesRegex(ValueError, "ns_steps"):

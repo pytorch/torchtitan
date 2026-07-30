@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.optim import OptimizationUnit, Optimizer, OptimizerStepOps
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -39,10 +39,12 @@ class _OwnedTestStepOps:
                     OptimizationUnit(
                         parameter=param,
                         parameter_group=group,
-                        state=optimizer.state[param],
+                        state=optimizer.state.get(param, {}),
                         gradient=param.grad,
                         name=name,
-                        compute_requirement=Owned(trailing_dims=2),
+                        compute_requirements={
+                            "update": Owned(trailing_dims=2)
+                        },
                     )
                 )
         return tuple(units)
@@ -58,15 +60,17 @@ class _OwnedTestStepOps:
     def prepare(self, unit, *, out):
         assert unit.gradient is not None
         unit.state["accumulator"].add_(unit.gradient)
-        out.copy_(unit.state["accumulator"])
+        out["update"].copy_(unit.state["accumulator"])
 
     def compute(self, unit_metadata, inputs, *, out):
         # The global mean makes the result depend on correct full-matrix assembly.
-        out.copy_(inputs)
-        out.add_(inputs.mean())
+        out["update"].copy_(inputs["update"])
+        out["update"].add_(inputs["update"].mean())
 
     def apply_updates(self, unit, updates):
-        unit.parameter.add_(updates, alpha=-unit.parameter_group["lr"])
+        unit.parameter.add_(
+            updates["update"], alpha=-unit.parameter_group["lr"]
+        )
 
     def end_step(self, context):
         context._test_end_count = getattr(context, "_test_end_count", 0) + 1
@@ -376,12 +380,14 @@ class TestFlexShard(DTensorTestBase):
 
     @with_comms
     def test_pipeline_prefetches_one_bucket(self):
-        optimizer, params, _full_values, _full_grads = self._owned_optimizer()
+        optimizer, params, _full_values, full_grads = self._owned_optimizer()
         optimizer.param_groups[0]["param_names"] = [
             "layers.0.first.weight",
             "layers.1.second.weight",
             "layers.2.third.weight",
         ]
+        for param in params:
+            param.grad = None
         flex_shard(
             optimizer,
             bucket_spec=[
@@ -419,7 +425,10 @@ class TestFlexShard(DTensorTestBase):
         )
 
         def closure():
+            self.assertTrue(torch.is_grad_enabled())
             hook_events.append("closure")
+            for param, full_grad in zip(params, full_grads, strict=True):
+                param.grad = self._sharded_dtensor(full_grad.clone())
             return 3.0
 
         self.assertEqual(optimizer.step(closure), 3.0)
@@ -498,6 +507,38 @@ class TestFlexShard(DTensorTestBase):
                     "accumulator"
                 ].to_local(),
             )
+
+    @with_comms
+    def test_rejects_optimization_unit_reordering(self):
+        optimizer, _params, _values, _grads = self._owned_optimizer()
+        flex_shard(
+            optimizer,
+            bucket_spec=[
+                BucketSpec(patterns=("layers.0.*",), mesh=self.mesh)
+            ],
+        )
+        optimizer.param_groups[0]["params"].reverse()
+        optimizer.param_groups[0]["param_names"].reverse()
+
+        with self.assertRaisesRegex(RuntimeError, "optimization-unit order changed"):
+            optimizer.step()
+
+    @with_comms
+    def test_rejects_optimizer_state_storage_layout_changes(self):
+        optimizer, params, _values, _grads = self._owned_optimizer()
+        flex_shard(
+            optimizer,
+            bucket_spec=[
+                BucketSpec(patterns=("layers.0.*",), mesh=self.mesh)
+            ],
+        )
+        optimizer.step()
+        optimizer.state[params[0]]["accumulator"] = optimizer.state[params[0]][
+            "accumulator"
+        ].redistribute(placements=(Replicate(),))
+
+        with self.assertRaisesRegex(RuntimeError, "state storage layout changed"):
+            optimizer.step()
 
     @with_comms
     def test_bucket_coverage_and_storage_layout_validation(self):

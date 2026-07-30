@@ -253,8 +253,8 @@ def _set_full_attention_sharding(
 ) -> None:
     """TP sharding for Qwen35Attention (output gating + partial RoPE)."""
     attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={"x": attention_input_layout},
-        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+        in_src_shardings={"x_BLD": attention_input_layout},
+        in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
     )
     # The per-layer rope ``cache`` buffer is a Replicate DTensor; MRoPE builds the
     # position-resolved cache from it (``positions`` stays a plain input).
@@ -316,15 +316,15 @@ def _set_deltanet_sharding(
         out_dst_shardings=_norm_plc,
     )
 
-    # GatedDeltaKernel: local_map converts DTensor q/k/v/g/beta to local
+    # GatedDeltaKernel: local_map converts DTensor q/k/v/g/beta to local.
     _kernel_plc = dense_activation_placement(tp=spmd.S(2))
     deltanet_cfg.kernel.sharding_config = ShardingConfig(
         in_dst_shardings={
-            "q": _kernel_plc,
-            "k": _kernel_plc,
-            "v": _kernel_plc,
-            "g": _kernel_plc,
-            "beta": _kernel_plc,
+            "xq_BLNK": _kernel_plc,
+            "xk_BLNK": _kernel_plc,
+            "xv_BLNV": _kernel_plc,
+            "g_BLN": _kernel_plc,
+            "beta_BLN": _kernel_plc,
         },
         out_src_shardings=_kernel_plc,
         local_map=LocalMapConfig(
@@ -337,7 +337,7 @@ def _set_deltanet_sharding(
             "A_log": dense_param_placement(tp=spmd.S(0)),
             "dt_bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings={"x": attention_input_layout},
-        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+        in_src_shardings={"x_BLD": attention_input_layout},
+        in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
         out_dst_shardings=dense_sequence_parallel_placement(),
     )
