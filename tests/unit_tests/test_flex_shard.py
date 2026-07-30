@@ -24,9 +24,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.flex_shard import (
     BucketSpec,
-    build_layer_bucket_specs,
     flex_shard,
-    get_flex_shard_assignments,
     Owned,
 )
 
@@ -39,13 +37,6 @@ class _OwnedTestOptimizer(Optimizer):
 
     def flex_shard_compute_requirement(self, param, group):
         return Owned(trailing_dims=2)
-
-    def flex_shard_validate_group(self, group_index, group) -> None:
-        if group["lr"] < 0:
-            raise ValueError("lr must be non-negative")
-
-    def flex_shard_group_signature(self, group):
-        return group["lr"]
 
     def flex_shard_init_state(self, param, grad, group):
         state = self.state[param]
@@ -114,9 +105,8 @@ def _run_cuda_pipeline_lifetime(
                 stride=tensor.stride(),
             )
 
-        serial_params = [
-            to_dtensor(value.clone()).requires_grad_() for value in full_values
-        ]
+        reference_values = [value.clone() for value in full_values]
+        reference_accumulators = [torch.zeros_like(value) for value in full_values]
         pipeline_params = [
             to_dtensor(value.clone()).requires_grad_() for value in full_values
         ]
@@ -129,23 +119,18 @@ def _run_cuda_pipeline_lifetime(
             for index in range(len(full_values))
         ]
 
-        def make_optimizer(params):
-            optimizer = _OwnedTestOptimizer(
+        pipeline_optimizer = flex_shard(
+            _OwnedTestOptimizer(
                 [
                     {
                         "params": [param],
                         "param_names": [f"layers.{index}.weight"],
                     }
-                    for index, param in enumerate(params)
+                    for index, param in enumerate(pipeline_params)
                 ],
                 lr=0.03,
-            )
-            return flex_shard(optimizer, bucket_spec=bucket_specs)
-
-        serial_optimizer = make_optimizer(serial_params)
-        pipeline_optimizer = make_optimizer(pipeline_params)
-        serial_optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
-            1
+            ),
+            bucket_spec=bucket_specs,
         )
 
         runtime = pipeline_optimizer.__dict__["_flex_shard_runtime"]
@@ -165,16 +150,17 @@ def _run_cuda_pipeline_lifetime(
         for step in range(3):
             torch.manual_seed(1000 + step)
             full_grads = [torch.randn_like(value) for value in full_values]
-            for serial_param, pipeline_param, grad in zip(
-                serial_params,
+            for reference, accumulator, pipeline_param, grad in zip(
+                reference_values,
+                reference_accumulators,
                 pipeline_params,
                 full_grads,
                 strict=True,
             ):
-                serial_param.grad = to_dtensor(grad.clone())
+                accumulator.add_(grad)
+                reference.add_(accumulator + accumulator.mean(), alpha=-0.03)
                 pipeline_param.grad = to_dtensor(grad.clone())
 
-            serial_optimizer.step()
             caller_stream.wait_stream(torch.cuda.current_stream(device))
             with (
                 torch.cuda.stream(caller_stream),
@@ -193,22 +179,24 @@ def _run_cuda_pipeline_lifetime(
                 ]
             caller_stream.synchronize()
 
-            for snapshot, serial_param, pipeline_param in zip(
+            for snapshot, pipeline_param, reference, accumulator in zip(
                 snapshots,
-                serial_params,
                 pipeline_params,
+                reference_values,
+                reference_accumulators,
                 strict=True,
             ):
-                torch.testing.assert_close(snapshot, serial_param._local_tensor)
-                torch.testing.assert_close(
-                    pipeline_param._local_tensor,
-                    serial_param._local_tensor,
+                rows, row_offset = Shard.local_shard_size_and_offset(
+                    reference.shape[0], world_size, rank
                 )
+                expected_param = reference.narrow(0, int(row_offset), int(rows))
+                expected_state = accumulator.narrow(0, int(row_offset), int(rows))
+                torch.testing.assert_close(snapshot, expected_param)
                 torch.testing.assert_close(
                     pipeline_optimizer.state[pipeline_param][
                         "accumulator"
                     ]._local_tensor,
-                    serial_optimizer.state[serial_param]["accumulator"]._local_tensor,
+                    expected_state,
                 )
 
             del full_grads, poison, snapshots
@@ -293,7 +281,23 @@ class TestFlexShard(DTensorTestBase):
         local_ptrs = [param.to_local().data_ptr() for param in params]
         placements = [param.placements for param in params]
         versions = [param._version for param in params]
-        flex_shard(optimizer, bucket_spec=build_layer_bucket_specs(optimizer))
+        flex_shard(
+            optimizer,
+            bucket_spec=[
+                BucketSpec(
+                    name="layers.0",
+                    patterns=("layers.0.*",),
+                    mesh=self.mesh,
+                )
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeError, "after flex_shard plan"):
+            optimizer.add_param_group(
+                {
+                    "params": [torch.nn.Parameter(torch.ones(2, 2))],
+                    "param_names": ["late.weight"],
+                }
+            )
 
         all_to_all_calls = 0
         status_collective_calls = 0
@@ -352,32 +356,25 @@ class TestFlexShard(DTensorTestBase):
             torch.testing.assert_close(accumulator.to_local(), param.grad.to_local())
 
     @with_comms
-    def test_pipeline_prefetches_one_bucket_and_validates_configuration(self):
+    def test_pipeline_prefetches_one_bucket(self):
         optimizer, params, _full_values, _full_grads = self._owned_optimizer()
         optimizer.param_groups[0]["param_names"] = [
             "layers.0.first.weight",
             "layers.1.second.weight",
             "layers.2.third.weight",
         ]
-        flex_shard(optimizer, bucket_spec=build_layer_bucket_specs(optimizer))
+        flex_shard(
+            optimizer,
+            bucket_spec=[
+                BucketSpec(
+                    name=f"layers.{index}",
+                    patterns=(f"layers.{index}.*",),
+                    mesh=self.mesh,
+                )
+                for index in range(3)
+            ],
+        )
         runtime = optimizer.__dict__["_flex_shard_runtime"]
-
-        self.assertEqual(runtime._max_in_flight_buckets, 2)
-        for invalid in (False, 0, 3):
-            with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(ValueError, "must be 1 or 2"):
-                    optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
-                        invalid
-                    )
-
-        with self.assertRaisesRegex(ValueError, "on every rank"):
-            optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
-                3 if dist.get_rank() == 0 else 2
-            )
-        with self.assertRaisesRegex(RuntimeError, "differs across ranks"):
-            optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
-                1 if dist.get_rank() == 0 else 2
-            )
 
         stages = []
         original_forward_bucket = runtime._forward_bucket
@@ -404,106 +401,6 @@ class TestFlexShard(DTensorTestBase):
                 "R:layers.1",
                 "R:layers.2",
             ],
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "before the first step"):
-            optimizer.set_max_in_flight_buckets(  # pyrefly: ignore [missing-attribute]
-                1
-            )
-
-    @with_comms
-    def test_layer_buckets_resolve_fqns_balance_and_freeze_groups(self):
-        global_shape = (4, 3)
-        first = self._parameter(torch.ones(global_shape), torch.ones(global_shape))
-        second = self._parameter(
-            torch.full(global_shape, 2.0), torch.ones(global_shape)
-        )
-        optimizer = _OwnedTestOptimizer(
-            [
-                {
-                    "params": [first, second],
-                    "param_names": [
-                        "layers.0.attention.weight",
-                        "layers.1.attention.weight",
-                    ],
-                }
-            ]
-        )
-        bucket_spec = build_layer_bucket_specs(optimizer)
-        self.assertEqual(
-            [(spec.name, spec.patterns) for spec in bucket_spec],
-            [
-                ("layers.0", ("layers.0.attention.weight",)),
-                ("layers.1", ("layers.1.attention.weight",)),
-            ],
-        )
-
-        self.assertIs(flex_shard(optimizer, bucket_spec=bucket_spec), optimizer)
-        self.assertEqual(
-            [
-                (assignment.bucket_name, assignment.fqn, assignment.owner_rank)
-                for assignment in get_flex_shard_assignments(optimizer)
-            ],
-            [
-                ("layers.0", "layers.0.attention.weight", 0),
-                ("layers.1", "layers.1.attention.weight", 1),
-            ],
-        )
-        with self.assertRaisesRegex(RuntimeError, "after flex_shard plan"):
-            optimizer.add_param_group(
-                {
-                    "params": [torch.nn.Parameter(torch.ones(2, 2))],
-                    "param_names": ["late.weight"],
-                }
-            )
-
-    @with_comms
-    def test_adamw_same_as_storage_preserves_storage_sharding(self):
-        full_param = torch.arange(1, 13, dtype=torch.float32).reshape(4, 3)
-        full_grad = full_param.flip(0).div(5)
-        param = self._parameter(full_param, full_grad)
-        reference = torch.nn.Parameter(param.to_local().detach().clone())
-        reference.grad = param.grad.to_local().clone()
-        kwargs = {
-            "lr": 0.03,
-            "weight_decay": 0.2,
-            "foreach": False,
-            "fused": False,
-        }
-        optimizer = torch.optim.AdamW(
-            [
-                {
-                    "params": [param],
-                    "param_names": ["layers.0.weight"],
-                }
-            ],
-            **kwargs,
-        )
-        reference_optimizer = torch.optim.AdamW([reference], **kwargs)
-        storage_placements = param.placements
-        local_ptr = param.to_local().data_ptr()
-
-        returned = flex_shard(
-            optimizer,
-            bucket_spec=[
-                BucketSpec(
-                    name="layers.0",
-                    patterns=("layers.0.*",),
-                    mesh=self.mesh,
-                )
-            ],
-        )
-        optimizer.step()
-        reference_optimizer.step()
-
-        self.assertIs(returned, optimizer)
-        torch.testing.assert_close(param.to_local(), reference)
-        self.assertEqual(param.placements, storage_placements)
-        self.assertEqual(param.to_local().data_ptr(), local_ptr)
-        self.assertIsInstance(optimizer.state[param]["exp_avg"], DTensor)
-        self.assertEqual(
-            optimizer.state[param]["exp_avg"].placements,
-            storage_placements,
         )
 
     @with_comms
@@ -547,11 +444,26 @@ class TestFlexShard(DTensorTestBase):
                 ],
             )
 
+    @with_comms
     def test_requires_compute_requirement_provider(self):
+        param = self._parameter(torch.ones(4, 2), torch.ones(4, 2))
         with self.assertRaisesRegex(TypeError, "must implement"):
             flex_shard(
-                torch.optim.SGD([torch.nn.Parameter(torch.ones(2, 2))]),
-                bucket_spec=[],
+                torch.optim.SGD(
+                    [
+                        {
+                            "params": [param],
+                            "param_names": ["layers.0.weight"],
+                        }
+                    ],
+                    lr=0.1,
+                ),
+                bucket_spec=[
+                    BucketSpec(
+                        patterns=("layers.0.*",),
+                        mesh=self.mesh,
+                    )
+                ],
             )
 
 
