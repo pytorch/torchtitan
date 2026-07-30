@@ -12,7 +12,6 @@ import fnmatch
 import hashlib
 import heapq
 import math
-import re
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from types import MethodType, ModuleType
@@ -30,26 +29,14 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "build_layer_bucket_specs",
-    "BucketAssignment",
     "BucketSpec",
-    "ComputeShardingRequirement",
     "FlexShardOptimizer",
     "Owned",
-    "SameAsStorage",
     "flex_shard",
-    "get_flex_shard_assignments",
 ]
 
 
 _OptimizerT = TypeVar("_OptimizerT", bound=Optimizer)
-
-
-class _HasFqn(Protocol):
-    fqn: str
-
-
-_BucketBindingT = TypeVar("_BucketBindingT", bound=_HasFqn)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,24 +60,6 @@ class BucketSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class BucketAssignment:
-    """Resolved compute-bucket information for one optimizer parameter.
-
-    ``owner_rank`` is a global distributed rank when compute is routed to one
-    owner. It is ``None`` when compute preserves the storage sharding.
-    """
-
-    bucket_name: str
-    fqn: str
-    owner_rank: int | None
-
-
-@dataclass(frozen=True, slots=True)
-class SameAsStorage:
-    """Compute directly in each parameter's persistent storage placement."""
-
-
-@dataclass(frozen=True, slots=True)
 class Owned:
     """Place each complete trailing compute block on exactly one mesh rank."""
 
@@ -103,9 +72,6 @@ class Owned:
             or self.trailing_dims <= 0
         ):
             raise ValueError("Owned trailing_dims must be a positive integer")
-
-
-ComputeShardingRequirement = SameAsStorage | Owned
 
 
 class FlexShardOptimizer(Protocol):
@@ -125,20 +91,7 @@ class FlexShardOptimizer(Protocol):
         self,
         param: Tensor,
         group: MutableMapping[str, Any],
-    ) -> ComputeShardingRequirement:
-        ...
-
-    def flex_shard_validate_group(
-        self,
-        group_index: int,
-        group: MutableMapping[str, Any],
-    ) -> None:
-        ...
-
-    def flex_shard_group_signature(
-        self,
-        group: MutableMapping[str, Any],
-    ) -> object:
+    ) -> Owned:
         ...
 
     def flex_shard_init_state(
@@ -178,107 +131,11 @@ class FlexShardOptimizer(Protocol):
         ...
 
 
-class _FlexShardRuntime(Protocol):
-    """Execution plan built and owned by :func:`flex_shard`."""
-
-    @property
-    def assignments(self) -> tuple[BucketAssignment, ...]:
-        ...
-
-
-def get_flex_shard_assignments(
-    optimizer: Optimizer,
-) -> tuple[BucketAssignment, ...]:
-    """Return the resolved compute plan for a flex-sharded optimizer."""
-    runtime = getattr(optimizer, "_flex_shard_runtime", None)
-    return () if runtime is None else runtime.assignments
-
-
-def build_layer_bucket_specs(
-    optimizer: Optimizer,
-    *,
-    mesh: DeviceMesh | None = None,
-) -> tuple[BucketSpec, ...]:
-    """Build one exact-FQN compute bucket per canonical transformer layer."""
-    layer_fqns: dict[str, list[str]] = {}
-    inferred_mesh = mesh
-    for group in optimizer.param_groups:
-        params = group["params"]
-        param_names = group.get("param_names")
-        if param_names is None or len(param_names) != len(params):
-            raise ValueError(
-                "Layer compute buckets require param_names aligned with params"
-            )
-        for fqn, param in zip(param_names, params, strict=True):
-            match = re.match(r"^(.*?layers\.\d+)\.", fqn)
-            if match is None:
-                raise ValueError(
-                    f"Optimizer parameter {fqn!r} is not under a canonical "
-                    "'<prefix>layers.<index>.' FQN"
-                )
-            layer_fqns.setdefault(match.group(1), []).append(fqn)
-            if inferred_mesh is None:
-                if not isinstance(param, DTensor):
-                    raise ValueError(
-                        f"Cannot infer a DeviceMesh from non-DTensor parameter {fqn!r}"
-                    )
-                inferred_mesh = param.device_mesh
-
-    if inferred_mesh is None:
-        raise ValueError("Layer compute buckets require at least one parameter")
-
-    def layer_order(item: tuple[str, list[str]]) -> tuple[str, int]:
-        layer_name = item[0]
-        prefix, index = layer_name.rsplit(".", 1)
-        return prefix, int(index)
-
-    return tuple(
-        BucketSpec(
-            name=layer_name,
-            patterns=tuple(fqns),
-            mesh=inferred_mesh,
-        )
-        for layer_name, fqns in sorted(layer_fqns.items(), key=layer_order)
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _FqnBinding:
-    fqn: str
-
-
-def _bind_optimizer_fqns(optimizer: Optimizer) -> tuple[_FqnBinding, ...]:
-    bindings = []
-    seen_fqns: set[str] = set()
-    seen_param_ids: set[int] = set()
-    for group in optimizer.param_groups:
-        params = group["params"]
-        param_names = group.get("param_names")
-        if param_names is None or len(param_names) != len(params):
-            raise ValueError(
-                "flex_shard parameter groups require param_names aligned with params"
-            )
-        for fqn, param in zip(param_names, params, strict=True):
-            if not isinstance(fqn, str) or not fqn:
-                raise ValueError(f"Invalid optimizer parameter FQN {fqn!r}")
-            if fqn in seen_fqns:
-                raise ValueError(f"Duplicate optimizer parameter FQN {fqn!r}")
-            if id(param) in seen_param_ids:
-                raise ValueError(f"Optimizer parameter {fqn!r} appears more than once")
-            seen_fqns.add(fqn)
-            seen_param_ids.add(id(param))
-            bindings.append(_FqnBinding(fqn))
-    if not bindings:
-        raise ValueError("flex_shard requires at least one optimizer parameter")
-    return tuple(bindings)
-
-
 @dataclass(frozen=True, slots=True)
 class _UnassignedBinding:
     fqn: str
     param: DTensor
     group_index: int
-    requirement: Owned
     global_shape: torch.Size
     global_stride: tuple[int, ...]
     dtype: torch.dtype
@@ -296,7 +153,6 @@ class _Binding:
     fqn: str
     param: DTensor
     group_index: int
-    requirement: Owned
     owner_group_rank: int
     global_shape: torch.Size
     global_stride: tuple[int, ...]
@@ -428,24 +284,34 @@ def _compute_sharding_requirement(
     optimizer: Optimizer,
     param: Tensor,
     group: MutableMapping[str, Any],
-) -> ComputeShardingRequirement:
+) -> Owned:
     provider = getattr(optimizer, "flex_shard_compute_requirement", None)
     if provider is None:
-        # torch.optim.AdamW is pointwise, so its compute placement is exactly
-        # its persistent parameter and state placement.
-        if type(optimizer) is torch.optim.AdamW:
-            return SameAsStorage()
         raise TypeError(
             f"{type(optimizer).__name__} must implement "
             "flex_shard_compute_requirement()"
         )
     requirement = provider(param, group)
-    if not isinstance(requirement, (SameAsStorage, Owned)):
+    if not isinstance(requirement, Owned):
         raise TypeError(
-            "flex_shard_compute_requirement() must return SameAsStorage or Owned, "
+            "flex_shard_compute_requirement() must return Owned, "
             f"got {requirement!r}"
         )
     return requirement
+
+
+def _validate_optimizer_hooks(optimizer: Optimizer) -> None:
+    required_methods = (
+        "flex_shard_init_state",
+        "flex_shard_prepare",
+        "flex_shard_compute",
+        "flex_shard_finalize",
+    )
+    for method_name in required_methods:
+        if not callable(getattr(optimizer, method_name, None)):
+            raise TypeError(
+                f"{type(optimizer).__name__} must implement {method_name}()"
+            )
 
 
 def _bind_optimizer_params(
@@ -476,11 +342,6 @@ def _bind_optimizer_params(
             seen_param_ids.add(id(param))
 
             requirement = _compute_sharding_requirement(optimizer, param, group)
-            if not isinstance(requirement, Owned):
-                raise ValueError(
-                    "Owned FlexShard runtime cannot mix SameAsStorage and Owned "
-                    f"requirements; {fqn!r} declared {requirement!r}"
-                )
 
             if not isinstance(param, DTensor):
                 raise ValueError(f"Owned FlexShard parameter {fqn!r} must be a DTensor")
@@ -554,7 +415,6 @@ def _bind_optimizer_params(
                     fqn=fqn,
                     param=param,
                     group_index=group_index,
-                    requirement=requirement,
                     global_shape=torch.Size(param.shape),
                     global_stride=tuple(param.stride()),
                     dtype=param.dtype,
@@ -570,9 +430,9 @@ def _bind_optimizer_params(
 
 
 def _resolve_buckets(
-    bindings: Sequence[_BucketBindingT],
+    bindings: Sequence[_UnassignedBinding],
     specs: Sequence[BucketSpec],
-) -> list[list[_BucketBindingT]]:
+) -> list[list[_UnassignedBinding]]:
     if not specs:
         raise ValueError("flex_shard requires at least one BucketSpec")
 
@@ -598,32 +458,6 @@ def _resolve_buckets(
             )
         resolved[matches[0]].append(binding)
     return resolved
-
-
-@dataclass(frozen=True, slots=True)
-class _IdentityFlexShardRuntime:
-    """A validated no-op plan for pointwise optimizer compute."""
-
-    assignments: tuple[BucketAssignment, ...]
-
-
-def _build_identity_runtime(
-    optimizer: Optimizer,
-    specs: Sequence[BucketSpec],
-) -> _FlexShardRuntime:
-    resolved = _resolve_buckets(_bind_optimizer_fqns(optimizer), specs)
-    assignments = tuple(
-        BucketAssignment(
-            bucket_name=spec.name or str(bucket_index),
-            fqn=binding.fqn,
-            owner_rank=None,
-        )
-        for bucket_index, (spec, bindings) in enumerate(
-            zip(specs, resolved, strict=True)
-        )
-        for binding in bindings
-    )
-    return _IdentityFlexShardRuntime(assignments)
 
 
 def _assign_balanced_owners(
@@ -774,8 +608,6 @@ class _OwnedFlexShardRuntime:
         if not dist.is_available() or not dist.is_initialized():
             raise RuntimeError("Owned FlexShard requires distributed initialization")
 
-        self._max_in_flight_buckets = 2
-        self._step_started = False
         self._comm_context: _OwnedFlexShardCommContext | None = None
         self._specs = tuple(bucket_specs)
         if any(spec.mesh.ndim != 1 for spec in self._specs):
@@ -786,9 +618,10 @@ class _OwnedFlexShardRuntime:
         except Exception as error:
             setup_error = error
         self._synchronize_setup_error(setup_error)
-        self._validate_plan_across_ranks(optimizer)
+        self._validate_plan_across_ranks()
 
     def _initialize_local(self, optimizer: Optimizer) -> None:
+        _validate_optimizer_hooks(optimizer)
         unassigned = _bind_optimizer_params(optimizer)
         resolved = _resolve_buckets(unassigned, self._specs)
 
@@ -814,7 +647,6 @@ class _OwnedFlexShardRuntime:
         world_size = unassigned[0].param.device_mesh.size()
         owner_maps = _assign_balanced_owners(resolved, world_size)
         plans = []
-        assignments = []
         for index, (spec, unassigned_bindings) in enumerate(
             zip(self._specs, resolved, strict=True)
         ):
@@ -826,7 +658,6 @@ class _OwnedFlexShardRuntime:
                     fqn=binding.fqn,
                     param=binding.param,
                     group_index=binding.group_index,
-                    requirement=binding.requirement,
                     owner_group_rank=owner_map[binding.fqn],
                     global_shape=binding.global_shape,
                     global_stride=binding.global_stride,
@@ -838,54 +669,12 @@ class _OwnedFlexShardRuntime:
                 for binding in sorted(unassigned_bindings, key=lambda item: item.fqn)
             )
             plans.append(_build_bucket_plan(spec, bindings))
-            assignments.extend(
-                BucketAssignment(
-                    bucket_name=spec.name or str(index),
-                    fqn=binding.fqn,
-                    owner_rank=_mesh_ranks(spec.mesh)[binding.owner_group_rank],
-                )
-                for binding in bindings
-            )
 
         self._plans = tuple(plans)
-        self.assignments = tuple(assignments)
         self._bindings = tuple(
             binding for plan in self._plans for binding in plan.bindings
         )
-        self._process_group = self._plans[0].process_group
-        self._world_size = self._plans[0].world_size
         self._tensor_device = self._plans[0].device
-        self._validate_groups(optimizer)
-
-    def set_max_in_flight_buckets(self, value: int) -> None:
-        value_is_valid = (
-            not isinstance(value, bool)
-            and isinstance(value, int)
-            and value in (1, 2)
-        )
-        local_config = torch.tensor(
-            [value if value_is_valid else 0, int(self._step_started)],
-            dtype=torch.int64,
-            device=self._tensor_device,
-        )
-        gathered_configs = [
-            torch.empty_like(local_config) for _ in range(self._world_size)
-        ]
-        dist.all_gather(
-            gathered_configs,
-            local_config,
-            group=self._process_group,
-        )
-        gathered_values = [int(config[0].item()) for config in gathered_configs]
-        if any(gathered_value not in (1, 2) for gathered_value in gathered_values):
-            raise ValueError("max_in_flight_buckets must be 1 or 2 on every rank")
-        if any(bool(config[1].item()) for config in gathered_configs):
-            raise RuntimeError(
-                "set_max_in_flight_buckets() must be called before the first step"
-            )
-        if any(gathered_value != value for gathered_value in gathered_values):
-            raise RuntimeError("max_in_flight_buckets differs across ranks")
-        self._max_in_flight_buckets = value
 
     def _synchronize_setup_error(self, error: Exception | None) -> None:
         if not self._specs:
@@ -910,15 +699,8 @@ class _OwnedFlexShardRuntime:
                 "Owned FlexShard setup failed validation on another rank"
             )
 
-    @staticmethod
-    def _validate_groups(optimizer: Optimizer) -> None:
-        errors = _OwnedFlexShardRuntime._group_validation_errors(optimizer)
-        if errors:
-            raise ValueError(f"Invalid FlexShard optimizer group: {errors[0]}")
-
-    def _validate_plan_across_ranks(self, optimizer: Optimizer) -> None:
-        plan_description = (
-            [
+    def _validate_plan_across_ranks(self) -> None:
+        plan_description = [
                 (
                     plan.spec.name,
                     plan.spec.patterns,
@@ -930,7 +712,6 @@ class _OwnedFlexShardRuntime:
                             binding.global_stride,
                             str(binding.dtype),
                             str(binding.device.type),
-                            binding.requirement,
                             binding.owner_group_rank,
                             binding.shard_numels,
                         )
@@ -962,64 +743,22 @@ class _OwnedFlexShardRuntime:
                     plan.device.type,
                 )
                 for plan in self._plans
-            ],
-            self._group_config_hash(optimizer),
-        )
+            ]
         digest = hashlib.sha256(repr(plan_description).encode("utf-8")).digest()
         plan_hash = int.from_bytes(digest[:7], byteorder="little")
         local_hash = torch.tensor(
             plan_hash, dtype=torch.int64, device=self._tensor_device
         )
         gathered_hashes = [
-            torch.empty_like(local_hash) for _ in range(self._world_size)
+            torch.empty_like(local_hash) for _ in range(self._plans[0].world_size)
         ]
         dist.all_gather(
             gathered_hashes,
             local_hash,
-            group=self._process_group,
+            group=self._plans[0].process_group,
         )
         if any(value.item() != plan_hash for value in gathered_hashes):
             raise RuntimeError("FlexShard plans differ across ranks")
-
-    @staticmethod
-    def _group_validation_errors(optimizer: Optimizer) -> list[str]:
-        errors = []
-        required_methods = (
-            "flex_shard_compute_requirement",
-            "flex_shard_validate_group",
-            "flex_shard_group_signature",
-            "flex_shard_init_state",
-            "flex_shard_prepare",
-            "flex_shard_compute",
-            "flex_shard_finalize",
-        )
-        for method_name in required_methods:
-            if not callable(getattr(optimizer, method_name, None)):
-                errors.append(
-                    f"{type(optimizer).__name__} must implement {method_name}()"
-                )
-        if errors:
-            return errors
-        validator = getattr(optimizer, "flex_shard_validate_group", None)
-        assert validator is not None
-        for group_index, group in enumerate(optimizer.param_groups):
-            try:
-                validator(group_index, group)
-            except Exception as error:
-                errors.append(str(error))
-        return errors
-
-    @staticmethod
-    def _group_config_hash(optimizer: Optimizer) -> int:
-        signature_provider = getattr(optimizer, "flex_shard_group_signature", None)
-        if signature_provider is None:
-            raise TypeError(
-                f"{type(optimizer).__name__} must implement "
-                "flex_shard_group_signature()"
-            )
-        signature = [signature_provider(group) for group in optimizer.param_groups]
-        digest = hashlib.sha256(repr(signature).encode("utf-8")).digest()
-        return int.from_bytes(digest[:7], byteorder="little")
 
     @staticmethod
     def _compute_owned_update(
@@ -1134,21 +873,9 @@ class _OwnedFlexShardRuntime:
         plan: _BucketPlan,
         active_by_param: dict[int, bool],
         *,
-        local_buffer: Tensor | None = None,
-        owner_buffer: Tensor | None = None,
+        local_buffer: Tensor,
+        owner_buffer: Tensor,
     ) -> _BucketWork:
-        if local_buffer is None:
-            local_buffer = torch.empty(
-                plan.local_buffer_numel,
-                dtype=plan.dtype,
-                device=plan.device,
-            )
-        if owner_buffer is None:
-            owner_buffer = torch.empty(
-                plan.owner_buffer_numel,
-                dtype=plan.dtype,
-                device=plan.device,
-            )
         if local_buffer.numel() != plan.local_buffer_numel:
             raise ValueError("FlexShard local buffer has incorrect capacity")
         if owner_buffer.numel() != plan.owner_buffer_numel:
@@ -1283,21 +1010,6 @@ class _OwnedFlexShardRuntime:
                 )
             torch.autograd.graph.increment_version(binding.param)
 
-    def _step_bucket(
-        self,
-        optimizer: Optimizer,
-        plan: _BucketPlan,
-        active_by_param: dict[int, bool],
-    ) -> None:
-        if not any(active_by_param[id(binding.param)] for binding in plan.bindings):
-            return
-
-        work = self._prepare_bucket(optimizer, plan, active_by_param)
-        self._forward_bucket(work)
-        self._compute_bucket(optimizer, work)
-        self._reverse_bucket(work)
-        self._finalize_bucket(optimizer, work)
-
     def _begin_pipelined_bucket(
         self,
         optimizer: Optimizer,
@@ -1423,8 +1135,6 @@ class _OwnedFlexShardRuntime:
             with torch.enable_grad():
                 loss = closure()
 
-        self._step_started = True
-
         # TorchTitan executes one SPMD graph and optimizer configuration on all
         # ranks. Rank-identical gradient presence is therefore a runtime
         # precondition, not a per-step control-plane collective.
@@ -1436,11 +1146,7 @@ class _OwnedFlexShardRuntime:
                 active_by_param[id(binding.param)] for binding in plan.bindings
             )
         ]
-        if self._max_in_flight_buckets == 1:
-            for plan in active_plans:
-                self._step_bucket(optimizer, plan, active_by_param)
-        else:
-            self._pipelined_step(optimizer, active_plans, active_by_param)
+        self._pipelined_step(optimizer, active_plans, active_by_param)
         return loss
 
 
@@ -1459,18 +1165,6 @@ def _reject_flex_shard_param_group(
         f"{type(optimizer).__name__} cannot add parameter groups after "
         "flex_shard plan construction"
     )
-
-
-def _set_max_in_flight_buckets(
-    optimizer: Optimizer,
-    value: int,
-) -> None:
-    runtime = optimizer.__dict__["_flex_shard_runtime"]
-    if not isinstance(runtime, _OwnedFlexShardRuntime):
-        raise RuntimeError(
-            "set_max_in_flight_buckets() requires an Owned FlexShard runtime"
-        )
-    runtime.set_max_in_flight_buckets(value)
 
 
 def flex_shard(
@@ -1497,32 +1191,12 @@ def flex_shard(
     if not all(isinstance(spec, BucketSpec) for spec in specs):
         raise TypeError("bucket_spec must contain only BucketSpec objects")
 
-    requirements = tuple(
-        _compute_sharding_requirement(optimizer, param, group)
-        for group in optimizer.param_groups
-        for param in group["params"]
-    )
-    if not requirements:
-        raise ValueError("flex_shard requires at least one optimizer parameter")
-    if all(isinstance(requirement, SameAsStorage) for requirement in requirements):
-        runtime = _build_identity_runtime(optimizer, specs)
-    elif all(isinstance(requirement, Owned) for requirement in requirements):
-        runtime = _OwnedFlexShardRuntime(optimizer, specs)
-    else:
-        raise ValueError(
-            "One flex_shard optimizer cannot mix SameAsStorage and Owned "
-            "compute requirements"
-        )
+    runtime = _OwnedFlexShardRuntime(optimizer, specs)
     optimizer.__dict__["_flex_shard_runtime"] = runtime
     optimizer.add_param_group = MethodType(  # type: ignore[method-assign]
         _reject_flex_shard_param_group,
         optimizer,
     )
-    if isinstance(runtime, _OwnedFlexShardRuntime):
-        step = Optimizer.profile_hook_step(_run_owned_flex_shard_step)
-        optimizer.step = MethodType(step, optimizer)  # type: ignore[method-assign]
-        optimizer.set_max_in_flight_buckets = MethodType(  # type: ignore[attr-defined]
-            _set_max_in_flight_buckets,
-            optimizer,
-        )
+    step = Optimizer.profile_hook_step(_run_owned_flex_shard_step)
+    optimizer.step = MethodType(step, optimizer)  # type: ignore[method-assign]
     return optimizer
