@@ -1,8 +1,8 @@
 # Kimi K3
 
-This directory contains the first TorchTitan implementation of Kimi K3. The
-initial scope is a topology-complete, reduced model for single-device training
-and numerical comparison with the
+This directory contains the eager numerical reference implementation of Kimi
+K3 in TorchTitan. The initial scope is a topology-complete, reduced model for
+single-device or FSDP2 training and numerical comparison with the
 [released HuggingFace implementation](https://huggingface.co/moonshotai/Kimi-K3).
 
 The implementation is device-neutral. It uses PyTorch operators and does not
@@ -13,6 +13,13 @@ inspectable model math over throughput.
 
 ```bash
 NGPU=1 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel ./run_train.sh
+```
+
+Run the same eager model with two-way FSDP2:
+
+```bash
+NGPU=2 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel ./run_train.sh \
+  --parallelism.data_parallel_shard_degree 2
 ```
 
 The multimodal data path requires `torchvision`.
@@ -58,7 +65,8 @@ The reference path mirrors the released implementation in these areas:
 - Vision features scattered into runs of media placeholder tokens.
 
 `KimiKDAKernel` is the optimization boundary. A future accelerated backend
-should preserve its input/output contract and checkpoint schema.
+should preserve its input/output contract and checkpoint schema. FSDP2 only
+shards parameters and leaves this eager forward contract unchanged.
 
 ## Checkpoint conversion
 
@@ -85,14 +93,17 @@ The CPU unit tests cover:
 - the KDA kernel against a direct recurrent formulation, including backward;
 - a small text+image model forward and backward;
 - exhaustive state-dict round-trip for that small model.
+- single-rank FSDP2 forward and per-parameter gradient parity with a manually
+  cast BF16 reference.
 
 ```bash
 pytest -q tests/unit_tests/test_kimi_k3.py
+pytest -q tests/unit_tests/test_kimi_k3_fsdp.py
 ```
 
 ## First-version limitations
 
-- Single device only; DP, FSDP/HSDP, TP, PP, CP, and EP are rejected.
+- FSDP2 data parallelism is supported; HSDP, TP, PP, CP, and EP are rejected.
 - No packed documents, activation checkpointing, `torch.compile`, or CPU
   offload.
 - Image inputs are supported; video inputs are rejected.
@@ -102,5 +113,5 @@ pytest -q tests/unit_tests/test_kimi_k3.py
 - No full 2.8T flavor.
 
 These restrictions are explicit so unsupported runtime settings fail instead
-of being silently ignored. Optimized kernels and distributed parallelism can be
-added in follow-up changes after the reference forward is numerically locked.
+of being silently ignored. EP and optimized kernels can be added in follow-up
+changes after the eager/FSDP2 reference forward is numerically locked.

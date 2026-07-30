@@ -22,7 +22,7 @@ from . import KIMI_K3_SPECIAL_TOKENS, model_registry
 
 
 def kimi_k3_debugmodel() -> Trainer.Config:
-    """Return the single-device, topology-complete Kimi K3 debug config."""
+    """Return the topology-complete Kimi K3 eager/FSDP2 debug config."""
     model_spec = model_registry("debugmodel")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -58,7 +58,7 @@ def kimi_k3_debugmodel() -> Trainer.Config:
         ),
         training=TrainingConfig(
             local_batch_size=1,
-            seq_len=128,
+            seq_len=256,
             steps=10,
             dtype="bfloat16",
         ),

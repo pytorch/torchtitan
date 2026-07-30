@@ -433,8 +433,27 @@ class KimiMoERouter(Module):
         return expert_ids_BLK, weights_BLK * self.route_scale
 
 
+class KimiRoutedExperts(ModuleList):
+    """List-backed experts implementing TorchTitan's FSDP expert protocol.
+
+    Kimi K3 keeps one module per expert so the eager implementation and
+    HuggingFace state-dict mapping stay directly inspectable.  The shared FSDP
+    wrapper discovers routed expert parameters through ``inner_experts`` and
+    ``num_experts``; exposing those properties here lets it shard this
+    list-backed layout without changing parameter names or forward math.
+    """
+
+    @property
+    def inner_experts(self) -> "KimiRoutedExperts":
+        return self
+
+    @property
+    def num_experts(self) -> int:
+        return len(self)
+
+
 class KimiLatentMoE(Module):
-    """Single-device trainable implementation of Kimi K3 latent MoE."""
+    """Eager trainable implementation of Kimi K3 latent MoE."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -456,7 +475,7 @@ class KimiLatentMoE(Module):
         self.num_experts = config.num_experts
         self.router = config.router.build()
         self.routed_down = config.routed_down.build()
-        self.routed_experts = ModuleList(
+        self.routed_experts = KimiRoutedExperts(
             [expert.build() for expert in config.routed_experts]
         )
         self.routed_norm = config.routed_norm.build()
@@ -669,7 +688,7 @@ class KimiK3Model(Decoder):
             enabled = [name for name, degree in unsupported.items() if degree > 1]
             if enabled:
                 raise NotImplementedError(
-                    "Kimi K3 v1 supports single-device execution only; "
+                    "Kimi K3 eager reference supports FSDP2 data parallelism only; "
                     f"disable {', '.join(enabled)}."
                 )
             dataloader = getattr(config, "dataloader", None)
