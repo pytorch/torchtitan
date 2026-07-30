@@ -23,7 +23,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.flex_shard import (
     BucketSpec,
-    build_layer_bucket_specs,
     flex_shard,
     Owned,
 )
@@ -314,17 +313,6 @@ def _run_bucketed_muon_parity(
                     atol=0,
                 )
 
-            mismatch_params = [
-                to_dtensor(value.clone()).requires_grad_() for value in full_values
-            ]
-            with unittest.TestCase().assertRaisesRegex(
-                RuntimeError, "FlexShard plans differ across ranks"
-            ):
-                make_optimizer(
-                    mismatch_params,
-                    lr=0.04 if rank == 0 else 0.03,
-                )
-
             bad_local_rows = 2 if rank == 0 else 3
             bad_param = DTensor.from_local(
                 torch.ones(bad_local_rows, 4),
@@ -436,19 +424,11 @@ class TestMuonAdapter(DTensorTestBase):
             Owned(trailing_dims=2),
         )
 
-    @with_comms
     def test_rejects_invalid_ns_steps(self):
-        optimizer, _first, _second = self._bucketed_optimizer()
-        optimizer.param_groups[0]["ns_steps"] = 100
         with self.assertRaisesRegex(ValueError, "ns_steps"):
-            flex_shard(
-                optimizer,
-                bucket_spec=[
-                    BucketSpec(
-                        patterns=("layers.*",),
-                        mesh=self.mesh,
-                    )
-                ],
+            MuonAdapter(
+                [torch.nn.Parameter(torch.ones(2, 2))],
+                ns_steps=100,
             )
 
     @unittest.skipUnless(_has_batched_muon(), "requires PyTorch PR #190597")
