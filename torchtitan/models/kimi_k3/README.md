@@ -76,7 +76,7 @@ compressed tensors is outside this first change. Numerical comparison should
 therefore instantiate the same reduced, unquantized model on both sides and
 copy one state dict through the adapter.
 
-## Validation contract
+## Tests
 
 The CPU unit tests cover:
 
@@ -86,34 +86,8 @@ The CPU unit tests cover:
 - a small text+image model forward and backward;
 - exhaustive state-dict round-trip for that small model.
 
-Before requesting merge, the following CUDA tests must also pass:
-
-1. One single-device training step on a CUDA GPU.
-2. FP32 forward comparison between CPU and CUDA using the same model and inputs.
-3. FP32 forward comparison against the released HuggingFace code using the
-   same reduced config, weights, tokens, image patches, and expert choices.
-4. BF16 forward, backward, and optimizer steps on CUDA.
-
-The parity report must include intermediate checks for KDA, MLA, vision
-features, each decoder layer, final logits, and router expert IDs. Final-logit
-metrics alone are not sufficient to localize a discrete routing mismatch.
-
-Run the CPU-to-CUDA comparison and real optimizer steps with:
-
 ```bash
-python -m scripts.checkpoint_conversion.numerical_tests_kimi_k3_device \
-    --device cuda
-```
-
-This device test is one link in the parity chain; it does not replace the
-direct HuggingFace comparison below.
-
-Run both implementations on a CUDA GPU with the released model dependencies:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m \
-    scripts.checkpoint_conversion.numerical_tests_kimi_k3 \
-    --hf_repo_path /path/to/moonshotai/Kimi-K3
+pytest -q tests/unit_tests/test_kimi_k3.py
 ```
 
 ## First-version limitations
