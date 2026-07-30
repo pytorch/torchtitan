@@ -183,8 +183,7 @@ class _RecurrentFwdChunkBwd(torch.autograd.Function):
         q, k, v, g, beta = ctx.saved_tensors
         with torch.enable_grad():
             inputs = [
-                tensor.detach().requires_grad_(True)
-                for tensor in (q, k, v, g, beta)
+                tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
             ]
             output = _fla_chunk_gated_delta_rule(
                 inputs[0],
@@ -337,9 +336,7 @@ class GatedDeltaNetCore(Module):
     ) -> torch.Tensor:
         """Run convolution and recurrence on rank-local head shards."""
         batch_size, seq_len, conv_dim = mixed_qkv_BLC.shape
-        local_key_dim = (
-            conv_dim * self.key_dim // (2 * self.key_dim + self.value_dim)
-        )
+        local_key_dim = conv_dim * self.key_dim // (2 * self.key_dim + self.value_dim)
 
         if cu_seqlens_host is not None:
             num_tokens = batch_size * seq_len
@@ -358,9 +355,9 @@ class GatedDeltaNetCore(Module):
             query_1TNK = conv_output_1TC[..., :local_key_dim].reshape(
                 1, num_tokens, -1, self.key_head_dim
             )
-            key_1TNK = conv_output_1TC[
-                ..., local_key_dim : 2 * local_key_dim
-            ].reshape(1, num_tokens, -1, self.key_head_dim)
+            key_1TNK = conv_output_1TC[..., local_key_dim : 2 * local_key_dim].reshape(
+                1, num_tokens, -1, self.key_head_dim
+            )
             value_1TNV = conv_output_1TC[..., 2 * local_key_dim :].reshape(
                 1, num_tokens, -1, self.value_head_dim
             )
@@ -368,9 +365,7 @@ class GatedDeltaNetCore(Module):
                 -torch.exp(A_log_N.float())
                 * F.softplus(a_BLN.reshape(num_tokens, -1).float() + dt_bias_N)
             ).unsqueeze(0)
-            update_gate_1TN = torch.sigmoid(
-                b_BLN.reshape(num_tokens, -1)
-            ).unsqueeze(0)
+            update_gate_1TN = torch.sigmoid(b_BLN.reshape(num_tokens, -1)).unsqueeze(0)
             output_1TNV = self.kernel(
                 query_1TNK,
                 key_1TNK,
@@ -380,9 +375,7 @@ class GatedDeltaNetCore(Module):
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
             )
-            return output_1TNV.reshape(
-                batch_size, seq_len, -1, self.value_head_dim
-            )
+            return output_1TNV.reshape(batch_size, seq_len, -1, self.value_head_dim)
 
         # Dense unpacked training path. Each batch row owns an independent state.
         conv_input_BCL = F.pad(
@@ -400,15 +393,13 @@ class GatedDeltaNetCore(Module):
         query_BLNK = conv_output_BLC[..., :local_key_dim].reshape(
             batch_size, seq_len, -1, self.key_head_dim
         )
-        key_BLNK = conv_output_BLC[
-            ..., local_key_dim : 2 * local_key_dim
-        ].reshape(batch_size, seq_len, -1, self.key_head_dim)
+        key_BLNK = conv_output_BLC[..., local_key_dim : 2 * local_key_dim].reshape(
+            batch_size, seq_len, -1, self.key_head_dim
+        )
         value_BLNV = conv_output_BLC[..., 2 * local_key_dim :].reshape(
             batch_size, seq_len, -1, self.value_head_dim
         )
-        decay_BLN = -torch.exp(A_log_N.float()) * F.softplus(
-            a_BLN.float() + dt_bias_N
-        )
+        decay_BLN = -torch.exp(A_log_N.float()) * F.softplus(a_BLN.float() + dt_bias_N)
         update_gate_BLN = torch.sigmoid(b_BLN)
         output_BLNV = self.kernel(
             query_BLNK,
@@ -417,9 +408,7 @@ class GatedDeltaNetCore(Module):
             decay_BLN,
             update_gate_BLN,
         )
-        return output_BLNV.reshape(
-            batch_size, seq_len, -1, self.value_head_dim
-        )
+        return output_BLNV.reshape(batch_size, seq_len, -1, self.value_head_dim)
 
 
 class GatedDeltaNet(Module):
@@ -480,6 +469,7 @@ class GatedDeltaNet(Module):
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
 
+        self.n_value_heads = n_value_heads
         self.key_dim = config.in_proj_q.out_features
         self.value_dim = value_dim
         # The dense training core is replaced by a paged-cache core inside
@@ -553,9 +543,7 @@ class GatedDeltaNet(Module):
                 device=x_BLD.device,
             )
             if is_in_batch_invariant_mode():
-                cu_seqlens_host = tuple(
-                    range(0, (batch_size + 1) * seq_len, seq_len)
-                )
+                cu_seqlens_host = tuple(range(0, (batch_size + 1) * seq_len, seq_len))
 
         query_BLC = self.in_proj_q(x_BLD)
         key_BLC = self.in_proj_k(x_BLD)
@@ -584,9 +572,7 @@ class GatedDeltaNet(Module):
                 value_BLC,
             )
         else:
-            mixed_qkv_BLC = torch.cat(
-                [query_BLC, key_BLC, value_BLC], dim=-1
-            )
+            mixed_qkv_BLC = torch.cat([query_BLC, key_BLC, value_BLC], dim=-1)
 
         gate_BLC = self.in_proj_z(x_BLD)
         a_BLN = self.in_proj_a(x_BLD)
@@ -609,9 +595,7 @@ class GatedDeltaNet(Module):
             cu_seqlens,
             cu_seqlens_host=cu_seqlens_host,
         )
-        gate_BLNV = gate_BLC.reshape(
-            batch_size, seq_len, -1, self.value_head_dim
-        )
+        gate_BLNV = gate_BLC.reshape(batch_size, seq_len, -1, self.value_head_dim)
         output_BLNV = self.norm(output_BLNV, gate_BLNV)
         out_BLD = output_BLNV.reshape(batch_size, seq_len, -1)
         return self.out_proj(out_BLD)
@@ -965,7 +949,7 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
-        special_tokens: dict[str, int],
+        special_tokens: dict[str, int] | None,
     ) -> torch.Tensor:
         """Embed tokens, run vision encoder, scatter vision into text.
 
@@ -980,18 +964,19 @@ class Qwen35Model(Decoder):
         Returns:
             (batch, seq_len, dim) embeddings with vision tokens scattered in
         """
-        image_token_id = special_tokens["image_id"]
-        video_token_id = special_tokens["video_id"]
-
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
 
         if pixel_values is not None and grid_thw is not None:
+            if special_tokens is None:
+                raise ValueError("special_tokens is required for image inputs")
             vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
-            image_positions = get_vision_positions(tokens, num_tokens, image_token_id)
+            image_positions = get_vision_positions(
+                tokens, num_tokens, special_tokens["image_id"]
+            )
             if image_positions:
                 inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
@@ -1000,10 +985,14 @@ class Qwen35Model(Decoder):
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
+            if special_tokens is None:
+                raise ValueError("special_tokens is required for video inputs")
             vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )
-            video_positions = get_vision_positions(tokens, num_tokens, video_token_id)
+            video_positions = get_vision_positions(
+                tokens, num_tokens, special_tokens["video_id"]
+            )
             if video_positions:
                 inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
@@ -1033,7 +1022,7 @@ class Qwen35Model(Decoder):
                 pixel_values_videos=pixel_values_videos,
                 grid_thw=grid_thw,
                 grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                special_tokens=special_tokens,
             )
         else:
             x = tokens
