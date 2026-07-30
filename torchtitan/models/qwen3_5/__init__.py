@@ -73,6 +73,7 @@ _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
     "bias": nn.init.zeros_,
 }
+_LAYER_NORM_INIT = {"weight": nn.init.ones_, "bias": nn.init.zeros_}
 _OFFSET_NORM_INIT = {"weight": nn.init.zeros_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _POS_EMBED_INIT = {"pos_embed": partial(nn.init.trunc_normal_, mean=0.0, std=0.02)}
@@ -157,7 +158,11 @@ def _qwen35_vision_encoder_config(
     patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
     merged_hidden_size = dim * (spatial_merge_size**2)
     head_dim = dim // num_heads
-    _norm = LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps)
+    _norm = LayerNorm.Config(
+        normalized_shape=dim,
+        eps=layer_norm_eps,
+        param_init=_LAYER_NORM_INIT,
+    )
     return Qwen35VisionEncoder.Config(
         dim=dim,
         num_layers=num_layers,
@@ -190,7 +195,11 @@ def _qwen35_vision_encoder_config(
         merger=PatchMerger.Config(
             spatial_merge_size=spatial_merge_size,
             merged_hidden_size=merged_hidden_size,
-            norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
+            norm=LayerNorm.Config(
+                normalized_shape=dim,
+                eps=layer_norm_eps,
+                param_init=_LAYER_NORM_INIT,
+            ),
             fc1=_linear(merged_hidden_size, merged_hidden_size),
             fc2=_linear(merged_hidden_size, out_hidden_size),
         ),
