@@ -56,6 +56,10 @@ class MuonAdapter(torch.optim.Muon):
                 "Configure implementation='for-loop' or explicitly disable both "
                 "options in each Muon parameter group."
             )
+        self._validate_group_options(
+            len(self.param_groups),
+            {**self.defaults, **param_group},
+        )
         super().add_param_group(param_group)
 
     @staticmethod
@@ -164,7 +168,7 @@ class MuonAdapter(torch.optim.Muon):
         return Owned(trailing_dims=2)
 
     @staticmethod
-    def flex_shard_validate_group(
+    def _validate_group_options(
         group_index: int,
         group: MutableMapping,
     ) -> None:
@@ -226,27 +230,6 @@ class MuonAdapter(torch.optim.Muon):
                 f"group {group_index} has unsupported adjust_lr_fn "
                 f"{group['adjust_lr_fn']!r}"
             )
-
-    @staticmethod
-    def flex_shard_group_signature(group: MutableMapping) -> object:
-        def signature_value(value):
-            if isinstance(value, torch.Tensor):
-                if value.numel() != 1:
-                    return ("invalid_tensor", tuple(value.shape))
-                return ("tensor", value.detach().item())
-            return value
-
-        return (
-            signature_value(group["lr"]),
-            signature_value(group["weight_decay"]),
-            signature_value(group["momentum"]),
-            group["nesterov"],
-            group["ns_coefficients"],
-            group["eps"],
-            group["ns_steps"],
-            group["adjust_lr_fn"],
-            group.get("matrix_shape"),
-        )
 
     def flex_shard_init_state(
         self,
@@ -320,8 +303,13 @@ class MuonAdapter(torch.optim.Muon):
         else:
             torch.add(update, param, alpha=decay, out=out)
 
-    def _validate_group(self, group: MutableMapping) -> None:
+    def _validate_group(
+        self,
+        group_index: int,
+        group: MutableMapping,
+    ) -> None:
         """Reject deterministic input errors before opening mutable views."""
+        self._validate_group_options(group_index, group)
         matrix_shape = group.get("matrix_shape")
         for persistent_param in group["params"]:
             persistent_grad = persistent_param.grad
@@ -442,8 +430,8 @@ class MuonAdapter(torch.optim.Muon):
             with torch.enable_grad():
                 loss = closure()
 
-        for group in self.param_groups:
-            self._validate_group(group)
+        for group_index, group in enumerate(self.param_groups):
+            self._validate_group(group_index, group)
 
         for group in self.param_groups:
             # Scope gathered parameter/gradient/state buffers to one group so a

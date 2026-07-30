@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
+
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.flex_shard import build_layer_bucket_specs, flex_shard
+from torchtitan.components.flex_shard import BucketSpec, flex_shard
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -41,6 +43,37 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
         config.override.imports.append(override)
 
 
+def _build_layer_muon_bucket_specs(
+    optimizer: MuonAdapter,
+    mesh,
+) -> tuple[BucketSpec, ...]:
+    layer_fqns: dict[str, list[str]] = {}
+    for group in optimizer.param_groups:
+        params = group["params"]
+        param_names = group.get("param_names")
+        if param_names is None or len(param_names) != len(params):
+            raise ValueError(
+                "Layer Muon buckets require param_names aligned with params"
+            )
+        for fqn in param_names:
+            match = re.match(r"^(.*?layers\.\d+)\.", fqn)
+            if match is None:
+                raise ValueError(
+                    f"Muon parameter {fqn!r} is not under a canonical "
+                    "'<prefix>layers.<index>.' FQN"
+                )
+            layer_fqns.setdefault(match.group(1), []).append(fqn)
+
+    def layer_order(item: tuple[str, list[str]]) -> tuple[str, int]:
+        prefix, index = item[0].rsplit(".", 1)
+        return prefix, int(index)
+
+    return tuple(
+        BucketSpec(name=layer, patterns=tuple(fqns), mesh=mesh)
+        for layer, fqns in sorted(layer_fqns.items(), key=layer_order)
+    )
+
+
 def _register_moe_load_balancing_and_flex_shard(
     optimizers,
     model_parts,
@@ -64,9 +97,9 @@ def _register_moe_load_balancing_and_flex_shard(
         if isinstance(optimizer, MuonAdapter):
             flex_shard(
                 optimizer,
-                bucket_spec=build_layer_bucket_specs(
+                bucket_spec=_build_layer_muon_bucket_specs(
                     optimizer,
-                    mesh=fsdp_mesh,
+                    fsdp_mesh,
                 ),
             )
 
