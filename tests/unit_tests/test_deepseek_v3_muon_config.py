@@ -263,6 +263,7 @@ class TestDeepSeekV3MuonConfig(unittest.TestCase):
         )
         parallel_dims.get_mesh.assert_called_once_with("fsdp")
         apply_flex_shard.assert_called_once()
+        apply_flex_shard.return_value.set_max_in_flight_buckets.assert_not_called()
         flex_shard_optimizer = apply_flex_shard.call_args.args[0]
         bucket_specs = apply_flex_shard.call_args.kwargs["bucket_spec"]
         self.assertIs(flex_shard_optimizer, muon)
