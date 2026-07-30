@@ -142,9 +142,6 @@ def annotate_input_spmd_types(
 
     Hardcodes the standard decoder convention: inputs and positions are
     ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
-    Qwen3.5 multimodal payload tensors are irregular across DP shards and
-    invariant across TP ranks; multimodal compute should handle them in local
-    SPMD regions. Qwen3.5 does not support CP.
     Analogous to ``full_dtensor.parallelize_inputs()`` but for the
     ``spmd_types`` path.
     """
@@ -160,26 +157,15 @@ def annotate_input_spmd_types(
         MeshAxisName.CP: spmd.S(1),
         MeshAxisName.TP: spmd.I,
     }
-    multimodal_type = {
-        MeshAxisName.DP: spmd.V,
-        MeshAxisName.TP: spmd.I,
-    }
 
     mesh = parallel_dims.spmd_dense_mesh()
     with set_current_spmd_mesh(mesh):
         spmd.assert_type(inputs, token_type)
         spmd.assert_type(labels, label_type)
-        for name in ("positions", "mrope_positions"):
-            if name in extra_kwargs and isinstance(extra_kwargs[name], torch.Tensor):
-                spmd.assert_type(extra_kwargs[name], token_type)
-        for name in (
-            "pixel_values",
-            "pixel_values_videos",
-            "grid_thw",
-            "grid_thw_videos",
+        if "positions" in extra_kwargs and isinstance(
+            extra_kwargs["positions"], torch.Tensor
         ):
-            if name in extra_kwargs and isinstance(extra_kwargs[name], torch.Tensor):
-                spmd.assert_type(extra_kwargs[name], multimodal_type)
+            spmd.assert_type(extra_kwargs["positions"], token_type)
     return inputs, labels, extra_kwargs
 
 
@@ -246,6 +232,17 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
                 f"axes ({sorted(axis.value for axis in changed_axes)}). "
                 "spmd_redistribute_per_axis only supports one single-axis "
                 "redistribution."
+            )
+        if changed_axes and (
+            src_types[changed_axes[0]] is spmd.V
+            or dst_types[changed_axes[0]] is spmd.V
+        ):
+            axis = changed_axes[0]
+            raise ValueError(
+                f"{name}: SpmdLayout-based redistribution changes mesh axis "
+                f"{axis.value!r} with spmd.V as the source or destination type. "
+                "Config-based redistribution requires non-V types; write an "
+                "explicit collective when the value semantics are unclear."
             )
 
         # 2) If neither has PartitionSpec, comparing per_axis_spmd_types() is sufficient.

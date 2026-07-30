@@ -12,11 +12,14 @@ from typing import Literal
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from fla.modules.conv.triton.ops import CausalConv1dFunction
 
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
 )
+from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction
+from fla.ops.gated_delta_rule.fused_recurrent import FusedRecurrentFunction
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
@@ -31,16 +34,33 @@ from torchtitan.models.common.attention import (
     VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.multimodal import (
+    get_vision_positions,
+    scatter_vision_embeds,
+)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 from .rope import MRoPE
-from .sharding import set_qwen35_sharding_config
+from .sharding import annotate_multimodal_input_spmd_types, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
 
+spmd.register_local_autograd_function(ChunkGatedDeltaRuleFunction)
+spmd.register_local_autograd_function(FusedRecurrentFunction)
+spmd.register_local_autograd_function(CausalConv1dFunction)
 
+
+@spmd.local_map(
+    in_types=(
+        {"dp": spmd.S(0), "tp": spmd.S(2)},
+        {"dp": spmd.R, "tp": spmd.S(0)},
+        {"dp": spmd.V, "tp": spmd.R},
+        {"dp": spmd.V, "tp": spmd.R},
+    ),
+    out_types={"dp": spmd.S(0), "tp": spmd.S(2)},
+)
 def _causal_conv1d_varlen(
     x_BTD: torch.Tensor,
     weight: torch.Tensor,
@@ -169,40 +189,36 @@ class GatedDeltaKernel(Module):
                 f"batch size 1, got batch size {xq_BLNK.shape[0]}."
             )
 
-        with spmd.no_typecheck():
-            # FLA kernels call third-party custom autograd functions; typechecking
-            # resumes at this module's ShardingConfig output annotation.
-            if self.backend == "fla_chunked":
-                if cu_seqlens is not None and cu_seqlens_cpu is None:
-                    raise ValueError(
-                        "Qwen3.5 FLA varlen DeltaNet requires a CPU "
-                        "cu_seqlens tensor."
-                    )
-                result = _fla_chunk_gated_delta_rule(
-                    xq_BLNK,
-                    xk_BLNK,
-                    xv_BLNV,
-                    g_BLN,
-                    beta_BLN,
-                    use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=cu_seqlens,
-                    cu_seqlens_cpu=cu_seqlens_cpu,
-                )
-            elif self.backend == "fla_fused_recurrent":
-                result = _fla_fused_recurrent_gated_delta_rule(
-                    xq_BLNK,
-                    xk_BLNK,
-                    xv_BLNV,
-                    g_BLN,
-                    beta=beta_BLN,
-                    use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=cu_seqlens,
-                )
-            else:
+        if self.backend == "fla_chunked":
+            if cu_seqlens is not None and cu_seqlens_cpu is None:
                 raise ValueError(
-                    f"Unknown fla_backend '{self.backend}'. "
-                    "Valid: 'fla_chunked', 'fla_fused_recurrent'."
+                    "Qwen3.5 FLA varlen DeltaNet requires a CPU cu_seqlens tensor."
                 )
+            result = _fla_chunk_gated_delta_rule(
+                xq_BLNK,
+                xk_BLNK,
+                xv_BLNV,
+                g_BLN,
+                beta_BLN,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
+        elif self.backend == "fla_fused_recurrent":
+            result = _fla_fused_recurrent_gated_delta_rule(
+                xq_BLNK,
+                xk_BLNK,
+                xv_BLNV,
+                g_BLN,
+                beta=beta_BLN,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+            )
+        else:
+            raise ValueError(
+                f"Unknown fla_backend '{self.backend}'. "
+                "Valid: 'fla_chunked', 'fla_fused_recurrent'."
+            )
 
         # FLA kernels return (output, final_state); we only need output
         return result[0]
@@ -328,13 +344,12 @@ class GatedDeltaNet(Module):
 
                 return self._local_map_conv(x_BLD, conv, _conv_varlen, cu_seqlens)
             if get_spmd_backend() == "spmd_types":
-                with spmd.no_typecheck():
-                    return _causal_conv1d_varlen(
-                        x_BLD,
-                        conv.weight,
-                        cu_seqlens,
-                        cu_seqlens_cpu,
-                    )
+                return _causal_conv1d_varlen(
+                    x_BLD,
+                    conv.weight,
+                    cu_seqlens,
+                    cu_seqlens_cpu,
+                )
             return _causal_conv1d_varlen(
                 x_BLD,
                 conv.weight,
@@ -700,6 +715,9 @@ class Qwen35Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
+            # The shared helper excludes the vision encoder from the per-token
+            # FLOP term (ViT cost scales with patches, not seq_len), so this MFU
+            # is decoder-only. TODO: add a per-batch vision FLOP term for VLMs.
             attn_cfg = self.first_attention
             # pyrefly: ignore [missing-attribute]
             n_heads = attn_cfg.n_heads
@@ -785,44 +803,21 @@ class Qwen35Model(Decoder):
             grid_thw: Grid dimensions (num_items, 3) for [t, h, w]
 
         Returns:
-            merged_embeds: (num_items, max_tokens, dim) padded vision embeddings
+            vision_embeds: (num_items, max_tokens, dim) padded vision embeddings
             num_tokens_per_item: (num_items,) actual token count per item
         """
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
-        merged_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
 
         merge_unit = self.vision_encoder.spatial_merge_unit
         num_tokens_per_item = grid_thw.prod(-1) // merge_unit
 
-        return merged_embeds, num_tokens_per_item
+        return vision_embeds, num_tokens_per_item
 
-    def _scatter_vision_embeds(
-        self,
-        inputs_embeds: torch.Tensor,
-        *,
-        merged_embeds: torch.Tensor,
-        vision_positions: list[tuple[int, int, int, int]],
-    ) -> torch.Tensor:
-        """Scatter vision embeddings into text embeddings at placeholder positions.
-
-        Copies directly from the padded vision encoder output into the text
-        sequence.
-
-        Args:
-            inputs_embeds: Text embeddings (batch, seq_len, dim)
-            merged_embeds: Padded vision embeddings (num_items, max_tokens, dim)
-            vision_positions: List of (item_idx, sample_idx, vision_start, n_tokens)
-
-        Returns:
-            Updated embeddings
-        """
-        for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            inputs_embeds[
-                sample_idx, vision_start : vision_start + n_tokens, :
-            ] = merged_embeds[item_idx, :n_tokens, :]
-        return inputs_embeds
-
-    @spmd.local_map(out_types={"dp": spmd.S(0), "tp": spmd.R})
+    @spmd.local_map(
+        in_types=(None, {"dp": spmd.S(0), "tp": spmd.R}),
+        out_types={"dp": spmd.S(0), "tp": spmd.R},
+    )
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -854,30 +849,26 @@ class Qwen35Model(Decoder):
         )
 
         if pixel_values is not None and grid_thw is not None:
-            merged_embeds, num_tokens = self._get_vision_embeds(
+            vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
-            image_positions = self._get_vision_positions(
-                tokens, num_tokens, image_token_id
-            )
+            image_positions = get_vision_positions(tokens, num_tokens, image_token_id)
             if image_positions:
-                inputs_embeds = self._scatter_vision_embeds(
+                inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
-                    merged_embeds=merged_embeds,
+                    vision_embeds=vision_embeds,
                     vision_positions=image_positions,
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
-            merged_embeds, num_tokens = self._get_vision_embeds(
+            vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )
-            video_positions = self._get_vision_positions(
-                tokens, num_tokens, video_token_id
-            )
+            video_positions = get_vision_positions(tokens, num_tokens, video_token_id)
             if video_positions:
-                inputs_embeds = self._scatter_vision_embeds(
+                inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
-                    merged_embeds=merged_embeds,
+                    vision_embeds=vision_embeds,
                     vision_positions=video_positions,
                 )
 
@@ -896,6 +887,15 @@ class Qwen35Model(Decoder):
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
+        if get_spmd_backend() == "spmd_types":
+            annotate_multimodal_input_spmd_types(
+                mrope_positions=mrope_positions,
+                pixel_values=pixel_values,
+                pixel_values_videos=pixel_values_videos,
+                grid_thw=grid_thw,
+                grid_thw_videos=grid_thw_videos,
+            )
+
         if self.tok_embeddings is not None:
             x = self._prepare_multimodal_embeds(
                 tokens,
@@ -903,7 +903,7 @@ class Qwen35Model(Decoder):
                 pixel_values_videos=pixel_values_videos,
                 grid_thw=grid_thw,
                 grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,
+                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
             )
         else:
             x = tokens

@@ -333,6 +333,31 @@ class TestSpmdLayout(DTensorTestBase):
                 )
             )
 
+    def test_rejects_redistribute_from_varying(self):
+        for src_dp, dst_dp in ((spmd.V, spmd.R), (spmd.R, spmd.V)):
+            with self.subTest(src_dp=src_dp, dst_dp=dst_dp):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "output: SpmdLayout-based redistribution changes mesh axis "
+                    "'dp' with spmd.V as the source or destination type",
+                ):
+                    spmd_validate_redistributions(
+                        ShardingConfig(
+                            out_src_shardings=SpmdLayout(
+                                {
+                                    MeshAxisName.DP: src_dp,
+                                    MeshAxisName.TP: spmd.I,
+                                }
+                            ),
+                            out_dst_shardings=SpmdLayout(
+                                {
+                                    MeshAxisName.DP: dst_dp,
+                                    MeshAxisName.TP: spmd.I,
+                                }
+                            ),
+                        )
+                    )
+
     @with_comms
     def test_partition_spec_order_controls_state_shard(self):
         """Test spmd_distribute_tensor follows PartitionSpec order.

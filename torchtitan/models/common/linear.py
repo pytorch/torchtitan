@@ -15,7 +15,6 @@
 
 from dataclasses import dataclass
 
-import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -42,11 +41,13 @@ class Linear(nn.Linear, Module):
 
 
 class ScaledBiasRowwiseLinear(Linear):
-    """Rowwise linear whose local bias contribution is scaled by TP degree.
-
-    The bias stays independent on TP so its backward semantics do not introduce
-    a reduction. During typechecking only, the scaled temporary is marked
-    varying to match the local rowwise output; this does not add a collective.
+    """
+    Rowwise linear whose local bias contribution is scaled by TP degree.
+    TODO(pianpwk): this should work in decomposition in spmd_types, or as Partial
+    init in DTensor. Today the local SPMD typecheck errors on the TP-axis
+    input:V, weight:V, bias:P case; decomposing to input @ weight -> P, then P + P should pass.
+    For DTensor, this errors because FSDP does not want to redistribute the incoming gradient
+    from Replicate -> storage-time Partial.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -66,18 +67,8 @@ class ScaledBiasRowwiseLinear(Linear):
             self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
         )
         bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
-        output = F.linear(input, weight, None)
-        if bias is None:
-            return output
-
-        scaled_bias = bias / self.tp_degree
-        if spmd.is_type_checking():
-            for axis, axis_type in spmd.get_local_type(scaled_bias).items():
-                if axis_type is spmd.I:
-                    scaled_bias = spmd.mutate_type(
-                        scaled_bias, axis, src=spmd.I, dst=spmd.V
-                    )
-        return output + scaled_bias
+        bias = bias / self.tp_degree
+        return F.linear(input, weight, bias)
 
 
 __all__ = [

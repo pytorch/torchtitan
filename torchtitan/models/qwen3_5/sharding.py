@@ -19,8 +19,10 @@ tensors via local_map.
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
+import torch
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_dense_mesh
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -49,6 +51,37 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
+def annotate_multimodal_input_spmd_types(
+    *,
+    mrope_positions: torch.Tensor | None,
+    pixel_values: torch.Tensor | None,
+    pixel_values_videos: torch.Tensor | None,
+    grid_thw: torch.Tensor | None,
+    grid_thw_videos: torch.Tensor | None,
+) -> None:
+    """Annotate Qwen3.5 multimodal inputs with their local SPMD types."""
+    token_type = {
+        MeshAxisName.DP: spmd.S(0),
+        MeshAxisName.TP: spmd.R,
+    }
+    multimodal_type = {
+        MeshAxisName.DP: spmd.V,
+        MeshAxisName.TP: spmd.I,
+    }
+
+    with set_current_spmd_mesh(spmd_dense_mesh()):
+        if mrope_positions is not None:
+            spmd.assert_type(mrope_positions, token_type)
+        for tensor in (
+            pixel_values,
+            pixel_values_videos,
+            grid_thw,
+            grid_thw_videos,
+        ):
+            if tensor is not None:
+                spmd.assert_type(tensor, multimodal_type)
+
+
 def _replicate_norm() -> ShardingConfig:
     """Replicate norm (weight/bias and activations) — used by the vision
     encoder, which runs without sequence parallelism."""
@@ -62,18 +95,6 @@ def _replicate_norm() -> ShardingConfig:
         in_dst_shardings={"input": activation},
         out_src_shardings=activation,
         out_dst_shardings=activation,
-    )
-
-
-def vision_activation_placement(
-    *, dp: spmd.PerMeshAxisSpmdType, tp: spmd.PerMeshAxisSpmdType
-) -> SpmdLayout:
-    """Placement for vision-only local activations."""
-    return SpmdLayout(
-        {
-            DP: dp,
-            TP: tp,
-        }
     )
 
 
@@ -97,7 +118,7 @@ def _vision_scaled_bias_rowwise_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.I),
+            "bias": dense_param_placement(tp=spmd.R),
         },
         in_src_shardings={"input": input_layout},
         in_dst_shardings={"input": input_layout},
@@ -262,15 +283,14 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={"pos_embed": dense_param_placement(tp=spmd.I)},
         # I->R convert to scatter into text embeddings.
-        out_src_shardings=vision_activation_placement(dp=spmd.V, tp=spmd.I),
-        out_dst_shardings=vision_activation_placement(dp=spmd.V, tp=spmd.R),
+        out_src_shardings=SpmdLayout({DP: spmd.V, TP: spmd.I}),
+        out_dst_shardings=SpmdLayout({DP: spmd.V, TP: spmd.R}),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
         state_shardings={"inv_freq": dense_param_placement(tp=spmd.I)},
         out_src_shardings=dense_param_placement(tp=spmd.I),
     )
 
-    # patch_embed receives plain pixel_values — wrap as DTensor(Replicate)
     patch_activation = dense_activation_placement(tp=spmd.I)
     ve_cfg.patch_embed_proj.sharding_config = ShardingConfig(
         state_shardings={
@@ -291,11 +311,11 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     block.attn.sharding_config = ShardingConfig(
         in_src_shardings={
             "x": dense_activation_placement(tp=spmd.I),
-            "rope_cache": vision_activation_placement(dp=spmd.R, tp=spmd.I),
+            "rope_cache": SpmdLayout({DP: spmd.R, TP: spmd.I}),
         },
         in_dst_shardings={
             "x": dense_activation_placement(tp=spmd.R),
-            "rope_cache": vision_activation_placement(dp=spmd.R, tp=spmd.R),
+            "rope_cache": SpmdLayout({DP: spmd.R, TP: spmd.R}),
         },
     )
     block.attn.wq.sharding_config = _vision_colwise_config(input_tp=spmd.R)
