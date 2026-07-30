@@ -65,9 +65,9 @@ class _MinimalAsyncEPBufferState:
 
 
 _buffer_state: _MinimalAsyncEPBufferState | None = None
-# MinimalAsyncEP has one process-global buffer: the first dispatcher initializes
-# it, same-configuration dispatchers reuse it, and differing metadata is invalid
-# because the buffer layout would not match.
+# MinimalAsyncEP has one process-global buffer: the first dispatcher
+# initializes it, same-configuration dispatchers reuse it, and differing
+# metadata is invalid because the buffer layout would not match.
 _buffer_key: (
     tuple[
         object,
@@ -116,7 +116,6 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             "MinimalAsyncEPTokenDispatcher.Config requires expert parallelism "
             "(expert_parallel_degree > 1)."
         )
-    # TODO: Add TP/SP, CP, and PP support to MinimalAsyncEP.
     if parallelism.tensor_parallel_degree != 1:
         raise ValueError(
             "MinimalAsyncEP does not support tensor or sequence parallelism."
@@ -536,8 +535,8 @@ def _dispatch_metadata(
     """Exchange per-expert local counts and build dispatch/combine metadata.
 
     Args:
-        num_local_tokens_per_expert_E: ``(E,)`` int64 routing-assignment
-            counts from this rank's token shard to all global experts.
+        num_local_tokens_per_expert_E: ``(E,)`` int64 counts for this rank's
+            local token shard over all global experts.
         num_routed_rows: ``N`` routed rows in local E-major order.
         receive_capacity: ``R_max``.
         ep_size: ``EP``.
@@ -598,8 +597,8 @@ def dispatch_op(
     Args:
         dispatch_input: ``(T, D)`` local token rows.
         topk_expert_ids_TK: ``(T, K)`` global expert ids.
-        num_local_tokens_per_expert_E: ``(E,)`` routing-assignment
-            counts from this rank's token shard to all global experts.
+        num_local_tokens_per_expert_E: ``(E,)`` counts for this rank's token
+            shard over all global experts.
         receive_capacity: ``R_max``.
         ep_size: ``EP``.
 

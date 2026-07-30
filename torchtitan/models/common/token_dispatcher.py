@@ -121,19 +121,14 @@ class LocalTokenDispatcher(Configurable):
             x_TD: ``(T, D)`` all input tokens
             topk_scores_TK: ``(T, K)`` routing scores
             topk_expert_ids_TK: ``(T, K)`` expert indices per token
-            num_local_tokens_per_expert_E: ``(E,)`` local routing
-                assignment counts per global expert
-            num_local_tokens_after_seq_dim_padding: Current logical input
-                capacity on every rank in the EP group. It includes
-                sequence-dimension padding, so it can exceed ``T``. Local
-                dispatch uses it only to validate the common dispatch contract
-                and has no preallocated communication buffer.
+            num_local_tokens_per_expert_E: ``(E,)`` token counts per expert
+            num_local_tokens_after_seq_dim_padding: Current logical capacity;
+                it may exceed ``T`` and otherwise does not affect local dispatch.
 
         Returns:
             routed_input_RD: ``[R = sum(num_local_tokens_per_expert_E), input_dim(D)]``.
                 Tokens sorted by expert index.
-            num_local_tokens_per_expert_E: ``(E,)`` local routing
-                assignment counts per global expert
+            num_local_tokens_per_expert_E: ``(E,)`` token counts per expert
             metadata: LocalDispatchMetadata for combine()
         """
         assert x_TD.shape[0] <= num_local_tokens_after_seq_dim_padding
@@ -455,12 +450,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             x_TD: ``(T, D)`` local token shard
             topk_scores_TK: ``(T, K)`` routing scores
             topk_expert_ids_TK: ``(T, K)`` expert indices
-            num_local_tokens_per_expert_E: ``(E,)`` routing-assignment
-                counts from this local token shard to every global expert
-            num_local_tokens_after_seq_dim_padding: Current logical input capacity after sequence
-                padding. AllToAll has no persistent maximum-sized communication
-                buffer; it uses exact tensor and split sizes after validating that
-                the materialized local input fits this common capacity.
+            num_local_tokens_per_expert_E: ``(E,)`` token counts for this local
+                token shard
+            num_local_tokens_after_seq_dim_padding: Current logical capacity;
+                AllToAll otherwise uses exact tensor and split sizes.
 
         Returns:
             routed_input_RD: ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
@@ -759,12 +752,6 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         *,
         num_local_tokens_after_seq_dim_padding: int,
     ):
-        """Dispatch using exact tensors plus the common current input capacity.
-
-        With EP enabled, AllToAll validates and otherwise uses dynamic split
-        sizes. With EP disabled, the current capacity only bounds the materialized
-        input before TorchAO pads routed expert groups to ``pad_multiple``.
-        """
         if self.ep_mesh is not None:
             return super().dispatch(
                 x_TD,
@@ -917,10 +904,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # prefill and decode, since both run under no_grad), no backward. The deepep
         # primitives gate on grad context, so a True spec falls back to compact in training.
         cudagraphable: bool = False
-        # Hard upper bound on physical input tokens per rank. update_from_config derives it
-        # from the fixed training shape or inference scheduler/cudagraph limits. It remains
-        # optional here because model configs are created before runtime configuration is
-        # applied, but it is required before the dispatcher is built.
+        # Hard per-rank input-token bound used to preallocate the communication buffer.
+        # Runtime configuration must fill it before dispatcher construction.
         num_max_tokens_per_rank: int | None = None
         # Model hidden dim, threaded by the builder for eager buffer initialization.
         hidden_dim: int | None = None
@@ -968,13 +953,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         *,
         num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
-        """Dispatch through a current logical view of the ElasticBuffer.
+        """Dispatch through the preallocated ElasticBuffer.
 
-        ``self.num_max_tokens_per_rank`` sized the persistent buffer during
-        ``wire_meshes``. ``num_local_tokens_after_seq_dim_padding`` is the
-        current common logical capacity and becomes DeepEP's per-rank layout
-        stride without reallocating storage. ``x_TD.shape[0]`` may be smaller
-        because sequence padding can be virtual rather than materialized.
+        ``num_local_tokens_after_seq_dim_padding`` sets the current DeepEP
+        layout stride and may exceed ``x_TD.shape[0]`` due to virtual padding.
         """
         # Ignore input num_local_tokens_per_expert_E. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
@@ -1054,7 +1036,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
                 with a given capacity factor.
 
                 Setting this to a float in (0, 1] enables CPU-free non-blocking
-                dispatch and controls num_permuted_tokens -- the fused-permute
+                dispatch and controls num_permuted_tokens — the fused-permute
                 output capacity, estimated as:
                 num_local_tokens_after_seq_dim_padding * ep_size *
                 min(num_local_experts, top_k) * capacity_factor, aligned for
@@ -1122,12 +1104,10 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         *,
         num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
-        """Dispatch with a current view over the preallocated HybridEP buffer.
+        """Dispatch through the preallocated HybridEP buffer.
 
-        The configured maximum sizes persistent all-to-all storage.
-        ``num_local_tokens_after_seq_dim_padding`` bounds the current
-        materialized rows and sizes the non-blocking fused-permute output;
-        dispatch must not allocate or grow the communication buffer.
+        ``num_local_tokens_after_seq_dim_padding`` sizes the current
+        non-blocking fused-permute output.
         """
         # Ignore input num_local_tokens_per_expert_E. HybridEP returns the
         # number of global routed tokens for every local expert using other inputs.
@@ -1299,10 +1279,8 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
                 num_local_tokens_per_expert_E: standard ``RoutedExperts``
                 dispatch inputs; see ``torchtitan.models.common.moe`` for shape
                 suffix definitions.
-            num_local_tokens_after_seq_dim_padding: Current logical input
-                capacity. MinimalAsyncEP currently requires this to equal the
-                materialized input rows and its fixed symmetric-memory
-                capacity.
+            num_local_tokens_after_seq_dim_padding: Current logical capacity;
+                it must equal the materialized and preallocated capacities.
 
         Returns:
             routed_input_RD: local-expert rows for grouped-mm.
