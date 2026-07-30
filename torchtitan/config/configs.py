@@ -313,6 +313,9 @@ class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
+    enable_keyed_parameter_init: bool = False
+    """Initialize parameters from FQN-keyed, sharding-invariant random draws."""
+
     spmd_typechecking: bool = False
     """Enable global SPMD type checking; only effective under spmd_backend="spmd_types"."""
 

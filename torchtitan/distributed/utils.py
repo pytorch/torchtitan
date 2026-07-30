@@ -155,7 +155,7 @@ def set_determinism(
     device: torch.device,
     debug_config: DebugConfig,
     distinct_seed_mesh_dims: list[str],
-) -> None:
+) -> int:
     """
     Set the same DTensor manual seed for all dimensions in world mesh, but only different seeds
     across dimensions denoted by `distinct_seed_mesh_dims`. An example use case is pipeline parallelism,
@@ -171,6 +171,9 @@ def set_determinism(
         device: Device to use
         debug_config: Debug config to use
         distinct_seed_mesh_dims: List of mesh dimension names to have distinct seeds across.
+
+    Returns:
+        The rank-invariant base seed before mesh-dimension offsets are applied.
     """
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
@@ -220,7 +223,8 @@ def set_determinism(
             torch.manual_seed(seed)
             os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
             logger.debug(f"Single-process job using seed: {seed}")
-        return
+            return seed % 2**64
+        return torch.initial_seed()
 
     # to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
     # if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
@@ -231,6 +235,7 @@ def set_determinism(
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
     assert isinstance(seed, int)
+    base_seed = seed % 2**64
 
     # Set distinct seed for each rank in mesh dimensions, with dimension names provided by `distinct_seed_mesh_dims`
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
@@ -255,8 +260,7 @@ def set_determinism(
             # Update cumulative size for next dimension
             cumulative_size *= distinct_mesh.size()
 
-        seed += seed_offset
-        seed %= 2**64
+        seed = (base_seed + seed_offset) % 2**64
 
         logger.debug(
             f"Distinct dims {distinct_seed_mesh_dims}, Global rank {c10d.get_rank()} using seed: {seed}"
@@ -278,6 +282,8 @@ def set_determinism(
         # We just need to pass the world_mesh as the device_id is the only information
         # this API uses.
         torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
+
+    return base_seed
 
 
 _batch_invariant_enabled: bool = False
