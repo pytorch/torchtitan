@@ -6,8 +6,9 @@
 
 """Adapt core Muon to persistent storage layouts and logical matrix views."""
 
-from collections.abc import Mapping, MutableMapping
+from collections.abc import MutableMapping
 from contextlib import ExitStack
+from dataclasses import dataclass
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -15,6 +16,7 @@ import torch
 import torch.distributed.tensor.placement_types as placement_types
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Partial, Placement, Replicate, Shard
+from torch.optim import OptimizationUnit, Optimizer, OptimizerStepOps
 from torch.optim._muon import muon
 
 from torchtitan.components.flex_shard import Owned
@@ -47,6 +49,8 @@ class MuonAdapter(torch.optim.Muon):
     two matrix dimensions are complete on the current rank. Ordinary untyped
     tensors retain the behavior of ``torch.optim.Muon``.
     """
+
+    _step_ops: OptimizerStepOps
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
         if param_group.get("fused") or param_group.get("foreach"):
@@ -155,17 +159,6 @@ class MuonAdapter(torch.optim.Muon):
         batch_size = tensor.numel() // matrix_numel
         return tensor.view(batch_size, *matrix_shape)
 
-    def flex_shard_compute_requirement(
-        self,
-        param: Tensor,
-        group: MutableMapping,
-    ) -> Owned:
-        if torch.is_complex(param):
-            raise RuntimeError("Muon does not support complex parameters")
-        matrix_shape = group.get("matrix_shape")
-        self._validate_matrix_shape(param, matrix_shape)
-        return Owned(trailing_dims=2)
-
     @staticmethod
     def _validate_group_options(
         group_index: int,
@@ -229,78 +222,6 @@ class MuonAdapter(torch.optim.Muon):
                 f"group {group_index} has unsupported adjust_lr_fn "
                 f"{group['adjust_lr_fn']!r}"
             )
-
-    def flex_shard_init_state(
-        self,
-        param: Tensor,
-        grad: Tensor,
-        group: MutableMapping,
-    ) -> MutableMapping:
-        state = self.state[param]
-        if "momentum_buffer" not in state:
-            state["momentum_buffer"] = torch.zeros_like(
-                grad, memory_format=torch.preserve_format
-            )
-        return state
-
-    @staticmethod
-    def flex_shard_prepare(
-        param: Tensor,
-        grad: Tensor,
-        state: Mapping[str, Tensor],
-        group: MutableMapping,
-        *,
-        out: Tensor,
-    ) -> None:
-        if param.shape != grad.shape:
-            raise ValueError("Muon parameter and gradient shapes must match")
-        momentum_buffer = state["momentum_buffer"]
-        momentum_buffer.lerp_(grad, 1 - group["momentum"])
-        if group["nesterov"]:
-            torch.lerp(grad, momentum_buffer, group["momentum"], out=out)
-        else:
-            out.copy_(momentum_buffer)
-
-    def flex_shard_compute(
-        self,
-        compute_input: Tensor,
-        group: MutableMapping,
-    ) -> Tensor:
-        logical_pre = self._logical_matrix_view(
-            compute_input, group.get("matrix_shape")
-        )
-        scratch_param = torch.zeros_like(logical_pre)
-        scratch_momentum = torch.zeros_like(logical_pre)
-        muon(
-            [scratch_param],
-            [logical_pre],
-            [scratch_momentum],
-            lr=group["lr"],
-            weight_decay=0.0,
-            momentum=0.0,
-            nesterov=False,
-            ns_coefficients=group["ns_coefficients"],
-            eps=group["eps"],
-            ns_steps=group["ns_steps"],
-            adjust_lr_fn=group["adjust_lr_fn"],
-            has_complex=False,
-        )
-        return scratch_param.view(compute_input.shape)
-
-    @staticmethod
-    def flex_shard_finalize(
-        param: Tensor,
-        update: Tensor,
-        group: MutableMapping,
-        *,
-        out: Tensor,
-    ) -> None:
-        decay = 1 - group["lr"] * group["weight_decay"]
-        if isinstance(decay, Tensor):
-            torch.mul(param, decay, out=out)
-            out.add_(update)
-        else:
-            torch.add(update, param, alpha=decay, out=out)
 
     def _validate_group(
         self,
@@ -424,6 +345,9 @@ class MuonAdapter(torch.optim.Muon):
     @torch.no_grad()
     def step(self, closure=None):
         """Run each parameter group in its requested physical compute layout."""
+        if self._step_executor is not None:
+            return self._execute_step_ops(self._step_ops, closure)
+
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -464,3 +388,130 @@ class MuonAdapter(torch.optim.Muon):
                     has_complex=has_complex,
                 )
         return loss
+
+
+@dataclass(frozen=True, slots=True)
+class _MuonAdapterUnitMetadata:
+    parameter_shape: torch.Size
+    parameter_group: MutableMapping
+    matrix_shape: tuple[int, int] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _MuonAdapterStepContext:
+    pass
+
+
+class _MuonAdapterStepOps:
+    def optimization_units(
+        self, optimizer: Optimizer
+    ) -> tuple[OptimizationUnit, ...]:
+        adapter = cast(MuonAdapter, optimizer)
+        units = []
+        for group in adapter.param_groups:
+            names = group.get("param_names")
+            if names is None:
+                names = [None] * len(group["params"])
+            matrix_shape = group.get("matrix_shape")
+            for param, name in zip(group["params"], names, strict=True):
+                if torch.is_complex(param):
+                    raise RuntimeError("Muon does not support complex parameters")
+                adapter._validate_matrix_shape(param, matrix_shape)
+                units.append(
+                    OptimizationUnit(
+                        parameter=param,
+                        parameter_group=group,
+                        state=adapter.state[param],
+                        gradient=param.grad,
+                        name=name,
+                        metadata=_MuonAdapterUnitMetadata(
+                            parameter_shape=param.shape,
+                            parameter_group=group,
+                            matrix_shape=matrix_shape,
+                        ),
+                        compute_requirement=Owned(trailing_dims=2),
+                    )
+                )
+        return tuple(units)
+
+    def begin_step(self, optimizer: Optimizer) -> _MuonAdapterStepContext:
+        adapter = cast(MuonAdapter, optimizer)
+        for group_index, group in enumerate(adapter.param_groups):
+            adapter._validate_group(group_index, group)
+            for param in group["params"]:
+                grad = param.grad
+                if grad is None:
+                    continue
+                state = adapter.state[param]
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(
+                        grad, memory_format=torch.preserve_format
+                    )
+        return _MuonAdapterStepContext()
+
+    def prepare(self, unit: OptimizationUnit, *, out: Tensor) -> None:
+        grad = unit.gradient
+        if grad is None:
+            raise RuntimeError("cannot prepare a Muon unit without a gradient")
+        if unit.parameter.shape != grad.shape:
+            raise ValueError("Muon parameter and gradient shapes must match")
+        group = unit.parameter_group
+        momentum_buffer = unit.state["momentum_buffer"]
+        momentum_buffer.lerp_(grad, 1 - group["momentum"])
+        if group["nesterov"]:
+            torch.lerp(grad, momentum_buffer, group["momentum"], out=out)
+        else:
+            out.copy_(momentum_buffer)
+
+    def compute(
+        self,
+        unit_metadata: _MuonAdapterUnitMetadata,
+        inputs: Tensor,
+        *,
+        out: Tensor,
+    ) -> None:
+        logical_input = MuonAdapter._logical_matrix_view(
+            inputs, unit_metadata.matrix_shape
+        )
+        logical_out = (
+            logical_input
+            if out is inputs
+            else MuonAdapter._logical_matrix_view(out, unit_metadata.matrix_shape)
+        )
+        if logical_input.numel() == 0:
+            logical_out.copy_(logical_input)
+            return
+
+        group = unit_metadata.parameter_group
+        scratch_param = torch.zeros_like(logical_input)
+        scratch_momentum = torch.zeros_like(logical_input)
+        muon(
+            [scratch_param],
+            [logical_input],
+            [scratch_momentum],
+            lr=group["lr"],
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            ns_coefficients=group["ns_coefficients"],
+            eps=group["eps"],
+            ns_steps=group["ns_steps"],
+            adjust_lr_fn=group["adjust_lr_fn"],
+            has_complex=False,
+        )
+        logical_out.copy_(scratch_param)
+
+    def apply_updates(self, unit: OptimizationUnit, updates: Tensor) -> None:
+        group = unit.parameter_group
+        decay = 1 - group["lr"] * group["weight_decay"]
+        if isinstance(decay, Tensor):
+            unit.parameter.mul_(decay)
+            unit.parameter.add_(updates)
+        else:
+            torch.add(updates, unit.parameter, alpha=decay, out=unit.parameter)
+
+    def end_step(self, context: _MuonAdapterStepContext) -> None:
+        pass
+
+
+MuonAdapter._step_ops = _MuonAdapterStepOps()
