@@ -6,7 +6,7 @@
 
 """Adapt core Muon to persistent storage layouts and logical matrix views."""
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, cast
@@ -23,6 +23,7 @@ from torchtitan.components.flex_shard import Owned
 
 
 __all__ = ["MuonAdapter"]
+_UPDATE = "update"
 
 
 def _is_shard_like(placement: Placement) -> bool:
@@ -421,7 +422,7 @@ class _MuonAdapterStepOps:
                     OptimizationUnit(
                         parameter=param,
                         parameter_group=group,
-                        state=adapter.state[param],
+                        state=adapter.state.get(param, {}),
                         gradient=param.grad,
                         name=name,
                         metadata=_MuonAdapterUnitMetadata(
@@ -429,7 +430,9 @@ class _MuonAdapterStepOps:
                             parameter_group=group,
                             matrix_shape=matrix_shape,
                         ),
-                        compute_requirement=Owned(trailing_dims=2),
+                        compute_requirements={
+                            _UPDATE: Owned(trailing_dims=2)
+                        },
                     )
                 )
         return tuple(units)
@@ -449,7 +452,7 @@ class _MuonAdapterStepOps:
                     )
         return _MuonAdapterStepContext()
 
-    def prepare(self, unit: OptimizationUnit, *, out: Tensor) -> None:
+    def prepare(self, unit: OptimizationUnit, *, out: dict[str, Tensor]) -> None:
         grad = unit.gradient
         if grad is None:
             raise RuntimeError("cannot prepare a Muon unit without a gradient")
@@ -459,24 +462,33 @@ class _MuonAdapterStepOps:
         momentum_buffer = unit.state["momentum_buffer"]
         momentum_buffer.lerp_(grad, 1 - group["momentum"])
         if group["nesterov"]:
-            torch.lerp(grad, momentum_buffer, group["momentum"], out=out)
+            torch.lerp(
+                grad,
+                momentum_buffer,
+                group["momentum"],
+                out=out[_UPDATE],
+            )
         else:
-            out.copy_(momentum_buffer)
+            out[_UPDATE].copy_(momentum_buffer)
 
     def compute(
         self,
         unit_metadata: _MuonAdapterUnitMetadata,
-        inputs: Tensor,
+        inputs: Mapping[str, Tensor],
         *,
-        out: Tensor,
+        out: dict[str, Tensor],
     ) -> None:
+        compute_input = inputs[_UPDATE]
+        compute_output = out[_UPDATE]
         logical_input = MuonAdapter._logical_matrix_view(
-            inputs, unit_metadata.matrix_shape
+            compute_input, unit_metadata.matrix_shape
         )
         logical_out = (
             logical_input
-            if out is inputs
-            else MuonAdapter._logical_matrix_view(out, unit_metadata.matrix_shape)
+            if compute_output is compute_input
+            else MuonAdapter._logical_matrix_view(
+                compute_output, unit_metadata.matrix_shape
+            )
         )
         if logical_input.numel() == 0:
             logical_out.copy_(logical_input)
@@ -501,14 +513,17 @@ class _MuonAdapterStepOps:
         )
         logical_out.copy_(scratch_param)
 
-    def apply_updates(self, unit: OptimizationUnit, updates: Tensor) -> None:
+    def apply_updates(
+        self, unit: OptimizationUnit, updates: Mapping[str, Tensor]
+    ) -> None:
         group = unit.parameter_group
         decay = 1 - group["lr"] * group["weight_decay"]
+        update = updates[_UPDATE]
         if isinstance(decay, Tensor):
             unit.parameter.mul_(decay)
-            unit.parameter.add_(updates)
+            unit.parameter.add_(update)
         else:
-            torch.add(updates, unit.parameter, alpha=decay, out=unit.parameter)
+            torch.add(update, unit.parameter, alpha=decay, out=unit.parameter)
 
     def end_step(self, context: _MuonAdapterStepContext) -> None:
         pass
