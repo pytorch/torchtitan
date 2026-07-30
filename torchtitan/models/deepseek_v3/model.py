@@ -17,7 +17,8 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttention,
 )
-from torchtitan.models.common.decoder import MTPDecoder, TransformerBlock
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -133,7 +134,7 @@ class Attention(BaseAttention):
                 kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
             k = torch.cat([k_nope, k_pe.expand(-1, -1, k_nope.size(2), -1)], dim=-1)
-            if get_spmd_backend() == "spmd_types" and not torch.compiler.is_compiling():
+            if get_spmd_backend() == "spmd_types":
                 for t in [k, v]:
                     spmd.assert_type(
                         t,
@@ -201,20 +202,12 @@ class DeepSeekV3Model(MTPDecoder):
             **kwargs,
         ) -> None:
             MTPDecoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-            if (
-                self.mtp is not None
-                and self.mtp.num_mtp_layers > 0
-                and parallelism.pipeline_parallel_degree > 1
-            ):
-                raise NotImplementedError(
-                    "DeepSeek-V3 MTP does not support pipeline parallelism yet."
-                )
 
             from torchtitan.models.deepseek_v3.sharding import (
                 set_deepseek_v3_sharding_config,
             )
 
+            parallelism = config.parallelism
             set_deepseek_v3_sharding_config(
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,

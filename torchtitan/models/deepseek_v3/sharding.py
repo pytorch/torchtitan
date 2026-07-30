@@ -61,7 +61,7 @@ def set_deepseek_v3_sharding_config(
         _set_deepseek_v3_layer_sharding(
             layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
         )
-    if getattr(config, "num_mtp_layers", 0) > 0:
+    if len(config.mtp_layers) > 0:
         _set_deepseek_v3_mtp_sharding(
             config,
             enable_sp=enable_sp,
@@ -163,25 +163,30 @@ def _set_deepseek_v3_mtp_sharding(
     )
     norm = norm_config(enable_sp=enable_sp)
 
-    # MTPDecoder.Config.update_from_config materializes this as an
-    # MTPTransformerBlock.Config before sharding runs. This function only fills
-    # placements, mirroring how the main DeepSeek-V3 layer config is handled.
-    mtp_layer_cfg = config.mtp_layer_config
-
-    _set_deepseek_v3_layer_sharding(
-        mtp_layer_cfg,
-        enable_sp=enable_sp,
-        enable_ep=enable_ep,
-    )
-    mtp_layer_cfg.enorm.sharding_config = norm
-    mtp_layer_cfg.hnorm.sharding_config = norm
-    mtp_layer_cfg.mtp_norm.sharding_config = pre_lm_head_norm_config(
-        enable_sp=enable_sp
-    )
-    mtp_layer_cfg.eh_proj.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={"input": activation},
-        out_src_shardings=activation,
-    )
+    for mtp_layer_cfg in config.mtp_layers:
+        _set_deepseek_v3_layer_sharding(
+            mtp_layer_cfg,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
+        )
+        if enable_sp:
+            mtp_layer_cfg.sharding_config = ShardingConfig(
+                in_src_shardings={
+                    "mtp_input_valid_mask": dense_activation_placement(tp=spmd.R),
+                },
+                in_dst_shardings={
+                    "mtp_input_valid_mask": activation,
+                },
+            )
+        mtp_layer_cfg.enorm.sharding_config = norm
+        mtp_layer_cfg.hnorm.sharding_config = norm
+        mtp_layer_cfg.mtp_norm.sharding_config = pre_lm_head_norm_config(
+            enable_sp=enable_sp
+        )
+        mtp_layer_cfg.eh_proj.sharding_config = ShardingConfig(
+            state_shardings={
+                "weight": dense_param_placement(tp=spmd.R),
+            },
+            in_src_shardings={"input": activation},
+            out_src_shardings=activation,
+        )
