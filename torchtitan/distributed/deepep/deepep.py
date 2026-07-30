@@ -499,11 +499,6 @@ def dispatch_tokens(
 
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
-    num_input_tokens = hidden_states.shape[0]
-    assert num_input_tokens <= num_local_tokens_after_seq_dim_padding, (
-        f"DeepEP input has {num_input_tokens} tokens on this rank, exceeding the "
-        f"current logical capacity of {num_local_tokens_after_seq_dim_padding}."
-    )
     assert num_local_tokens_after_seq_dim_padding <= buffer.num_max_tokens_per_rank, (
         "DeepEP current logical capacity "
         f"{num_local_tokens_after_seq_dim_padding} exceeds the "

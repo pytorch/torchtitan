@@ -239,6 +239,8 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
         *,
+        # TODO: Remove this argument if callers physically pad x_TD to the same
+        # size on every EP rank; dispatchers can then use x_TD.shape[0].
         num_local_tokens_after_seq_dim_padding: int,
     ) -> tuple[torch.Tensor, torch.Tensor, object]:
         """Dispatch tokens using the current rank-wide logical input capacity.
@@ -417,7 +419,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             input_split_sizes=output_splits,
         )
 
-    # pyrefly: ignore [bad-override]
     def dispatch(
         self,
         x_TD: torch.Tensor,
@@ -729,7 +730,6 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         super().__init__(config)
         self.pad_multiple = config.pad_multiple
 
-    # pyrefly: ignore [bad-override]
     def dispatch(
         self,
         x_TD,
@@ -927,7 +927,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             num_topk=self.top_k,
         )
 
-    # pyrefly: ignore [bad-override]
     def dispatch(
         self,
         x_TD: torch.Tensor,
@@ -1078,7 +1077,6 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts=self.num_experts // self.ep_mesh.size(),
         )
 
-    # pyrefly: ignore [bad-override]
     def dispatch(
         self,
         x_TD: torch.Tensor,
@@ -1246,7 +1244,6 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             device=self.buffer_device,
         )
 
-    # pyrefly: ignore [bad-override]
     def dispatch(
         self,
         x_TD: torch.Tensor,
@@ -1263,8 +1260,10 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
                 num_local_tokens_per_expert_E: standard ``RoutedExperts``
                 dispatch inputs; see ``torchtitan.models.common.moe`` for shape
                 suffix definitions.
-            num_local_tokens_after_seq_dim_padding: Current logical capacity;
-                it must equal the materialized and preallocated capacities.
+            num_local_tokens_after_seq_dim_padding: Common logical capacity
+                accepted by the unified API. MinimalAsyncEP derives its current
+                dispatch shapes from ``x_TD.shape[0]`` because it does not
+                support TP/SP, so there is no uneven token split across TP ranks.
 
         Returns:
             routed_input_RD: local-expert rows for grouped-mm.
@@ -1279,9 +1278,6 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
 
         ep_size = ep_group.size()
         num_tokens = x_TD.shape[0]
-        assert num_tokens == num_local_tokens_after_seq_dim_padding
-        assert self.num_max_tokens_per_rank is not None
-        assert num_local_tokens_after_seq_dim_padding == self.num_max_tokens_per_rank
         num_local_experts = num_local_tokens_per_expert_E.numel() // ep_size
         num_receive_rows_per_source_rank = num_tokens * min(top_k, num_local_experts)
         receive_capacity = ep_size * num_receive_rows_per_source_rank
@@ -1352,18 +1348,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
 def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     """Validate and fill EP token dispatcher configs from runtime config."""
     parallelism = config.parallelism
-    training = getattr(config, "training", None)
-    required_num_max_tokens_per_rank = None
-    if training is not None:
-        # CP and TP/SP shard the token axis before MoE, so derive the
-        # per-rank capacity from the configured input shape.
-        num_token_shards = (
-            parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
-        )
-        required_num_max_tokens_per_rank = training.local_batch_size * (
-            (training.seq_len + num_token_shards - 1) // num_token_shards
-        )
-
+    dispatcher_cfgs = []
     for layer_cfg in model_config.layers:
         moe_cfg = getattr(layer_cfg, "moe", None)
         if moe_cfg is None:
@@ -1377,7 +1362,21 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
             ),
         ):
             continue
+        dispatcher_cfgs.append(token_dispatcher_cfg)
 
+    required_num_max_tokens_per_rank = None
+    training = getattr(config, "training", None)
+    if dispatcher_cfgs and training is not None:
+        # CP and TP/SP shard the token axis before MoE, so derive the
+        # per-rank capacity from the configured input shape.
+        num_token_shards = (
+            parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
+        )
+        required_num_max_tokens_per_rank = training.local_batch_size * (
+            (training.seq_len + num_token_shards - 1) // num_token_shards
+        )
+
+    for token_dispatcher_cfg in dispatcher_cfgs:
         if parallelism.expert_parallel_degree == 1:
             raise ValueError(
                 f"{type(token_dispatcher_cfg).__qualname__} requires expert "
