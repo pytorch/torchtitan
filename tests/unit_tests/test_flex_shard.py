@@ -8,8 +8,6 @@ import datetime
 import os
 import tempfile
 import unittest
-from collections.abc import Mapping, MutableMapping
-from typing import Any
 from unittest import mock
 
 import torch
@@ -17,7 +15,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard
-from torch.optim import Optimizer
+from torch.optim import OptimizationUnit, Optimizer, OptimizerStepOps
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -29,41 +27,62 @@ from torchtitan.components.flex_shard import (
 )
 
 
+class _OwnedTestStepOps:
+    def optimization_units(self, optimizer):
+        units = []
+        for group in optimizer.param_groups:
+            names = group.get("param_names")
+            if names is None:
+                names = [None] * len(group["params"])
+            for param, name in zip(group["params"], names, strict=True):
+                units.append(
+                    OptimizationUnit(
+                        parameter=param,
+                        parameter_group=group,
+                        state=optimizer.state[param],
+                        gradient=param.grad,
+                        name=name,
+                        compute_requirement=Owned(trailing_dims=2),
+                    )
+                )
+        return tuple(units)
+
+    def begin_step(self, optimizer):
+        optimizer._test_begin_count = getattr(optimizer, "_test_begin_count", 0) + 1
+        for group in optimizer.param_groups:
+            for param in group["params"]:
+                if param.grad is not None and not optimizer.state[param]:
+                    optimizer.state[param]["accumulator"] = torch.zeros_like(param)
+        return optimizer
+
+    def prepare(self, unit, *, out):
+        assert unit.gradient is not None
+        unit.state["accumulator"].add_(unit.gradient)
+        out.copy_(unit.state["accumulator"])
+
+    def compute(self, unit_metadata, inputs, *, out):
+        # The global mean makes the result depend on correct full-matrix assembly.
+        out.copy_(inputs)
+        out.add_(inputs.mean())
+
+    def apply_updates(self, unit, updates):
+        unit.parameter.add_(updates, alpha=-unit.parameter_group["lr"])
+
+    def end_step(self, context):
+        context._test_end_count = getattr(context, "_test_end_count", 0) + 1
+
+
 class _OwnedTestOptimizer(Optimizer):
     """Minimal complete-matrix optimizer used to test FlexShard itself."""
+
+    _step_ops: OptimizerStepOps = _OwnedTestStepOps()
 
     def __init__(self, params, lr: float = 0.1) -> None:
         super().__init__(params, {"lr": lr})
 
-    def flex_shard_compute_requirement(self, param, group):
-        return Owned(trailing_dims=2)
-
-    def flex_shard_init_state(self, param, grad, group):
-        state = self.state[param]
-        if not state:
-            state["accumulator"] = torch.zeros_like(param)
-        return state
-
-    def flex_shard_prepare(
-        self,
-        param: torch.Tensor,
-        grad: torch.Tensor,
-        state: Mapping[str, torch.Tensor],
-        group: MutableMapping[str, Any],
-        *,
-        out: torch.Tensor,
-    ) -> None:
-        state["accumulator"].add_(grad)
-        out.copy_(state["accumulator"])
-
-    def flex_shard_compute(self, compute_input, group):
-        # The global mean makes the result depend on correct full-matrix assembly.
-        return compute_input + compute_input.mean()
-
-    def flex_shard_finalize(self, param, update, group, *, out) -> None:
-        if out is not param:
-            out.copy_(param)
-        out.add_(update, alpha=-group["lr"])
+    @torch.no_grad()
+    def step(self, closure=None):
+        return self._execute_step_ops(self._step_ops, closure)
 
 
 def _run_cuda_pipeline_lifetime(
@@ -133,7 +152,7 @@ def _run_cuda_pipeline_lifetime(
             bucket_spec=bucket_specs,
         )
 
-        runtime = pipeline_optimizer.__dict__["_flex_shard_runtime"]
+        runtime = pipeline_optimizer._step_executor
         original_reverse_bucket = runtime._reverse_bucket
 
         def delayed_reverse_bucket(work):
@@ -291,7 +310,7 @@ class TestFlexShard(DTensorTestBase):
                 )
             ],
         )
-        with self.assertRaisesRegex(RuntimeError, "after flex_shard plan"):
+        with self.assertRaisesRegex(RuntimeError, "after installing a step executor"):
             optimizer.add_param_group(
                 {
                     "params": [torch.nn.Parameter(torch.ones(2, 2))],
@@ -374,9 +393,11 @@ class TestFlexShard(DTensorTestBase):
                 for index in range(3)
             ],
         )
-        runtime = optimizer.__dict__["_flex_shard_runtime"]
+        runtime = optimizer._step_executor
+        self.assertNotIn("step", optimizer.__dict__)
 
         stages = []
+        hook_events = []
         original_forward_bucket = runtime._forward_bucket
         original_reverse_bucket = runtime._reverse_bucket
 
@@ -390,7 +411,21 @@ class TestFlexShard(DTensorTestBase):
 
         runtime._forward_bucket = record_forward_bucket
         runtime._reverse_bucket = record_reverse_bucket
-        optimizer.step()
+        optimizer.register_step_pre_hook(
+            lambda optimizer, args, kwargs: hook_events.append("pre")
+        )
+        optimizer.register_step_post_hook(
+            lambda optimizer, args, kwargs: hook_events.append("post")
+        )
+
+        def closure():
+            hook_events.append("closure")
+            return 3.0
+
+        self.assertEqual(optimizer.step(closure), 3.0)
+        self.assertEqual(hook_events, ["pre", "closure", "post"])
+        self.assertEqual(optimizer._test_begin_count, 1)
+        self.assertEqual(optimizer._test_end_count, 1)
         self.assertEqual(
             stages,
             [
@@ -402,6 +437,67 @@ class TestFlexShard(DTensorTestBase):
                 "R:layers.2",
             ],
         )
+
+    @with_comms
+    def test_bucket_partition_does_not_change_updates(self):
+        one_layer_optimizer, one_layer_params, _values, _grads = (
+            self._owned_optimizer()
+        )
+        two_layer_optimizer, two_layer_params, _values, _grads = (
+            self._owned_optimizer()
+        )
+        names = [
+            "layers.0.first.weight",
+            "layers.1.second.weight",
+            "layers.2.third.weight",
+        ]
+        one_layer_optimizer.param_groups[0]["param_names"] = names
+        two_layer_optimizer.param_groups[0]["param_names"] = names
+
+        flex_shard(
+            one_layer_optimizer,
+            bucket_spec=[
+                BucketSpec(
+                    name=f"layers.{index}",
+                    patterns=(f"layers.{index}.*",),
+                    mesh=self.mesh,
+                )
+                for index in range(3)
+            ],
+        )
+        flex_shard(
+            two_layer_optimizer,
+            bucket_spec=[
+                BucketSpec(
+                    name="layers.0-1",
+                    patterns=("layers.0.*", "layers.1.*"),
+                    mesh=self.mesh,
+                ),
+                BucketSpec(
+                    name="layers.2",
+                    patterns=("layers.2.*",),
+                    mesh=self.mesh,
+                ),
+            ],
+        )
+
+        one_layer_optimizer.step()
+        two_layer_optimizer.step()
+
+        for one_layer_param, two_layer_param in zip(
+            one_layer_params, two_layer_params, strict=True
+        ):
+            torch.testing.assert_close(
+                one_layer_param.to_local(), two_layer_param.to_local()
+            )
+            torch.testing.assert_close(
+                one_layer_optimizer.state[one_layer_param][
+                    "accumulator"
+                ].to_local(),
+                two_layer_optimizer.state[two_layer_param][
+                    "accumulator"
+                ].to_local(),
+            )
 
     @with_comms
     def test_bucket_coverage_and_storage_layout_validation(self):
@@ -445,9 +541,9 @@ class TestFlexShard(DTensorTestBase):
             )
 
     @with_comms
-    def test_requires_compute_requirement_provider(self):
+    def test_requires_optimizer_step_ops(self):
         param = self._parameter(torch.ones(4, 2), torch.ones(4, 2))
-        with self.assertRaisesRegex(TypeError, "must implement"):
+        with self.assertRaisesRegex(TypeError, "does not expose OptimizerStepOps"):
             flex_shard(
                 torch.optim.SGD(
                     [
