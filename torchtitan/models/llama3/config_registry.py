@@ -191,7 +191,7 @@ def llama3_405b() -> Trainer.Config:
         "405B",
         converters=[
             Float8LinearConverter.Config(
-                filter_fqns=["output"],
+                filter_fqns=["lm_head"],
                 model_compile_enabled=(
                     compile_config.enable and "model" in compile_config.components
                 ),

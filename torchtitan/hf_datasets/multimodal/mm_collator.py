@@ -35,6 +35,7 @@ class MultiModalCollator:
     spatial_merge_size: int
     tokenizer: MultiModalTokenizer
     build_mrope_positions: bool
+    patch_order: str = "block"
 
     def collate_images(
         self, all_images: list[torch.Tensor]
@@ -52,7 +53,11 @@ class MultiModalCollator:
         """
         results = [
             vision_to_patches(
-                img, self.patch_size, self.temporal_patch_size, self.spatial_merge_size
+                img,
+                self.patch_size,
+                self.temporal_patch_size,
+                self.spatial_merge_size,
+                patch_order=self.patch_order,
             )
             for img in all_images
         ]
@@ -164,6 +169,13 @@ class MultiModalCollator:
         Returns:
             (batch, seq_len, 3) MRoPE position IDs.
         """
+        # MRoPE position IDs are laid out in block order; a raster patch order
+        # would desync them from the patch sequence.
+        if self.patch_order != "block":
+            raise ValueError(
+                f"MRoPE requires patch_order='block', got {self.patch_order!r}."
+            )
+
         # Expand each video [T, H, W] into T rows of [1, H, W] so each frame is
         # treated like an image; temporal position comes from frame ordering.
         if grid_thw_videos is not None:
