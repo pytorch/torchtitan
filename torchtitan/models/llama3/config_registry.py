@@ -11,6 +11,7 @@ from torchtitan.components.data import (
     GrainDataLoader,
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
+    TextCollator,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -53,6 +54,7 @@ def llama3_debugmodel() -> Trainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=packed,
+            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
@@ -66,6 +68,7 @@ def llama3_debugmodel() -> Trainer.Config:
             steps=10,
             dataloader=GrainDataLoader.Config(
                 dataset=packed,
+                collator=TextCollator.Config(),
             ),
         ),
     )
@@ -145,6 +148,7 @@ def llama3_8b() -> Trainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            collator=TextCollator.Config(),
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=SelectiveAC.Config(),
@@ -180,6 +184,7 @@ def llama3_70b() -> Trainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            collator=TextCollator.Config(),
         ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
@@ -230,6 +235,7 @@ def llama3_405b() -> Trainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            collator=TextCollator.Config(),
         ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
@@ -290,6 +296,7 @@ def sft_debugmodel() -> Trainer.Config:
                     post_filters=(lambda sample: sample is not None,),
                 ),
             ),
+            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(

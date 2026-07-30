@@ -6,9 +6,9 @@
 
 import unittest
 
-import grain.python as grain
 import torch
 
+from torchtitan.components.data.collators import TextCollator
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
@@ -79,16 +79,14 @@ class TestDatasetCheckpointing(unittest.TestCase):
                     processor=TextProcessor.Config(
                         text_fn=_process_text,
                     ),
+                    post_filters=(lambda sample: sample is not None,),
                 ),
             ),
+            collator=TextCollator.Config(),
             seed=42,
             shuffle=True,
             repeat=True,
-            read_options=grain.ReadOptions(
-                num_threads=1,
-                prefetch_buffer_size=1,
-            ),
-            batch_prefetch_buffer_size=1,
+            num_prefetch_batches=1,
         )
         return config.build(
             dp_world_size=2,

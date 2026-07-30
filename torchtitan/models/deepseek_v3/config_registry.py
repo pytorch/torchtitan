@@ -5,7 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    TextCollator,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -42,6 +46,7 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -107,6 +112,7 @@ def deepseek_v3_16b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -188,6 +194,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(

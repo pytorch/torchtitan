@@ -26,7 +26,7 @@ Workflow overview::
     │  3. Process text: insert vision placeholder tokens    │
     │     <|vision_start|><|image_pad|>...<|vision_end|>    │
     │     into text, then tokenize                          │
-    │     → input_ids: Tensor(seq_len,)                     │
+    │     → input_ids: Tensor(num_tokens,)                  │
     │     → labels: same as input_ids, with vision tokens   │
     │       masked to ignore_id (-100)                      │
     └───────────────────────────────────────────────────────┘
@@ -34,7 +34,7 @@ Workflow overview::
             ▼  (optional, if MMSamplePackingConfig is configured)
     ┌───────────────────────────────────────────────────────┐
     │  Sample Packer                                        │
-    │  Bin-pack short samples into seq_len-length sequences │
+    │  Bin-pack short samples into seq_len-token sequences  │
     │  to reduce padding waste                              │
     └───────────────────────────────────────────────────────┘
             │
@@ -49,8 +49,8 @@ Workflow overview::
     │     → grid_thw: (N, 3) per-image [T, H', W'] dims    │
     │     (same for videos)                                 │
     │                                                       │
-    │  2. collate_text: pad input_ids/labels across batch   │
-    │     to seq_len, pad batch to target batch_size        │
+    │  2. collate_text: pad text fields to seq_len, shift   │
+    │     labels, and pad to the target batch size          │
     │     → input_ids: (batch_size, seq_len)                │
     │     → labels: (batch_size, seq_len)                   │
     └───────────────────────────────────────────────────────┘
@@ -72,13 +72,12 @@ import torch
 import tyro
 
 from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
     DatasetConfig as GrainDatasetConfig,
-    DatasetIterationPolicy,
     SampleProcessor,
     SingleDatasetConfig,
 )
 from torchtitan.components.data.sources import HuggingFaceStreamingSource
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
@@ -305,12 +304,14 @@ class MultiModalProcessor(SampleProcessor):
             video_fps=self._config.video_fps,
             video_min_frames=self._config.video_min_frames,
             video_max_frames=self._config.video_max_frames,
-            seq_len=self._seq_len,
         )
-        if processed is not None and processed["input_ids"].shape[0] > self._seq_len:
+        if (
+            processed is not None
+            and processed["input_ids"].shape[0] > self._seq_len
+        ):
             logger.warning(
                 f"Sample length {processed['input_ids'].shape[0]} > training "
-                f"self._seq_len={self._seq_len}. Skip"
+                f"seq_len={self._seq_len}. Skip"
             )
             return None
         return processed
@@ -390,8 +391,6 @@ class _MMSamplePackingIterator(grain.DatasetIterator[dict[str, Any]]):
         self._flushed = False
 
     def __next__(self) -> dict[str, Any]:
-        # TODO(data-mm-packer-liveness): Exact-fill packing can retain rows
-        # indefinitely on repeated input; emit on buffer pressure instead.
         while not self._packer.packed_samples:
             if self._parent_exhausted:
                 if not self._flushed:
@@ -438,15 +437,21 @@ class MMSamplePackingConfig:
         self,
         *,
         context: DatasetBuildContext,
-        iteration: DatasetIterationPolicy,
+        dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.IterDataset[dict[str, Any]]:
-        parent = self.dataset.build(context=context, iteration=iteration)
+        parent = self.dataset.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy,
+        )
+        parent = parent.filter(
+            lambda sample: len(sample["input_ids"]) <= context.seq_len
+        )
         if isinstance(parent, grain.MapDataset):
             parent = parent.to_iter_dataset(read_options=context.read_options)
         if not isinstance(parent, grain.IterDataset):
             raise TypeError("multimodal packing requires a Grain dataset")
-        # TODO(data-global-pack-plan): Plan packed rows before effective-DP sharding
-        # to support topology-independent resume.
+        # TODO(data-global-pack-plan): Each DP rank packs its own documents, so
+        # changing the DP size changes packed rows. Plan rows before DP sharding.
         return _MMSamplePackingDataset(
             parent,
             max_seq_length=context.seq_len,

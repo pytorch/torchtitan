@@ -24,6 +24,7 @@ import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import (
+    AsyncMode,
     CheckpointManager,
     MODEL,
     ModelWrapper,
@@ -32,6 +33,58 @@ from torchtitan.components.checkpoint import (
 )
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.trainer import Trainer
+
+
+def _distributed_rng_checkpoint_worker(
+    rank: int,
+    world_size: int,
+    init_file: str,
+    checkpoint_dir: str,
+) -> None:
+    torch.distributed.init_process_group(
+        backend="gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        trainer = Trainer.__new__(Trainer)
+        trainer.step = 5
+        trainer.ntokens_seen = 123
+        manager = CheckpointManager.__new__(CheckpointManager)
+        manager.sd_adapter = None
+        manager.states = {}
+
+        random.seed(100 + rank)
+        np.random.seed(200 + rank)
+        torch.manual_seed(300 + rank)
+        with mock.patch(
+            "torchtitan.trainer.utils.device_module.is_available",
+            return_value=False,
+        ):
+            manager.dcp_save(
+                {"train_state": trainer},
+                checkpoint_dir,
+                AsyncMode.DISABLED,
+            )
+            expected = (random.random(), np.random.random(), torch.rand(1))
+
+            random.random()
+            np.random.random()
+            torch.rand(1)
+            manager.dcp_load(
+                {"train_state": trainer},
+                checkpoint_dir,
+                from_hf=False,
+                from_quantized=False,
+            )
+            actual = (random.random(), np.random.random(), torch.rand(1))
+
+        assert actual[0] == expected[0]
+        assert actual[1] == expected[1]
+        assert torch.equal(actual[2], expected[2])
+    finally:
+        torch.distributed.destroy_process_group()
 
 
 class FakeOptimizersContainer:
@@ -1038,6 +1091,19 @@ class TestTrainerRNGState(unittest.TestCase):
         self.assertEqual(random.random(), expected_python)
         self.assertEqual(np.random.random(), expected_numpy)
         self.assertTrue(torch.equal(torch.rand(1), expected_torch))
+
+    def test_distributed_checkpoint_restores_rank_local_rng(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            torch.multiprocessing.spawn(
+                _distributed_rng_checkpoint_worker,
+                args=(
+                    2,
+                    os.path.join(temp_dir, "init"),
+                    os.path.join(temp_dir, "checkpoint"),
+                ),
+                nprocs=2,
+                join=True,
+            )
 
     def test_uses_global_rank_in_rng_key(self):
         trainer = Trainer.__new__(Trainer)

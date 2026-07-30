@@ -6,6 +6,7 @@
 
 """Grain-backed TorchTitan dataloader."""
 
+from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,15 +14,45 @@ from typing import Any
 import grain.python as grain
 import torch
 from grain import experimental as grain_experimental
+from torch.distributed.checkpoint.stateful import Stateful
 
 from torchtitan.components.data.collators import Collator, DefaultCollator, TrainerBatch
-from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
-    DatasetConfig,
-    DatasetIterationPolicy,
-)
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data.dataset import DatasetConfig
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.config import Configurable
+
+
+# NOTE: This class deliberately inherits from `Exception` and not `StopIteration`.
+# According to PEP 479, raising a `StopIteration` or its subclass from within a
+# generator will wrap it in a `RuntimeError`. Since this exception is designed
+# to be raised from a generator-based dataloader and caught by the training loop,
+# inheriting from `StopIteration` would make it uncatchable and would crash the
+# program.
+# See: https://peps.python.org/pep-0479/
+class DataloaderExhaustedError(Exception):
+    """An exception that indicates dataloader exhaustion."""
+
+    pass
+
+
+class BaseDataLoader(Stateful, ABC, Configurable):
+    """Base class for all dataloaders.
+
+    This is used to enforce that all dataloaders have the methods defined in
+    ``Stateful``, ``state_dict()`` and ``load_state_dict()``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    @abstractmethod
+    def __iter__(self) -> Iterator[TrainerBatch]:
+        ...
+
+    def close(self) -> None:
+        pass
 
 
 def _configure_data_worker(worker_index: int, worker_count: int) -> None:
@@ -39,16 +70,12 @@ class GrainDataLoader(BaseDataLoader):
         seed: int = 42
         shuffle: bool = True
         repeat: bool = True
-        streaming_shuffle_window_size: int = 1_000
+        streaming_shuffle_buffer_size: int = 1_000
         """Raw stream rows held for shuffling; lower it for large media rows."""
-        read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
-        """Grain map-to-iter reader threads and row buffer."""
-        batch_prefetch_buffer_size: int = 8
-        """Completed trainer batches prefetched ahead of training."""
-        process_workers: int = 0
-        """Processes used for map-root prefetch; zero disables process prefetch."""
-        process_prefetch_buffer_size: int = 1
-        """Rows buffered by each process worker."""
+        num_workers: int = 0
+        """One loader-level map-processing pool per rank; zero disables it."""
+        num_prefetch_batches: int = 8
+        """Complete batches prepared ahead of trainer consumption."""
 
     def __init__(
         self,
@@ -68,37 +95,40 @@ class GrainDataLoader(BaseDataLoader):
                 "controlled step count"
             )
         self._dp_world_size = dp_world_size
-        self._process_workers = config.process_workers
+        self._num_workers = config.num_workers
         self._rank_id = f"dp_rank_{dp_rank}"
+        read_options = grain.ReadOptions()
         context = DatasetBuildContext(
             tokenizer=tokenizer,
             seq_len=seq_len,
             local_batch_size=local_batch_size,
-            read_options=config.read_options,
+            read_options=read_options,
         )
-        iteration = DatasetIterationPolicy(
+        dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,
             shuffle=config.shuffle,
             repeat=config.repeat,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
-            streaming_shuffle_window_size=config.streaming_shuffle_window_size,
+            streaming_shuffle_buffer_size=config.streaming_shuffle_buffer_size,
         )
 
-        dataset = config.dataset.build(context=context, iteration=iteration)
+        dataset = config.dataset.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy,
+        )
         collator = config.collator.build(context=context)
-        if config.process_workers and not isinstance(dataset, grain.MapDataset):
-            raise ValueError(
-                "process prefetch currently requires a map-root dataset; "
-                "streaming, mixing, and packing remain single-process"
-            )
+        if config.num_workers and not isinstance(dataset, grain.MapDataset):
+            raise ValueError("multiprocessing prefetch requires a map-root dataset")
         if isinstance(dataset, grain.MapDataset):
-            dataset = dataset.to_iter_dataset(read_options=config.read_options)
-        if config.process_workers:
+            dataset = dataset.to_iter_dataset(read_options=read_options)
+
+        # Run the map-root preprocessing pipeline in one loader-level process
+        # pool. Eight workers means eight total workers per rank, not per child.
+        if config.num_workers:
             dataset = dataset.mp_prefetch(
                 grain.MultiprocessingOptions(
-                    num_workers=config.process_workers,
-                    per_worker_buffer_size=config.process_prefetch_buffer_size,
+                    num_workers=config.num_workers,
                 ),
                 worker_init_fn=_configure_data_worker,
             )
@@ -107,8 +137,13 @@ class GrainDataLoader(BaseDataLoader):
             drop_remainder=config.repeat,
             batch_fn=collator,
         )
+
+        # One background thread runs batching/collation and queues complete
+        # batches while the trainer consumes the previous batch.
+        # TODO(data-prefetch-benchmark): Benchmark complete-batch thread prefetch
+        # with and without process prefetch before changing either default.
         dataset = grain_experimental.ThreadPrefetchIterDataset(
-            dataset, prefetch_buffer_size=config.batch_prefetch_buffer_size
+            dataset, prefetch_buffer_size=config.num_prefetch_batches
         )
         self._iterator = iter(dataset)
 
@@ -119,7 +154,7 @@ class GrainDataLoader(BaseDataLoader):
         return {
             "version": 1,
             "dp_world_size": self._dp_world_size,
-            "process_workers": self._process_workers,
+            "num_workers": self._num_workers,
             self._rank_id: self._iterator.get_state(),
         }
 
@@ -134,12 +169,12 @@ class GrainDataLoader(BaseDataLoader):
             raise ValueError(
                 "cannot resume after changing the effective data-parallel degree"
             )
-        if state_dict.get("process_workers", 0) != self._process_workers:
+        if state_dict.get("num_workers", 0) != self._num_workers:
             self.close()
             raise ValueError(
-                "cannot resume after changing process_workers from "
-                f"{state_dict.get('process_workers', 0)} "
-                f"to {self._process_workers}"
+                "cannot resume after changing num_workers from "
+                f"{state_dict.get('num_workers', 0)} "
+                f"to {self._num_workers}"
             )
         if self._rank_id not in state_dict:
             raise ValueError(

@@ -10,50 +10,42 @@ from dataclasses import dataclass
 
 import grain.python as grain
 import numpy as np
-import torch
 
-from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
-    DatasetConfig,
-    DatasetIterationPolicy,
-    TokenSequence,
-)
+from torchtitan.components.data.dataset import DatasetConfig, TextSequence
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 
 
-def _token_sequence_to_input_ids_and_labels(
-    sample: TokenSequence,
+def _text_sequence_to_packing_dict(
+    sample: TextSequence,
 ) -> dict[str, np.ndarray]:
-    """Shift one document before packing so labels never cross documents.
-
-    Example:
-
-        token_ids=[5, 6, 7, 8], loss_mask=[1, 1, 1, 1]
-        # -> input_ids=[5, 6, 7], labels=[6, 7, 8]
-    """
-    token_ids = np.asarray(sample.token_ids, dtype=np.int64)
-    loss_mask = np.asarray(sample.loss_mask, dtype=np.bool_)
-    if token_ids.ndim != 1 or loss_mask.shape != token_ids.shape:
-        raise ValueError("token_ids and loss_mask must be aligned 1-D arrays")
+    """Expose token-aligned arrays consumed by the packing operators."""
+    positions = sample.positions
+    if positions is None:
+        positions = np.arange(len(sample.input_ids), dtype=np.int64)
     return {
-        "input_ids": token_ids[:-1],
-        "labels": np.where(loss_mask[1:], token_ids[1:], np.int64(IGNORE_INDEX)),
+        "input_ids": np.asarray(sample.input_ids),
+        "labels": np.asarray(sample.labels),
+        "positions": np.asarray(positions),
     }
 
 
-def _packed_to_input_and_labels(
+def _packed_dict_to_text_sequence(
     packed: dict[str, np.ndarray],
-) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-    """Convert one packed row to the trainer contract; padding is loss-masked."""
-    padding = np.asarray(packed["input_ids_segment_ids"]) == 0
-    labels = np.where(padding, np.int64(IGNORE_INDEX), np.asarray(packed["labels"]))
-    inputs = {
-        "input": torch.as_tensor(np.asarray(packed["input_ids"]), dtype=torch.long),
-        "positions": torch.as_tensor(
-            np.asarray(packed["input_ids_positions"]), dtype=torch.long
-        ),
-    }
-    return inputs, torch.as_tensor(labels, dtype=torch.long)
+) -> TextSequence:
+    """Finalize packed text by masking padding and canonicalizing positions."""
+    labels = np.asarray(packed["labels"]).copy()
+    labels[np.asarray(packed["input_ids_segment_ids"]) == 0] = IGNORE_INDEX
+
+    boundaries = np.asarray(packed["positions"]) == 0
+    token_indices = np.arange(len(boundaries), dtype=np.int64)
+    segment_starts = np.maximum.accumulate(np.where(boundaries, token_indices, 0))
+
+    return TextSequence(
+        input_ids=np.asarray(packed["input_ids"]),
+        labels=labels,
+        positions=token_indices - segment_starts,
+    )
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -63,23 +55,31 @@ class ConcatThenSplitPackingConfig:
     dataset: DatasetConfig
 
     def build(
-        self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
+        self,
+        *,
+        context: DatasetBuildContext,
+        dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.IterDataset:
-        dataset = self.dataset.build(context=context, iteration=iteration)
-        dataset = dataset.filter(lambda sample: len(sample.token_ids) >= 2)
-        dataset = dataset.map(_token_sequence_to_input_ids_and_labels)
+        dataset = self.dataset.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy,
+        )
+        dataset = dataset.map(_text_sequence_to_packing_dict)
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
-        # TODO(data-global-pack-plan): Plan packed rows before effective-DP sharding
-        # when measurements justify shared length metadata and a cached plan.
-        # TODO(data-overflow-policy): Make long-document handling configurable
-        # (chunk, truncate, or drop); concat-then-split always chunks today.
+        # TODO(data-global-pack-plan): Each DP rank packs its own documents, so
+        # changing the DP size changes packed rows. Plan rows before DP sharding.
+        # TODO(data-overflow-policy): Concat-then-split chunks long documents, while
+        # first-fit drops them. Expose a shared split, truncate, or drop policy.
         dataset = grain.experimental.ConcatThenSplitIterDataset(
             dataset,
-            length_struct={"input_ids": context.seq_len, "labels": context.seq_len},
-            meta_features=(),
+            length_struct={
+                "input_ids": context.seq_len,
+                "labels": context.seq_len,
+                "positions": context.seq_len,
+            },
         )
-        return dataset.map(_packed_to_input_and_labels)
+        return dataset.map(_packed_dict_to_text_sequence)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -87,31 +87,46 @@ class FirstFitPackingConfig:
     """Packs whole tokenized documents into fixed-length rows."""
 
     dataset: DatasetConfig
-    num_packing_bins: int | None = None
+    num_packing_bins: int = 8
+    """Candidate rows kept open; more bins can reduce padding but buffer more samples."""
 
     def __post_init__(self) -> None:
-        if self.num_packing_bins is not None and self.num_packing_bins <= 0:
+        if self.num_packing_bins <= 0:
             raise ValueError("num_packing_bins must be positive")
 
     def build(
-        self, *, context: DatasetBuildContext, iteration: DatasetIterationPolicy
+        self,
+        *,
+        context: DatasetBuildContext,
+        dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.IterDataset:
-        dataset = self.dataset.build(context=context, iteration=iteration)
-        dataset = dataset.filter(lambda sample: len(sample.token_ids) >= 2)
-        dataset = dataset.map(_token_sequence_to_input_ids_and_labels)
+        dataset = self.dataset.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy,
+        )
+        dataset = dataset.filter(
+            lambda sample: len(sample.input_ids) <= context.seq_len
+        )
+        dataset = dataset.map(_text_sequence_to_packing_dict)
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
-        dataset = dataset.filter(
-            lambda packed: len(packed["input_ids"]) <= context.seq_len
-        )
-        # TODO(data-global-pack-plan): Plan packed rows before effective-DP sharding
-        # when measurements justify shared length metadata and a cached plan.
+        # TODO(data-global-pack-plan): Each DP rank packs its own documents, so
+        # changing the DP size changes packed rows. Plan rows before DP sharding.
         dataset = grain.experimental.FirstFitPackIterDataset(
             dataset,
-            length_struct={"input_ids": context.seq_len, "labels": context.seq_len},
-            num_packing_bins=(self.num_packing_bins or context.local_batch_size),
-            meta_features=("labels",),
-            seed=iteration.seed,
-            shuffle_bins=iteration.shuffle,
+            length_struct={
+                "input_ids": context.seq_len,
+                "labels": context.seq_len,
+                "positions": context.seq_len,
+            },
+            padding_struct={
+                "input_ids": 0,
+                "labels": IGNORE_INDEX,
+                "positions": 0,
+            },
+            num_packing_bins=self.num_packing_bins,
+            meta_features=("labels", "positions"),
+            seed=dataset_iteration_policy.seed,
+            shuffle_bins=dataset_iteration_policy.shuffle,
         )
-        return dataset.map(_packed_to_input_and_labels)
+        return dataset.map(_packed_dict_to_text_sequence)

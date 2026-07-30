@@ -46,7 +46,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
         dl_config = GrainDataLoader.Config(
             dataset=dataset,
             collator=MultiModalCollator.Config(),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         )
 
         return dl_config.build(
@@ -102,6 +102,8 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
                                 f"(world_size={world_size}, rank={rank})"
                             )
                             assert torch.equal(exp_v, res_v)
+                dl.close()
+                dl_resumed.close()
 
 
 if __name__ == "__main__":

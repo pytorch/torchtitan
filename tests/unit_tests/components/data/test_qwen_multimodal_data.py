@@ -10,11 +10,8 @@ import grain.python as grain
 import pytest
 import torch
 
-from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
-    DatasetIterationPolicy,
-    SingleDatasetConfig,
-)
+from torchtitan.components.data.dataset import SingleDatasetConfig
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
@@ -26,7 +23,8 @@ from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
 
 
 class _Tokenizer:
-    pass
+    pad_id = 0
+    TOKEN_FIELDS = ()
 
 
 @dataclass(frozen=True)
@@ -42,7 +40,7 @@ class _RowsSource:
 
 CONTEXT = DatasetBuildContext(
     tokenizer=_Tokenizer(),
-    seq_len=8,
+    seq_len=9,
     local_batch_size=1,
     read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
 )
@@ -63,19 +61,19 @@ def _row(
     }
 
 
-def _dataset(rows):
+def _dataset(rows, *, repeat=False):
     return MMSamplePackingConfig(
         dataset=SingleDatasetConfig(source=_RowsSourceConfig(rows=tuple(rows))),
         buffer_size=2,
     ).build(
         context=CONTEXT,
-        iteration=DatasetIterationPolicy(
+        dataset_iteration_policy=DatasetIterationPolicy(
             seed=0,
             shuffle=False,
-            repeat=False,
+            repeat=repeat,
             dp_rank=0,
             dp_world_size=1,
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
     )
 
@@ -84,8 +82,12 @@ def _dataset(rows):
 class _RowsSourceConfig:
     rows: tuple[dict, ...]
 
-    def build(self, *, dp_rank: int, dp_world_size: int):
-        del dp_rank, dp_world_size
+    def build(
+        self,
+        *,
+        dataset_iteration_policy: DatasetIterationPolicy,
+    ):
+        del dataset_iteration_policy
         return _RowsSource(self.rows)
 
 
@@ -161,7 +163,7 @@ def test_packing_preserves_ordered_images_when_merging_rows():
     assert torch.equal(row["input_ids"], torch.tensor([1, 2, 3, 4]))
     assert torch.equal(
         row["labels"],
-        torch.tensor([1, 2, IGNORE_INDEX, 4]),
+        torch.tensor([1, 2, 3, 4]),
     )
     assert len(row["pixel_values"]) == 2
     assert torch.equal(row["pixel_values"][0], first_image)
@@ -185,5 +187,63 @@ def test_buffered_packing_is_checkpointed_exactly():
     restored.set_state(state)
     actual = next(restored)
 
-    assert torch.equal(first["input_ids"], torch.tensor([1, 2, 3, 4, 5, 6, 20, 21]))
+    assert torch.equal(first["input_ids"], torch.tensor([1, 2, 3, 4, 5, 6]))
     assert torch.equal(expected["input_ids"], actual["input_ids"])
+
+
+def test_repeated_underfilled_rows_emit_at_buffer_pressure():
+    dataset = _dataset(
+        [
+            _row(1, length=6),
+            _row(10, length=6),
+        ],
+        repeat=True,
+    )
+    iterator = iter(dataset)
+
+    assert torch.equal(
+        next(iterator)["input_ids"],
+        torch.tensor([1, 2, 3, 4, 5, 6]),
+    )
+    assert torch.equal(
+        next(iterator)["input_ids"],
+        torch.tensor([10, 11, 12, 13, 14, 15]),
+    )
+
+
+def test_oversized_row_does_not_clear_valid_buffered_rows():
+    dataset = _dataset(
+        [
+            _row(1, length=6),
+            _row(20, length=10),
+            _row(10, length=3),
+        ]
+    )
+
+    row = next(iter(dataset))
+
+    assert torch.equal(
+        row["input_ids"],
+        torch.tensor([1, 2, 3, 4, 5, 6, 10, 11, 12]),
+    )
+
+
+def test_multimodal_packing_uses_seq_len():
+    row = next(iter(_dataset([_row(1, length=9)])))
+
+    assert len(row["input_ids"]) == CONTEXT.seq_len
+
+
+def test_multimodal_collator_masks_cross_sample_target():
+    collator = MultiModalCollator.Config().build(context=CONTEXT)
+    packed = {
+        "input_ids": torch.tensor([1, 2, 3, 4]),
+        "labels": torch.tensor([1, 2, 3, 4]),
+        "positions": torch.tensor([0, 1, 0, 1]),
+        "pixel_values": [],
+        "pixel_values_videos": [],
+    }
+
+    _, labels = collator([packed])
+
+    assert labels[0, :4].tolist() == [2, IGNORE_INDEX, 4, IGNORE_INDEX]

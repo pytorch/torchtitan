@@ -11,6 +11,7 @@ from torchtitan.components.data import (
     GrainDataLoader,
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
+    TextCollator,
 )
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -51,6 +52,7 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
@@ -84,6 +86,7 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
@@ -136,6 +139,7 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
                     post_filters=(lambda sample: sample is not None,),
                 ),
             ),
+            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(
@@ -194,6 +198,7 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
                     post_filters=(lambda sample: sample is not None,),
                 ),
             ),
+            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(

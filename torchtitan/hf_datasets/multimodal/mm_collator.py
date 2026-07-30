@@ -13,8 +13,12 @@ from typing import Any
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from torchtitan.components.data.collators import Collator, TrainerBatch
-from torchtitan.components.data.dataset import DatasetBuildContext
+from torchtitan.components.data.collators import (
+    Collator,
+    shift_causal_labels,
+    TrainerBatch,
+)
+from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.tools.logging import logger
 from .utils.image import vision_to_patches
@@ -38,7 +42,7 @@ class MultiModalCollator(Collator):
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         self.batch_size = context.local_batch_size
-        self.seq_len = context.seq_len
+        self._seq_len = context.seq_len
         self.max_images_per_batch = config.max_images_per_batch
         self.patch_size = config.patch_size
         self.temporal_patch_size = config.temporal_patch_size
@@ -108,24 +112,24 @@ class MultiModalCollator(Collator):
             batch_first=True,
             padding_value=0,
         )
-        # Pad or truncate to seq_len + 1
+        # Pad or truncate to the model sequence length.
         input_ids, labels = pad_seq_len(
             input_ids,
             labels,
-            self.seq_len + 1,
+            self._seq_len,
             # pyrefly: ignore [missing-attribute]
             padding_idx=self.tokenizer.pad_id,
             ignore_idx=IGNORE_INDEX,
         )
-        # Pad or truncate positions to seq_len + 1
-        if positions.shape[1] < self.seq_len + 1:
+        # Pad or truncate positions to the same length.
+        if positions.shape[1] < self._seq_len:
             positions = torch.nn.functional.pad(
                 positions,
-                (0, self.seq_len + 1 - positions.shape[1]),
+                (0, self._seq_len - positions.shape[1]),
                 value=0,
             )
         else:
-            positions = positions[:, : self.seq_len + 1]
+            positions = positions[:, : self._seq_len]
         # Pad dummy rows to reach target batch size
         input_ids, labels = pad_batch_dim(
             input_ids,
@@ -142,7 +146,7 @@ class MultiModalCollator(Collator):
                 value=0,
             )
 
-        return input_ids[:, :-1], labels[:, 1:], positions[:, :-1]
+        return shift_causal_labels(input_ids, labels, positions)
 
     def _build_mrope_positions(
         self,

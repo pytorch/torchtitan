@@ -16,17 +16,14 @@ from typing import Any
 
 import torch
 
-from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.tools.logging import logger
-
 
 class MMSamplePacker:
     """Packs multiple samples to maximize sequence length utilization.
 
     Samples are accumulated in an internal buffer.  When the buffer reaches
     ``buffer_size``, a scan-and-pick pass packs samples into sequences of up
-    to ``max_seq_length``.  Samples that cannot form a complete sequence stay
-    in the buffer to be combined with future arrivals (unless ``flush=True``).
+    to ``max_seq_length``. Partial sequences wait for more samples until the
+    lookahead buffer fills, then are emitted to guarantee progress.
     """
 
     def __init__(
@@ -45,8 +42,8 @@ class MMSamplePacker:
         """Pack buffered samples into sequences using scan-and-pick.
 
         Repeatedly scans the buffer to greedily fill each packed sequence.
-        When ``flush=False``, an incomplete sequence stays in the buffer
-        for future combination.
+        When ``flush=False``, an incomplete sequence stays buffered until the
+        lookahead buffer fills.
 
         O(N * K) where N = buffer size, K = number of packed sequences.
         Negligible vs data loading and model forward for typical buffer sizes.
@@ -61,17 +58,18 @@ class MMSamplePacker:
                     picked_ids.append(sid)
                     current_length += length
 
-            # Nothing fit — every remaining sample exceeds max_seq_length
+            # Oversized rows are filtered before entering the packer.
             if not picked_ids:
-                logger.warning(
-                    f"Dropping {len(self._sample_buffer)} samples that"
-                    f" exceed max_seq_length {self.max_seq_length}"
+                raise RuntimeError(
+                    "multimodal packer received a row longer than max_seq_length"
                 )
-                self._sample_buffer.clear()
-                break
 
-            # Incomplete sequence — keep in buffer for future samples
-            if not flush and current_length < self.max_seq_length:
+            # Keep a partial row only while more lookahead slots remain.
+            if (
+                not flush
+                and current_length < self.max_seq_length
+                and len(self._sample_buffer) < self.buffer_size
+            ):
                 break
 
             samples = [self._sample_buffer.pop(sid) for sid in picked_ids]
@@ -79,12 +77,9 @@ class MMSamplePacker:
 
     @staticmethod
     def _merge_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
-        labels = [sample["labels"].clone() for sample in samples]
-        for later_labels in labels[1:]:
-            later_labels[0] = IGNORE_INDEX
         merged: dict[str, Any] = {
             "input_ids": torch.cat([s["input_ids"] for s in samples]),
-            "labels": torch.cat(labels),
+            "labels": torch.cat([s["labels"] for s in samples]),
             "positions": torch.cat([s["positions"] for s in samples]),
             "pixel_values": [img for s in samples for img in s.get("pixel_values", [])],
             "pixel_values_videos": [

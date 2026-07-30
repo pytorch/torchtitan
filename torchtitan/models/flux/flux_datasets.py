@@ -5,26 +5,35 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, NotRequired, TypedDict
 
 import grain.python as grain
 import numpy as np
 import PIL.Image
 import torch
 import tyro
+from torch.utils.data import default_collate
 
+from torchtitan.components.data.collators import Collator, TrainerBatch
 from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
     DatasetConfig as GrainDatasetConfig,
-    DatasetIterationPolicy,
     SampleProcessor,
     SingleDatasetConfig,
 )
 from torchtitan.components.data.sources import HuggingFaceStreamingSource
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.tools.logging import logger
+
+
+class FluxSample(TypedDict):
+    t5: torch.Tensor
+    clip: torch.Tensor
+    prompt: str
+    image: torch.Tensor
+    timestep: NotRequired[float]
 
 
 def _process_cc12m_image(
@@ -168,7 +177,7 @@ class FluxSampleProcessor(SampleProcessor):
         self,
         sample: dict[str, Any],
         rng: np.random.Generator,
-    ) -> tuple[dict[str, Any], torch.Tensor] | None:
+    ) -> FluxSample | None:
         # Use the dataset-specific preprocessor
         sample_dict = self._data_processor(
             sample,
@@ -193,8 +202,23 @@ class FluxSampleProcessor(SampleProcessor):
             if rng.random() < dropout_prob:
                 sample_dict["clip"] = self._clip_empty_token
 
-        labels = sample_dict.pop("image")
-        return sample_dict, labels
+        return sample_dict
+
+
+class FluxCollator(Collator):
+    """Stacks Flux samples and moves images to the trainer label slot."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Collator.Config):
+        pass
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        del config, context
+
+    def __call__(self, rows: Sequence[FluxSample]) -> TrainerBatch:
+        batch = default_collate(list(rows))
+        labels = batch.pop("image")
+        return batch, labels
 
 
 DATASETS: dict[str, SingleDatasetConfig] = {
@@ -256,12 +280,13 @@ _VALIDATION_TIMESTEPS = tuple((index + 0.5) / 8 for index in range(8))
 
 def _add_validation_timestep(
     index: int,
-    sample: tuple[dict[str, Any], torch.Tensor],
-) -> tuple[dict[str, Any], torch.Tensor]:
-    sample_dict, labels = sample
-    sample_dict = dict(sample_dict)
-    sample_dict["timestep"] = _VALIDATION_TIMESTEPS[index % len(_VALIDATION_TIMESTEPS)]
-    return sample_dict, labels
+    sample: FluxSample,
+) -> FluxSample:
+    sample_with_timestep = sample.copy()
+    sample_with_timestep["timestep"] = _VALIDATION_TIMESTEPS[
+        index % len(_VALIDATION_TIMESTEPS)
+    ]
+    return sample_with_timestep
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -274,9 +299,12 @@ class FluxValidationDatasetConfig:
         self,
         *,
         context: DatasetBuildContext,
-        iteration: DatasetIterationPolicy,
+        dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.MapDataset | grain.IterDataset:
-        dataset = self.dataset.build(context=context, iteration=iteration)
+        dataset = self.dataset.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy,
+        )
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
         return dataset.map_with_index(_add_validation_timestep)

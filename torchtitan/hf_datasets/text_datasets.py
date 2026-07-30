@@ -12,15 +12,15 @@ import numpy as np
 import tyro
 
 from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
     SampleProcessor,
     SingleDatasetConfig,
-    TokenSequence,
+    TextSequence,
 )
 from torchtitan.components.data.sources import (
     HuggingFaceRandomAccessSource,
     HuggingFaceStreamingSource,
 )
+from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.tools.logging import logger
 
@@ -42,15 +42,17 @@ class TextProcessor(SampleProcessor):
 
     def __call__(
         self, sample: dict[str, Any], rng: np.random.Generator
-    ) -> TokenSequence:
+    ) -> TextSequence | None:
         del rng
-        token_ids = np.asarray(
+        input_ids = np.asarray(
             self._tokenizer.encode(self._text_fn(sample), add_bos=True, add_eos=True),
             dtype=np.int64,
         )
-        return TokenSequence(
-            token_ids=token_ids,
-            loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
+        if len(input_ids) < 2:
+            return None
+        return TextSequence(
+            input_ids=input_ids,
+            labels=input_ids.copy(),
         )
 
 
@@ -71,7 +73,7 @@ class ChatProcessor(SampleProcessor):
             )
         self._tokenizer = context.tokenizer
         self._eos_id = context.tokenizer.eos_id
-        self.seq_len = context.seq_len
+        self._seq_len = context.seq_len
         self._messages_fn = config.messages_fn
         self._logged_first_sample = False
 
@@ -92,12 +94,11 @@ class ChatProcessor(SampleProcessor):
                 f"Second message must be 'assistant', got '{messages[1]['role']}'"
             )
 
-    def _tokenize_sample(self, sample: dict[str, Any]) -> TokenSequence | None:
-        """Tokenize a single-turn sample and create input/label pairs.
+    def _tokenize_sample(self, sample: dict[str, Any]) -> TextSequence | None:
+        """Tokenize a single-turn sample and mask prompt labels.
 
-        Returns token IDs and a loss mask with prompt tokens disabled.
-        Returns None if the sample exceeds seq_len (dropped to avoid
-        training on truncated responses).
+        Returns None if the sample exceeds `seq_len`, avoiding
+        training on truncated responses.
 
         Uses incremental prefix re-tokenization to find the prompt/response
         token boundary, avoiding BPE merge errors.
@@ -116,12 +117,12 @@ class ChatProcessor(SampleProcessor):
             logger.info(f"[ChatProcessor] First sample full:\n{full_text}")
             self._logged_first_sample = True
 
-        # Drop examples exceeding seq_len rather than truncating.
-        if len(full_tokens) - 1 > self.seq_len:
-            logger.debug(f"Dropping sample: tokens exceeds seq_len {self.seq_len}")
+        # Drop oversized examples rather than truncating.
+        if len(full_tokens) > self._seq_len:
+            logger.debug(
+                f"Dropping sample: token count exceeds seq_len={self._seq_len}"
+            )
             return None
-
-        label_ids = full_tokens[1:]
 
         # Find prompt/response boundary by tokenizing just the user message
         # with add_generation_prompt=True.
@@ -133,22 +134,17 @@ class ChatProcessor(SampleProcessor):
         # of full-conversation tokens before masking on prompt_len.
         prompt_len = len(prompt_tokens)
 
-        # Labels are shifted by one token, so the first assistant token is
-        # predicted at index prompt_len - 1 and must remain unmasked.
-        mask_end = min(max(prompt_len - 1, 0), len(label_ids))
-        label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
-
-        loss_mask = np.concatenate(
-            ([True], np.asarray(label_ids) != IGNORE_INDEX),
-        )
-        return TokenSequence(
-            token_ids=np.asarray(full_tokens, dtype=np.int64),
-            loss_mask=loss_mask,
+        input_ids = np.asarray(full_tokens, dtype=np.int64)
+        labels = input_ids.copy()
+        labels[:prompt_len] = IGNORE_INDEX
+        return TextSequence(
+            input_ids=input_ids,
+            labels=labels,
         )
 
     def __call__(
         self, sample: dict[str, Any], rng: np.random.Generator
-    ) -> TokenSequence | None:
+    ) -> TextSequence | None:
         del rng
         return self._tokenize_sample(sample)
 
@@ -162,6 +158,7 @@ DATASETS: dict[str, SingleDatasetConfig] = {
             split="train",
         ),
         processor=TextProcessor.Config(),
+        post_filters=(lambda sample: sample is not None,),
     ),
     "c4_test": SingleDatasetConfig(
         source=HuggingFaceRandomAccessSource.Config(
@@ -172,6 +169,7 @@ DATASETS: dict[str, SingleDatasetConfig] = {
             },
         ),
         processor=TextProcessor.Config(),
+        post_filters=(lambda sample: sample is not None,),
     ),
     "c4_validation": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
@@ -180,5 +178,6 @@ DATASETS: dict[str, SingleDatasetConfig] = {
             split="validation",
         ),
         processor=TextProcessor.Config(),
+        post_filters=(lambda sample: sample is not None,),
     ),
 }
