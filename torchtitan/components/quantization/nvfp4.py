@@ -163,11 +163,14 @@ try:
             # Re-register them as None so ``_distribute_states`` skips them and
             # ``_init_self_buffers`` materializes them on the real device, per
             # torchtitan's buffer protocol.
-            # _sr_seed is a per-rank stochastic-rounding seed: distinct across
-            # ranks (SR stays unbiased and NVFP4 never communicates quantized
-            # values, so per-rank seeds are correct) and non-persistent (a Philox
-            # key needs no checkpointing). Re-register it None so it is not
-            # distributed and is re-drawn per rank in _init_self_buffers.
+            # _sr_seed is a stochastic-rounding seed drawn locally per rank with
+            # no cross-rank coordination. Ranks that share an RNG stream (all but
+            # the pp axis, which set_determinism seeds distinctly) draw the same
+            # value, but that is fine: SR stays unbiased and NVFP4 never
+            # communicates quantized values, so the seed need not differ across
+            # ranks. It is non-persistent (a Philox key needs no checkpointing).
+            # Re-register it None so it is not distributed and is re-drawn per
+            # rank in _init_self_buffers.
             self.register_buffer("_sr_seed", None, persistent=False)
             # _rht_sign_vector is the fixed _HARDCODED_SIGN_VECTOR (see module
             # top): identical on every rank, so it is non-persistent (a
