@@ -99,6 +99,10 @@ def _fused_qkv_param_init(
     """Init for the fused ``wqkv`` that is bit-identical to the stock separate
     ``wq``/``wk``/``wv`` and independent of the sharding degree.
 
+    Under FQN-keyed initialization, the fused and separate parameterizations
+    intentionally have different numerical identities; each remains invariant
+    to sharding independently.
+
     The non-fused module initializes ``wq``/``wk``/``wv`` as three separate
     contiguous parameters. This reproduces those exact draws: it initializes q,
     k, v as three contiguous tensors of the stock-weight shapes (in

@@ -22,6 +22,10 @@ from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.keyed_parameter_init import (
+    keyed_parameter_init_is_active,
+    keyed_parameter_scope,
+)
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
@@ -176,12 +180,18 @@ class Module(nn.Module, Configurable):
                 self._init_param(name, param)
             return
 
+        own_param_names = [name for name, _ in self.named_parameters(recurse=False)]
+        if keyed_parameter_init_is_active() and own_param_names:
+            raise ValueError(
+                "keyed parameter initialization requires explicit param_init; "
+                f"{type(self).__name__} uses reset_parameters"
+            )
+
         reset = getattr(self, "reset_parameters", None)
         if callable(reset):
             reset()
             return
 
-        own_param_names = [name for name, _ in self.named_parameters(recurse=False)]
         if own_param_names:
             raise ValueError(
                 f"{type(self).__name__} has parameters {own_param_names} "
@@ -206,7 +216,9 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}. "
                 f"Available: {list(self._param_init.keys())}"
             )
-        self._param_init[name](param)
+        with keyed_parameter_scope(self, name, param) as should_initialize:
+            if should_initialize:
+                self._param_init[name](param)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Initialize this module's own buffers.
