@@ -269,6 +269,9 @@ class CompileConfig:
 
     backend: str = "inductor"
 
+    dynamic: bool | None = None
+    """Whether torch.compile should trace dynamic tensor dimensions eagerly."""
+
 
 @dataclass(kw_only=True, slots=True)
 class CommConfig:

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import MagicMock
 
 import torch
 
@@ -42,6 +43,24 @@ class TinyModel(Module):
 
 
 class TestApplyCompile(unittest.TestCase):
+    def test_dynamic_compile_config_is_forwarded(self):
+        model = TinyModel(num_layers=2, dim=8)
+        blocks = list(model.layers.values())
+        for block in blocks:
+            block.compile = MagicMock()
+
+        apply_compile(
+            model,
+            CompileConfig(backend="inductor", dynamic=True),
+        )
+
+        for block in blocks:
+            block.compile.assert_called_once_with(
+                backend="inductor",
+                fullgraph=True,
+                dynamic=True,
+            )
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_grouped_mm_compiles_and_runs(self):
         model = TinyModel(num_layers=2, dim=128).cuda()

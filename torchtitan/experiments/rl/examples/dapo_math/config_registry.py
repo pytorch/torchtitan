@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Single-node Qwen3-4B-Base DAPO-Math recipes."""
+"""Single-node DAPO-Math recipes."""
 
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.training_sample_builder import (
+    TrainingSampleBuilder,
+)
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -37,7 +40,8 @@ from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
 )
 from torchtitan.experiments.rl.routing.strategies import LeastLoadedRoutingStrategy
-from torchtitan.models.qwen3 import model_registry
+from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
+from torchtitan.models.qwen3 import model_registry as qwen3_model_registry
 
 
 def _qwen3_4b_dapo_math_config(
@@ -52,7 +56,7 @@ def _qwen3_4b_dapo_math_config(
         num_samples=num_validation_samples,
     )
     return Controller.Config(
-        model_spec=model_registry(
+        model_spec=qwen3_model_registry(
             "4B",
             attn_backend="varlen",
             # Compute vocabulary logits in fp32; the rest of the forward uses bf16.
@@ -158,4 +162,109 @@ def rl_dapo_qwen3_4b_math_32k() -> Controller.Config:
         max_response_tokens=32768,
         max_total_tokens=34816,
         dump_folder="outputs/rl/qwen3_4b_dapo_math_32k",
+    )
+
+
+def rl_dapo_deepseek_v3_16b_math_2k_perf() -> Controller.Config:
+    """Run a fast random-weight DeepSeek-v3 16B DAPO benchmark on 8 GPUs.
+
+    The available ``deepseek-moe-16b-base`` checkpoint is not compatible with
+    TorchTitan's DeepSeek-v3 16B architecture, so this recipe intentionally
+    initializes weights randomly. It exercises the production DAPO data,
+    rollout, training, and weight-sync paths, but its rewards and learning
+    metrics are not meaningful.
+    """
+    max_response_tokens = 2048
+    max_total_tokens = 4096
+    return Controller.Config(
+        model_spec=deepseek_v3_model_registry("16B", attn_backend="flex"),
+        # This directory supplies the tokenizer only; model weights are random.
+        hf_assets_path="assets/hf/deepseek-moe-16b-base",
+        dump_folder="outputs/rl/deepseek_v3_16b_dapo_math_2k_perf",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=20,
+            num_prompts_per_train_step=2,
+            num_samples_per_prompt=4,
+            target_offpolicy_steps=0,
+            validation=ValidationConfig(num_samples=0),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=1, seq_len=max_total_tokens),
+            ),
+            # Random weights generally produce uniform zero rewards. Retain
+            # those groups so the performance benchmark continues training.
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="inductor", dynamic=True),
+        rollouter=DapoMathRollouter.Config(
+            token_env=TokenEnv.Config(
+                max_rollout_tokens=max_total_tokens,
+                max_num_turns=1,
+            ),
+        ),
+        renderer=RendererConfig(
+            name="default",
+            chat_template=(
+                "{% for message in messages %}"
+                "{% if loop.first %}{{ bos_token }}{% endif %}"
+                "{{ message['role'] | capitalize }}: {{ message['content'] }}\n"
+                "{% endfor %}"
+                "{% if add_generation_prompt %}Assistant: {% endif %}"
+            ),
+        ),
+        num_generators=1,
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(
+                lr=1e-6,
+                betas=(0.9, 0.98),
+                weight_decay=0.1,
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=0,
+                min_lr_factor=1.0,
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                data_parallel_replicate_degree=1,
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
+                expert_parallel_degree=4,
+                enable_sequence_parallel=True,
+                spmd_backend="spmd_types",
+                enable_async_tensor_parallel=True,
+            ),
+            ac_config=None,
+            checkpoint=CheckpointManager.Config(enable=False),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=DAPOLoss.Config(
+                    ratio_clip_low=0.2,
+                    ratio_clip_high=0.28,
+                ),
+            ),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
+                expert_parallel_degree=4,
+                enable_sequence_parallel=True,
+                spmd_backend="spmd_types",
+                enable_async_tensor_parallel=True,
+            ),
+            # Async TP's event synchronization is not CUDA-graph capture safe.
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=1.0,
+                max_tokens=max_response_tokens,
+                # The reused DeepSeek-MoE tokenizer defines IDs through 100014,
+                # while the synthetic model keeps a padded 102400-word vocabulary.
+                allowed_token_ids=list(range(100015)),
+            ),
+        ),
     )

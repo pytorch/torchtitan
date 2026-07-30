@@ -147,14 +147,23 @@ def resolve_placements(
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
         key = MeshAxisName(axis_name)
-        if key not in placements:
+        if key == MeshAxisName.DP and key not in placements:
+            dp_replicate = placements.get(MeshAxisName.DP_REPLICATE)
+            dp_shard = placements.get(MeshAxisName.DP_SHARD)
+            assert dp_replicate == dp_shard, (
+                "A logical DP layout must resolve identically on its "
+                "dp_replicate and dp_shard storage axes"
+            )
+            p = dp_shard
+        else:
+            p = placements.get(key)
+        if p is None:
             raise ValueError(
                 f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
                 f"{sorted(k.value for k in layout.axes())}; "
                 f"required: {list(mesh.mesh_dim_names)}."
             )
-        p = placements[key]
         if isinstance(p, (Shard, Partial)) and mesh.size(i) == 1:
             p = Replicate()
         result.append(p)

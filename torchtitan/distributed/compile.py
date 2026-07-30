@@ -53,7 +53,10 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig) -> None:
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block.compile(backend=backend, fullgraph=True)
+        compile_kwargs = {"backend": backend, "fullgraph": True}
+        if compile_config.dynamic is not None:
+            compile_kwargs["dynamic"] = compile_config.dynamic
+        transformer_block.compile(**compile_kwargs)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
 

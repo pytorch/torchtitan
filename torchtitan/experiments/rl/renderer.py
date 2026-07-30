@@ -45,6 +45,8 @@ class RendererConfig(Configurable.Config):
         enable_thinking: Let the model emit reasoning, when supported.
         preserve_all_thinking: Keep historical reasoning in future prompts.
         preserve_thinking_between_tool_calls: Keep reasoning during tool loops.
+        chat_template: Override the tokenizer's Jinja chat template. This is
+            useful for tokenizer-only assets that do not define one.
 
     Every field defaults to `None`; a non-`None` value overrides that knob on the
     chosen renderer's config, otherwise the renderer keeps its own default.
@@ -63,6 +65,7 @@ class RendererConfig(Configurable.Config):
     enable_thinking: bool | None = None
     preserve_all_thinking: bool | None = None
     preserve_thinking_between_tool_calls: bool | None = None
+    chat_template: str | None = None
 
     def build(self, *, tokenizer_path: str) -> Renderer:
         # TODO(renderers#70): use TorchTitan's tokenizer once `renderers` supports
@@ -70,6 +73,8 @@ class RendererConfig(Configurable.Config):
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        if self.chat_template is not None:
+            tokenizer.chat_template = self.chat_template
 
         # `name=None` (or "auto") -> let `create_renderer` resolve from the tokenizer.
         renderer_name = _RENDERER_BY_MODEL.get(self.name, self.name)
@@ -83,7 +88,7 @@ class RendererConfig(Configurable.Config):
         args = {
             field.name: getattr(self, field.name)  # {key: value}
             for field in fields(self)
-            if field.name != "name"  # Get all self.fields, except name
+            if field.name not in ("name", "chat_template")
             and getattr(self, field.name) is not None  # Only consider provided fields
             and field.name in config_type.model_fields  # Config supports this field
         }
