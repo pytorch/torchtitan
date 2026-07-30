@@ -12,16 +12,16 @@ import fnmatch
 import hashlib
 import heapq
 import math
-from collections.abc import Mapping, MutableMapping, Sequence
-from dataclasses import dataclass, field
-from types import MethodType, ModuleType
-from typing import Any, cast, Protocol, TYPE_CHECKING, TypeVar
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
+from types import ModuleType
+from typing import Any, TYPE_CHECKING, TypeVar
 
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import _get_device_handle, DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
-from torch.optim import Optimizer
+from torch.optim import OptimizationUnit, Optimizer, OptimizerStepOps
 
 
 if TYPE_CHECKING:
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BucketSpec",
-    "FlexShardOptimizer",
+    "FlexShardStepExecutor",
     "Owned",
     "flex_shard",
 ]
@@ -72,63 +72,6 @@ class Owned:
             or self.trailing_dims <= 0
         ):
             raise ValueError("Owned trailing_dims must be a positive integer")
-
-
-class FlexShardOptimizer(Protocol):
-    """Optimizer-side declaration and distribution-agnostic compute hooks.
-
-    ``prepare``, ``compute``, and ``finalize`` receive only plain tensors.
-    FlexShard chooses owners and supplies output buffers; the optimizer writes
-    distribution-agnostic results into those buffers. ``prepare`` may update
-    local optimizer state in place, and ``finalize`` must support ``out``
-    aliasing ``param``.
-    """
-
-    param_groups: list[dict[str, Any]]
-    state: dict[Any, Any]
-
-    def flex_shard_compute_requirement(
-        self,
-        param: Tensor,
-        group: MutableMapping[str, Any],
-    ) -> Owned:
-        ...
-
-    def flex_shard_init_state(
-        self,
-        param: Tensor,
-        grad: Tensor,
-        group: MutableMapping[str, Any],
-    ) -> MutableMapping[str, Any]:
-        ...
-
-    def flex_shard_prepare(
-        self,
-        param: Tensor,
-        grad: Tensor,
-        state: Mapping[str, Tensor],
-        group: MutableMapping[str, Any],
-        *,
-        out: Tensor,
-    ) -> None:
-        ...
-
-    def flex_shard_compute(
-        self,
-        compute_input: Tensor,
-        group: MutableMapping[str, Any],
-    ) -> Tensor:
-        ...
-
-    def flex_shard_finalize(
-        self,
-        param: Tensor,
-        update: Tensor,
-        group: MutableMapping[str, Any],
-        *,
-        out: Tensor,
-    ) -> None:
-        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,48 +223,28 @@ def _shard_metadata(
     return tuple(shard_numels), tuple(shard_offsets)
 
 
-def _compute_sharding_requirement(
-    optimizer: Optimizer,
-    param: Tensor,
-    group: MutableMapping[str, Any],
-) -> Owned:
-    provider = getattr(optimizer, "flex_shard_compute_requirement", None)
-    if provider is None:
-        raise TypeError(
-            f"{type(optimizer).__name__} must implement "
-            "flex_shard_compute_requirement()"
-        )
-    requirement = provider(param, group)
+def _compute_sharding_requirement(unit: OptimizationUnit) -> Owned:
+    requirement = unit.compute_requirement
     if not isinstance(requirement, Owned):
         raise TypeError(
-            "flex_shard_compute_requirement() must return Owned, "
+            "FlexShard optimization units must require Owned compute, "
             f"got {requirement!r}"
         )
     return requirement
 
 
-def _validate_optimizer_hooks(optimizer: Optimizer) -> None:
-    required_methods = (
-        "flex_shard_init_state",
-        "flex_shard_prepare",
-        "flex_shard_compute",
-        "flex_shard_finalize",
-    )
-    for method_name in required_methods:
-        if not callable(getattr(optimizer, method_name, None)):
-            raise TypeError(
-                f"{type(optimizer).__name__} must implement {method_name}()"
-            )
-
-
 def _bind_optimizer_params(
     optimizer: Optimizer,
+    units: Sequence[OptimizationUnit],
 ) -> tuple[_UnassignedBinding, ...]:
     bindings = []
     seen_fqns: set[str] = set()
     seen_param_ids: set[int] = set()
     process_group_ranks: tuple[int, ...] | None = None
     tensor_device: torch.device | None = None
+    units_by_param = {id(unit.parameter): unit for unit in units}
+    if len(units_by_param) != len(units):
+        raise ValueError("FlexShard optimization units contain duplicate parameters")
 
     for group_index, group in enumerate(optimizer.param_groups):
         params = group["params"]
@@ -332,6 +255,21 @@ def _bind_optimizer_params(
                 "params"
             )
         for fqn, param in zip(param_names, params, strict=True):
+            unit = units_by_param.get(id(param))
+            if unit is None or unit.parameter is not param:
+                raise ValueError(
+                    "FlexShard optimization units must cover every optimizer parameter"
+                )
+            if unit.parameter_group is not group:
+                raise ValueError(
+                    f"FlexShard optimization unit {fqn!r} has a different "
+                    "parameter group"
+                )
+            if unit.name != fqn:
+                raise ValueError(
+                    f"FlexShard optimization unit name {unit.name!r} does not "
+                    f"match parameter FQN {fqn!r}"
+                )
             if not isinstance(fqn, str) or not fqn:
                 raise ValueError(f"Invalid FlexShard parameter FQN {fqn!r}")
             if fqn in seen_fqns:
@@ -341,7 +279,7 @@ def _bind_optimizer_params(
                 raise ValueError(f"FlexShard parameter {fqn!r} appears more than once")
             seen_param_ids.add(id(param))
 
-            requirement = _compute_sharding_requirement(optimizer, param, group)
+            requirement = _compute_sharding_requirement(unit)
 
             if not isinstance(param, DTensor):
                 raise ValueError(f"Owned FlexShard parameter {fqn!r} must be a DTensor")
@@ -426,6 +364,10 @@ def _bind_optimizer_params(
 
     if not bindings:
         raise ValueError("Owned FlexShard requires at least one parameter")
+    if len(seen_param_ids) != len(units):
+        raise ValueError(
+            "FlexShard optimization units must exactly match optimizer parameters"
+        )
     return tuple(bindings)
 
 
@@ -599,30 +541,62 @@ def _build_bucket_plan(
     )
 
 
-class _OwnedFlexShardRuntime:
+class FlexShardStepExecutor:
     def __init__(
         self,
         optimizer: Optimizer,
+        ops: OptimizerStepOps,
         bucket_specs: Sequence[BucketSpec],
     ) -> None:
         if not dist.is_available() or not dist.is_initialized():
             raise RuntimeError("Owned FlexShard requires distributed initialization")
 
         self._comm_context: _OwnedFlexShardCommContext | None = None
+        self._ops = ops
+        units = tuple(ops.optimization_units(optimizer))
+        self._units_by_param = {id(unit.parameter): unit for unit in units}
         self._specs = tuple(bucket_specs)
         if any(spec.mesh.ndim != 1 for spec in self._specs):
             raise ValueError("Owned FlexShard currently requires 1D bucket meshes")
         setup_error = None
         try:
-            self._initialize_local(optimizer)
+            self._initialize_local(optimizer, units)
         except Exception as error:
             setup_error = error
         self._synchronize_setup_error(setup_error)
         self._validate_plan_across_ranks()
 
-    def _initialize_local(self, optimizer: Optimizer) -> None:
-        _validate_optimizer_hooks(optimizer)
-        unassigned = _bind_optimizer_params(optimizer)
+    def _refresh_units(
+        self,
+        optimizer: Optimizer,
+        ops: OptimizerStepOps,
+    ) -> None:
+        units = tuple(ops.optimization_units(optimizer))
+        units_by_param = {id(unit.parameter): unit for unit in units}
+        if units_by_param.keys() != self._units_by_param.keys():
+            raise RuntimeError("FlexShard optimization-unit membership changed")
+        bindings_by_param = {
+            id(binding.param): binding for binding in self._bindings
+        }
+        for param_id, planned_unit in self._units_by_param.items():
+            unit = units_by_param[param_id]
+            binding = bindings_by_param[param_id]
+            if (
+                unit.parameter is not planned_unit.parameter
+                or unit.parameter_group
+                is not optimizer.param_groups[binding.group_index]
+                or unit.name != planned_unit.name
+                or unit.compute_requirement != planned_unit.compute_requirement
+            ):
+                raise RuntimeError("FlexShard optimization-unit plan changed")
+        self._units_by_param = units_by_param
+
+    def _initialize_local(
+        self,
+        optimizer: Optimizer,
+        units: Sequence[OptimizationUnit],
+    ) -> None:
+        unassigned = _bind_optimizer_params(optimizer, units)
         resolved = _resolve_buckets(unassigned, self._specs)
 
         nonempty_specs = [
@@ -760,16 +734,17 @@ class _OwnedFlexShardRuntime:
         if any(value.item() != plan_hash for value in gathered_hashes):
             raise RuntimeError("FlexShard plans differ across ranks")
 
-    @staticmethod
     def _compute_owned_update(
-        optimizer: Optimizer,
+        self,
+        ops: OptimizerStepOps,
         binding: _Binding,
         compute_input: Tensor,
     ) -> Tensor:
-        group = optimizer.param_groups[binding.group_index]
-        return cast(FlexShardOptimizer, optimizer).flex_shard_compute(
-            compute_input, group
-        )
+        unit = self._units_by_param[id(binding.param)]
+        result = ops.compute(unit.metadata, compute_input, out=compute_input)
+        if result is not None:
+            raise TypeError("OptimizerStepOps.compute() must write to out and return None")
+        return compute_input
 
     @staticmethod
     def _validate_local_value(
@@ -788,20 +763,15 @@ class _OwnedFlexShardRuntime:
                 f"{hook_name}() output must match the expected local tensor layout"
             )
 
-    @staticmethod
     def _prepare_local_compute(
-        optimizer: Optimizer,
+        self,
+        ops: OptimizerStepOps,
         binding: _Binding,
         grad: DTensor,
         out: Tensor,
     ) -> None:
-        group = optimizer.param_groups[binding.group_index]
-        compute_optimizer = cast(FlexShardOptimizer, optimizer)
-        persistent_state = compute_optimizer.flex_shard_init_state(
-            binding.param, grad, group
-        )
-        if not isinstance(persistent_state, MutableMapping):
-            raise TypeError("flex_shard_init_state() must return a mutable mapping")
+        unit = self._units_by_param[id(binding.param)]
+        persistent_state = unit.state
 
         local_state = {}
         tensor_state = {}
@@ -816,20 +786,20 @@ class _OwnedFlexShardRuntime:
             local_state[name] = local_value
             tensor_state[name] = (value, local_value, local_value._version)
 
-        result = compute_optimizer.flex_shard_prepare(
-            binding.param._local_tensor,
-            grad.to_local(),
-            local_state,
-            group,
-            out=out,
+        local_unit = replace(
+            unit,
+            parameter=binding.param._local_tensor,
+            gradient=grad.to_local(),
+            state=local_state,
         )
+        result = ops.prepare(local_unit, out=out)
         if result is not None:
-            raise TypeError("flex_shard_prepare() must write to out and return None")
+            raise TypeError("OptimizerStepOps.prepare() must write to out and return None")
         if local_state.keys() != tensor_state.keys() or any(
             local_state[name] is not local_value
             for name, (_storage, local_value, _version) in tensor_state.items()
         ):
-            raise TypeError("flex_shard_prepare() must update state tensors in place")
+            raise TypeError("OptimizerStepOps.prepare() must update state tensors in place")
         for storage, local_value, version in tensor_state.values():
             if local_value._version != version:
                 torch.autograd.graph.increment_version(storage)
@@ -869,7 +839,7 @@ class _OwnedFlexShardRuntime:
 
     def _prepare_bucket(
         self,
-        optimizer: Optimizer,
+        ops: OptimizerStepOps,
         plan: _BucketPlan,
         active_by_param: dict[int, bool],
         *,
@@ -891,7 +861,7 @@ class _OwnedFlexShardRuntime:
             assert isinstance(grad, DTensor)
             local_param = binding.param._local_tensor
             self._prepare_local_compute(
-                optimizer,
+                ops,
                 binding,
                 grad,
                 local_output.view(local_param.shape),
@@ -918,7 +888,7 @@ class _OwnedFlexShardRuntime:
 
     def _compute_bucket(
         self,
-        optimizer: Optimizer,
+        ops: OptimizerStepOps,
         work: _BucketWork,
     ) -> None:
         plan = work.plan
@@ -946,11 +916,11 @@ class _OwnedFlexShardRuntime:
                     flat_input[source_offset : source_offset + source_numel].copy_(
                         owner_buffer[owner_offset : owner_offset + source_numel]
                     )
-            full_update = self._compute_owned_update(optimizer, binding, full_input)
+            full_update = self._compute_owned_update(ops, binding, full_input)
             self._validate_local_value(
                 full_update,
                 full_input,
-                "flex_shard_compute",
+                "OptimizerStepOps.compute",
             )
             flat_update = full_update.view(-1)
             if plan.owner_buffer_is_compute_layout:
@@ -983,9 +953,9 @@ class _OwnedFlexShardRuntime:
             group=plan.process_group,
         )
 
-    @staticmethod
     def _finalize_bucket(
-        optimizer: Optimizer,
+        self,
+        ops: OptimizerStepOps,
         work: _BucketWork,
     ) -> None:
         plan = work.plan
@@ -997,22 +967,47 @@ class _OwnedFlexShardRuntime:
             local_update = work.local_buffer[
                 local_offset : local_offset + local_param.numel()
             ].view(local_param.shape)
-            group = optimizer.param_groups[binding.group_index]
-            result = cast(FlexShardOptimizer, optimizer).flex_shard_finalize(
-                local_param,
-                local_update,
-                group,
-                out=local_param,
+            unit = self._units_by_param[id(binding.param)]
+            local_state = {}
+            tensor_state = {}
+            for name, value in unit.state.items():
+                if not isinstance(value, torch.Tensor):
+                    continue
+                if not isinstance(value, DTensor):
+                    raise TypeError(
+                        f"Owned FlexShard state {name!r} must be stored as a DTensor"
+                    )
+                local_value = value.to_local()
+                local_state[name] = local_value
+                tensor_state[name] = (value, local_value, local_value._version)
+            grad = binding.param.grad
+            assert isinstance(grad, DTensor)
+            local_unit = replace(
+                unit,
+                parameter=local_param,
+                gradient=grad.to_local(),
+                state=local_state,
             )
+            result = ops.apply_updates(local_unit, local_update)
             if result is not None:
                 raise TypeError(
-                    "flex_shard_finalize() must write to out and return None"
+                    "OptimizerStepOps.apply_updates() must return None"
                 )
+            if local_state.keys() != tensor_state.keys() or any(
+                local_state[name] is not local_value
+                for name, (_storage, local_value, _version) in tensor_state.items()
+            ):
+                raise TypeError(
+                    "OptimizerStepOps.apply_updates() must update state tensors in place"
+                )
+            for storage, local_value, version in tensor_state.values():
+                if local_value._version != version:
+                    torch.autograd.graph.increment_version(storage)
             torch.autograd.graph.increment_version(binding.param)
 
     def _begin_pipelined_bucket(
         self,
-        optimizer: Optimizer,
+        ops: OptimizerStepOps,
         plan: _BucketPlan,
         active_by_param: dict[int, bool],
         slot: _BucketBufferSlot,
@@ -1024,7 +1019,7 @@ class _OwnedFlexShardRuntime:
         with device_handle.stream(transfer_stream):
             local_buffer, owner_buffer = slot.buffers(plan)
             work = self._prepare_bucket(
-                optimizer,
+                ops,
                 plan,
                 active_by_param,
                 local_buffer=local_buffer,
@@ -1037,7 +1032,7 @@ class _OwnedFlexShardRuntime:
 
         with device_handle.stream(caller_stream):
             caller_stream.wait_event(forward_ready)
-            self._compute_bucket(optimizer, work)
+            self._compute_bucket(ops, work)
             compute_done = device_handle.Event()
             compute_done.record(caller_stream)
             work.compute_done = compute_done
@@ -1045,7 +1040,7 @@ class _OwnedFlexShardRuntime:
 
     def _complete_pipelined_bucket(
         self,
-        optimizer: Optimizer,
+        ops: OptimizerStepOps,
         work: _BucketWork,
         context: _OwnedFlexShardCommContext,
     ) -> None:
@@ -1060,7 +1055,7 @@ class _OwnedFlexShardRuntime:
             # the lifetime back edge preserves the one-bucket overlap window.
             transfer_stream.wait_event(compute_done)
             self._reverse_bucket(work)
-            self._finalize_bucket(optimizer, work)
+            self._finalize_bucket(ops, work)
             done = device_handle.Event()
             done.record(transfer_stream)
             work.done = done
@@ -1074,17 +1069,15 @@ class _OwnedFlexShardRuntime:
         if done is None:
             raise AssertionError("FlexShard reverse must precede buffer release")
 
-        # The caller stream is the allocation stream for any distinct tensor
-        # returned by flex_shard_compute(). Enqueue the allocator-lifetime back
-        # edge before dropping its final Python reference. Do not use
-        # Tensor.record_stream() here.
+        # Enqueue the allocator-lifetime back edge before releasing temporary
+        # compute views. Do not use Tensor.record_stream() here.
         caller_stream.wait_event(done)
         work.compute_keepalives.clear()
         work.reverse_buffer = None
 
     def _pipelined_step(
         self,
-        optimizer: Optimizer,
+        ops: OptimizerStepOps,
         active_plans: list[_BucketPlan],
         active_by_param: dict[int, bool],
     ) -> None:
@@ -1103,7 +1096,7 @@ class _OwnedFlexShardRuntime:
         try:
             for bucket_index, plan in enumerate(active_plans):
                 work = self._begin_pipelined_bucket(
-                    optimizer,
+                    ops,
                     plan,
                     active_by_param,
                     context.slots[bucket_index % 2],
@@ -1113,11 +1106,11 @@ class _OwnedFlexShardRuntime:
                 pending.append(work)
                 if len(pending) == 2:
                     oldest = pending.pop(0)
-                    self._complete_pipelined_bucket(optimizer, oldest, context)
+                    self._complete_pipelined_bucket(ops, oldest, context)
                     self._release_pipelined_bucket(oldest, caller_stream)
 
             for work in pending:
-                self._complete_pipelined_bucket(optimizer, work, context)
+                self._complete_pipelined_bucket(ops, work, context)
                 self._release_pipelined_bucket(work, caller_stream)
         except Exception:
             # Order both streams before releasing compute-owned temporaries.
@@ -1129,7 +1122,15 @@ class _OwnedFlexShardRuntime:
                 work.reverse_buffer = None
             raise
 
-    def step(self, optimizer: Optimizer, closure=None):
+    def execute(
+        self,
+        optimizer: Optimizer,
+        ops: OptimizerStepOps,
+        closure=None,
+    ):
+        if ops is not self._ops:
+            raise RuntimeError("FlexShard optimizer step operations changed")
+        self._refresh_units(optimizer, ops)
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -1138,33 +1139,20 @@ class _OwnedFlexShardRuntime:
         # TorchTitan executes one SPMD graph and optimizer configuration on all
         # ranks. Rank-identical gradient presence is therefore a runtime
         # precondition, not a per-step control-plane collective.
-        active_by_param = self._active_params()
-        active_plans = [
-            plan
-            for plan in self._plans
-            if any(
-                active_by_param[id(binding.param)] for binding in plan.bindings
-            )
-        ]
-        self._pipelined_step(optimizer, active_plans, active_by_param)
+        context = ops.begin_step(optimizer)
+        try:
+            active_by_param = self._active_params()
+            active_plans = [
+                plan
+                for plan in self._plans
+                if any(
+                    active_by_param[id(binding.param)] for binding in plan.bindings
+                )
+            ]
+            self._pipelined_step(ops, active_plans, active_by_param)
+        finally:
+            ops.end_step(context)
         return loss
-
-
-@torch.no_grad()
-def _run_owned_flex_shard_step(optimizer: Optimizer, closure=None):
-    runtime = optimizer.__dict__["_flex_shard_runtime"]
-    assert isinstance(runtime, _OwnedFlexShardRuntime)
-    return runtime.step(optimizer, closure)
-
-
-def _reject_flex_shard_param_group(
-    optimizer: Optimizer,
-    param_group: dict[str, Any],
-) -> None:
-    raise RuntimeError(
-        f"{type(optimizer).__name__} cannot add parameter groups after "
-        "flex_shard plan construction"
-    )
 
 
 def flex_shard(
@@ -1175,28 +1163,30 @@ def flex_shard(
 
     The optimizer declares its compute placement and implements plain-tensor
     math. FlexShard owns FQN resolution, owner assignment, redistribution,
-    temporary buffers, and writeback into persistent storage placements.
+    temporary buffers, and writeback into storage placements.
 
     Parameter-group membership, order, names, and compute requirements are
-    fixed after plan construction. Persistent parameters and optimizer state
+    fixed after plan construction. Parameters and optimizer state
     must retain their planned DTensor storage layouts. Mutable optimizer
     settings and per-parameter gradient presence must remain identical across
     ranks. The training hot path treats these as SPMD preconditions and does
     not launch control-plane collectives to diagnose rank divergence.
     """
-    if getattr(optimizer, "_flex_shard_runtime", None) is not None:
-        raise RuntimeError(f"{type(optimizer).__name__} is already flex-sharded")
+    if optimizer._step_executor is not None:
+        raise RuntimeError(
+            f"{type(optimizer).__name__} already has a step executor"
+        )
+
+    ops = getattr(optimizer, "_step_ops", None)
+    if ops is None:
+        raise TypeError(
+            f"{type(optimizer).__name__} does not expose OptimizerStepOps"
+        )
 
     specs = tuple(bucket_spec)
     if not all(isinstance(spec, BucketSpec) for spec in specs):
         raise TypeError("bucket_spec must contain only BucketSpec objects")
 
-    runtime = _OwnedFlexShardRuntime(optimizer, specs)
-    optimizer.__dict__["_flex_shard_runtime"] = runtime
-    optimizer.add_param_group = MethodType(  # type: ignore[method-assign]
-        _reject_flex_shard_param_group,
-        optimizer,
-    )
-    step = Optimizer.profile_hook_step(_run_owned_flex_shard_step)
-    optimizer.step = MethodType(step, optimizer)  # type: ignore[method-assign]
+    executor = FlexShardStepExecutor(optimizer, ops, specs)
+    optimizer.set_step_executor(executor)
     return optimizer
