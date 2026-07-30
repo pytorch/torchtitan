@@ -289,6 +289,9 @@ class SamplingConfig:
     stop_token_ids: list[int] | None = None
     """Renderer role-boundary stop tokens; filled by the controller."""
 
+    allowed_token_ids: list[int] | None = None
+    """Token IDs allowed during sampling, or all model vocabulary IDs when unset."""
+
 
 class RequestDispatcher:
     """Owns the generator's DP/TP request dispatch, hiding the rank layout behind
@@ -1180,6 +1183,7 @@ class VLLMGenerator(Actor, Configurable):
             max_tokens=sampling.max_tokens,
             n=1,  # always expects a single sample per request. Caller can call N times.
             stop_token_ids=sampling.stop_token_ids or None,
+            allowed_token_ids=sampling.allowed_token_ids,
             seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Return each request's result once, when it is fully done, instead of streaming partial
