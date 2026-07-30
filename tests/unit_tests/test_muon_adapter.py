@@ -302,7 +302,10 @@ def _run_bucketed_muon_parity(
             assert_state_matches_reference()
             for param, restored_param in zip(params, restored_params, strict=True):
                 torch.testing.assert_close(
-                    restored_param.to_local(), param.to_local(), rtol=0, atol=0
+                    restored_param.to_local(),
+                    param.to_local(),
+                    rtol=0,
+                    atol=0,
                 )
                 torch.testing.assert_close(
                     restored_optimizer.state[restored_param][
@@ -342,6 +345,127 @@ def _run_bucketed_muon_parity(
                 )
 
         assert all_to_all_calls == 3 * 2 * 2 + 2 + 2 * 2 * 2
+    finally:
+        dist.destroy_process_group()
+
+
+def _run_cuda_forward_readiness(
+    rank: int,
+    world_size: int,
+    store_path: str,
+) -> None:
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{store_path}",
+        rank=rank,
+        world_size=world_size,
+        timeout=datetime.timedelta(seconds=60),
+    )
+    try:
+        device = torch.device("cuda", rank)
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
+        torch.manual_seed(11)
+        full_values = [
+            torch.randn((32, 24), device=device, dtype=torch.bfloat16),
+            torch.randn((24, 16), device=device, dtype=torch.bfloat16),
+        ]
+        full_grads = [torch.randn_like(value) for value in full_values]
+
+        def to_dtensor(tensor: torch.Tensor) -> DTensor:
+            rows, row_offset = Shard.local_shard_size_and_offset(
+                tensor.shape[0], world_size, rank
+            )
+            local = tensor.narrow(0, int(row_offset), int(rows)).contiguous()
+            return DTensor.from_local(
+                local,
+                device_mesh=mesh,
+                placements=(Shard(0),),
+                run_check=False,
+                shape=tensor.shape,
+                stride=tensor.stride(),
+            )
+
+        params = [to_dtensor(value.clone()).requires_grad_() for value in full_values]
+        references = [torch.nn.Parameter(value.clone()) for value in full_values]
+        for param, reference, grad in zip(
+            params, references, full_grads, strict=True
+        ):
+            param.grad = to_dtensor(grad.clone())
+            reference.grad = grad.clone()
+
+        kwargs = {
+            "lr": 0.03,
+            "weight_decay": 0.2,
+            "momentum": 0.8,
+            "nesterov": True,
+            "ns_steps": 2,
+        }
+        optimizer = flex_shard(
+            MuonAdapter(
+                [
+                    {
+                        "params": params,
+                        "param_names": [
+                            "layers.0.attention.wq.weight",
+                            "layers.1.attention.wq.weight",
+                        ],
+                    }
+                ],
+                **kwargs,
+            ),
+            bucket_spec=[
+                BucketSpec(
+                    name=f"layers.{index}",
+                    patterns=(f"layers.{index}.*",),
+                    mesh=mesh,
+                )
+                for index in range(2)
+            ],
+        )
+        reference_optimizer = torch.optim.Muon(references, **kwargs)
+        reference_optimizer.step()
+        torch.cuda.synchronize(device)
+
+        caller_stream = torch.cuda.Stream(device=device)
+        control_stream = torch.cuda.Stream(device=device)
+        gate = torch.cuda.Event()
+        with torch.cuda.stream(control_stream):
+            torch.cuda._sleep(50_000_000)
+            gate.record(control_stream)
+
+        executor = optimizer._step_executor
+        original_forward_bucket = executor._forward_bucket
+        poison_events = []
+
+        def gated_forward_bucket(work):
+            work.owner_buffer.fill_(float("nan"))
+            poison_ready = torch.cuda.Event()
+            poison_ready.record(torch.cuda.current_stream(device))
+            poison_events.append(poison_ready)
+            caller_stream.wait_event(poison_ready)
+            torch.cuda.current_stream(device).wait_event(gate)
+            return original_forward_bucket(work)
+
+        executor._forward_bucket = gated_forward_bucket
+        caller_stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(caller_stream):
+            optimizer.step()
+        caller_stream.synchronize()
+
+        for param, reference in zip(params, references, strict=True):
+            rows, row_offset = Shard.local_shard_size_and_offset(
+                reference.shape[0], world_size, rank
+            )
+            expected = reference.narrow(0, int(row_offset), int(rows))
+            torch.testing.assert_close(param.to_local(), expected)
+            expected_momentum = reference_optimizer.state[reference][
+                "momentum_buffer"
+            ].narrow(0, int(row_offset), int(rows))
+            torch.testing.assert_close(
+                optimizer.state[param]["momentum_buffer"].to_local(),
+                expected_momentum,
+            )
     finally:
         dist.destroy_process_group()
 
@@ -419,10 +543,9 @@ class TestMuonAdapter(DTensorTestBase):
     @with_comms
     def test_declares_owned_compute_requirement(self):
         optimizer, first, _second = self._bucketed_optimizer()
-        self.assertEqual(
-            optimizer.flex_shard_compute_requirement(first, optimizer.param_groups[0]),
-            Owned(trailing_dims=2),
-        )
+        units = optimizer._step_ops.optimization_units(optimizer)
+        self.assertIs(units[0].parameter, first)
+        self.assertEqual(units[0].compute_requirement, Owned(trailing_dims=2))
 
     def test_rejects_invalid_ns_steps(self):
         with self.assertRaisesRegex(ValueError, "ns_steps"):
@@ -652,6 +775,16 @@ class TestDistributedBucketedMuonAdapter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store_dir:
             mp.spawn(
                 _run_bucketed_muon_parity,
+                args=(2, os.path.join(store_dir, "store")),
+                nprocs=2,
+                join=True,
+            )
+
+    @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+    def test_muon_waits_for_forward_redistribution(self):
+        with tempfile.TemporaryDirectory() as store_dir:
+            mp.spawn(
+                _run_cuda_forward_readiness,
                 args=(2, os.path.join(store_dir, "store")),
                 nprocs=2,
                 join=True,
