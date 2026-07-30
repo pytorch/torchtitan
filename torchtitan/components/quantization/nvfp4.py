@@ -13,30 +13,21 @@ TorchAO's ``nvfp4_training`` kernels (NVIDIA Blackwell / sm_100+, CUDA only).
 Like :class:`MXFP8LinearConverter`, this is a pure leaf swap: it inherits the
 model's stock colwise/rowwise sharding and changes only the GEMM. Under tensor
 parallelism the block boundary keeps its stock bf16 collectives (all-gather /
-reduce-scatter); NVFP4 does not move fp4 codes over the wire. NVFP4Linear only
-bridges TorchAO's functional op (opaque to DTensor) to torchtitan's DTensor-based
-TP: it runs the GEMM on local shards and returns the output with the colwise /
-rowwise placement so DTensor performs the (bf16) reduction.
+reduce-scatter); NVFP4 does not move fp4 codes over the wire.
 """
 
 import math
 from dataclasses import dataclass, field, replace
-from typing import Literal
 
 import spmd_types as spmd
 import torch
-from torch.distributed.tensor import DTensor, Shard
 
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import (
-    LocalMapConfig,
-    ShardingConfig,
-)
+from torchtitan.protocols.sharding import LocalMapConfig, SpmdLayout
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -83,9 +74,9 @@ try:
     )
 
     # The NVFP4 GEMM is a raw autograd Function that runs on local shards inside
-    # the spmd.local_map region (see _augment_sharding_config). Mark it local-safe
-    # so SPMD type checking propagates through it; the local_map boundary declares
-    # the real colwise/rowwise output and input-gradient types.
+    # the spmd.local_map region. Mark it local-safe so SPMD type checking
+    # propagates through it; the local_map boundary declares the real
+    # colwise/rowwise output and input-gradient types.
     spmd.register_local_autograd_function(nvfp4_mm_triton)
 
     class NVFP4Linear(TorchAONVFP4Linear, Module):
@@ -93,8 +84,7 @@ try:
 
         Reuses TorchAO's ``NVFP4Linear`` (weight/bias, the ``_sr_seed`` /
         ``_rht_sign_vector`` runtime buffers, RHT logic, functional forward) and
-        adds torchtitan's meta-init buffer protocol and a DTensor <-> local TP
-        bridge. Both runtime buffers are plain local (non-DTensor) tensors:
+        adds torchtitan's meta-init buffer protocol and local SPMD sharding.
         ``_rht_sign_vector`` is the fixed ``_HARDCODED_SIGN_VECTOR`` (identical on
         every rank by construction) and ``_sr_seed`` is per-rank.
         """
@@ -121,15 +111,44 @@ try:
             def build(self, **kwargs):
                 # sharding_config (the stock colwise/rowwise weight placement) is
                 # attached by update_from_config after this Config is built, so it
-                # is available here but not in __post_init__. Augment it into the
+                # is available here but not in __post_init__. Fold it into the
                 # local_map region for the opaque nvfp4_linear op now, so base
-                # Module.parallelize consumes it directly (no parallelize override).
+                # Module.parallelize consumes it directly.
                 # slots=True breaks zero-arg super(), so call the parent explicitly.
                 instance = Linear.Config.build(self, **kwargs)
                 if instance._sharding_config is not None:
-                    tp_style = _infer_tp_style(instance._sharding_config)
-                    instance._sharding_config = _augment_sharding_config(
-                        instance._sharding_config, tp_style
+                    sc = instance._sharding_config
+                    weight_tp = (
+                        sc.state_shardings["weight"].per_axis_spmd_types().get(TP)
+                    )
+                    rowwise = isinstance(weight_tp, spmd.Shard) and weight_tp.dim == 1
+                    if rowwise:
+                        in_layout = dense_activation_placement(tp=spmd.S(-1))
+                        in_grad = dense_activation_placement(tp=spmd.S(-1))
+                    else:
+                        in_layout = dense_activation_placement(tp=spmd.R)
+                        in_grad = dense_activation_placement(tp=spmd.P)
+                    instance._sharding_config = replace(
+                        sc,
+                        state_shardings={
+                            **sc.state_shardings,
+                            "_sr_seed": SpmdLayout(
+                                {
+                                    MeshAxisName.DP: spmd.V,
+                                    MeshAxisName.CP: spmd.V,
+                                    TP: spmd.V,
+                                }
+                            ),
+                        },
+                        in_src_shardings={
+                            **(sc.in_src_shardings or {}),
+                            "x": in_layout,
+                        },
+                        in_dst_shardings={
+                            **(sc.in_dst_shardings or {}),
+                            "x": in_layout,
+                        },
+                        local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
                     )
                 return instance
 
@@ -157,18 +176,7 @@ try:
             self.register_buffer("_rht_sign_vector", None, persistent=False)
             self._rht_sign_vector_tuple = None
 
-        # -- runtime-buffer accessors --
-
-        def _local_sr_seed(self) -> torch.Tensor:
-            return (
-                self._sr_seed.to_local()
-                if isinstance(self._sr_seed, DTensor)
-                else self._sr_seed
-            )
-
         def _local_rht_sign_vector(self) -> torch.Tensor:
-            # _rht_sign_vector is always a plain per-rank-identical tensor (never
-            # distributed), so no DTensor unwrap is needed.
             sign_vector = self._rht_sign_vector
             if sign_vector is not None and sign_vector.device.type != "meta":
                 sign_vector = sign_vector.reshape(-1)
@@ -211,84 +219,16 @@ try:
         # -- forward --
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            # Runs on local tensors. Under TP the framework's spmd.local_map has
-            # already converted the activation to a local shard and will re-type
-            # the output; the weight/buffers are plain locals (spmd_types). Under
-            # FSDP-only / single-GPU the activation is already local and the
-            # weight is a DTensor that FSDP has all-gathered, so unwrap it.
-            weight = (
-                self.weight.to_local()
-                if isinstance(self.weight, DTensor)
-                else self.weight
-            )
-            bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
-            sr_seed = self._local_sr_seed()
-            if spmd.is_type_checking():
-                # The per-rank seed varies across ranks; declare it Varying so the
-                # local type rule for the opaque nvfp4_mm_triton does not treat it
-                # as an Invariant, which cannot mix with the R/V data operands.
-                spmd.assert_type(
-                    sr_seed,
-                    {MeshAxisName.DP: spmd.V, MeshAxisName.CP: spmd.V, TP: spmd.V},
-                )
             return nvfp4_linear(
                 x,
-                weight,
-                bias,
-                sr_seed=sr_seed,
+                self.weight,
+                self.bias,
+                sr_seed=self._sr_seed,
                 sign_vector=self.rht_sign_vector,
             )
 
 except ImportError:
     NVFP4Linear = None
-
-
-def _augment_sharding_config(
-    sc: ShardingConfig, tp_style: Literal["colwise", "rowwise"] | None
-) -> ShardingConfig:
-    """Turn the stock colwise/rowwise Linear config into a local_map region for
-    the opaque ``nvfp4_linear`` op.
-
-    ``nvfp4_linear`` is opaque to the SPMD type system, so TP runs it on local
-    shards inside ``spmd.local_map``: the framework converts the activation to
-    local on entry and re-types the output on exit. We add the activation's input
-    layout (colwise consumes TP-Replicate; rowwise consumes TP-Shard(-1)) and the
-    input-gradient layout (colwise grad is TP-Partial -- a per-rank partial sum
-    over the output shard that must be all-reduced; rowwise grad stays
-    TP-Shard(-1)). ``out_src`` / ``out_dst`` are inherited from
-    colwise_config()/rowwise_config().
-    """
-    if tp_style == "rowwise":
-        in_layout = dense_activation_placement(tp=spmd.S(-1))
-        in_grad = dense_activation_placement(tp=spmd.S(-1))
-    else:
-        in_layout = dense_activation_placement(tp=spmd.R)
-        in_grad = dense_activation_placement(tp=spmd.P)
-    return replace(
-        sc,
-        in_src_shardings={**(sc.in_src_shardings or {}), "x": in_layout},
-        in_dst_shardings={**(sc.in_dst_shardings or {}), "x": in_layout},
-        local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
-    )
-
-
-def _infer_tp_style(
-    sharding_config: ShardingConfig | None,
-) -> Literal["colwise", "rowwise"] | None:
-    """Infer colwise vs rowwise from the weight's declared TP placement.
-
-    The weight placement is torchtitan's canonical colwise/rowwise encoding:
-    colwise shards the output dim (Shard(0)), rowwise the input dim (Shard(1)).
-    """
-    if sharding_config is None:
-        return None
-    weight_layout = sharding_config.state_shardings.get("weight")
-    if weight_layout is None:
-        return None
-    tp_placement = spmd_layout_to_dtensor_placements(weight_layout).get(TP)
-    if isinstance(tp_placement, Shard) and tp_placement.dim == 1:
-        return "rowwise"
-    return "colwise"
 
 
 # Default fraction of decoder layers kept in bf16 at the tail (the final layers

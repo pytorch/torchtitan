@@ -297,12 +297,12 @@ is `model_spec.model.layers.0.feed_forward` and the optimizer is `optimizer`.
 Globs with `*` (which crosses `.`) keep selectors readable.
 
 ```python
-# A custom kernel on every in-layer linear, leaving the top-level LM head
-# ("...output") untouched
+# NVFP4 on every in-layer linear, leaving the top-level LM head ("...output")
+# untouched (required for NVFP4; useful for MXFP8)
 @override(target=Linear.Config,
           fqns=["*.layers.*.attention.*", "*.layers.*.feed_forward.*"])
-def custom_linear(cfg: Linear.Config) -> "CustomLinear.Config":
-    return CustomLinear.Config(in_features=cfg.in_features, ...)
+def nvfp4_linear(cfg: Linear.Config) -> "NVFP4Linear.Config":
+    return NVFP4Linear.Config(in_features=cfg.in_features, ...)
 
 # Fused MoE only on the later layers
 @override(target=MoE.Config, fqns=["*.layers.1[0-9].moe"])
@@ -503,7 +503,6 @@ for the full recipe.
   recipe from "Custom kernels and `torch.compile`". `helion` is an optional
   dependency, so the module imports without it and falls back to the PyTorch RoPE
   when it (or CUDA) is unavailable; it is checkpoint-compatible with stock.
-
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
 shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
 one): each attention module owns a `rope` submodule (`RoPE.Config`), so a custom

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import pytest
+import spmd_types as spmd
 import torch
 
 from torchtitan.components.quantization import Float8Linear
@@ -11,6 +12,7 @@ from torchtitan.components.quantization.float8 import _get_float8_grouped_expert
 from torchtitan.components.quantization.mx import _get_mxfp8_grouped_experts_cls
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.config import ConfigManager
+from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
@@ -143,17 +145,6 @@ def _nvfp4_linear_cls():
     return NVFP4Linear
 
 
-def test_nvfp4_infer_tp_style():
-    """colwise/rowwise is read back from the weight's declared TP placement."""
-    _nvfp4_linear_cls()
-    from torchtitan.components.quantization.nvfp4 import _infer_tp_style
-    from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
-
-    assert _infer_tp_style(colwise_config()) == "colwise"
-    assert _infer_tp_style(rowwise_config(output_sp=True)) == "rowwise"
-    assert _infer_tp_style(None) is None
-
-
 @pytest.mark.parametrize("in_features, out_features", [(512, 300), (300, 512)])
 def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
     # The model dims are known at config-build time, so a non-128 in/out_features
@@ -163,21 +154,75 @@ def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
         NVFP4Linear.Config(in_features=in_features, out_features=out_features)
 
 
-def test_nvfp4_build_augments_sharding_config_with_local_map():
-    # The parallelize override is gone: Config.build() folds the stock colwise
-    # sharding into a local_map region for the opaque nvfp4 GEMM, which base
-    # Module.parallelize then consumes directly.
+@pytest.mark.parametrize(
+    "sharding_config_factory, input_tp, input_grad_tp",
+    [
+        pytest.param(lambda: colwise_config(), spmd.R, spmd.P, id="colwise"),
+        pytest.param(
+            lambda: rowwise_config(output_sp=True),
+            spmd.S(-1),
+            spmd.S(-1),
+            id="rowwise",
+        ),
+    ],
+)
+def test_nvfp4_build_configures_local_spmd_sharding(
+    sharding_config_factory, input_tp, input_grad_tp
+):
+    # Config.build() folds the stock colwise/rowwise sharding into the local
+    # SPMD region for the opaque NVFP4 GEMM.
     NVFP4Linear = _nvfp4_linear_cls()
-    from torchtitan.models.common.decoder_sharding import colwise_config
+    from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
+    from torchtitan.models.common.decoder_sharding import dense_activation_placement
 
     module = NVFP4Linear.Config(
-        in_features=512, out_features=1024, sharding_config=colwise_config()
+        in_features=512,
+        out_features=1024,
+        sharding_config=sharding_config_factory(),
     ).build()
     sc = module._sharding_config
     assert sc.local_map is not None
-    assert "x" in (sc.in_dst_shardings or {})
-    # The weight placement (colwise) is left untouched by the augmentation.
+    input_layout = dense_activation_placement(tp=input_tp)
+    assert sc.in_src_shardings == {"x": input_layout}
+    assert sc.in_dst_shardings == {"x": input_layout}
+    assert sc.local_map.in_grad_placements == (
+        dense_activation_placement(tp=input_grad_tp),
+    )
     assert "weight" in sc.state_shardings
+    assert sc.state_shardings["_sr_seed"] == SpmdLayout(
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.V,
+            MeshAxisName.TP: spmd.V,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "llama3_debugmodel_nvfp4",
+        "llama3_debugmodel_nvfp4_mixed",
+        "llama3_8b_nvfp4",
+        "llama3_8b_nvfp4_mixed",
+    ],
+)
+def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
+    monkeypatch, recipe
+):
+    _nvfp4_linear_cls()
+    import torchtitan.components.quantization.nvfp4 as nvfp4_mod
+
+    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    base_args = ["--module", "llama3", "--config", recipe]
+
+    config = ConfigManager().parse_args(base_args)
+    assert config.parallelism.spmd_backend == "spmd_types"
+
+    overridden = ConfigManager().parse_args(
+        [*base_args, "--parallelism.spmd_backend", "default"]
+    )
+    assert overridden.parallelism.spmd_backend == "default"
 
 
 def test_nvfp4_module_exposes_weight_and_two_buffers():
