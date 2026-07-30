@@ -19,14 +19,13 @@ import numpy as np
 import pytest
 import torch
 
+from torchtitan.components.data.collators import DefaultCollator, TextCollator
 from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
     DatasetConcatConfig,
-    DatasetIterationPolicy,
     DatasetMixConfig,
     SampleProcessor,
     SingleDatasetConfig,
-    TokenSequence,
+    TextSequence,
     WeightedDataset,
 )
 from torchtitan.components.data.loader import GrainDataLoader
@@ -35,12 +34,14 @@ from torchtitan.components.data.packing import (
     FirstFitPackingConfig,
 )
 from torchtitan.components.data.sources import (
+    _HuggingFaceCursorIterator,
     HuggingFaceRandomAccessSource,
     HuggingFaceStreamingSource,
     IndexedJsonlSource,
 )
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.hf_datasets.text_datasets import ChatProcessor
+from torchtitan.hf_datasets.text_datasets import ChatProcessor, TextProcessor
 from torchtitan.trainer import Trainer
 
 
@@ -63,20 +64,20 @@ class FakeTokenizer:
 
 CONTEXT = DatasetBuildContext(
     tokenizer=FakeTokenizer(),
-    seq_len=8,
+    seq_len=9,
     local_batch_size=2,
     read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
 )
 
 
-def iteration(**overrides):
+def dataset_iteration_policy(**overrides):
     values = {
         "seed": 42,
         "shuffle": False,
         "repeat": False,
         "dp_rank": 0,
         "dp_world_size": 1,
-        "streaming_shuffle_window_size": 4,
+        "streaming_shuffle_buffer_size": 4,
     }
     return DatasetIterationPolicy(**(values | overrides))
 
@@ -95,10 +96,10 @@ class RowToTokens(SampleProcessor):
 
     def __call__(self, sample, rng):
         del rng
-        token_ids = np.asarray(sample["tokens"], dtype=np.int64)
-        return TokenSequence(
-            token_ids=token_ids,
-            loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
+        input_ids = np.asarray(sample["tokens"], dtype=np.int64)
+        return TextSequence(
+            input_ids=input_ids,
+            labels=input_ids.copy(),
         )
 
 
@@ -133,7 +134,7 @@ def test_indexed_jsonl_random_access(tmp_path):
     write_jsonl(tmp_path / "b.jsonl", [{"id": 2}, {"id": 3}])
     write_jsonl(tmp_path / "a.jsonl", [{"id": 0}, {"id": 1}])
     source = IndexedJsonlSource.Config(patterns=(str(tmp_path / "*.jsonl"),)).build(
-        dp_rank=0, dp_world_size=1
+        dataset_iteration_policy=dataset_iteration_policy(),
     )
 
     assert len(source) == 4
@@ -144,7 +145,7 @@ def test_indexed_jsonl_random_access(tmp_path):
 def test_indexed_jsonl_rejects_missing_and_duplicate_paths(tmp_path):
     with pytest.raises(FileNotFoundError):
         IndexedJsonlSource.Config(patterns=(str(tmp_path / "missing*.jsonl"),)).build(
-            dp_rank=0, dp_world_size=1
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
 
     write_jsonl(tmp_path / "rows.jsonl", [{"id": 0}])
@@ -154,7 +155,9 @@ def test_indexed_jsonl_rejects_missing_and_duplicate_paths(tmp_path):
                 str(tmp_path / "rows.jsonl"),
                 str(tmp_path / "*.jsonl"),
             )
-        ).build(dp_rank=0, dp_world_size=1)
+        ).build(
+            dataset_iteration_policy=dataset_iteration_policy(),
+        )
 
 
 def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
@@ -168,22 +171,98 @@ def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
     rank_rows = []
     for rank in range(2):
         dataset = config.build(
-            dp_rank=rank,
-            dp_world_size=2,
+            dataset_iteration_policy=dataset_iteration_policy(
+                dp_rank=rank,
+                dp_world_size=2,
+            ),
         )
         rank_rows.append([row["id"] for row in dataset])
 
     assert set(rank_rows[0]).isdisjoint(rank_rows[1])
     assert set(rank_rows[0]) | set(rank_rows[1]) == set(range(10))
 
-    iterator = iter(config.build(dp_rank=0, dp_world_size=1))
+    iterator = iter(
+        config.build(
+            dataset_iteration_policy=dataset_iteration_policy(),
+        )
+    )
     next(iterator)
     state = iterator.get_state()
     expected = next(iterator)
-    restored = iter(config.build(dp_rank=0, dp_world_size=1))
+    restored = iter(
+        config.build(
+            dataset_iteration_policy=dataset_iteration_policy(),
+        )
+    )
     restored.set_state(state)
 
     assert next(restored) == expected
+
+
+def _hf_sharded_rows():
+    return datasets.Dataset.from_dict({"id": list(range(16))}).to_iterable_dataset(
+        num_shards=8
+    )
+
+
+def test_hf_shuffled_repeat_advances_epoch():
+    iterator = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(),
+        repeat=True,
+        shuffle=True,
+    )
+
+    first_epoch = [next(iterator)["id"] for _ in range(16)]
+    second_epoch = [next(iterator)["id"] for _ in range(16)]
+
+    assert first_epoch != second_epoch
+    assert set(first_epoch) == set(second_epoch) == set(range(16))
+
+
+def test_hf_unshuffled_repeat_replays_order():
+    iterator = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(),
+        repeat=True,
+        shuffle=False,
+    )
+
+    first_epoch = [next(iterator)["id"] for _ in range(16)]
+    second_epoch = [next(iterator)["id"] for _ in range(16)]
+
+    assert first_epoch == second_epoch
+
+
+def test_hf_resume_mid_second_epoch():
+    iterator = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(),
+        repeat=True,
+        shuffle=True,
+    )
+    for _ in range(20):
+        next(iterator)
+    state = iterator.get_state()
+    expected = [next(iterator) for _ in range(16)]
+
+    restored = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(),
+        repeat=True,
+        shuffle=True,
+    )
+    restored.set_state(state)
+
+    assert [next(restored) for _ in range(16)] == expected
+
+
+def test_hf_empty_repeat_stops():
+    empty = datasets.IterableDataset.from_generator(lambda: iter(()))
+    iterator = _HuggingFaceCursorIterator(
+        empty,
+        repeat=True,
+        shuffle=True,
+    )
+
+    with pytest.raises(StopIteration):
+        next(iterator)
 
 
 def test_hf_cursor_restores_through_grain_wrappers(tmp_path):
@@ -197,14 +276,14 @@ def test_hf_cursor_restores_through_grain_wrappers(tmp_path):
         ),
         post_filters=(lambda row: row["id"] % 2 == 0,),
     )
-    policy = iteration(repeat=True, shuffle=True)
-    iterator = iter(config.build(context=CONTEXT, iteration=policy))
+    policy = dataset_iteration_policy(repeat=True, shuffle=True)
+    iterator = iter(config.build(context=CONTEXT, dataset_iteration_policy=policy))
     for _ in range(3):
         next(iterator)
     state = iterator.get_state()
     expected = [next(iterator) for _ in range(5)]
 
-    restored = iter(config.build(context=CONTEXT, iteration=policy))
+    restored = iter(config.build(context=CONTEXT, dataset_iteration_policy=policy))
     restored.set_state(state)
 
     assert [next(restored) for _ in range(5)] == expected
@@ -237,7 +316,9 @@ def test_hf_explicit_fields_are_passed_to_load_dataset(
         split="validation",
         revision="abc123",
         load_dataset_kwargs={"token": "secret"},
-    ).build(dp_rank=0, dp_world_size=1)
+    ).build(
+        dataset_iteration_policy=dataset_iteration_policy(),
+    )
 
     load_dataset.assert_called_once_with(
         "owner/dataset",
@@ -332,7 +413,7 @@ def test_hf_source_rejects_wrong_leaf(monkeypatch, source_type, wrong_leaf, mess
 
     with pytest.raises(TypeError, match=message):
         source_type.Config(path="owner/dataset", split="train").build(
-            dp_rank=0, dp_world_size=1
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
 
 
@@ -362,8 +443,12 @@ def test_loader_requires_repeat_with_data_parallelism(tmp_path):
 class RowsSourceConfig:
     rows: tuple[Any, ...]
 
-    def build(self, *, dp_rank: int, dp_world_size: int):
-        del dp_rank, dp_world_size
+    def build(
+        self,
+        *,
+        dataset_iteration_policy: DatasetIterationPolicy,
+    ):
+        del dataset_iteration_policy
         return self.rows
 
 
@@ -371,9 +456,17 @@ class RowsSourceConfig:
 class StreamingRowsSourceConfig:
     rows: tuple[dict, ...]
 
-    def build(self, *, dp_rank: int, dp_world_size: int):
+    def build(
+        self,
+        *,
+        dataset_iteration_policy: DatasetIterationPolicy,
+    ):
+        dp_rank = dataset_iteration_policy.dp_rank
+        dp_world_size = dataset_iteration_policy.dp_world_size
         dataset = grain.MapDataset.source(self.rows)
         dataset = dataset[dp_rank::dp_world_size]
+        if dataset_iteration_policy.repeat:
+            dataset = dataset.repeat()
         return dataset.to_iter_dataset()
 
 
@@ -386,7 +479,9 @@ def test_pre_and_post_filters_restore_exactly(source_type):
         processor=VerifyFilterOrder.Config(),
         post_filters=(lambda row: row["processed"] and row["value"] % 4 == 0,),
     )
-    dataset = config.build(context=CONTEXT, iteration=iteration())
+    dataset = config.build(
+        context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
+    )
     if isinstance(dataset, grain.MapDataset):
         dataset = dataset.to_iter_dataset(read_options=CONTEXT.read_options)
     iterator = iter(dataset)
@@ -395,7 +490,9 @@ def test_pre_and_post_filters_restore_exactly(source_type):
     state = iterator.get_state()
     expected = list(iterator)
 
-    restored_dataset = config.build(context=CONTEXT, iteration=iteration())
+    restored_dataset = config.build(
+        context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
+    )
     if isinstance(restored_dataset, grain.MapDataset):
         restored_dataset = restored_dataset.to_iter_dataset(
             read_options=CONTEXT.read_options
@@ -422,15 +519,21 @@ def test_single_dataset_shuffle_shard_repeat_order():
     )
     rank_0 = config.build(
         context=CONTEXT,
-        iteration=iteration(shuffle=True, dp_world_size=2, dp_rank=0),
+        dataset_iteration_policy=dataset_iteration_policy(
+            shuffle=True, dp_world_size=2, dp_rank=0
+        ),
     )
     rank_1 = config.build(
         context=CONTEXT,
-        iteration=iteration(shuffle=True, dp_world_size=2, dp_rank=1),
+        dataset_iteration_policy=dataset_iteration_policy(
+            shuffle=True, dp_world_size=2, dp_rank=1
+        ),
     )
     rank_0_peer = config.build(
         context=CONTEXT,
-        iteration=iteration(shuffle=True, dp_world_size=2, dp_rank=0),
+        dataset_iteration_policy=dataset_iteration_policy(
+            shuffle=True, dp_world_size=2, dp_rank=0
+        ),
     )
     values_0 = {row["value"] for row in rank_0}
     values_1 = {row["value"] for row in rank_1}
@@ -457,7 +560,9 @@ def test_weighted_mix_keeps_weight_with_dataset():
             WeightedDataset(dataset=left, weight=2.0),
             WeightedDataset(dataset=right, weight=1.0),
         )
-    ).build(context=CONTEXT, iteration=iteration(repeat=True))
+    ).build(
+        context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(repeat=True)
+    )
     iterator = iter(dataset)
     values = [next(iterator)["source"] for _ in range(12)]
 
@@ -481,7 +586,9 @@ def _mixed_child_rows(source_type):
             WeightedDataset(dataset=large),
             WeightedDataset(dataset=small),
         )
-    ).build(context=CONTEXT, iteration=iteration(repeat=True))
+    ).build(
+        context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(repeat=True)
+    )
     if isinstance(dataset, grain.MapDataset):
         return [dataset[index] for index in range(2_000)]
     iterator = iter(dataset)
@@ -519,7 +626,9 @@ def test_filtered_mix_weights_emitted_rows():
             WeightedDataset(dataset=sparse),
             WeightedDataset(dataset=dense),
         )
-    ).build(context=CONTEXT, iteration=iteration(repeat=True))
+    ).build(
+        context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(repeat=True)
+    )
     iterator = iter(dataset)
     sources = [next(iterator)["source"] for _ in range(2_000)]
 
@@ -542,7 +651,9 @@ def test_mix_composes_map_and_iterable_children():
             WeightedDataset(dataset=map_child),
             WeightedDataset(dataset=stream_child),
         )
-    ).build(context=CONTEXT, iteration=iteration(repeat=True))
+    ).build(
+        context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(repeat=True)
+    )
     iterator = iter(dataset)
     sources = {next(iterator)["source"] for _ in range(40)}
 
@@ -565,7 +676,7 @@ def test_finite_mix_stops_when_first_child_exhausts(lengths):
     )
     rows = list(
         DatasetMixConfig(datasets=children).build(
-            context=CONTEXT, iteration=iteration()
+            context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
         )
     )
     counts = [sum(row["source"] == source for row in rows) for source in range(2)]
@@ -588,7 +699,7 @@ def test_finite_mix_with_empty_iterable_child_is_empty():
                 WeightedDataset(dataset=empty),
                 WeightedDataset(dataset=nonempty),
             )
-        ).build(context=CONTEXT, iteration=iteration())
+        ).build(context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy())
     )
 
     assert rows == []
@@ -610,14 +721,14 @@ def test_iterable_mix_restores_exactly():
             for source in range(2)
         )
     )
-    policy = iteration(repeat=True)
-    iterator = iter(config.build(context=CONTEXT, iteration=policy))
+    policy = dataset_iteration_policy(repeat=True)
+    iterator = iter(config.build(context=CONTEXT, dataset_iteration_policy=policy))
     for _ in range(17):
         next(iterator)
     state = iterator.get_state()
     expected = [next(iterator) for _ in range(20)]
 
-    restored = iter(config.build(context=CONTEXT, iteration=policy))
+    restored = iter(config.build(context=CONTEXT, dataset_iteration_policy=policy))
     restored.set_state(state)
 
     assert [next(restored) for _ in range(20)] == expected
@@ -634,13 +745,17 @@ def test_concat_shards_after_one_global_index_space():
     rank_0 = list(
         config.build(
             context=CONTEXT,
-            iteration=iteration(dp_world_size=2, dp_rank=0),
+            dataset_iteration_policy=dataset_iteration_policy(
+                dp_world_size=2, dp_rank=0
+            ),
         )
     )
     rank_1 = list(
         config.build(
             context=CONTEXT,
-            iteration=iteration(dp_world_size=2, dp_rank=1),
+            dataset_iteration_policy=dataset_iteration_policy(
+                dp_world_size=2, dp_rank=1
+            ),
         )
     )
 
@@ -665,18 +780,21 @@ def test_packing_yields_rows_and_loader_batches(packing_type):
         processor=RowToTokens.Config(),
     )
     recipe = packing_type(dataset=documents)
-    rows = recipe.build(context=CONTEXT, iteration=iteration())
-    first_inputs, first_labels = next(iter(rows))
+    packed_sequences = recipe.build(
+        context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
+    )
+    first_sequence = next(iter(packed_sequences))
 
-    assert first_inputs["input"].shape == (8,)
-    assert first_inputs["positions"].shape == (8,)
-    assert first_labels.shape == (8,)
+    assert first_sequence.input_ids.shape == (9,)
+    assert first_sequence.labels.shape == (9,)
+    assert first_sequence.positions.shape == (9,)
 
     loader = GrainDataLoader.Config(
         dataset=recipe,
+        collator=TextCollator.Config(),
         shuffle=False,
         repeat=True,
-        batch_prefetch_buffer_size=1,
+        num_prefetch_batches=1,
     ).build(
         dp_world_size=1,
         dp_rank=0,
@@ -689,6 +807,165 @@ def test_packing_yields_rows_and_loader_batches(packing_type):
     assert labels.shape == (2, 8)
 
 
+def test_default_collator_returns_trainer_batch_tuple():
+    rows = [
+        ({"input": torch.tensor([1])}, torch.tensor([2])),
+        ({"input": torch.tensor([3])}, torch.tensor([4])),
+    ]
+
+    batch = DefaultCollator.Config().build(context=CONTEXT)(rows)
+
+    assert isinstance(batch, tuple)
+    assert batch[0]["input"].tolist() == [[1], [3]]
+    assert batch[1].tolist() == [[2], [4]]
+
+
+def test_default_collator_rejects_rows_without_trainer_batch_pairs():
+    collator = DefaultCollator.Config().build(context=CONTEXT)
+
+    with pytest.raises(TypeError, match="model_inputs, labels"):
+        collator([{"input": torch.tensor([1])}])
+
+
+def test_first_fit_num_packing_bins_is_independent_of_local_batch_size(monkeypatch):
+    captured = {}
+
+    def capture_options(dataset, **kwargs):
+        captured.update(kwargs)
+        return dataset
+
+    monkeypatch.setattr(
+        grain.experimental,
+        "FirstFitPackIterDataset",
+        capture_options,
+    )
+    dataset = SingleDatasetConfig(
+        source=RowsSourceConfig(rows=({"tokens": [1, 2]},)),
+        processor=RowToTokens.Config(),
+    )
+
+    FirstFitPackingConfig(dataset=dataset).build(
+        context=replace(CONTEXT, local_batch_size=64),
+        dataset_iteration_policy=dataset_iteration_policy(),
+    )
+
+    assert captured["num_packing_bins"] == 8
+
+
+def test_first_fit_meta_features_are_packed_arrays():
+    dataset = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {"tokens": [1, 2]},
+                {"tokens": [3, 4, 5]},
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+
+    packed = next(
+        iter(
+            FirstFitPackingConfig(dataset=dataset).build(
+                context=CONTEXT,
+                dataset_iteration_policy=dataset_iteration_policy(),
+            )
+        )
+    )
+
+    assert isinstance(packed.input_ids, np.ndarray)
+    assert isinstance(packed.labels, np.ndarray)
+    assert isinstance(packed.positions, np.ndarray)
+    assert packed.input_ids.shape == packed.labels.shape == packed.positions.shape
+
+
+def test_first_fit_positions_reset_per_document():
+    dataset = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {"tokens": [1, 2]},
+                {"tokens": [3, 4, 5]},
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+
+    packed = next(
+        iter(
+            FirstFitPackingConfig(dataset=dataset).build(
+                context=CONTEXT,
+                dataset_iteration_policy=dataset_iteration_policy(),
+            )
+        )
+    )
+
+    assert packed.positions[:5].tolist() == [0, 1, 0, 1, 2]
+    assert (packed.labels[5:] == IGNORE_INDEX).all()
+
+
+def test_nested_packing_preserves_inner_document_boundaries():
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {"tokens": [1, 2]},
+                {"tokens": [3, 4, 5]},
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+    inner = FirstFitPackingConfig(dataset=documents)
+    outer = ConcatThenSplitPackingConfig(dataset=inner)
+
+    packed = next(
+        iter(
+            outer.build(
+                context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
+            )
+        )
+    )
+
+    assert packed.positions[:5].tolist() == [0, 1, 0, 1, 2]
+
+
+def test_unpacked_text_collator_creates_range_positions():
+    sequence = TextSequence(
+        input_ids=np.asarray([1, 2, 3]),
+        labels=np.asarray([1, 2, 3]),
+    )
+
+    inputs, labels = TextCollator.Config().build(context=CONTEXT)([sequence])
+
+    assert inputs["input"][0, :3].tolist() == [1, 2, 3]
+    assert inputs["positions"][0, :3].tolist() == [0, 1, 2]
+    assert labels[0, :3].tolist() == [2, 3, IGNORE_INDEX]
+    assert (labels[0, 3:] == IGNORE_INDEX).all()
+
+
+def test_pack_then_pack_then_collate_shifts_once():
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {"tokens": [1, 2]},
+                {"tokens": [3, 4, 5]},
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+    packed = next(
+        iter(
+            FirstFitPackingConfig(
+                dataset=ConcatThenSplitPackingConfig(dataset=documents)
+            ).build(
+                context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
+            )
+        )
+    )
+
+    inputs, labels = TextCollator.Config().build(context=CONTEXT)([packed])
+
+    assert inputs["input"][0, :5].tolist() == [1, 2, 3, 4, 5]
+    assert labels[0, :5].tolist() == [2, IGNORE_INDEX, 4, 5, IGNORE_INDEX]
+
+
 class SftTokens(SampleProcessor):
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
@@ -699,24 +976,66 @@ class SftTokens(SampleProcessor):
 
     def __call__(self, sample, rng):
         del sample, rng
-        return TokenSequence(
-            token_ids=np.asarray([1, 10, 11, 20, 21, 2]),
-            loss_mask=np.asarray([False, False, False, True, True, True]),
+        return TextSequence(
+            input_ids=np.asarray([1, 10, 11, 20, 21, 2]),
+            labels=np.asarray([IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, 20, 21, 2]),
         )
 
 
-def test_sft_loss_mask_survives_packing():
+def test_sft_labels_survive_packing_and_shift():
     recipe = FirstFitPackingConfig(
         dataset=SingleDatasetConfig(
             source=RowsSourceConfig(rows=({"id": 0}, {"id": 1})),
             processor=SftTokens.Config(),
         )
     )
-    _, labels = next(iter(recipe.build(context=CONTEXT, iteration=iteration())))
+    packed = next(
+        iter(
+            recipe.build(
+                context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
+            )
+        )
+    )
+    _, labels = TextCollator.Config().build(context=CONTEXT)([packed])
 
-    assert labels[0].item() == IGNORE_INDEX
-    assert labels[1].item() == IGNORE_INDEX
-    assert labels[2].item() == 20
+    assert labels[0, 0].item() == IGNORE_INDEX
+    assert labels[0, 1].item() == IGNORE_INDEX
+    assert labels[0, 2].item() == 20
+
+
+def test_text_processor_leaves_positions_unmaterialized():
+    processor = TextProcessor.Config().build(context=CONTEXT)
+
+    sequence = processor({"text": "hello"}, np.random.default_rng(0))
+
+    assert sequence is not None
+    assert sequence.positions is None
+    assert np.array_equal(sequence.input_ids, sequence.labels)
+
+
+def test_text_processor_returns_none_for_short_row():
+    tokenizer = mock.Mock()
+    tokenizer.encode.return_value = [FakeTokenizer.bos_id]
+    processor = TextProcessor.Config().build(
+        context=replace(CONTEXT, tokenizer=tokenizer)
+    )
+
+    assert processor({"text": ""}, np.random.default_rng(0)) is None
+
+
+def test_single_dataset_post_filter_removes_none():
+    tokenizer = mock.Mock()
+    tokenizer.encode.side_effect = ([FakeTokenizer.bos_id], [1, 10, 2])
+    dataset = SingleDatasetConfig(
+        source=RowsSourceConfig(rows=({"text": ""}, {"text": "kept"})),
+        processor=TextProcessor.Config(),
+        post_filters=(lambda sample: sample is not None,),
+    ).build(
+        context=replace(CONTEXT, tokenizer=tokenizer),
+        dataset_iteration_policy=dataset_iteration_policy(),
+    )
+
+    assert [sequence.input_ids.tolist() for sequence in dataset] == [[1, 10, 2]]
 
 
 def test_chat_processor_masks_prompt_and_trains_assistant():
@@ -728,7 +1047,7 @@ def test_chat_processor_masks_prompt_and_trains_assistant():
 
     processor = ChatProcessor.Config(
         messages_fn=question_answer_to_messages,
-    ).build(context=replace(CONTEXT, seq_len=64))
+    ).build(context=replace(CONTEXT, seq_len=65))
     token_sequence = processor(
         {"question": "2+2?", "answer": "4"},
         np.random.default_rng(0),
@@ -739,9 +1058,9 @@ def test_chat_processor_masks_prompt_and_trains_assistant():
     )
     prompt_length = len(FakeTokenizer().encode(prompt, add_bos=True, add_eos=False))
 
-    assert not token_sequence.loss_mask[1:prompt_length].any()
-    assert token_sequence.loss_mask[prompt_length:].all()
-    assert token_sequence.token_ids[-1] == FakeTokenizer.eos_id
+    assert (token_sequence.labels[:prompt_length] == IGNORE_INDEX).all()
+    assert (token_sequence.labels[prompt_length:] != IGNORE_INDEX).all()
+    assert token_sequence.input_ids[-1] == FakeTokenizer.eos_id
 
 
 def test_chat_processor_rejects_non_single_turn_messages():
@@ -769,8 +1088,14 @@ def test_first_fit_drops_rows_longer_than_sequence_length():
         )
     )
 
-    inputs, _ = next(iter(recipe.build(context=CONTEXT, iteration=iteration())))
-    assert inputs["input"][0].item() == 1
+    sequence = next(
+        iter(
+            recipe.build(
+                context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
+            )
+        )
+    )
+    assert sequence.input_ids[0].item() == 1
 
 
 class AddRandomOffset(SampleProcessor):
@@ -791,13 +1116,21 @@ def test_configured_random_processor_is_deterministic():
         source=RowsSourceConfig(rows=tuple({"id": index} for index in range(10))),
         processor=AddRandomOffset.Config(maximum=1000),
     )
-    first = list(config.build(context=CONTEXT, iteration=iteration(seed=7)))
-    second = list(config.build(context=CONTEXT, iteration=iteration(seed=7)))
+    first = list(
+        config.build(
+            context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(seed=7)
+        )
+    )
+    second = list(
+        config.build(
+            context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(seed=7)
+        )
+    )
 
     assert first == second
 
 
-class RandomTokenSequence(SampleProcessor):
+class RandomTextSequence(SampleProcessor):
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
         pass
@@ -807,10 +1140,10 @@ class RandomTokenSequence(SampleProcessor):
 
     def __call__(self, sample, rng):
         random_token = int(rng.integers(10, 200))
-        token_ids = np.asarray([1, sample["id"] + 10, random_token, 2])
-        return TokenSequence(
-            token_ids=token_ids,
-            loss_mask=np.ones(token_ids.shape, dtype=np.bool_),
+        input_ids = np.asarray([1, sample["id"] + 10, random_token, 2])
+        return TextSequence(
+            input_ids=input_ids,
+            labels=input_ids.copy(),
         )
 
 
@@ -821,11 +1154,12 @@ def test_loader_restores_configured_random_map():
                 source=RowsSourceConfig(
                     rows=tuple({"id": index} for index in range(20))
                 ),
-                processor=RandomTokenSequence.Config(),
+                processor=RandomTextSequence.Config(),
             )
         ),
+        collator=TextCollator.Config(),
         repeat=True,
-        batch_prefetch_buffer_size=1,
+        num_prefetch_batches=1,
     )
     loader = config.build(
         dp_world_size=1,
@@ -865,9 +1199,10 @@ def test_loader_exact_restore_with_nonempty_packing_buffers():
     )
     config = GrainDataLoader.Config(
         dataset=recipe,
+        collator=TextCollator.Config(),
         shuffle=True,
         repeat=True,
-        batch_prefetch_buffer_size=2,
+        num_prefetch_batches=2,
     )
     loader = config.build(
         dp_world_size=1,
@@ -924,8 +1259,9 @@ def test_loader_exact_restore_with_nested_weighted_mix():
                 WeightedDataset(dataset=packed_rows(100), weight=1.0),
             ),
         ),
+        collator=TextCollator.Config(),
         repeat=True,
-        batch_prefetch_buffer_size=1,
+        num_prefetch_batches=1,
     )
     loader = config.build(
         dp_world_size=1,
@@ -963,7 +1299,9 @@ def test_empty_shard_rejected():
     with pytest.raises(ValueError, match="fewer than"):
         dataset.build(
             context=CONTEXT,
-            iteration=iteration(dp_rank=1, dp_world_size=2),
+            dataset_iteration_policy=dataset_iteration_policy(
+                dp_rank=1, dp_world_size=2
+            ),
         )
 
 
@@ -981,7 +1319,7 @@ def test_concat_rejects_iterable_children(tmp_path):
     with pytest.raises(TypeError, match="map-style children"):
         DatasetConcatConfig(datasets=(stream,)).build(
             context=CONTEXT,
-            iteration=iteration(),
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
 
 
@@ -996,6 +1334,7 @@ def test_loader_rejects_dp_change():
     )
     config = GrainDataLoader.Config(
         dataset=recipe,
+        collator=TextCollator.Config(),
         shuffle=False,
         repeat=True,
     )
@@ -1019,7 +1358,7 @@ def test_loader_rejects_dp_change():
         different_dp.load_state_dict(state)
 
 
-def test_concat_then_split_keeps_long_document_next_token_pairs():
+def test_concat_then_split_normalizes_split_continuation_positions():
     recipe = ConcatThenSplitPackingConfig(
         dataset=SingleDatasetConfig(
             source=RowsSourceConfig(rows=({"tokens": list(range(10))},)),
@@ -1028,34 +1367,37 @@ def test_concat_then_split_keeps_long_document_next_token_pairs():
     )
     rows = list(
         recipe.build(
-            context=replace(CONTEXT, seq_len=4),
-            iteration=iteration(shuffle=False, repeat=False),
+            context=replace(CONTEXT, seq_len=5),
+            dataset_iteration_policy=dataset_iteration_policy(
+                shuffle=False, repeat=False
+            ),
         )
     )
 
-    assert rows[0][0]["input"].tolist() == [0, 1, 2, 3]
-    assert rows[0][1].tolist() == [1, 2, 3, 4]
-    assert rows[1][0]["input"].tolist() == [4, 5, 6, 7]
-    assert rows[1][1].tolist() == [5, 6, 7, 8]
-    assert rows[2][0]["input"].tolist() == [8, 0, 0, 0]
-    assert rows[2][1].tolist() == [
-        9,
-        IGNORE_INDEX,
-        IGNORE_INDEX,
-        IGNORE_INDEX,
-    ]
-    assert rows[0][0]["positions"].tolist() == [0, 1, 2, 3]
-    assert rows[1][0]["positions"].tolist() == [0, 1, 2, 3]
-    assert rows[2][0]["positions"].tolist() == [0, 0, 0, 0]
+    assert rows[0].input_ids.tolist() == [0, 1, 2, 3, 4]
+    assert rows[1].input_ids.tolist() == [5, 6, 7, 8, 9]
+    assert rows[0].positions.tolist() == [0, 1, 2, 3, 4]
+    assert rows[1].positions.tolist() == [0, 1, 2, 3, 4]
+
+    collator = TextCollator.Config().build(
+        context=replace(CONTEXT, seq_len=5)
+    )
+    first_inputs, first_labels = collator([rows[0]])
+    second_inputs, second_labels = collator([rows[1]])
+
+    assert first_inputs["input"].tolist() == [[0, 1, 2, 3, 4]]
+    assert first_labels.tolist() == [[1, 2, 3, 4, IGNORE_INDEX]]
+    assert second_inputs["input"].tolist() == [[5, 6, 7, 8, 9]]
+    assert second_labels.tolist() == [[6, 7, 8, 9, IGNORE_INDEX]]
 
 
 def test_map_dataset_reshuffles_deterministically_across_repeats():
     config = SingleDatasetConfig(
         source=RowsSourceConfig(rows=tuple({"value": index} for index in range(8)))
     )
-    policy = iteration(shuffle=True, repeat=True)
-    first = config.build(context=CONTEXT, iteration=policy)
-    peer = config.build(context=CONTEXT, iteration=policy)
+    policy = dataset_iteration_policy(shuffle=True, repeat=True)
+    first = config.build(context=CONTEXT, dataset_iteration_policy=policy)
+    peer = config.build(context=CONTEXT, dataset_iteration_policy=policy)
     first_two = [first[index]["value"] for index in range(16)]
     peer_two = [peer[index]["value"] for index in range(16)]
 
@@ -1075,27 +1417,44 @@ def test_concat_then_split_resets_positions_between_documents():
             processor=RowToTokens.Config(),
         )
     )
-    inputs, labels = next(
+    sequence = next(
         iter(
             recipe.build(
-                context=replace(CONTEXT, seq_len=8),
-                iteration=iteration(),
+                context=replace(CONTEXT, seq_len=9),
+                dataset_iteration_policy=dataset_iteration_policy(),
             )
         )
     )
 
-    assert inputs["input"].tolist() == [1, 10, 1, 20, 21, 0, 0, 0]
-    assert labels.tolist() == [
+    assert sequence.input_ids.tolist() == [1, 10, 2, 1, 20, 21, 2, 0, 0]
+    assert sequence.labels.tolist() == [
+        1,
         10,
         2,
+        1,
         20,
         21,
         2,
         IGNORE_INDEX,
         IGNORE_INDEX,
-        IGNORE_INDEX,
     ]
-    assert inputs["positions"].tolist() == [0, 1, 0, 1, 2, 0, 0, 0]
+    assert sequence.positions.tolist() == [0, 1, 2, 0, 1, 2, 3, 0, 0]
+
+    inputs, labels = TextCollator.Config().build(context=CONTEXT)([sequence])
+    assert inputs["input"].tolist() == [[1, 10, 2, 1, 20, 21, 2, 0, 0]]
+    assert labels.tolist() == [
+        [
+            10,
+            2,
+            IGNORE_INDEX,
+            20,
+            21,
+            2,
+            IGNORE_INDEX,
+            IGNORE_INDEX,
+            IGNORE_INDEX,
+        ]
+    ]
 
 
 @pytest.fixture
@@ -1115,7 +1474,7 @@ def finite_rows_loader():
         dataset=SingleDatasetConfig(source=RowsSourceConfig(rows=rows)),
         shuffle=False,
         repeat=False,
-        batch_prefetch_buffer_size=1,
+        num_prefetch_batches=1,
     ).build(
         dp_world_size=1,
         dp_rank=0,
@@ -1127,7 +1486,7 @@ def finite_rows_loader():
     loader.close()
 
 
-def build_process_rows_loader(*, process_workers, row_count):
+def build_process_rows_loader(*, num_workers, row_count):
     # DefaultCollator converts these rows to tensors after process prefetch.
     rows = tuple(
         (
@@ -1143,10 +1502,8 @@ def build_process_rows_loader(*, process_workers, row_count):
         dataset=SingleDatasetConfig(source=RowsSourceConfig(rows=rows)),
         shuffle=False,
         repeat=False,
-        batch_prefetch_buffer_size=1,
-        process_workers=process_workers,
-        process_prefetch_buffer_size=1,
-        read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+        num_prefetch_batches=1,
+        num_workers=num_workers,
     ).build(
         dp_world_size=1,
         dp_rank=0,
@@ -1184,7 +1541,7 @@ def test_mix_rejects_empty_datasets():
     with pytest.raises(ValueError, match="positive-weight"):
         DatasetMixConfig(datasets=()).build(
             context=CONTEXT,
-            iteration=iteration(),
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
 
 
@@ -1199,7 +1556,7 @@ def test_mix_rejects_non_finite_or_nonpositive_weight(weight):
             datasets=(WeightedDataset(dataset=dataset, weight=weight),)
         ).build(
             context=CONTEXT,
-            iteration=iteration(),
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
 
 
@@ -1231,11 +1588,11 @@ def test_loader_batches_exact_rows_and_preserves_finite_tail(finite_rows_loader)
     assert batches[2][1].tolist() == [[4]]
 
 
-@pytest.mark.parametrize("process_workers", [1, 2, 4])
-def test_process_workers_emit_every_map_row_once(process_workers):
+@pytest.mark.parametrize("num_workers", [1, 2, 4])
+def test_num_workers_emit_every_map_row_once(num_workers):
     baseline_pids = {process.pid for process in multiprocessing.active_children()}
     loader = build_process_rows_loader(
-        process_workers=process_workers,
+        num_workers=num_workers,
         row_count=17,
     )
     worker_pids = set()
@@ -1256,7 +1613,7 @@ def test_process_workers_emit_every_map_row_once(process_workers):
     wait_for_processes_to_stop(worker_pids)
 
 
-def test_process_workers_reject_iterable_root_before_startup():
+def test_num_workers_reject_iterable_root_before_startup():
     child = SingleDatasetConfig(
         source=RowsSourceConfig(rows=tuple({"value": index} for index in range(4)))
     )
@@ -1267,7 +1624,7 @@ def test_process_workers_reject_iterable_root_before_startup():
                 WeightedDataset(dataset=child),
             )
         ),
-        process_workers=1,
+        num_workers=1,
     )
 
     with pytest.raises(ValueError, match="requires a map-root dataset"):
@@ -1280,8 +1637,8 @@ def test_process_workers_reject_iterable_root_before_startup():
         )
 
 
-def test_process_workers_restore_exactly_with_same_topology():
-    loader = build_process_rows_loader(process_workers=1, row_count=24)
+def test_num_workers_restore_exactly_with_same_topology():
+    loader = build_process_rows_loader(num_workers=1, row_count=24)
     restored = None
     try:
         iterator = iter(loader)
@@ -1289,7 +1646,7 @@ def test_process_workers_restore_exactly_with_same_topology():
         state = loader.state_dict()
         expected = [next(iterator) for _ in range(4)]
 
-        restored = build_process_rows_loader(process_workers=1, row_count=24)
+        restored = build_process_rows_loader(num_workers=1, row_count=24)
         restored.load_state_dict(state)
         actual = [next(iter(restored)) for _ in range(4)]
 
@@ -1305,7 +1662,7 @@ def test_process_workers_restore_exactly_with_same_topology():
 def mock_grain_loader():
     loader = object.__new__(GrainDataLoader)
     loader._dp_world_size = 1
-    loader._process_workers = 0
+    loader._num_workers = 0
     loader._rank_id = "dp_rank_0"
     loader._iterator = mock.Mock()
     return loader
@@ -1313,15 +1670,15 @@ def mock_grain_loader():
 
 def test_changed_process_topology_closes_before_rejecting():
     baseline_pids = {process.pid for process in multiprocessing.active_children()}
-    loader = build_process_rows_loader(process_workers=1, row_count=10_000)
+    loader = build_process_rows_loader(num_workers=1, row_count=10_000)
     worker_pids = set()
     try:
         next(iter(loader))
         worker_pids = wait_for_processes_to_start(baseline_pids)
         state = loader.state_dict()
-        state["process_workers"] = 2
+        state["num_workers"] = 2
 
-        with pytest.raises(ValueError, match="changing process_workers"):
+        with pytest.raises(ValueError, match="changing num_workers"):
             loader.load_state_dict(state)
     finally:
         loader.close()
@@ -1340,9 +1697,9 @@ def test_restore_failure_closes_loader():
     loader._iterator.close.assert_called_once_with()
 
 
-def test_trainer_shutdown_closes_process_workers():
+def test_trainer_shutdown_closes_num_workers():
     baseline_pids = {process.pid for process in multiprocessing.active_children()}
-    loader = build_process_rows_loader(process_workers=1, row_count=10_000)
+    loader = build_process_rows_loader(num_workers=1, row_count=10_000)
     worker_pids = set()
     try:
         next(iter(loader))
@@ -1368,8 +1725,8 @@ def test_process_worker_exception_reaches_consumer():
         ),
         shuffle=False,
         repeat=False,
-        process_workers=1,
-        batch_prefetch_buffer_size=1,
+        num_workers=1,
+        num_prefetch_batches=1,
     ).build(
         dp_world_size=1,
         dp_rank=0,
@@ -1401,10 +1758,11 @@ def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):
                 processor=RowToTokens.Config(),
             )
         ),
+        collator=TextCollator.Config(),
         seed=42,
         shuffle=True,
         repeat=True,
-        batch_prefetch_buffer_size=1,
+        num_prefetch_batches=1,
     )
 
     for rank in range(2):

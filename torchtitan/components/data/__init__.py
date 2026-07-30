@@ -4,16 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.data.collators import Collator, DefaultCollator, TrainerBatch
+from torchtitan.components.data.collators import (
+    Collator,
+    DefaultCollator,
+    TextCollator,
+    TrainerBatch,
+)
 from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
     DatasetConcatConfig,
     DatasetConfig,
-    DatasetIterationPolicy,
     DatasetMixConfig,
     SampleProcessor,
     SingleDatasetConfig,
-    TokenSequence,
+    TextSequence,
     WeightedDataset,
 )
 from torchtitan.components.data.loader import GrainDataLoader
@@ -25,9 +28,10 @@ from torchtitan.components.data.sources import (
     HuggingFaceRandomAccessSource,
     HuggingFaceStreamingSource,
     IndexedJsonlSource,
-    RandomAccessSource,
+    RandomAccessDataSource,
     SourceConfig,
 )
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 
 __all__ = [
     "Collator",
@@ -43,11 +47,12 @@ __all__ = [
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",
-    "RandomAccessSource",
+    "RandomAccessDataSource",
     "SampleProcessor",
     "SingleDatasetConfig",
     "SourceConfig",
-    "TokenSequence",
+    "TextCollator",
+    "TextSequence",
     "TrainerBatch",
     "WeightedDataset",
 ]

@@ -54,7 +54,7 @@ def qwen35_debugmodel() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -98,7 +98,7 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -136,7 +136,7 @@ def qwen35_0_8b() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -170,7 +170,7 @@ def qwen35_2b() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -204,7 +204,7 @@ def qwen35_4b() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -237,7 +237,7 @@ def qwen35_9b() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -272,7 +272,7 @@ def qwen35_27b() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -307,7 +307,7 @@ def qwen35_35b_a3b() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -344,7 +344,7 @@ def qwen35_122b_a10b() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -381,7 +381,7 @@ def qwen35_397b_a17b() -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
-            streaming_shuffle_window_size=128,
+            streaming_shuffle_buffer_size=128,
         ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),

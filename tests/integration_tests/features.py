@@ -195,7 +195,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--compile.enable_async_tensor_parallel",
+                    "--parallelism.enable_async_tensor_parallel",
                 ],
             ],
             "2D async TP compile",
@@ -247,7 +247,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule 1F1B",
                     "--parallelism.data_parallel_shard_degree 1",
@@ -260,13 +259,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule 1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                 ],
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule 1F1B",
                     "--parallelism.pipeline_parallel_layers_per_stage 4",
@@ -279,7 +276,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule GPipe",
                     "--parallelism.tensor_parallel_degree 2",
@@ -291,14 +287,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
                 [
-                    "--training.disable_cuda_graphs",
                     "--training.steps 20",
                     "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -313,7 +307,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -327,12 +320,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                 ],
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.pipeline_parallel_layers_per_stage 1",
@@ -357,7 +348,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
                     "activation-checkpoint:full",
@@ -371,7 +361,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
                     "activation-checkpoint:full",
@@ -389,7 +378,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
@@ -458,8 +446,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module torchtitan_recipes.tests "
-                    "--config llama3_debugmodel_fsdp2_cp2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.context_parallel_degree=2",
                 ]
             ],
             "FSDP+CP",
@@ -548,7 +536,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
+                    "--module llama3 --config llama3_debugmodel",
                     "--validator.enable",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
@@ -574,7 +562,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu,"
                     "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
@@ -592,7 +579,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "activation-checkpoint:selective",
@@ -606,7 +592,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--module llama3 --config llama3_debugmodel_float8_emulate_lora",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -619,7 +604,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--comm.mode torchcomms",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -638,7 +622,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--module llama3 --config llama3_debugmodel_ce_loss",
                     "--comm.mode torchcomms",
                     "--parallelism.tensor_parallel_degree 2",
@@ -667,7 +650,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--checkpoint.enable",
                     "--checkpoint.create_seed_checkpoint",
                 ],

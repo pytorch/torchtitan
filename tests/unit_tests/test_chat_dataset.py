@@ -14,18 +14,13 @@ import numpy as np
 import torch
 from datasets import Dataset
 from torch.nn.attention.flex_attention import and_masks
+from torchtitan.components.data.collators import TextCollator
 
-from torchtitan.components.data.dataset import (
-    DatasetBuildContext,
-    DatasetIterationPolicy,
-    SingleDatasetConfig,
-)
+from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.loader import GrainDataLoader
-from torchtitan.components.data.packing import (
-    _token_sequence_to_input_ids_and_labels,
-    FirstFitPackingConfig,
-)
+from torchtitan.components.data.packing import FirstFitPackingConfig
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
@@ -92,13 +87,13 @@ def _build_rows(seq_len):
     )
     return dataset.build(
         context=_runtime(seq_len),
-        iteration=DatasetIterationPolicy(
+        dataset_iteration_policy=DatasetIterationPolicy(
             seed=42,
             shuffle=False,
             repeat=False,
             dp_rank=0,
             dp_world_size=1,
-            streaming_shuffle_window_size=1_000,
+            streaming_shuffle_buffer_size=1_000,
         ),
     )
 
@@ -118,11 +113,11 @@ def _build_dataloader(seq_len=128, world_size=1, rank=0):
                 post_filters=(lambda sample: sample is not None,),
             )
         ),
+        collator=TextCollator.Config(),
         seed=42,
         shuffle=True,
         repeat=True,
-        read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
-        batch_prefetch_buffer_size=1,
+        num_prefetch_batches=1,
     )
     return config.build(
         dp_world_size=world_size,
@@ -137,10 +132,12 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
     """Prompt tokens should be masked (IGNORE_INDEX), assistant tokens should not."""
 
     def test_prompt_masked_response_unmasked(self):
-        features = _token_sequence_to_input_ids_and_labels(
-            _build_processor()(_load_dataset()[0], np.random.default_rng(0))
+        sequence = _build_processor()(
+            _load_dataset()[0],
+            np.random.default_rng(0),
         )
-        label_ids = torch.from_numpy(features["labels"])
+        _, label_ids = TextCollator.Config().build(context=_runtime(2048))([sequence])
+        label_ids = label_ids[0]
 
         masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
         unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
@@ -150,32 +147,37 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
 
 
 class TestChatDatasetShiftedTokens(unittest.TestCase):
-    """input_ids = tokens[:-1], label_ids = tokens[1:]."""
+    """Inputs keep `seq_len`; labels shift left and pad the final target."""
 
     def test_shifted_by_one(self):
         tokenizer = _load_tokenizer()
         sample = _load_dataset()[0]
         messages = _process_sample(sample)
         token_sequence = _build_processor()(sample, np.random.default_rng(0))
-        features = _token_sequence_to_input_ids_and_labels(token_sequence)
+        inputs, labels = TextCollator.Config().build(context=_runtime(2048))(
+            [token_sequence]
+        )
 
         full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
         full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
         if full_tokens[-1] != tokenizer.eos_id:
             full_tokens.append(tokenizer.eos_id)
 
-        self.assertEqual(features["input_ids"].tolist(), full_tokens[:-1])
+        self.assertEqual(
+            inputs["input"][0].tolist()[: len(full_tokens)], full_tokens
+        )
 
         prompt_text = tokenizer.apply_chat_template(
             messages[:1], add_generation_prompt=True
         )
         prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
         response_start = len(prompt_tokens) - 1
-        self.assertNotEqual(features["labels"][response_start], IGNORE_INDEX)
+        self.assertNotEqual(labels[0, response_start], IGNORE_INDEX)
         self.assertEqual(
-            features["labels"][response_start:].tolist(),
+            labels[0, response_start : len(full_tokens) - 1].tolist(),
             full_tokens[1:][response_start:],
         )
+        self.assertEqual(labels[0, len(full_tokens) - 1], IGNORE_INDEX)
 
 
 class TestChatDatasetGreedyPacking(unittest.TestCase):
@@ -183,25 +185,28 @@ class TestChatDatasetGreedyPacking(unittest.TestCase):
 
     def test_packing_multiple_samples(self):
         seq_len = 256
-        batches = list(_build_rows(seq_len))
+        sequences = list(_build_rows(seq_len))
 
         # With 10 samples of lengths 79-123, they should pack into fewer than 10 batches
-        self.assertGreater(len(batches), 0)
-        self.assertLess(len(batches), 10)
+        self.assertGreater(len(sequences), 0)
+        self.assertLess(len(sequences), 10)
 
-        for batch, labels in batches:
-            self.assertEqual(batch["input"].shape[0], seq_len)
-            self.assertEqual(labels.shape[0], seq_len)
+        collator = TextCollator.Config().build(context=_runtime(seq_len))
+        for sequence in sequences:
+            batch, labels = collator([sequence])
+            self.assertEqual(batch["input"].shape, (1, seq_len))
+            self.assertEqual(labels.shape, (1, seq_len))
             self.assertIn("positions", batch)
-            self.assertEqual(batch["positions"].shape[0], seq_len)
+            self.assertEqual(batch["positions"].shape, (1, seq_len))
 
 
 class TestChatDatasetPerDocumentPositions(unittest.TestCase):
     """Positions reset to 0 at each document boundary in packed mode."""
 
     def test_positions_reset_at_boundaries(self):
-        batch, _ = next(iter(_build_rows(seq_len=256)))
-        positions = batch["positions"]
+        sequence = next(iter(_build_rows(seq_len=256)))
+        batch, _ = TextCollator.Config().build(context=_runtime(256))([sequence])
+        positions = batch["positions"][0]
 
         self.assertEqual(positions[0].item(), 0)
         resets = (positions[1:] == 0).nonzero(as_tuple=True)[0]
@@ -296,8 +301,8 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
     def test_packed_samples_block_cross_document_attention(self):
         processor = _build_processor()
         dataset = _load_dataset()
-        input_ids_0 = processor(dataset[0], np.random.default_rng(0)).token_ids[:-1]
-        input_ids_1 = processor(dataset[1], np.random.default_rng(0)).token_ids[:-1]
+        input_ids_0 = processor(dataset[0], np.random.default_rng(0)).input_ids[:-1]
+        input_ids_1 = processor(dataset[1], np.random.default_rng(0)).input_ids[:-1]
 
         packed = np.concatenate((input_ids_0, input_ids_1))
         boundary = len(input_ids_0)

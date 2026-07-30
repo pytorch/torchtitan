@@ -14,9 +14,51 @@ from torchtitan.config import ConfigManager
 class TestFluxDataLoader(unittest.TestCase):
     def setUp(self):
         # Import here to avoid circular import during test collection
-        from torchtitan.models.flux.flux_datasets import DATASETS
+        from torchtitan.models.flux.flux_datasets import DATASETS, FluxCollator
 
         self._dataset = DATASETS["cc12m-test"]
+        self._collator = FluxCollator.Config()
+
+    def test_collator_moves_image_to_labels(self):
+        rows = [
+            {
+                "t5": torch.tensor([1, 2]),
+                "clip": torch.tensor([3]),
+                "prompt": "first",
+                "image": torch.full((3, 2, 2), 1.0),
+            },
+            {
+                "t5": torch.tensor([4, 5]),
+                "clip": torch.tensor([6]),
+                "prompt": "second",
+                "image": torch.full((3, 2, 2), 2.0),
+            },
+        ]
+
+        model_inputs, labels = self._collator.build(context=None)(rows)
+
+        self.assertNotIn("image", model_inputs)
+        self.assertEqual(model_inputs["prompt"], ["first", "second"])
+        self.assertTrue(
+            torch.equal(labels, torch.stack([row["image"] for row in rows]))
+        )
+
+    def test_validation_timestep_preserves_sample(self):
+        from torchtitan.models.flux.flux_datasets import _add_validation_timestep
+
+        sample = {
+            "t5": torch.tensor([1, 2]),
+            "clip": torch.tensor([3]),
+            "prompt": "caption",
+            "image": torch.ones(3, 2, 2),
+        }
+
+        timed = _add_validation_timestep(3, sample)
+
+        self.assertEqual(timed["timestep"], 3.5 / 8)
+        self.assertNotIn("timestep", sample)
+        for key in sample:
+            self.assertIs(timed[key], sample[key])
 
     def test_load_dataset(self):
         # The test checks for the correct tensor shapes during the first num_steps
@@ -51,8 +93,9 @@ class TestFluxDataLoader(unittest.TestCase):
                 )
                 config.dataloader = GrainDataLoader.Config(
                     dataset=self._dataset,
+                    collator=self._collator,
                     shuffle=False,
-                    streaming_shuffle_window_size=128,
+                    streaming_shuffle_buffer_size=128,
                 )
 
                 # Build the tokenizer container from config

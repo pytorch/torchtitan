@@ -24,7 +24,7 @@ import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
-from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer

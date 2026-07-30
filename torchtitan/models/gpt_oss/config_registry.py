@@ -5,7 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    TextCollator,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -32,6 +36,7 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -80,6 +85,7 @@ def gpt_oss_20b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -113,6 +119,7 @@ def gpt_oss_120b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

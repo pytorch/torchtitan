@@ -17,12 +17,13 @@ import datasets
 import grain.python as grain
 from datasets.distributed import split_dataset_by_node
 
+from torchtitan.components.data.types import DatasetIterationPolicy
 from torchtitan.config import Configurable
 
 
 @runtime_checkable
-class RandomAccessSource(Protocol):
-    """A finite source addressable by integer index."""
+class RandomAccessDataSource(Protocol):
+    """Finite data source addressable by integer index."""
 
     def __len__(self) -> int:
         ...
@@ -35,12 +36,19 @@ class SourceConfig(Protocol):
     """Builds a random-access or streaming source."""
 
     def build(
-        self, *, dp_rank: int, dp_world_size: int
-    ) -> RandomAccessSource | grain.IterDataset:
+        self,
+        *,
+        dataset_iteration_policy: DatasetIterationPolicy,
+    ) -> RandomAccessDataSource | grain.IterDataset:
         ...
 
 
-def _expand_patterns(patterns: tuple[str, ...]) -> tuple[str, ...]:
+def _file_patterns_to_paths(patterns: tuple[str, ...]) -> tuple[str, ...]:
+    """Return sorted, unique absolute paths matched by file patterns.
+
+    Every pattern must match at least one file. Duplicate resolved paths are
+    rejected so one file cannot be indexed twice.
+    """
     paths: list[str] = []
     for pattern in patterns:
         matches = sorted(glob.glob(pattern))
@@ -59,14 +67,18 @@ class IndexedJsonlSource(Configurable):
     class Config(Configurable.Config):
         patterns: tuple[str, ...]
 
-    def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int) -> None:
-        del dp_rank, dp_world_size
-        self._paths = _expand_patterns(config.patterns)
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dataset_iteration_policy: DatasetIterationPolicy,
+    ) -> None:
+        del dataset_iteration_policy
+        self._paths = _file_patterns_to_paths(config.patterns)
         self._path_ids = array("I")
         self._byte_offsets = array("Q")
-        # TODO(data-jsonl-sidecar): Persist and mmap offsets so ranks and process
-        # workers do not rescan or duplicate the full index; needs atomic publication
-        # and stale-index validation.
+        # TODO(data-jsonl-sidecar): Startup rescans every JSONL file per rank and
+        # worker. Build one validated offset index that all processes can memory-map.
         for path_id, path in enumerate(self._paths):
             with open(path, "rb") as file:
                 while True:
@@ -113,8 +125,13 @@ class HuggingFaceRandomAccessSource(Configurable):
                     f"{sorted(duplicated)}"
                 )
 
-    def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int) -> None:
-        del dp_rank, dp_world_size
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dataset_iteration_policy: DatasetIterationPolicy,
+    ) -> None:
+        del dataset_iteration_policy
         dataset = datasets.load_dataset(
             config.path,
             name=config.name,
@@ -140,18 +157,44 @@ class HuggingFaceRandomAccessSource(Configurable):
 class _HuggingFaceCursorIterator(grain.DatasetIterator):
     """Exposes a Hugging Face streaming cursor to Grain checkpoint recursion."""
 
-    def __init__(self, dataset: Any) -> None:
+    def __init__(
+        self,
+        dataset: datasets.IterableDataset,
+        *,
+        repeat: bool,
+        shuffle: bool,
+    ) -> None:
         super().__init__()
         self._dataset = dataset
+        self._repeat = repeat
+        self._shuffle = shuffle
+        self._epoch = 0
+        self._initial_state = dataset.state_dict()
         self._iterator = iter(dataset)
 
     def __next__(self) -> dict[str, Any]:
-        return next(self._iterator)
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            if not self._repeat:
+                raise
+            self._epoch += 1
+            if self._shuffle:
+                self._dataset.set_epoch(self._epoch)
+            self._dataset.load_state_dict(self._initial_state)
+            self._iterator = iter(self._dataset)
+            return next(self._iterator)
 
     def get_state(self) -> dict[str, Any]:
-        return {"hf": self._dataset.state_dict()}
+        return {
+            "epoch": self._epoch,
+            "hf": self._dataset.state_dict(),
+        }
 
     def set_state(self, state: dict[str, Any]) -> None:
+        self._epoch = state["epoch"]
+        if self._shuffle:
+            self._dataset.set_epoch(self._epoch)
         self._dataset.load_state_dict(state["hf"])
         self._iterator = iter(self._dataset)
 
@@ -177,7 +220,12 @@ class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
                     f"{sorted(duplicated)}"
                 )
 
-    def __init__(self, config: Config, *, dp_rank: int, dp_world_size: int) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dataset_iteration_policy: DatasetIterationPolicy,
+    ) -> None:
         super().__init__()
         dataset = datasets.load_dataset(
             config.path,
@@ -200,9 +248,15 @@ class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
             )
         self._dataset = split_dataset_by_node(
             dataset,
-            rank=dp_rank,
-            world_size=dp_world_size,
+            rank=dataset_iteration_policy.dp_rank,
+            world_size=dataset_iteration_policy.dp_world_size,
         )
+        self._repeat = dataset_iteration_policy.repeat
+        self._shuffle = dataset_iteration_policy.shuffle
 
     def __iter__(self) -> grain.DatasetIterator:
-        return _HuggingFaceCursorIterator(self._dataset)
+        return _HuggingFaceCursorIterator(
+            self._dataset,
+            repeat=self._repeat,
+            shuffle=self._shuffle,
+        )

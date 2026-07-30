@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from typing import Any, cast, TypeAlias
@@ -13,8 +13,12 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    TextCollator,
+)
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -26,7 +30,6 @@ from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
 
 ValidationContext: TypeAlias = Callable[[], AbstractContextManager[None]]
 
@@ -86,6 +89,7 @@ class Validator(BaseValidator):
                 dataset=ConcatThenSplitPackingConfig(
                     dataset=DATASETS["c4_validation"],
                 ),
+                collator=TextCollator.Config(),
                 repeat=False,
             )
         )
@@ -131,12 +135,6 @@ class Validator(BaseValidator):
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
-
-        if config.steps == -1:
-            logger.warning(
-                "Setting validation steps to -1 might cause hangs because of "
-                "unequal sample counts across ranks when dataset is exhausted."
-            )
 
     def post_dataloading_process(
         self,
@@ -251,7 +249,9 @@ class Validator(BaseValidator):
             ),
         )
 
-        validation_iterator = iter(validation_dataloader)
+        validation_iterator = iter(
+            _iterate_and_close_dataloader(validation_dataloader)
+        )
         while True:
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
@@ -340,7 +340,6 @@ class Validator(BaseValidator):
             total_global_valid_tokens.add_(global_valid_tokens)
             num_steps += 1
 
-        validation_dataloader.close()
         assert accumulated_loss is not None
         num_global_valid_tokens = int(total_global_valid_tokens.item())
         if parallel_dims.dp_cp_enabled:
@@ -356,3 +355,11 @@ class Validator(BaseValidator):
         # Set model back to train mode
         for model in model_parts:
             model.train()
+
+
+def _iterate_and_close_dataloader(dataloader: BaseDataLoader) -> Iterator[Any]:
+    """Close a temporary dataloader whenever its consumer stops iterating."""
+    try:
+        yield from dataloader
+    finally:
+        dataloader.close()

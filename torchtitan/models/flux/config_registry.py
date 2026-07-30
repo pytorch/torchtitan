@@ -13,7 +13,11 @@ from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
-from torchtitan.models.flux.flux_datasets import DATASETS, FluxValidationDatasetConfig
+from torchtitan.models.flux.flux_datasets import (
+    DATASETS,
+    FluxCollator,
+    FluxValidationDatasetConfig,
+)
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.models.flux.validate import FluxValidator
@@ -51,7 +55,8 @@ def flux_debugmodel() -> FluxTrainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=training_dataset,
-            streaming_shuffle_window_size=128,
+            collator=FluxCollator.Config(),
+            streaming_shuffle_buffer_size=128,
         ),
         parallelism=ParallelismConfig(context_parallel_degree=1),
         activation_checkpoint=FullAC.Config(),
@@ -74,7 +79,8 @@ def flux_debugmodel() -> FluxTrainer.Config:
                 dataset=FluxValidationDatasetConfig(
                     dataset=validation_dataset,
                 ),
-                streaming_shuffle_window_size=128,
+                collator=FluxCollator.Config(),
+                streaming_shuffle_buffer_size=128,
             ),
             save_img_count=1,
             save_img_folder="img",
@@ -115,7 +121,8 @@ def flux_dev() -> FluxTrainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=training_dataset,
-            streaming_shuffle_window_size=128,
+            collator=FluxCollator.Config(),
+            streaming_shuffle_buffer_size=128,
         ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
@@ -131,7 +138,8 @@ def flux_dev() -> FluxTrainer.Config:
                 dataset=FluxValidationDatasetConfig(
                     dataset=validation_dataset,
                 ),
-                streaming_shuffle_window_size=128,
+                collator=FluxCollator.Config(),
+                streaming_shuffle_buffer_size=128,
             ),
             save_img_count=50,
             save_img_folder="img",
@@ -167,7 +175,8 @@ def flux_schnell() -> FluxTrainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=training_dataset,
-            streaming_shuffle_window_size=128,
+            collator=FluxCollator.Config(),
+            streaming_shuffle_buffer_size=128,
         ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
@@ -183,7 +192,8 @@ def flux_schnell() -> FluxTrainer.Config:
                 dataset=FluxValidationDatasetConfig(
                     dataset=validation_dataset,
                 ),
-                streaming_shuffle_window_size=128,
+                collator=FluxCollator.Config(),
+                streaming_shuffle_buffer_size=128,
             ),
             save_img_count=50,
             save_img_folder="img",

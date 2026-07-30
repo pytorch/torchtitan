@@ -69,7 +69,7 @@ We look forward to your contributions!
 8. Supervised Fine-Tuning (SFT) with chat-formatted datasets
 9. DDP and HSDP
 10. [TorchFT](https://github.com/pytorch/torchft) integration
-11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom Grain datasets](torchtitan/components/data/README.md)
+11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
 12. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument on the CLI
 13. Flexible learning rate scheduler (warmup-stable-decay)
 14. [BF16 optimizer states](docs/bf16_optimizer_states.md) for reduced memory usage

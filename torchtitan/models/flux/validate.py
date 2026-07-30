@@ -16,7 +16,11 @@ from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.components.validate import ValidationContext, Validator
+from torchtitan.components.validate import (
+    _iterate_and_close_dataloader,
+    ValidationContext,
+    Validator,
+)
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools.logging import logger
@@ -162,7 +166,7 @@ class FluxValidator(Validator):
             seq_len=self.seq_len,
         )
 
-        for input_dict, labels in validation_dataloader:
+        for input_dict, labels in _iterate_and_close_dataloader(validation_dataloader):
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
@@ -292,9 +296,6 @@ class FluxValidator(Validator):
             accumulated_losses.append(loss.detach())
 
             num_steps += 1
-
-        # Release the temporary validation loader's prefetch workers.
-        validation_dataloader.close()
 
         # Compute average loss
         loss = torch.sum(torch.stack(accumulated_losses))
