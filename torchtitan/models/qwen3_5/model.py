@@ -162,7 +162,20 @@ class RMSNormGated(Module):
 
 
 class _RecurrentFwdChunkBwd(torch.autograd.Function):
-    """Use recurrent forward values and recompute the chunk kernel in backward."""
+    """Batch-invariant GDN: fla RECURRENT kernel for the forward, fla CHUNK for backward.
+
+    The vLLM generator must use the recurrent kernel for decode (decode is inherently a
+    per-token recurrence). For the trainer forward to be bitwise-identical to the
+    generator it must use that SAME recurrent kernel with a materialized float32 zero
+    initial state and cu_seqlens (varlen) -- so the USE_INITIAL_STATE and IS_VARLEN
+    triton constexprs select the exact compiled kernel + fp reduction the generator
+    hits. A pure-recurrent backward is O(seqlen) sequential and slow, so the backward
+    recomputes the fla CHUNK kernel for efficient parallel gradients (chunk and recurrent
+    compute the same function; only the forward value is swapped to recurrent).
+
+    Inputs are the flattened [1, T, ...] varlen layout; cu_seqlens marks the packed
+    per-sample boundaries so the recurrence resets per sample.
+    """
 
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]

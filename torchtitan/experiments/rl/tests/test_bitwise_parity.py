@@ -30,6 +30,7 @@ Run each backend in a separate torchrun invocation:
         torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
+import dataclasses
 import gc
 import logging
 import os
@@ -67,6 +68,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_5_9b_varlen_batch_invariant,
+    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
@@ -255,8 +257,8 @@ def build_inference_engine(
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
-        # GDN promotes its paged conv+ssm states to fp32 under batch-invariant mode
-        # inside VLLMGatedDeltaNetCore, so no mamba cache-dtype engine args are needed.
+        # GDN preserves its accumulated paged SSM state in fp32 under
+        # batch-invariant mode inside VLLMGatedDeltaNetCore.
     )
 
     from torchtitan.tools.utils import has_cuda_capability
@@ -746,8 +748,12 @@ class BitwiseParityTestBase(unittest.TestCase):
             b = torch.tensor(b, dtype=torch.float32)
         else:
             b = b.detach().cpu().float()
-        n = min(len(a), len(b))
-        a, b = a[:n], b[:n]
+        self.assertEqual(
+            len(a),
+            len(b),
+            f"{name}: length mismatch ({label_a}={len(a)}, {label_b}={len(b)})",
+        )
+        n = len(a)
 
         max_delta = (a - b).abs().max().item() if n > 0 else 0.0
         num_diff = (a != b).sum().item()
@@ -872,6 +878,67 @@ class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
     config_fn = staticmethod(rl_grpo_qwen3_5_9b_varlen_batch_invariant)
     attn_backend = "varlen"
     min_world_size = 2
+
+
+def _qwen3_5_debug_bitwise_config() -> Controller.Config:
+    """Build a two-GPU random-weight Qwen3.5 parity configuration."""
+    config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=1,
+        ),
+    )
+    return config
+
+
+class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
+    """Qwen3.5 GDN parity with random weights and matched TP=2."""
+
+    __test__ = True
+    config_fn = staticmethod(_qwen3_5_debug_bitwise_config)
+    attn_backend = "varlen"
+    min_world_size = 2
+    sync_weights_from_trainer = True
+    BATCH_SIZE = 3
+    PROMPT_LENGTH = 64
+    MAX_GEN_TOKENS = 16
+
+    def test_vllm_prefill_and_decode_batch_invariance(self):
+        """vLLM prefill and decode must not depend on batch composition."""
+        single_prompt = self.prompt_ids[:1]
+
+        single_prefill_lps = vllm_prefill(self.engine, single_prompt)
+        batched_prefill_lps = vllm_prefill(self.engine, self.prompt_ids)
+
+        single_gen_ids, single_decode_lps = vllm_generate(
+            self.engine, single_prompt, self.MAX_GEN_TOKENS
+        )
+        batched_gen_ids, batched_decode_lps = vllm_generate(
+            self.engine, self.prompt_ids, self.MAX_GEN_TOKENS
+        )
+
+        if dist.get_rank() == 0:
+            self._assert_logprobs_equal(
+                "seq 0: vLLM prefill(bsz=1) vs prefill(bsz=3)",
+                single_prefill_lps[0],
+                batched_prefill_lps[0],
+                "bsz=1",
+                "bsz=3",
+            )
+            self.assertEqual(
+                single_gen_ids[0],
+                batched_gen_ids[0],
+                "seq 0: greedy decode token IDs differ by batch composition",
+            )
+            self._assert_logprobs_equal(
+                "seq 0: vLLM decode(bsz=1) vs decode(bsz=3)",
+                single_decode_lps[0],
+                batched_decode_lps[0],
+                "bsz=1",
+                "bsz=3",
+            )
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):
