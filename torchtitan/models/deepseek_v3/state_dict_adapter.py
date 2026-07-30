@@ -82,7 +82,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         layer_num: str,
     ) -> tuple[str, str]:
         new_key = self.from_hf_map[abstract_key]
-        if getattr(self.model_config, "num_mtp_layers", 0) > 0:
+        if len(getattr(self.model_config, "mtp_layers", [])) > 0:
             num_main_layers = len(self.model_config.layers)
             layer_idx = int(layer_num)
             if layer_idx >= num_main_layers:

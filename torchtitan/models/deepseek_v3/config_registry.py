@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss, MTPLoss
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
@@ -19,7 +19,7 @@ from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.mtp import MTPBlock
+from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -36,17 +36,13 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
         config.override.imports.append(override)
 
 
-def _configure_debug_mtp(config: Trainer.Config) -> None:
-    config.mtp = MTPBlock.Config(num_mtp_layers=1, loss_scaling_factor=0.3)
-
-
 def deepseek_v3_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
-    mtp_config = MTPBlock.Config(num_mtp_layers=1, loss_scaling_factor=0.3)
     return Trainer.Config(
-        mtp=mtp_config,
-        loss=MTPLoss.Config(
-            global_vocab_size=decoder_vocab_size(model_spec),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -73,6 +69,16 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+
+def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry("debugmodel", num_mtp_layers=1)
+    config.loss = MTPLoss.Config(
+        global_vocab_size=decoder_vocab_size(config.model_spec),
+    )
+    return config
 
 
 def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
@@ -109,7 +115,6 @@ def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
     )
-    _configure_debug_mtp(config)
     return config
 
 
@@ -119,7 +124,6 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
         "debugmodel",
         moe_comm_backend="minimal_async_ep",
     )
-    _configure_debug_mtp(config)
     enable_fused_swiglu(config)
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,

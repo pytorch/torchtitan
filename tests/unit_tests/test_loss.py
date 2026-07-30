@@ -32,9 +32,8 @@ from torchtitan.components.loss import (
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
-    MTPLoss,
 )
-from torchtitan.models.common.mtp import roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import set_spmd_backend
 
@@ -88,6 +87,15 @@ class TestLoss(unittest.TestCase):
                 [[2, IGNORE_INDEX, IGNORE_INDEX, 5, 6, 7, IGNORE_INDEX, IGNORE_INDEX]]
             ),
         )
+
+    def test_mtp_loss_rejects_plain_tensor(self):
+        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+        pred = torch.zeros(1, 4, 16)
+        labels = torch.zeros(1, 4, dtype=torch.long)
+        positions = torch.arange(4).unsqueeze(0)
+
+        with self.assertRaisesRegex(ValueError, "expects a list"):
+            loss_fn(pred, labels, positions=positions)
 
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.

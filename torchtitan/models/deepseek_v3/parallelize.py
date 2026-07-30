@@ -14,7 +14,6 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.full_dtensor import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
@@ -22,10 +21,7 @@ from torchtitan.distributed.full_dtensor import (
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.common.decoder import Decoder
-
-
-def _get_inner_attentions_for_context_parallel(model: Decoder):
-    return [block.attention.inner_attention for block in model.layers.values()]
+from torchtitan.models.deepseek_v3.mtp import apply_fsdp_to_mtp_decoder
 
 
 def parallelize_deepseekv3(
@@ -46,7 +42,7 @@ def parallelize_deepseekv3(
         # runs inside the local_map boundary on local tensors.
         if parallel_dims.cp_enabled:
             apply_cp_to_forward(
-                _get_inner_attentions_for_context_parallel(model),
+                [block.attention.inner_attention for block in model.layers.values()],
                 parallel_dims.get_mesh("cp"),
             )
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -84,7 +80,7 @@ def parallelize_deepseekv3(
             )
             edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-    apply_fsdp_to_decoder(
+    apply_fsdp_to_mtp_decoder(
         model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],

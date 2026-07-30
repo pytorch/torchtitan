@@ -26,7 +26,6 @@ from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
 from .linear import Linear, ScaledBiasRowwiseLinear
 from .moe import MoE
-from .mtp import MTPDecoder, MTPTransformerBlock
 from .nn_modules import (
     Conv1d,
     Conv2d,
@@ -65,8 +64,6 @@ __all__ = [
     "LayerNorm",
     "Linear",
     "MoE",
-    "MTPDecoder",
-    "MTPTransformerBlock",
     "QKVLinear",
     "RMSNorm",
     "RoPE",
