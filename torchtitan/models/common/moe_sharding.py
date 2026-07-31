@@ -120,7 +120,7 @@ def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConf
         )
 
 
-def _shared_expert_colwise_config(*, input_layout: SpmdLayout) -> ShardingConfig:
+def _shared_expert_colwise_config() -> ShardingConfig:
     """Colwise shared-expert FFN (w1/w3).
 
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
@@ -132,7 +132,7 @@ def _shared_expert_colwise_config(*, input_layout: SpmdLayout) -> ShardingConfig
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings={"input": input_layout},
+        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
         out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
@@ -165,12 +165,10 @@ def _shared_experts_sharding_configs(
     enable_sp: bool,
 ) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig, ShardingConfig]:
     """Configs for shared FeedForward parent and w1/w2/w3 linears."""
-    # Keep the parent FeedForward input in its incoming layout so the
-    # linear layers expose the TP collectives:
-    # w1/w3 all-gather to Replicate when the input is sequence-sharded, and
-    # w2 reduces its Partial output to the final MoE boundary layout used
-    # for the routed + shared add: sequence-sharded when SP is enabled and
-    # Replicate when SP is disabled.
+    # The parent FeedForward converts its input to Replicate once before the
+    # w1/w3 fork. w2 reduces its Partial output to the final MoE boundary layout
+    # used for the routed + shared add: sequence-sharded when SP is enabled and
+    # Partial when SP is disabled.
     input_layout = (
         dense_sequence_parallel_placement()
         if enable_ep and enable_sp
@@ -187,9 +185,9 @@ def _shared_experts_sharding_configs(
             in_src_shardings={"x": input_layout},
             in_dst_shardings={"x": desired_input_layout},
         ),
-        _shared_expert_colwise_config(input_layout=desired_input_layout),
+        _shared_expert_colwise_config(),
         _shared_expert_rowwise_config(output_layout=desired_output_layout),
-        _shared_expert_colwise_config(input_layout=desired_input_layout),
+        _shared_expert_colwise_config(),
     )
 
 
@@ -352,11 +350,14 @@ def set_moe_sharding_config(
     # Shared experts: SwiGLU FFN run in parallel with the routed experts.
     shared = moe_cfg.shared_experts
     if shared is not None:
-        shared_config, w1_config, w2_config, w3_config = (
-            _shared_experts_sharding_configs(
-                enable_ep=enable_ep,
-                enable_sp=enable_sp,
-            )
+        (
+            shared_config,
+            w1_config,
+            w2_config,
+            w3_config,
+        ) = _shared_experts_sharding_configs(
+            enable_ep=enable_ep,
+            enable_sp=enable_sp,
         )
         shared.sharding_config = shared_config
         shared.w1.sharding_config = w1_config
