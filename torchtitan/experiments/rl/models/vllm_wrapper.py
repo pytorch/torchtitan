@@ -198,12 +198,13 @@ class VLLMModelWrapper(Module):
         model_config = model_spec.model
         attn_config = model_config.layers[0].attention
         n_heads = attn_config.n_heads
-        n_kv_heads = attn_config.n_kv_heads or n_heads
-        head_dim = (
-            attn_config.head_dim
-            if attn_config.head_dim is not None
-            else model_config.dim // n_heads
-        )
+        n_kv_heads = getattr(attn_config, "n_kv_heads", None) or n_heads
+        head_dim = getattr(attn_config, "head_dim", None)
+        if head_dim is None and hasattr(attn_config, "qk_nope_head_dim"):
+            head_dim = attn_config.qk_nope_head_dim + attn_config.qk_rope_head_dim
+        if head_dim is None:
+            head_dim = model_config.dim // n_heads
+        value_head_dim = getattr(attn_config, "v_head_dim", None)
         new_layers = []
         for layer_cfg in model_config.layers:
             vllm_backend = VLLMAttentionWrapper.Config(
@@ -211,6 +212,7 @@ class VLLMModelWrapper(Module):
                 num_heads=n_heads,
                 num_kv_heads=n_kv_heads,
                 head_dim=head_dim,
+                value_head_dim=value_head_dim,
                 sliding_window_size=getattr(
                     layer_cfg.attention, "sliding_window_size", None
                 ),
@@ -229,6 +231,7 @@ class VLLMModelWrapper(Module):
         # Translate the inference parallelism into torchtitan's full
         # ParallelismConfig that ParallelDims / parallelize_fn consume.
         training_parallelism = parallelism.to_training()
+        self.enable_sequence_parallel = training_parallelism.enable_sequence_parallel
 
         # Build ParallelDims from the translated ParallelismConfig so TP/EP
         # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree
@@ -372,6 +375,15 @@ class VLLMModelWrapper(Module):
         if input_ids is None:
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
+        num_input_tokens = input_ids.numel()
+        pad_tokens = 0
+        if self.enable_sequence_parallel and self.parallel_dims.tp_enabled:
+            tp_degree = self.parallel_dims.tp
+            pad_tokens = (-num_input_tokens) % tp_degree
+            if pad_tokens:
+                input_ids = torch.nn.functional.pad(input_ids, (0, pad_tokens))
+                positions = torch.nn.functional.pad(positions, (0, pad_tokens))
+
         with self.spmd_context():
             # Convert vLLM interface to TorchTitan interface
             # vLLM: [total_tokens] -> TorchTitan: [batch_size, seq_len]
@@ -387,9 +399,30 @@ class VLLMModelWrapper(Module):
                 h = layer(h, attention_masks=None, positions=positions)
 
             h = self.model.norm(h)
-        # Inference disables sequence parallelism, so final hidden states should
-        # already be replicated before returning to vLLM.
+        # vLLM expects full local hidden states. If the TorchTitan model ran
+        # with SP, gather the sequence-sharded output before returning.
+        if (
+            self.enable_sequence_parallel
+            and self.parallel_dims.tp_enabled
+            and self.parallel_dims.spmd_backend == "spmd_types"
+        ):
+            with self.spmd_context():
+                mesh = current_spmd_mesh()
+                assert mesh is not None
+                h = spmd.redistribute(
+                    h,
+                    mesh.get_group("tp"),
+                    src=spmd.S(1),
+                    dst=spmd.R,
+                    backward_options={"op_dtype": h.dtype},
+                )
         if isinstance(h, DTensor):
+            if self.enable_sequence_parallel:
+                placements = tuple(
+                    Replicate() if isinstance(p, Shard) and p.dim == 1 else p
+                    for p in h.placements
+                )
+                h = h.redistribute(placements=placements)
             assert all(isinstance(p, Replicate) for p in h.placements)
             h = h._local_tensor
 
@@ -397,6 +430,8 @@ class VLLMModelWrapper(Module):
         if h.dim() == 3:
             hidden_size = h.size(-1)
             h = h.view(-1, hidden_size)
+        if pad_tokens:
+            h = h[:num_input_tokens]
         return h
 
     def compute_logits(
