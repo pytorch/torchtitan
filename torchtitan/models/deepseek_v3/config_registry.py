@@ -7,7 +7,7 @@
 import re
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.flex_shard import BucketSpec, flex_shard
+from torchtitan.components.flex_shard import BucketSpec, distribute_optimizer
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -74,7 +74,7 @@ def _build_layer_muon_bucket_specs(
     )
 
 
-def _register_moe_load_balancing_and_flex_shard(
+def _register_moe_load_balancing_and_distribute_optimizer(
     optimizers,
     model_parts,
     parallel_dims,
@@ -95,7 +95,7 @@ def _register_moe_load_balancing_and_flex_shard(
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     for optimizer in optimizers:
         if isinstance(optimizer, MuonAdapter):
-            flex_shard(
+            distribute_optimizer(
                 optimizer,
                 bucket_spec=_build_layer_muon_bucket_specs(
                     optimizer,
@@ -108,7 +108,7 @@ def _enable_flex_shard_muon(config: Trainer.Config) -> Trainer.Config:
     assert config.model_spec is not None
     assert config.model_spec.post_optimizer_build_fn is register_moe_load_balancing_hook
     config.model_spec.post_optimizer_build_fn = (
-        _register_moe_load_balancing_and_flex_shard
+        _register_moe_load_balancing_and_distribute_optimizer
     )
     # The current Owned runtime supports one Shard(0) storage mesh.
     config.parallelism = ParallelismConfig(data_parallel_shard_degree=-1)
