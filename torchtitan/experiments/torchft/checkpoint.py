@@ -32,6 +32,7 @@ from torchtitan.components.checkpoint import (
     TRAIN_STATE,
 )
 from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.ema import EMAOptimizersContainer
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.experiments.torchft.manager import TorchFTManager
@@ -77,6 +78,7 @@ class TorchFTCheckpointManager(CheckpointManager):
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
+        ema_optimizer: EMAOptimizersContainer,
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
@@ -89,6 +91,7 @@ class TorchFTCheckpointManager(CheckpointManager):
             model_parts=model_parts,
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
+            ema_optimizer=ema_optimizer,
             states=states,
             sd_adapter=sd_adapter,
             base_folder=base_folder,
