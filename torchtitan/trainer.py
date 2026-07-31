@@ -51,7 +51,6 @@ from torchtitan.distributed.cudagraph import (
 )
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
-from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
@@ -1016,7 +1015,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
-            **collect_aux_loss_metrics(self.model_parts, parallel_dims),
         }
         self.metrics_processor.log(
             self.step,
