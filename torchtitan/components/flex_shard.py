@@ -32,7 +32,7 @@ __all__ = [
     "BucketSpec",
     "FlexShardStepExecutor",
     "Owned",
-    "flex_shard",
+    "distribute_optimizer",
 ]
 
 
@@ -394,7 +394,7 @@ def _resolve_buckets(
     specs: Sequence[BucketSpec],
 ) -> list[list[_UnassignedBinding]]:
     if not specs:
-        raise ValueError("flex_shard requires at least one BucketSpec")
+        raise ValueError("distribute_optimizer requires at least one BucketSpec")
 
     resolved = [[] for _ in specs]
     for binding in bindings:
@@ -727,7 +727,7 @@ class FlexShardStepExecutor:
         if not self._specs:
             if error is not None:
                 raise error
-            raise ValueError("flex_shard requires at least one BucketSpec")
+            raise ValueError("distribute_optimizer requires at least one BucketSpec")
 
         mesh = self._specs[0].mesh
         device = torch.device(mesh.device_type)
@@ -1237,7 +1237,7 @@ class FlexShardStepExecutor:
         return loss
 
 
-def flex_shard(
+def distribute_optimizer(
     optimizer: _OptimizerT,
     bucket_spec: Sequence[BucketSpec],
 ) -> _OptimizerT:
