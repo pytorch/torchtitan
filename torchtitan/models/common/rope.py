@@ -19,7 +19,6 @@ __all__ = [
     "ComplexRoPE",
     "CosSinRoPE",
     "RoPE",
-    "SingleComplexRoPE",
 ]
 
 
@@ -141,32 +140,39 @@ class RoPE(Module):
     @staticmethod
     def apply_rotary_emb(
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None,
         rope_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply a prepared RoPE cache to query and key.
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply a prepared RoPE cache to query and optional key.
 
         Args:
             query: Query tensor of shape ``(batch, seq_len, n_heads, head_dim)``.
-            key: Key tensor of shape ``(batch, seq_len, n_heads, head_dim)``.
+            key: Optional key tensor of shape
+                ``(batch, seq_len, n_heads, head_dim)``. If ``None``, only
+                ``query`` is rotated and returned.
             rope_cache: Prepared cache broadcastable to ``query`` and ``key``
                 according to the concrete RoPE format.
+            inverse: Whether to apply the inverse rotation.
 
         Returns:
-            Rotated query and key tensors with the same shapes and dtypes as
-            ``query`` and ``key``.
+            Rotated query tensor when ``key`` is ``None``; otherwise rotated
+            query and key tensors with the same shapes and dtypes as inputs.
         """
         raise NotImplementedError
 
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and key tensors."""
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply rotary embeddings to query and optional key tensors."""
         reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache)
+        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
@@ -255,15 +261,23 @@ class ComplexRoPE(RoPE):
     @staticmethod
     def apply_rotary_emb(
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None,
         rope_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Apply complex RoPE using adjacent-dim pairs."""
+        if inverse:
+            rope_cache = rope_cache.conj()
+
         xq_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
+        query_out = torch.view_as_real(xq_ * rope_cache).flatten(-2).type_as(query)
+        if key is None:
+            return query_out
+
         xk_ = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
-        xq_out = torch.view_as_real(xq_ * rope_cache).flatten(3)
-        xk_out = torch.view_as_real(xk_ * rope_cache).flatten(3)
-        return xq_out.type_as(query), xk_out.type_as(key)
+        key_out = torch.view_as_real(xk_ * rope_cache).flatten(-2).type_as(key)
+        return query_out, key_out
 
 
 class CosSinRoPE(RoPE):
@@ -328,8 +342,12 @@ class CosSinRoPE(RoPE):
         query: torch.Tensor,
         key: torch.Tensor,
         rope_cache: torch.Tensor,
+        *,
+        inverse: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply cos/sin RoPE using the rotate-half convention."""
+        if inverse:
+            raise NotImplementedError("CosSinRoPE does not support inverse rotation.")
         head_dim = query.shape[-1]
         cos = rope_cache[..., :head_dim]
         sin = rope_cache[..., head_dim:]
@@ -344,37 +362,6 @@ class CosSinRoPE(RoPE):
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
-
-
-class SingleComplexRoPE(ComplexRoPE):
-    """Apply complex RoPE to a single tensor."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ComplexRoPE.Config):
-        pass
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor:
-        rope_cache = self._reshape_cache(x, positions)
-        return self.apply_rotary_emb(x, rope_cache, inverse=inverse)
-
-    @staticmethod
-    def apply_rotary_emb(
-        x: torch.Tensor,
-        rope_cache: torch.Tensor,
-        *,
-        inverse: bool,
-    ) -> torch.Tensor:
-        if inverse:
-            rope_cache = rope_cache.conj()
-        x_ = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-        x_out = torch.view_as_real(x_ * rope_cache).flatten(-2)
-        return x_out.type_as(x)
 
 
 @spmd.local_map(out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R})

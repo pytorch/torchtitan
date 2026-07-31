@@ -18,7 +18,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import RoPE, SingleComplexRoPE
+from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 
 from .compressor import Compressor, Indexer
@@ -200,14 +200,24 @@ class DSAFlexAttention(FlexAttention):
         device,
     ):
         sink_idx = kv_len
-        topk = topk_idxs.size(-1)
+        selected_count = torch.zeros(
+            bsz,
+            seqlen,
+            kv_len + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        valid = topk_idxs >= 0
+        selected_count.scatter_add_(
+            -1,
+            topk_idxs.clamp(min=0, max=sink_idx),
+            valid.to(torch.int32),
+        )
+        selected_mask = selected_count > 0
+        selected_mask[:, :, sink_idx] = True
 
         def v4_sparse_mask_mod(b, h, q_idx, kv_idx):
-            selected = kv_idx < 0
-            for idx in range(topk):
-                selected = selected | (topk_idxs[b, q_idx, idx] == kv_idx)
-            is_sink = kv_idx == sink_idx
-            return selected | is_sink
+            return selected_mask[b, q_idx, kv_idx]
 
         with spmd.no_typecheck():
             return create_attention_mask(
@@ -272,7 +282,6 @@ class Attention(BaseAttention):
         n_heads: int
         inner_attention: Module.Config
         rope: RoPE.Config
-        single_rope: SingleComplexRoPE.Config
         head_dim: int = 512
         rope_head_dim: int = 64
         q_lora_rank: int = 1024
@@ -290,14 +299,14 @@ class Attention(BaseAttention):
 
         # Sub-module configs — declared as fields so the sharding system can
         # set sharding_config on them before build().
-        wq_a: Linear.Config | None = None
-        q_norm: RMSNorm.Config | None = None
-        wq_b: Linear.Config | None = None
-        wkv: Linear.Config | None = None
-        kv_norm: RMSNorm.Config | None = None
-        wo_a: Linear.Config | None = None
-        wo_b: Linear.Config | None = None
-        attn_sink: Linear.Config | None = None
+        wq_a: Linear.Config
+        q_norm: RMSNorm.Config
+        wq_b: Linear.Config
+        wkv: Linear.Config
+        kv_norm: RMSNorm.Config
+        wo_a: Linear.Config
+        wo_b: Linear.Config
+        attn_sink: Linear.Config
 
         # Compressor/indexer are conditional, so keep them here too.
         compressor: Compressor.Config | None = None
@@ -321,7 +330,6 @@ class Attention(BaseAttention):
         self.layer_id = cfg.layer_id
         self.n_layers = cfg.n_layers
         self.rope = cfg.rope.build()
-        self.single_rope = cfg.single_rope.build()
 
         # Build all sub-modules from their configs.
         self.wq_a = cfg.wq_a.build()
@@ -451,7 +459,7 @@ class Attention(BaseAttention):
             )
 
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
-        o_rope = self.single_rope(o_rope, positions, inverse=True)
+        o_rope = self.rope(o_rope, positions=positions, inverse=True)
         o = torch.cat([o_nope, o_rope], dim=-1)
         _assert_spmd_attention_type(o, tp=spmd.S(2))
 
