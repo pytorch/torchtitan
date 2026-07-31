@@ -5,12 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.models.common import Embedding
+from torchtitan.models.common.multimodal import scatter_vision_embeds
 from torchtitan.models.kimi_k3 import (
     _feed_forward_config,
     _kda_config,
@@ -22,13 +24,72 @@ from torchtitan.models.kimi_k3 import (
     kimi_k3_configs,
 )
 from torchtitan.models.kimi_k3.model import (
-    _replace_vision_embeds,
     KimiK3Model,
     KimiK3TransformerBlock,
     KimiKDAKernel,
 )
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan.models.kimi_k3.vision_encoder import KimiExactGELU
+from torchtitan.protocols.module import Module
+
+
+class ReferenceKimiKDAKernel(Module):
+    """Pure-PyTorch stand-in for KimiKDAKernel backed by an explicit recurrence.
+
+    Mirrors ``KimiKDAKernel.forward``'s interface so tests can build a model
+    with it in place of the FLA kernel and exercise the surrounding eager model
+    on CPU. The loop is O(seqlen) and far too slow for training; it exists to
+    pin the kernel's math.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        head_dim: int
+        lower_bound: float | None = -5.0
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.head_dim = config.head_dim
+        self.lower_bound = config.lower_bound
+
+    def forward(
+        self,
+        q_BLHK: torch.Tensor,
+        k_BLHK: torch.Tensor,
+        v_BLHV: torch.Tensor,
+        gate_BLHK: torch.Tensor,
+        beta_BLH: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
+    ) -> torch.Tensor:
+        return _kda_recurrent_reference(
+            q_BLHK,
+            k_BLHK,
+            v_BLHV,
+            gate_BLHK,
+            beta_BLH,
+            A_log_H,
+            dt_bias_HK,
+            lower_bound=self.lower_bound,
+        )
+
+
+def _use_reference_kda_kernel(config: KimiK3Model.Config) -> KimiK3Model.Config:
+    """Point every KDA layer at the recurrent reference kernel.
+
+    Test configurations use head dimensions far below what FLA's chunked KDA
+    kernel can compile, and the CPU suite has no Triton runtime at all.
+    """
+    for layer in config.layers:
+        if layer.delta_attention is None:
+            continue
+        kernel = layer.delta_attention.kernel
+        assert isinstance(kernel, KimiKDAKernel.Config)
+        layer.delta_attention.kernel = ReferenceKimiKDAKernel.Config(
+            head_dim=kernel.head_dim,
+            lower_bound=kernel.lower_bound,
+        )
+    return config
 
 
 def _small_model_config() -> KimiK3Model.Config:
@@ -89,38 +150,40 @@ def _small_model_config() -> KimiK3Model.Config:
             ffn_res_proj=_linear(dim, 1),
         )
 
-    return KimiK3Model.Config(
-        dim=dim,
-        vocab_size=32,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=32,
-            embedding_dim=dim,
-            param_init={
-                "weight": lambda parameter: nn.init.normal_(parameter, std=0.02)
-            },
-        ),
-        layers=[
-            block(0, use_mla=False, use_moe=False),
-            block(1, use_mla=True, use_moe=True),
-        ],
-        norm=_norm(dim),
-        lm_head=_linear(dim, 32),
-        output_res_norm=_norm(dim),
-        output_res_proj=_linear(dim, 1),
-        vision_encoder=_vision_encoder_config(
-            text_dim=dim,
-            dim=16,
-            qkv_dim=24,
-            hidden_dim=32,
-            num_layers=1,
-            num_heads=3,
-            patch_size=2,
-            merge_kernel_size=(2, 2),
-            init_pos_emb_height=2,
-            init_pos_emb_width=2,
-            max_num_frames=1,
-        ),
-        spatial_merge_size=2,
+    return _use_reference_kda_kernel(
+        KimiK3Model.Config(
+            dim=dim,
+            vocab_size=32,
+            tok_embeddings=Embedding.Config(
+                num_embeddings=32,
+                embedding_dim=dim,
+                param_init={
+                    "weight": lambda parameter: nn.init.normal_(parameter, std=0.02)
+                },
+            ),
+            layers=[
+                block(0, use_mla=False, use_moe=False),
+                block(1, use_mla=True, use_moe=True),
+            ],
+            norm=_norm(dim),
+            lm_head=_linear(dim, 32),
+            output_res_norm=_norm(dim),
+            output_res_proj=_linear(dim, 1),
+            vision_encoder=_vision_encoder_config(
+                text_dim=dim,
+                dim=16,
+                qkv_dim=24,
+                hidden_dim=32,
+                num_layers=1,
+                num_heads=3,
+                patch_size=2,
+                merge_kernel_size=(2, 2),
+                init_pos_emb_height=2,
+                init_pos_emb_width=2,
+                max_num_frames=1,
+            ),
+            spatial_merge_size=2,
+        )
     )
 
 
@@ -133,49 +196,68 @@ def _kda_recurrent_reference(
     A_log_H: torch.Tensor,
     dt_bias_HK: torch.Tensor,
     *,
-    lower_bound: float,
+    lower_bound: float | None,
 ) -> torch.Tensor:
+    """Explicit KDA recurrence in FP32, matching the released Kimi K3 math.
+
+    ``lower_bound`` selects the same two gate activations FLA exposes through
+    ``safe_gate``: the bounded ``lower_bound * sigmoid(...)`` form when set,
+    and ``-exp(A_log) * softplus(...)`` when ``None``.
+    """
+    input_dtype = q_BLHK.dtype
     q_BLHK = q_BLHK.float()
     k_BLHK = k_BLHK.float()
     q_BLHK = q_BLHK * torch.rsqrt(q_BLHK.square().sum(dim=-1, keepdim=True) + 1e-6)
     k_BLHK = k_BLHK * torch.rsqrt(k_BLHK.square().sum(dim=-1, keepdim=True) + 1e-6)
-    log_decay_BLHK = lower_bound * torch.sigmoid(
-        torch.exp(A_log_H.float()).view(1, 1, -1, 1)
-        * (gate_BLHK.float() + dt_bias_HK.float())
-    )
+    v_BLHV = v_BLHV.float()
+    if lower_bound is None:
+        log_decay_BLHK = -torch.exp(A_log_H.float()).view(1, 1, -1, 1) * F.softplus(
+            gate_BLHK.float() + dt_bias_HK.float()
+        )
+    else:
+        log_decay_BLHK = lower_bound * torch.sigmoid(
+            torch.exp(A_log_H.float()).view(1, 1, -1, 1)
+            * (gate_BLHK.float() + dt_bias_HK.float())
+        )
     decay_BLHK = torch.exp(log_decay_BLHK)
     beta_BLH = torch.sigmoid(beta_BLH.float())
 
     B, L, H, K = q_BLHK.shape
     V = v_BLHV.shape[-1]
-    state_BHKV = torch.zeros(B, H, K, V)
-    output_BLHV = torch.empty(B, L, H, V)
+    state_BHKV = torch.zeros(B, H, K, V, device=q_BLHK.device)
+    outputs_BHV = []
     for token_idx in range(L):
         state_BHKV = state_BHKV * decay_BLHK[:, token_idx].unsqueeze(-1)
         old_value_BHV = torch.matmul(
             k_BLHK[:, token_idx].unsqueeze(-2),
             state_BHKV,
         ).squeeze(-2)
-        delta_BHV = (v_BLHV[:, token_idx].float() - old_value_BHV) * beta_BLH[
+        delta_BHV = (v_BLHV[:, token_idx] - old_value_BHV) * beta_BLH[
             :, token_idx
         ].unsqueeze(-1)
         state_BHKV = state_BHKV + (
             k_BLHK[:, token_idx].unsqueeze(-1) * delta_BHV.unsqueeze(-2)
         )
-        output_BLHV[:, token_idx] = torch.matmul(
-            q_BLHK[:, token_idx].unsqueeze(-2),
-            state_BHKV,
-        ).squeeze(-2) * (K**-0.5)
-    return output_BLHV
+        outputs_BHV.append(
+            torch.matmul(
+                q_BLHK[:, token_idx].unsqueeze(-2),
+                state_BHKV,
+            ).squeeze(-2)
+            * (K**-0.5)
+        )
+    return torch.stack(outputs_BHV, dim=1).to(input_dtype)
 
 
 class TestKimiK3(unittest.TestCase):
-    def test_replace_vision_embeds_is_out_of_place(self):
-        inputs_embeds = torch.arange(30.0).view(2, 5, 3).requires_grad_()
+    def test_scatter_vision_embeds_routes_gradients_to_both_streams(self):
+        # The scatter is in place, so the graph has to be built from tensors
+        # that are not themselves leaves requiring grad.
+        inputs_source = torch.arange(30.0).view(2, 5, 3).requires_grad_()
         vision_embeds = torch.arange(12.0).view(2, 2, 3).requires_grad_()
-        inputs_before = inputs_embeds.detach().clone()
+        inputs_embeds = inputs_source * 1.0
+        inputs_before = inputs_source.detach().clone()
 
-        actual = _replace_vision_embeds(
+        actual = scatter_vision_embeds(
             inputs_embeds,
             vision_embeds=vision_embeds,
             vision_positions=[
@@ -203,21 +285,21 @@ class TestKimiK3(unittest.TestCase):
         )
 
         torch.testing.assert_close(actual, expected)
-        torch.testing.assert_close(inputs_embeds, inputs_before)
-        self.assertNotEqual(actual.data_ptr(), inputs_embeds.data_ptr())
 
         actual.sum().backward()
+        # Overwritten positions must not propagate to the text embeddings, and
+        # every vision token that was scattered must receive gradient.
         expected_input_grad = torch.tensor(
             [[1, 0, 1, 1, 1], [1, 1, 0, 0, 1]],
-            dtype=inputs_embeds.dtype,
+            dtype=inputs_source.dtype,
         ).unsqueeze(-1)
         expected_vision_grad = torch.tensor(
             [[1, 0], [1, 1]],
             dtype=vision_embeds.dtype,
         ).unsqueeze(-1)
         torch.testing.assert_close(
-            inputs_embeds.grad,
-            expected_input_grad.expand_as(inputs_embeds),
+            inputs_source.grad,
+            expected_input_grad.expand_as(inputs_source),
         )
         torch.testing.assert_close(
             vision_embeds.grad,
@@ -259,58 +341,76 @@ class TestKimiK3(unittest.TestCase):
         self.assertEqual(vision_config.dim, 256)
         self.assertEqual(vision_config.num_layers, 4)
 
-    def test_kda_kernel_matches_recurrent_reference(self):
+    @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
+    def test_fla_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
-        q_BLHK = torch.randn(2, 5, 3, 4, requires_grad=True)
-        k_BLHK = torch.randn(2, 5, 3, 4, requires_grad=True)
-        v_BLHV = torch.randn(2, 5, 3, 4, requires_grad=True)
-        gate_BLHK = torch.randn(2, 5, 3, 4, requires_grad=True)
-        beta_BLH = torch.randn(2, 5, 3, requires_grad=True)
-        A_log_H = torch.randn(3, requires_grad=True)
-        dt_bias_HK = torch.randn(3, 4, requires_grad=True)
+        head_dim = 32
+        num_heads = 3
 
-        kernel = KimiKDAKernel.Config(
-            head_dim=4,
-            lower_bound=-5.0,
-        ).build()
-        actual_BLHV = kernel(
-            q_BLHK,
-            k_BLHK,
-            v_BLHV,
-            gate_BLHK,
-            beta_BLH,
-            A_log_H,
-            dt_bias_HK,
-        )
-        expected_BLHV = _kda_recurrent_reference(
-            q_BLHK,
-            k_BLHK,
-            v_BLHV,
-            gate_BLHK,
-            beta_BLH,
-            A_log_H,
-            dt_bias_HK,
-            lower_bound=-5.0,
-        )
+        def parameter(*shape: int) -> torch.Tensor:
+            return torch.randn(*shape, device="cuda", requires_grad=True)
 
-        torch.testing.assert_close(
-            actual_BLHV,
-            expected_BLHV,
-            atol=1e-6,
-            rtol=1e-6,
-        )
-        actual_BLHV.square().mean().backward()
-        for tensor in (
-            q_BLHK,
-            k_BLHK,
-            v_BLHV,
-            gate_BLHK,
-            beta_BLH,
-            A_log_H,
-            dt_bias_HK,
-        ):
-            self.assertIsNotNone(tensor.grad)
-            self.assertTrue(torch.isfinite(tensor.grad).all())
+        for lower_bound in (-5.0, None):
+            with self.subTest(lower_bound=lower_bound):
+                q_BLHK = parameter(2, 64, num_heads, head_dim)
+                k_BLHK = parameter(2, 64, num_heads, head_dim)
+                v_BLHV = parameter(2, 64, num_heads, head_dim)
+                gate_BLHK = parameter(2, 64, num_heads, head_dim)
+                beta_BLH = parameter(2, 64, num_heads)
+                A_log_H = torch.rand(num_heads, device="cuda")
+                A_log_H = A_log_H.uniform_(1.0, 16.0).log().requires_grad_()
+                dt_bias_HK = parameter(num_heads, head_dim)
+
+                kernel = KimiKDAKernel.Config(
+                    head_dim=head_dim,
+                    lower_bound=lower_bound,
+                ).build()
+                actual_BLHV = kernel(
+                    q_BLHK,
+                    k_BLHK,
+                    v_BLHV,
+                    gate_BLHK,
+                    beta_BLH,
+                    A_log_H,
+                    dt_bias_HK,
+                )
+                expected_BLHV = _kda_recurrent_reference(
+                    q_BLHK,
+                    k_BLHK,
+                    v_BLHV,
+                    gate_BLHK,
+                    beta_BLH,
+                    A_log_H,
+                    dt_bias_HK,
+                    lower_bound=lower_bound,
+                )
+
+                # The chunked kernel accumulates over chunk boundaries and uses
+                # reduced-precision matmuls internally, so it does not reproduce
+                # the sequential FP32 recurrence bit for bit.
+                torch.testing.assert_close(
+                    actual_BLHV,
+                    expected_BLHV,
+                    atol=2e-3,
+                    rtol=2e-3,
+                )
+                actual_BLHV.square().mean().backward()
+                for tensor in (
+                    q_BLHK,
+                    k_BLHK,
+                    v_BLHV,
+                    gate_BLHK,
+                    beta_BLH,
+                    A_log_H,
+                    dt_bias_HK,
+                ):
+                    self.assertIsNotNone(tensor.grad)
+                    assert tensor.grad is not None
+                    self.assertTrue(torch.isfinite(tensor.grad).all())
+
+    def test_kda_kernel_rejects_head_dim_below_kernel_minimum(self):
+        with self.assertRaisesRegex(ValueError, "head_dim must be at least"):
+            KimiKDAKernel.Config(head_dim=8, lower_bound=-5.0).build()
 
     def test_unused_moe_experts_receive_zero_gradients(self):
         torch.manual_seed(2)
@@ -322,7 +422,7 @@ class TestKimiK3(unittest.TestCase):
             moe.router.gate.weight.zero_()
 
         inputs = torch.randn(2, 4, 16, requires_grad=True)
-        expert_ids, _ = moe.router(inputs, moe.expert_bias_E)
+        _, expert_ids, _ = moe.router(inputs, moe.expert_bias_E)
         selected_experts = set(expert_ids.flatten().tolist())
         unused_experts = set(range(moe.num_experts)) - selected_experts
         self.assertTrue(unused_experts)

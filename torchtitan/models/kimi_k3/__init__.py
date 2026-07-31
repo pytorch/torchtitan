@@ -14,6 +14,7 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import VisionMLP
 from torchtitan.models.utils import validate_converter_order
@@ -28,7 +29,6 @@ from .model import (
     KimiKDAKernel,
     KimiLatentMoE,
     KimiMLAAttention,
-    KimiMoERouter,
     KimiRMSNorm,
     KimiRMSNormGated,
     SituAndMul,
@@ -152,7 +152,6 @@ def _mla_config(
     return KimiMLAAttention.Config(
         dim=dim,
         num_heads=num_heads,
-        q_lora_rank=q_lora_rank,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
         qk_rope_head_dim=qk_rope_head_dim,
@@ -240,10 +239,11 @@ def _latent_moe_config(
     ]
     return KimiLatentMoE.Config(
         num_experts=num_experts,
-        router=KimiMoERouter.Config(
+        router=TokenChoiceTopKRouter.Config(
             num_experts=num_experts,
             top_k=top_k,
             gate=_linear(dim, num_experts),
+            score_func="sigmoid",
             route_norm=True,
             route_scale=1.0,
         ),

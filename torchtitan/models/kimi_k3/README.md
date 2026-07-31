@@ -8,9 +8,10 @@ It is intended to make architecture experiments and model-structure choices
 measurable against a stable, inspectable baseline before optimized kernels and
 additional parallelisms are introduced.
 
-The implementation is device-neutral. It uses PyTorch operators and does not
-import accelerator-specific packages. The reference kernels prioritize
-inspectable model math over throughput.
+Every operator outside the KDA recurrence is plain eager PyTorch, which keeps
+the model math directly inspectable. KDA itself runs on FLA's chunked Triton
+kernel, following the same split Qwen3.5 uses: the kernel is the training path
+and a pure-PyTorch recurrence in the unit tests pins its numerics.
 
 ## Quick start
 
@@ -25,7 +26,8 @@ NGPU=2 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel ./run_train.sh \
   --parallelism.data_parallel_shard_degree 2
 ```
 
-The multimodal data path requires `torchvision`.
+Requirements beyond core TorchTitan are listed in `requirements.txt`: KDA needs
+`flash-linear-attention` and the multimodal data path needs `torchvision`.
 
 ## Reduced model
 
@@ -53,7 +55,9 @@ blocks and preserve the released model's 1-based full-attention cadence.
 The released vocabulary size is retained, following other TorchTitan
 multimodal debug models and making FSDP state sharding measurable while the
 decoder widths and depths remain reduced. The resulting model has about 100
-million parameters.
+million parameters, of which roughly 84 million are the tied-vocabulary
+embedding and output projection; the transformer itself is correspondingly
+small.
 
 ## Forward structure
 
@@ -72,15 +76,25 @@ The reference path mirrors the released implementation in these areas:
   PatchMergerMLPV2.
 - Vision features scattered into runs of media placeholder tokens.
 
-`KimiKDAKernel` is the optimization boundary. A future accelerated backend
-should preserve its input/output contract and checkpoint schema. FSDP2 only
-shards parameters and leaves this eager forward contract unchanged.
+`KimiKDAKernel` is the kernel boundary. It dispatches to FLA's `chunk_kda`
+with the gate activation, beta sigmoid, and query/key L2 norm fused in, so a
+future backend can replace it while preserving the same input/output contract
+and checkpoint schema. FLA's chunked kernel cannot compile head dimensions
+below 16, and the reduced flavor uses 32.
 
-When FSDP ranks contain a mixture of image and text-only batches, every rank
-invokes the independently wrapped vision encoder once. Image ranks process
-their real patches; text-only ranks process the minimum mergeable dummy grid
-and attach its zero-valued result to the text embeddings. This keeps FSDP
-all-gather and reduce-scatter ordering aligned without changing text logits.
+The vision encoder is its own FSDP unit, so its collectives only fire on ranks
+that execute it. Because a data-parallel rank can legitimately receive a batch
+with no images -- the shared multimodal collator emits `pixel_values=None` for
+a text-only batch, and drops images to respect `max_images_per_batch` -- the
+model runs the encoder on *every* batch. Batches without images use the
+smallest grid the patch merger accepts and contribute its result through
+`add_zero_valued_dependency`, which leaves the text embeddings numerically
+unchanged while keeping the encoder in the autograd graph. Every rank
+therefore issues the same all-gather and reduce-scatter regardless of what its
+batch contains, and the encoder correctly receives zero gradients from
+text-only ranks. Note that `torchtitan/models/qwen3_5` wraps its vision
+encoder the same way but still calls it conditionally, so it retains this
+hazard.
 
 ## Checkpoint conversion
 
@@ -108,19 +122,24 @@ run the regression.
 
 ## Tests
 
-The CPU unit tests cover:
+The unit tests cover:
 
 - the reduced layer topology;
 - the explicit exact GELU against PyTorch's CPU reference;
-- the KDA kernel against a direct recurrent formulation, including backward;
 - a small text+image model forward and backward;
-- exhaustive state-dict round-trip for that small model.
+- exhaustive state-dict round-trip for that small model;
 - reduced text, vision, router, and multimodal numerical parity against frozen
   HuggingFace eager outputs;
 - single-rank FSDP2 forward and per-parameter gradient parity with a manually
   cast BF16 reference;
 - two-rank FSDP2 forward and backward when one rank has an image and the other
   rank is text-only.
+
+`ReferenceKimiKDAKernel` in `tests/unit_tests/test_kimi_k3.py` is the explicit
+recurrent formulation of KDA. The tests above build the model with it in place
+of the FLA kernel, which is what lets them run on CPU and at head dimensions
+FLA cannot compile. A separate CUDA-only test checks the FLA kernel against
+that same reference, forward and backward, for both gate activations.
 
 ```bash
 pytest -q \
@@ -136,7 +155,6 @@ pytest -q tests/unit_tests/test_kimi_k3_fsdp.py
   offload.
 - Image inputs are supported; video inputs are rejected.
 - No generation cache.
-- No optimized KDA backend.
 - No MXFP4 checkpoint loading.
 - No full 2.8T flavor.
 
