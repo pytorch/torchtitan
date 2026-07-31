@@ -40,6 +40,7 @@ jobs:
       gpu-arch-version: "13.0"
       docker-image: torchtitan-ubuntu-22.04-clang12
       repository: pytorch/torchtitan
+      ref: ${{ github.sha }}
       upload-artifact: outputs
       timeout: 45
       script: |
