@@ -373,7 +373,7 @@ class MoE(Module):
         self.seq_dim_tp_sharded = config.seq_dim_tp_sharded
         # Sequence-shard count used by EP padding/combine. Set in
         # parallelize(); stays 1 unless both EP and TP/SP are active.
-        self.num_seq_shards_for_ep = 1
+        self.expert_sequence_parallel_size = 1
         self.routed_experts = config.routed_experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -419,14 +419,15 @@ class MoE(Module):
         # ---------------------------------------------------------------------
         # TODO: Temporary workaround for #3622. Remove it once short-sequence
         # routing counts can remain Partial.
-        # Real padding when seq_len < num_seq_shards_for_ep: EP routes over
+        # Real padding when seq_len < expert_sequence_parallel_size: EP routes over
         # sequence-parallel token shards. A sequence shorter than
-        # ``num_seq_shards_for_ep`` cannot shard across all EP sequence shards,
-        # so physically pad to ``num_seq_shards_for_ep`` and trim before returning.
+        # ``expert_sequence_parallel_size`` cannot shard across all EP sequence
+        # shards, so physically pad to ``expert_sequence_parallel_size`` and trim
+        # before returning.
         # Virtual padding then pads each batch's sequence length up to a multiple
-        # of ``num_seq_shards_for_ep`` without materializing padded tokens.
+        # of ``expert_sequence_parallel_size`` without materializing padded tokens.
         B, L, D = x_BLD.shape
-        num_seq_shards_for_ep = self.num_seq_shards_for_ep
+        expert_sequence_parallel_size = self.expert_sequence_parallel_size
         if not isinstance(x_BLD, DTensor) and self.seq_dim_tp_sharded:
             # Local dense activation with SP enabled guarantees even CP*TP
             # sequence sharding, so L is already the local TP sequence length
@@ -440,19 +441,21 @@ class MoE(Module):
             # sequence length. Compute the local TP stride from the unsplit
             # MoE-region sequence length.
             seq_pad = (
-                num_seq_shards_for_ep - L if L < num_seq_shards_for_ep else 0
+                expert_sequence_parallel_size - L
+                if L < expert_sequence_parallel_size
+                else 0
             )
             if seq_pad:
                 x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
                 L = L + seq_pad
-            seq_dim_pad_tokens = (-L) % num_seq_shards_for_ep
+            seq_dim_pad_tokens = (-L) % expert_sequence_parallel_size
             local_batch_size = (
                 x_BLD._local_tensor.shape[0] if isinstance(x_BLD, DTensor) else B
             )
             num_local_tokens_after_seq_dim_padding = (
                 local_batch_size
                 * (L + seq_dim_pad_tokens)
-                // num_seq_shards_for_ep
+                // expert_sequence_parallel_size
             )
         # ---------------------------------------------------------------------
 
@@ -531,14 +534,14 @@ class MoE(Module):
         The short-sequence padding in ``forward`` only matters when the EP
         all-to-all routes tokens across TP-axis (SP) sequence shards, i.e. when
         both EP and TP/SP are active. Both are read from ``parallel_dims``, so
-        MoE owns ``num_seq_shards_for_ep`` without inspecting the token
+        MoE owns ``expert_sequence_parallel_size`` without inspecting the token
         dispatcher. Otherwise it stays 1 and no padding is applied.
         """
         super().parallelize(parallel_dims)
         ep_mesh = parallel_dims.get_optional_mesh("ep")
         tp_mesh = parallel_dims.get_optional_mesh("tp")
         if ep_mesh is not None and tp_mesh is not None:
-            self.num_seq_shards_for_ep = tp_mesh.size()
+            self.expert_sequence_parallel_size = tp_mesh.size()
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
