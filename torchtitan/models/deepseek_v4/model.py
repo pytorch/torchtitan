@@ -4,13 +4,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from functools import partial
-
 import dataclasses as dc
 
 import torch
-from torch import nn
-
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
@@ -20,11 +16,9 @@ from .mhc import HcHead, HcPost, HcPre
 class DeepSeekV4TransformerBlock(TransformerBlock):
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        dim: int
-        hc_mult: int = 4
-        norm_eps: float = 1e-6
-        sinkhorn_iters: int = 20
-        hc_eps: float = 1e-6
+        hc_attn_pre: HcPre.Config
+        hc_ffn_pre: HcPre.Config
+        hc_post: HcPost.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -48,44 +42,9 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
             )
             self.moe_enabled = False
 
-        self.hc_mult = cfg.hc_mult
-        mix_hc = (2 + cfg.hc_mult) * cfg.hc_mult
-        hc_dim = cfg.hc_mult * cfg.dim
-
-        self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim))
-        self.hc_ffn_fn = nn.Parameter(torch.empty(mix_hc, hc_dim))
-        self.hc_attn_base = nn.Parameter(torch.empty(mix_hc))
-        self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc))
-        self.hc_attn_scale = nn.Parameter(torch.empty(3))
-        self.hc_ffn_scale = nn.Parameter(torch.empty(3))
-
-        self.hc_pre = HcPre.Config(
-            hc_mult=cfg.hc_mult,
-            dim=cfg.dim,
-            sinkhorn_iters=cfg.sinkhorn_iters,
-            eps=cfg.hc_eps,
-            norm_eps=cfg.norm_eps,
-        ).build()
-        self.hc_post = HcPost.Config().build()
-
-        if self._param_init is None:
-            self._param_init = {}
-        self._param_init.update({
-            "hc_attn_fn": partial(_init_trunc_normal, std=0.02),
-            "hc_ffn_fn": partial(_init_trunc_normal, std=0.02),
-            "hc_attn_base": partial(_init_trunc_normal, std=0.02),
-            "hc_ffn_base": partial(_init_trunc_normal, std=0.02),
-            "hc_attn_scale": partial(_init_trunc_normal, std=0.02),
-            "hc_ffn_scale": partial(_init_trunc_normal, std=0.02),
-        })
-
-    def _mhc_step(self, x, residual, hc_fn, hc_scale, hc_base, norm, fn, *a, **kw):
-        x, post, comb = self.hc_pre(x, hc_fn, hc_scale, hc_base)
-        if norm is not None:
-            x = norm(x)
-        x = fn(x)
-        x = self.hc_post(x, residual, post, comb)
-        return x
+        self.hc_attn_pre = cfg.hc_attn_pre.build()
+        self.hc_ffn_pre = cfg.hc_ffn_pre.build()
+        self.hc_post = cfg.hc_post.build()
 
     def forward(
         self,
@@ -95,15 +54,11 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
     ):
         residual = x
-        x, post, comb = self.hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-        )
+        x, post, comb = self.hc_attn_pre(x)
         x = self.attention(self.attention_norm(x), attention_masks, positions)
         x = self.hc_post(x, residual, post, comb)
         residual = x
-        x, post, comb = self.hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
-        )
+        x, post, comb = self.hc_ffn_pre(x)
         if self.moe_enabled:
             x = self.moe(self.ffn_norm(x), input_ids)
         else:
@@ -121,6 +76,7 @@ class DeepSeekV4Model(Decoder):
         compress_ratios: tuple[int, ...] = (1, 1, 4, 4)
         n_layers: int = 4
         norm_eps: float = 1e-6
+        hc_head: HcHead.Config
 
         def update_from_config(self, *, config, **kwargs):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -198,29 +154,7 @@ class DeepSeekV4Model(Decoder):
         self.compress_ratios = list(cfg.compress_ratios)[: cfg.n_layers]
         self.n_main_layers = cfg.n_layers
 
-        hc_dim = cfg.hc_mult * cfg.dim
-        self.hc_head_fn = nn.Parameter(
-            torch.empty(cfg.hc_mult, hc_dim, dtype=torch.float32)
-        )
-        self.hc_head_base = nn.Parameter(
-            torch.empty(cfg.hc_mult, dtype=torch.float32)
-        )
-        self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
-
-        self.hc_head = HcHead.Config(
-            hc_mult=cfg.hc_mult,
-            dim=cfg.dim,
-            norm_eps=cfg.norm_eps,
-            eps=1e-6,
-        ).build()
-
-        if self._param_init is None:
-            self._param_init = {}
-        self._param_init.update({
-            "hc_head_fn": partial(_init_trunc_normal, std=0.02),
-            "hc_head_base": partial(_init_trunc_normal, std=0.02),
-            "hc_head_scale": partial(_init_trunc_normal, std=0.02),
-        })
+        self.hc_head = cfg.hc_head.build()
 
         self._dsa_loss_tracker = {}
 
@@ -246,13 +180,10 @@ class DeepSeekV4Model(Decoder):
             layer = self.layers[str(i)]
             h = layer(h, input_ids, attention_masks, positions)
         
-        h = self.hc_head(h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
+        h = self.hc_head(h)
         h = self.norm(h) if self.norm is not None else h
         if self._skip_lm_head:
             return h
         output = self.lm_head(h.float()) if self.lm_head is not None else h
         return output
 
-
-def _init_trunc_normal(x, std=0.02):
-    nn.init.trunc_normal_(x, mean=0.0, std=std)

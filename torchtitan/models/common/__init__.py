@@ -36,7 +36,7 @@ from .nn_modules import (
     RMSNorm,
     SiLU,
 )
-from .rope import ComplexRoPE, CosSinRoPE, RoPE, SingleComplexRoPE
+from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
     "Conv1d",
@@ -70,7 +70,6 @@ __all__ = [
     "ScaledBiasRowwiseLinear",
     "ScaledDotProductAttention",
     "SiLU",
-    "SingleComplexRoPE",
     "TransformerBlock",
     "VarlenAttention",
     "VarlenMetadata",

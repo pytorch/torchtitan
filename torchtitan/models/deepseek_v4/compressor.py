@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import RoPE, SingleComplexRoPE
+from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 
 
@@ -28,38 +28,29 @@ def _hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tenso
 class Compressor(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int
         rope: RoPE.Config
-        single_rope: SingleComplexRoPE.Config
+        wkv: Linear.Config
+        wgate: Linear.Config
+        norm: RMSNorm.Config
         head_dim: int = 512
         rope_head_dim: int = 64
         compress_ratio: int = 4
-        rotate: bool = False
-        norm_eps: float = 1e-6
-
-        wkv: Linear.Config | None = None
-        wgate: Linear.Config | None = None
-        norm: RMSNorm.Config | None = None
-        ape: Linear.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
         cfg = config
         self.head_dim = cfg.head_dim
         self.rope_head_dim = cfg.rope_head_dim
-        self.nope_head_dim = cfg.head_dim - cfg.rope_head_dim
         self.compress_ratio = cfg.compress_ratio
         self.overlap = cfg.compress_ratio == 4
-        self.rotate = cfg.rotate
         self.rope = cfg.rope.build()
-        self.single_rope = cfg.single_rope.build()
 
         self.wkv = cfg.wkv.build()
         self.wgate = cfg.wgate.build()
         self.norm = cfg.norm.build()
-        # ape is stored as a Linear holding a (ape_rows, ape_cols) weight;
-        # the forward path accesses .weight directly.
-        self.ape = cfg.ape.build()
+        self.ape = nn.Parameter(
+            torch.empty(cfg.compress_ratio, self.wkv.out_features)
+        )
 
     def _overlap_transform(self, tensor, value=0):
         ratio, d = self.compress_ratio, self.head_dim
@@ -73,7 +64,7 @@ class Compressor(Module):
         curr = tensor[:, :, :, d:]
         return torch.cat([prev, curr], dim=2)
 
-    def forward(self, x, positions=None):
+    def forward(self, x, positions):
         _, seqlen, _ = x.size()
         rd = self.rope_head_dim
         ratio = self.compress_ratio
@@ -85,21 +76,16 @@ class Compressor(Module):
             raise ValueError(
                 f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
             )
-        if positions is not None:
-            comp_positions = positions[:, ::ratio]
-        else:
-            comp_positions = torch.arange(
-                0, seqlen, ratio, device=x.device
-            ).unsqueeze(0)
+        comp_positions = positions[:, ::ratio]
         kv = kv.unflatten(1, (-1, ratio))
-        score = score.unflatten(1, (-1, ratio)) + self.ape.weight
+        score = score.unflatten(1, (-1, ratio)) + self.ape
         if self.overlap:
             kv = self._overlap_transform(kv, 0)
             score = self._overlap_transform(score, float("-inf"))
         kv = (kv * score.softmax(dim=2)).sum(dim=2)
         kv = self.norm(kv.to(dtype))
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
-        kv_rope = self.single_rope(kv_rope.unsqueeze(2), comp_positions)
+        kv_rope = self.rope(kv_rope.unsqueeze(2), positions=comp_positions)
         kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
         return kv
 
@@ -107,25 +93,19 @@ class Compressor(Module):
 class Indexer(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int
         rope: RoPE.Config
-        single_rope: SingleComplexRoPE.Config
+        wq_b: Linear.Config
+        weights_proj: Linear.Config
+        compressor: "Compressor.Config"
         num_index_heads: int = 64
         index_head_dim: int = 128
         index_topk: int = 512
         rope_head_dim: int = 64
-        q_lora_rank: int = 1024
         compress_ratio: int = 4
-        norm_eps: float = 1e-6
-
-        wq_b: Linear.Config | None = None
-        weights_proj: Linear.Config | None = None
-        compressor: "Compressor.Config | None" = None
 
     def __init__(self, config: Config):
         super().__init__()
         cfg = config
-        self.dim = cfg.dim
         self.num_index_heads = cfg.num_index_heads
         self.head_dim = cfg.index_head_dim
         self.rope_head_dim = cfg.rope_head_dim
@@ -133,7 +113,6 @@ class Indexer(Module):
         self.softmax_scale = cfg.index_head_dim**-0.5
         self.compress_ratio = cfg.compress_ratio
         self.rope = cfg.rope.build()
-        self.single_rope = cfg.single_rope.build()
 
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
@@ -150,7 +129,7 @@ class Indexer(Module):
         x,
         qr,
         *,
-        positions=None,
+        positions,
         offset: int,
     ):
         bsz, seqlen, _ = x.size()
@@ -158,7 +137,7 @@ class Indexer(Module):
         q = self.wq_b(qr)
         q = q.view(bsz, seqlen, self.num_index_heads, self.head_dim)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
-        q_rope = self.single_rope(q_rope, positions)
+        q_rope = self.rope(q_rope, positions=positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)
