@@ -750,6 +750,13 @@ class VLLMGenerator(Actor, Configurable):
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
 
+        enable_prefix_caching: bool = True
+        """Enable vLLM prefix caching for reused prompt prefixes."""
+
+        enable_chunked_prefill: bool = True
+        """Enable vLLM chunked prefill. This is required for hybrid GDN models
+        when prefix caching selects the align Mamba cache mode."""
+
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -902,8 +909,8 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            # GDN promotes its paged conv+ssm states to fp32 under batch-invariant mode
-            # inside VLLMGatedDeltaNetCore; no mamba cache-dtype engine args are needed.
+            enable_prefix_caching=config.enable_prefix_caching,
+            enable_chunked_prefill=config.enable_chunked_prefill,
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION

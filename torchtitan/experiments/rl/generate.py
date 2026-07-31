@@ -153,6 +153,8 @@ def generate() -> None:
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=not gen_config.cudagraph.enable,
+        enable_prefix_caching=gen_config.enable_prefix_caching,
+        enable_chunked_prefill=gen_config.enable_chunked_prefill,
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION

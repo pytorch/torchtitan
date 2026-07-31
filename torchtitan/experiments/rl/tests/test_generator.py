@@ -286,6 +286,24 @@ def test_decode_metrics_absent_for_single_generated_token():
 _PARALLELISM = InferenceParallelismConfig()
 
 
+def test_prefix_caching_and_chunked_prefill_enabled_by_default():
+    config = VLLMGenerator.Config(parallelism=_PARALLELISM)
+
+    assert config.enable_prefix_caching
+    assert config.enable_chunked_prefill
+
+
+def test_prefix_caching_and_chunked_prefill_are_configurable():
+    config = VLLMGenerator.Config(
+        parallelism=_PARALLELISM,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=False,
+    )
+
+    assert not config.enable_prefix_caching
+    assert not config.enable_chunked_prefill
+
+
 def test_batch_invariant_requires_prefix_cache_reset():
     with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
         VLLMGenerator.Config(
