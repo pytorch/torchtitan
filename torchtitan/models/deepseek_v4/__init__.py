@@ -18,7 +18,6 @@ from torchtitan.models.common import (
     Linear,
     RMSNorm,
     RoPE,
-    SingleComplexRoPE,
 )
 from torchtitan.models.common.config_utils import (
     make_experts_config,
@@ -34,6 +33,7 @@ from .attention import (
     DSAIndexerAuxLoss,
     DSAFlexAttention,
 )
+from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4MoE, DeepSeekV4Router
 from .parallelize import parallelize_deepseek_v4
@@ -52,6 +52,11 @@ _LINEAR_INIT = {
 }
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
+_HC_INIT = {
+    "hc_fn": partial(nn.init.trunc_normal_, std=0.02),
+    "hc_base": partial(nn.init.trunc_normal_, std=0.02),
+    "hc_scale": partial(nn.init.trunc_normal_, std=0.02),
+}
 
 
 def _output_linear_init(dim: int) -> dict[str, Callable]:
@@ -82,21 +87,16 @@ def _make_compressor_config(
     head_dim: int,
     rope_head_dim: int,
     compress_ratio: int,
-    rotate: bool,
     norm_eps: float,
     coff: int,
     rope: RoPE.Config,
 ) -> "Compressor.Config":
     from .compressor import Compressor
     return Compressor.Config(
-        dim=dim,
         rope=dataclasses.replace(rope),
-        single_rope=SingleComplexRoPE.Config(**dataclasses.asdict(rope)),
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
-        rotate=rotate,
-        norm_eps=norm_eps,
         wkv=Linear.Config(
             in_features=dim, out_features=coff * head_dim, bias=False,
             param_init=_LINEAR_INIT,
@@ -109,11 +109,9 @@ def _make_compressor_config(
             normalized_shape=head_dim, eps=norm_eps,
             param_init=_NORM_INIT,
         ),
-        # ape holds a (compress_ratio, coff * head_dim) weight in a Linear.
-        ape=Linear.Config(
-            in_features=coff * head_dim, out_features=compress_ratio, bias=False,
-            param_init=_LINEAR_INIT,
-        ),
+        param_init={
+            "ape": partial(nn.init.trunc_normal_, std=0.02),
+        },
     )
 
 
@@ -132,16 +130,12 @@ def _make_indexer_config(
     from .compressor import Compressor, Indexer
     coff = 2  # overlap always True for indexer
     return Indexer.Config(
-        dim=dim,
         rope=dataclasses.replace(rope),
-        single_rope=SingleComplexRoPE.Config(**dataclasses.asdict(rope)),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
         index_topk=index_topk,
         rope_head_dim=rope_head_dim,
-        q_lora_rank=q_lora_rank,
         compress_ratio=compress_ratio,
-        norm_eps=norm_eps,
         wq_b=Linear.Config(
             in_features=q_lora_rank,
             out_features=num_index_heads * index_head_dim,
@@ -157,7 +151,6 @@ def _make_indexer_config(
             head_dim=index_head_dim,
             rope_head_dim=rope_head_dim,
             compress_ratio=compress_ratio,
-            rotate=True,
             norm_eps=norm_eps,
             coff=coff,
             rope=rope,
@@ -200,7 +193,7 @@ def _make_v4_attn_config(
         coff = 2  # 1 + overlap (overlap=True when compress_ratio==4)
         compressor_cfg = _make_compressor_config(
             dim=dim, head_dim=hd, rope_head_dim=rope_head_dim,
-            compress_ratio=compress_ratio, rotate=False,
+            compress_ratio=compress_ratio,
             norm_eps=norm_eps, coff=coff, rope=rope,
         )
         indexer_cfg = _make_indexer_config(
@@ -219,7 +212,7 @@ def _make_v4_attn_config(
         coff = 1  # no overlap
         compressor_128_cfg = _make_compressor_config(
             dim=dim, head_dim=hd, rope_head_dim=rope_head_dim,
-            compress_ratio=compress_ratio, rotate=False,
+            compress_ratio=compress_ratio,
             norm_eps=norm_eps, coff=coff, rope=rope,
         )
     inner_attention_cfg = DSAFlexAttention.Config(
@@ -247,7 +240,6 @@ def _make_v4_attn_config(
         layer_id=layer_id,
         inner_attention=inner_attention_cfg,
         rope=dataclasses.replace(rope),
-        single_rope=SingleComplexRoPE.Config(**dataclasses.asdict(rope)),
         wq_a=Linear.Config(
             in_features=dim, out_features=q_lora_rank, bias=False,
             param_init=_LINEAR_INIT,
@@ -466,11 +458,23 @@ def _build_v4_layers(
                 ),
                 feed_forward=ffn_cfg,
                 moe=moe_cfg,
-                hc_mult=hc_mult,
-                dim=dim,
-                norm_eps=norm_eps,
-                sinkhorn_iters=sinkhorn_iters,
-                hc_eps=hc_eps,
+                hc_attn_pre=HcPre.Config(
+                    hc_mult=hc_mult,
+                    dim=dim,
+                    sinkhorn_iters=sinkhorn_iters,
+                    eps=hc_eps,
+                    norm_eps=norm_eps,
+                    param_init=_HC_INIT,
+                ),
+                hc_ffn_pre=HcPre.Config(
+                    hc_mult=hc_mult,
+                    dim=dim,
+                    sinkhorn_iters=sinkhorn_iters,
+                    eps=hc_eps,
+                    norm_eps=norm_eps,
+                    param_init=_HC_INIT,
+                ),
+                hc_post=HcPost.Config(),
             )
         )
     return layers
@@ -585,6 +589,13 @@ def _debugmodel(
         hc_mult=hc_mult,
         compress_ratios=compress_ratios,
         n_layers=n_layers,
+        hc_head=HcHead.Config(
+            hc_mult=hc_mult,
+            dim=dim,
+            norm_eps=norm_eps,
+            eps=hc_eps,
+            param_init=_HC_INIT,
+        ),
     )
 
 
@@ -697,6 +708,13 @@ def _deepseek_v4_flash(
         hc_mult=hc_mult,
         compress_ratios=compress_ratios,
         n_layers=n_layers,
+        hc_head=HcHead.Config(
+            hc_mult=hc_mult,
+            dim=dim,
+            norm_eps=norm_eps,
+            eps=hc_eps,
+            param_init=_HC_INIT,
+        ),
     )
 
 
@@ -809,6 +827,13 @@ def _deepseek_v4_pro(
         hc_mult=hc_mult,
         compress_ratios=compress_ratios,
         n_layers=n_layers,
+        hc_head=HcHead.Config(
+            hc_mult=hc_mult,
+            dim=dim,
+            norm_eps=norm_eps,
+            eps=hc_eps,
+            param_init=_HC_INIT,
+        ),
     )
 
 

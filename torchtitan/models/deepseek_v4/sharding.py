@@ -159,9 +159,6 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
     at.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": _dense_param_rep},
     )
-    at.single_rope.sharding_config = ShardingConfig(
-        state_shardings={"cache": _dense_param_rep},
-    )
 
     if at.compressor is not None:
         set_compressor_sharding(at.compressor)
@@ -174,17 +171,15 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
 
 
 def set_compressor_sharding(compressor_cfg):
-    # wkv, wgate, norm, and ape are all sub-module Config fields.
     compressor_cfg.rope.sharding_config = ShardingConfig(
-        state_shardings={"cache": _dense_param_rep},
-    )
-    compressor_cfg.single_rope.sharding_config = ShardingConfig(
         state_shardings={"cache": _dense_param_rep},
     )
     compressor_cfg.wkv.sharding_config = _replicate_weight
     compressor_cfg.wgate.sharding_config = _replicate_weight
     compressor_cfg.norm.sharding_config = _replicate_weight
-    compressor_cfg.ape.sharding_config = _replicate_weight
+    compressor_cfg.sharding_config = ShardingConfig(
+        state_shardings={"ape": _dense_param_rep},
+    )
 
 
 def set_indexer_sharding(indexer_cfg):
@@ -202,9 +197,6 @@ def set_indexer_sharding(indexer_cfg):
     indexer_cfg.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": _dense_param_rep},
     )
-    indexer_cfg.single_rope.sharding_config = ShardingConfig(
-        state_shardings={"cache": _dense_param_rep},
-    )
     indexer_cfg.wq_b.sharding_config = ShardingConfig(
         state_shardings={"weight": _dense_param_rep},
     )
@@ -220,17 +212,15 @@ def set_deepseek_v4_layer_sharding(
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
-    hc_rep = ShardingConfig(
+    hc_pre_sharding = ShardingConfig(
         state_shardings={
-            n: _dense_param_rep
-            for n in [
-                "hc_attn_fn", "hc_ffn_fn",
-                "hc_attn_base", "hc_ffn_base",
-                "hc_attn_scale", "hc_ffn_scale",
-            ]
+            "hc_fn": _dense_param_rep,
+            "hc_base": _dense_param_rep,
+            "hc_scale": _dense_param_rep,
         },
     )
-    layer_cfg.sharding_config = hc_rep
+    layer_cfg.hc_attn_pre.sharding_config = hc_pre_sharding
+    layer_cfg.hc_ffn_pre.sharding_config = hc_pre_sharding
 
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
@@ -284,15 +274,13 @@ def set_deepseek_v4_sharding_config(
 ) -> None:
     set_decoder_sharding_config(config, enable_sp=enable_sp)
 
-    hc_rep = ShardingConfig(
+    config.hc_head.sharding_config = ShardingConfig(
         state_shardings={
-            n: _dense_param_rep
-            for n in ["hc_head_fn", "hc_head_base", "hc_head_scale"]
+            "hc_fn": _dense_param_rep,
+            "hc_base": _dense_param_rep,
+            "hc_scale": _dense_param_rep,
         },
     )
-    model_sharding = config.sharding_config or ShardingConfig()
-    model_sharding.state_shardings.update(hc_rep.state_shardings)
-    config.sharding_config = model_sharding
 
     for layer_cfg in config.layers:
         set_deepseek_v4_layer_sharding(

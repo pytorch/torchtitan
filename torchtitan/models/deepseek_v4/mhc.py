@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from torchtitan.protocols.module import Module
 
@@ -60,21 +61,27 @@ class HcPre(Module):
 
     def __init__(self, config: Config):
         super().__init__()
+        hc_mult = config.hc_mult
+        mix_hc = (2 + hc_mult) * hc_mult
+        hc_dim = hc_mult * config.dim
         self.hc_mult = config.hc_mult
         self.norm_eps = config.norm_eps
+        self.hc_fn = nn.Parameter(torch.empty(mix_hc, hc_dim))
+        self.hc_base = nn.Parameter(torch.empty(mix_hc))
+        self.hc_scale = nn.Parameter(torch.empty(3))
         self.sinkhorn = HcSplitSinkhorn.Config(
             hc_mult=config.hc_mult,
             sinkhorn_iters=config.sinkhorn_iters,
             eps=config.eps,
         ).build()
 
-    def forward(self, x, hc_fn, hc_scale, hc_base):
+    def forward(self, x):
         shape, dtype = x.size(), x.dtype
         x = x.flatten(2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, hc_fn.float()) * rsqrt
+        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
         pre, post, comb = self.sinkhorn(
-            mixes.float(), hc_scale.float(), hc_base.float()
+            mixes.float(), self.hc_scale.float(), self.hc_base.float()
         )
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
         return y.to(dtype), post, comb
@@ -105,14 +112,22 @@ class HcHead(Module):
 
     def __init__(self, config: Config):
         super().__init__()
+        hc_dim = config.hc_mult * config.dim
         self.norm_eps = config.norm_eps
         self.eps = config.eps
+        self.hc_fn = nn.Parameter(
+            torch.empty(config.hc_mult, hc_dim, dtype=torch.float32)
+        )
+        self.hc_base = nn.Parameter(
+            torch.empty(config.hc_mult, dtype=torch.float32)
+        )
+        self.hc_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
-    def forward(self, x, hc_fn, hc_scale, hc_base):
+    def forward(self, x):
         shape, dtype = x.size(), x.dtype
         x = x.flatten(2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, hc_fn.float()) * rsqrt
-        pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.eps
+        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
+        pre = torch.sigmoid(mixes * self.hc_scale + self.hc_base) + self.eps
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
         return y.to(dtype)

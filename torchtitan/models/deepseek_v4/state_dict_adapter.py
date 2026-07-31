@@ -7,16 +7,14 @@ import re
 from typing import Any
 
 import torch
-from torch.distributed.tensor import DTensor
 
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
-from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import DeepSeekV4Model
 
 
-class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
-    get_hf_storage_reader = DeepSeekV3StateDictAdapter.get_hf_storage_reader
+class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
+    hf_experts_key_fragment = "ffn.experts"
 
     def __init__(
         self,
@@ -27,7 +25,7 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
 
         self.from_hf_map = {
             "embed.weight": "tok_embeddings.weight",
-            # Attention (monolithic)
+            # Attention
             "layers.{}.attn.attn_sink": "layers.{}.attention.attn_sink.weight",
             "layers.{}.attn.kv_norm.weight": "layers.{}.attention.kv_norm.weight",
             "layers.{}.attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
@@ -49,15 +47,15 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
             "layers.{}.ffn.shared_experts.w3.weight": "layers.{}.moe.shared_experts.w3.weight",
             "layers.{}.ffn.shared_experts.w2.weight": "layers.{}.moe.shared_experts.w2.weight",
             # mHC
-            "layers.{}.hc_attn_base": "layers.{}.hc_attn_base",
-            "layers.{}.hc_attn_fn": "layers.{}.hc_attn_fn",
-            "layers.{}.hc_attn_scale": "layers.{}.hc_attn_scale",
-            "layers.{}.hc_ffn_base": "layers.{}.hc_ffn_base",
-            "layers.{}.hc_ffn_fn": "layers.{}.hc_ffn_fn",
-            "layers.{}.hc_ffn_scale": "layers.{}.hc_ffn_scale",
-            "hc_head_base": "hc_head_base",
-            "hc_head_fn": "hc_head_fn",
-            "hc_head_scale": "hc_head_scale",
+            "layers.{}.hc_attn_base": "layers.{}.hc_attn_pre.hc_base",
+            "layers.{}.hc_attn_fn": "layers.{}.hc_attn_pre.hc_fn",
+            "layers.{}.hc_attn_scale": "layers.{}.hc_attn_pre.hc_scale",
+            "layers.{}.hc_ffn_base": "layers.{}.hc_ffn_pre.hc_base",
+            "layers.{}.hc_ffn_fn": "layers.{}.hc_ffn_pre.hc_fn",
+            "layers.{}.hc_ffn_scale": "layers.{}.hc_ffn_pre.hc_scale",
+            "hc_head_base": "hc_head.hc_base",
+            "hc_head_fn": "hc_head.hc_fn",
+            "hc_head_scale": "hc_head.hc_scale",
             "norm.weight": "norm.weight",
             "head.weight": "lm_head.weight",
         }
@@ -69,7 +67,7 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
                 comp = "compressor" if cr == 4 else "compressor_128"
                 self.from_hf_map.update({
                     f"layers.{layer_id}.attn.compressor.ape": (
-                        f"layers.{layer_id}.attention.{comp}.ape.weight"
+                        f"layers.{layer_id}.attention.{comp}.ape"
                     ),
                     f"layers.{layer_id}.attn.compressor.norm.weight": (
                         f"layers.{layer_id}.attention.{comp}.norm.weight"
@@ -84,7 +82,7 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
             if cr == 4:
                 self.from_hf_map.update({
                     f"layers.{layer_id}.attn.indexer.compressor.ape": (
-                        f"layers.{layer_id}.attention.indexer.compressor.ape.weight"
+                        f"layers.{layer_id}.attention.indexer.compressor.ape"
                     ),
                     f"layers.{layer_id}.attn.indexer.compressor.norm.weight": (
                         f"layers.{layer_id}.attention.indexer.compressor.norm.weight"
@@ -122,104 +120,68 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
             self._first_number(key)
         )
 
+    @staticmethod
+    def _is_v4_special_titan_key(key: str) -> bool:
+        return any(t in key for t in ("compressor", "indexer", "tid2eid"))
+
+    @staticmethod
+    def _is_v4_special_hf_key(key: str) -> bool:
+        return any(t in key for t in ("compressor", "indexer", "tid2eid"))
+
+    def _can_delegate_titan_key(self, key: str, to_hf_map: dict[str, str]) -> bool:
+        if key in to_hf_map or "moe.experts" in key:
+            return True
+        if "layers" in key:
+            return self._abstract_key(key, count=1) in to_hf_map
+        return False
+
+    def _can_delegate_hf_key(self, key: str) -> bool:
+        if key in self.from_hf_map or self.hf_experts_key_fragment in key:
+            return True
+        if "layers" in key:
+            count = 2 if self.hf_experts_key_fragment in key else 1
+            return self._abstract_key(key, count=count) in self.from_hf_map
+        return False
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
+        delegated_state_dict = {}
 
         for key, value in state_dict.items():
-            if any(t in key for t in ("compressor", "indexer", "tid2eid")):
+            if self._is_v4_special_titan_key(key) and key in to_hf_map:
                 new_key = to_hf_map[key]
                 if "tid2eid" in key:
-                    # HF inference stores tid2eid as int32, but the current
-                    # HuggingFaceStorageWriter consolidation path calls
-                    # torch.finfo() for every saved dtype and fails on integer
-                    # tensors. Save as float32 and let HF load_state_dict cast
-                    # into its int32 parameter.
                     value = value.to(torch.float32)
                 hf_state_dict[new_key] = value
-
             elif "attention.attn_sink.weight" in key:
                 hf_state_dict[self._map_layer(key, to_hf_map)] = value.squeeze(-1)
-
-            elif "moe.experts" in key:
-                abstract_key = self._abstract_key(key, count=1)
-                layer_num = self._first_number(key)
-                new_abstract = to_hf_map[abstract_key]
-
-                if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[abstract_key] = value.placements
-                    self.grouped_expert_weight_shape[abstract_key] = value.shape
-                    self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
-                    local_fqn = self._get_local_experts_weights(
-                        new_abstract, abstract_key, layer_num, value,
-                    )
-                    hf_state_dict.update(local_fqn)
-                else:
-                    num_experts = next(
-                        l for l in self.model_config.layers if l.moe is not None
-                    ).moe.num_experts
-                    split_values = self._split_experts_weights(value, num_experts)
-                    for e in range(num_experts):
-                        hf_state_dict[new_abstract.format(layer_num, e)] = split_values[e].squeeze()
-
-            elif "layers" in key:
-                hf_state_dict[self._map_layer(key, to_hf_map)] = value
-
+            elif self._can_delegate_titan_key(key, to_hf_map):
+                delegated_state_dict[key] = value
             else:
-                if key in to_hf_map:
-                    hf_state_dict[to_hf_map[key]] = value
-                else:
-                    hf_state_dict[key] = value
+                hf_state_dict[key] = value
 
+        if delegated_state_dict:
+            hf_state_dict.update(super().to_hf(delegated_state_dict))
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         state_dict = {}
-        expert_weights = {}
+        delegated_hf_state_dict = {}
 
         for key, value in hf_state_dict.items():
-            if any(t in key for t in ("compressor", "indexer", "tid2eid")):
+            if self._is_v4_special_hf_key(key) and key in self.from_hf_map:
                 new_key = self.from_hf_map[key]
                 if "tid2eid" in key:
                     value = value.to(torch.int64)
                 state_dict[new_key] = value
-
             elif "attn.attn_sink" in key:
                 state_dict[self._map_layer(key, self.from_hf_map)] = value.unsqueeze(-1)
-
-            elif "ffn.experts" in key:
-                abstract_key = self._abstract_key(key, count=2)
-                layer_num, expert_num, _ = re.findall(r"\d+", key)
-                titan_abstract = self.from_hf_map[abstract_key]
-                new_key = titan_abstract.format(layer_num)
-
-                if layer_num not in expert_weights:
-                    expert_weights[layer_num] = {}
-                if titan_abstract not in expert_weights[layer_num]:
-                    expert_weights[layer_num][titan_abstract] = {}
-                expert_weights[layer_num][titan_abstract][int(expert_num)] = value
-
-                if titan_abstract in self.local_experts_indices:
-                    stacked = self._concatenate_expert_weights_dtensor(
-                        expert_weights, titan_abstract, layer_num,
-                    )
-                else:
-                    num_experts = next(
-                        l for l in self.model_config.layers if l.moe is not None
-                    ).moe.num_experts
-                    stacked = self._concatenate_expert_weights(
-                        expert_weights, titan_abstract, layer_num, num_experts,
-                    )
-                if stacked is not None:
-                    state_dict[new_key] = stacked
-
-            elif "layers" in key:
-                state_dict[self._map_layer(key, self.from_hf_map)] = value
-
+            elif self._can_delegate_hf_key(key):
+                delegated_hf_state_dict[key] = value
             else:
-                if key in self.from_hf_map:
-                    state_dict[self.from_hf_map[key]] = value
-                else:
-                    state_dict[key] = value
+                state_dict[key] = value
 
+        if delegated_hf_state_dict:
+            state_dict.update(super().from_hf(delegated_hf_state_dict))
         return state_dict
