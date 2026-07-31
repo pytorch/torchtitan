@@ -43,24 +43,20 @@ from .vision_encoder import Qwen35VisionEncoder
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
 
 
-class Qwen35AttentionMaskInputs(NamedTuple):
-    """Pipeline-safe inputs for building the hybrid stack's attention masks.
+class Qwen35AttentionMasks(NamedTuple):
+    """Per-consumer attention masks for the hybrid stack under flex attention.
 
     A ``BlockMask`` only document-isolates the quadratic full-attention
-    layers; GatedDeltaNet is a recurrence, so it also needs document
-    boundaries. The pipeline scheduler shards both fields on the batch axis,
-    then ``Qwen35Model.forward`` converts ``deltanet_positions`` into
-    ``VarlenMetadata`` for that microbatch.
+    layers; GatedDeltaNet is a recurrence, so it needs document *offsets*
+    (``VarlenMetadata``) to reset conv and recurrent state at packing
+    boundaries. Built by ``Qwen35Model.get_attention_masks`` once per model
+    forward (under pipeline parallelism the trainer pre-splits microbatches
+    and builds masks per microbatch); each attention module picks its slice
+    in ``forward``. The varlen backend does not use this type: there both
+    consumers share one ``VarlenMetadata``.
     """
 
-    full_attention: AttentionMasksType
-    deltanet_positions: torch.Tensor
-
-
-class Qwen35AttentionMasks(NamedTuple):
-    """Per-consumer masks resolved for one model-forward microbatch."""
-
-    full_attention: AttentionMasksType
+    quadratic_attention: AttentionMasksType
     deltanet: VarlenMetadata
 
 
@@ -519,7 +515,7 @@ class Qwen35Attention(BaseAttention):
     ) -> torch.Tensor:
         B, L, _ = x_BLD.shape
         if isinstance(attention_masks, Qwen35AttentionMasks):
-            attention_masks = attention_masks.full_attention
+            attention_masks = attention_masks.quadratic_attention
 
         # wq is 2x wider: produces query + gate
         xq_gate_BLN2H = self.wq(x_BLD).view(B, L, -1, self.head_dim * 2)
@@ -727,7 +723,7 @@ class Qwen35Model(Decoder):
     def get_attention_masks(  # pyrefly: ignore [bad-override]
         self,
         positions: torch.Tensor,
-    ) -> AttentionMasksType | Qwen35AttentionMaskInputs | None:
+    ) -> AttentionMasksType | Qwen35AttentionMasks | None:
         attn_config = self.config.first_attention
         if attn_config is not None and isinstance(
             attn_config.inner_attention, VarlenAttention.Config
@@ -747,12 +743,15 @@ class Qwen35Model(Decoder):
             # TODO: DeltaNet state then runs across document boundaries in
             # pure GatedDeltaNet models under both flex and varlen backends.
             return None
-        # Keep the document positions batch-aligned so pipeline microbatching
-        # shards them correctly. Each model stage builds its own cumulative
-        # offsets after the scheduler splits the batch.
-        return Qwen35AttentionMaskInputs(
-            full_attention=full_attention_masks,
-            deltanet_positions=positions,
+        # A BlockMask document-isolates the quadratic layers only; pair it
+        # with document offsets so GatedDeltaNet resets state at packing
+        # boundaries too.
+        return Qwen35AttentionMasks(
+            quadratic_attention=full_attention_masks,
+            deltanet=create_varlen_metadata_for_document(
+                positions,
+                include_host_offsets=True,
+            ),
         )
 
     def _get_vision_positions(
@@ -877,9 +876,7 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: (
-            AttentionMasksType | Qwen35AttentionMaskInputs | Qwen35AttentionMasks | None
-        ) = None,
+        attention_masks: AttentionMasksType | Qwen35AttentionMasks | None = None,
         positions: torch.Tensor | None = None,
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
@@ -899,14 +896,6 @@ class Qwen35Model(Decoder):
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
-        if isinstance(attention_masks, Qwen35AttentionMaskInputs):
-            attention_masks = Qwen35AttentionMasks(
-                full_attention=attention_masks.full_attention,
-                deltanet=create_varlen_metadata_for_document(
-                    attention_masks.deltanet_positions,
-                    include_host_offsets=True,
-                ),
-            )
         for layer in self.layers.values():
             x = layer(x, attention_masks, rope_positions)
 
