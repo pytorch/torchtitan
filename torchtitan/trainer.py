@@ -112,6 +112,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "Batch-invariant mode is not supported in pre-training."
                 )
 
+            pp_microbatch_size = self.parallelism.pipeline_parallel_microbatch_size
+            if pp_microbatch_size <= 0:
+                raise ValueError(
+                    "parallelism.pipeline_parallel_microbatch_size must be "
+                    "greater than 0."
+                )
+            if (
+                self.parallelism.pipeline_parallel_degree > 1
+                and self.training.local_batch_size % pp_microbatch_size != 0
+            ):
+                raise ValueError(
+                    f"training.local_batch_size ({self.training.local_batch_size}) "
+                    "must be evenly divisible by "
+                    "parallelism.pipeline_parallel_microbatch_size "
+                    f"({pp_microbatch_size}) when pipeline parallelism is enabled."
+                )
+
             if (
                 self.parallelism.spmd_backend == "spmd_types"
                 and self.debug.spmd_typechecking
