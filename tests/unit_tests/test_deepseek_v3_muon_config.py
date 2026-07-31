@@ -249,8 +249,8 @@ class TestDeepSeekV3MuonConfig(unittest.TestCase):
                 "register_moe_load_balancing_hook"
             ) as register_moe_hook,
             patch(
-                "torchtitan.models.deepseek_v3.config_registry.flex_shard"
-            ) as apply_flex_shard,
+                "torchtitan.models.deepseek_v3.config_registry.distribute_optimizer"
+            ) as apply_distribute_optimizer,
         ):
             config.model_spec.post_optimizer_build_fn(
                 [muon, other_optimizer],
@@ -262,10 +262,10 @@ class TestDeepSeekV3MuonConfig(unittest.TestCase):
             [muon, other_optimizer], model_parts, parallel_dims
         )
         parallel_dims.get_mesh.assert_called_once_with("fsdp")
-        apply_flex_shard.assert_called_once()
-        flex_shard_optimizer = apply_flex_shard.call_args.args[0]
-        bucket_specs = apply_flex_shard.call_args.kwargs["bucket_spec"]
-        self.assertIs(flex_shard_optimizer, muon)
+        apply_distribute_optimizer.assert_called_once()
+        distributed_optimizer = apply_distribute_optimizer.call_args.args[0]
+        bucket_specs = apply_distribute_optimizer.call_args.kwargs["bucket_spec"]
+        self.assertIs(distributed_optimizer, muon)
         self.assertEqual(
             [spec.name for spec in bucket_specs],
             [f"layers.{layer_id}" for layer_id in range(6)],

@@ -23,7 +23,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.flex_shard import (
     BucketSpec,
-    flex_shard,
+    distribute_optimizer,
     Owned,
 )
 from torchtitan.components.muon_adapter import MuonAdapter
@@ -124,7 +124,7 @@ def _run_bucketed_muon_parity(
                 ],
                 **{**kwargs, **overrides},
             )
-            return flex_shard(optimizer, bucket_spec=bucket_specs)
+            return distribute_optimizer(optimizer, bucket_spec=bucket_specs)
 
         optimizer = make_optimizer(params)
         reference_optimizer = torch.optim.Muon(
@@ -334,7 +334,7 @@ def _run_bucketed_muon_parity(
                 ]
             )
             with unittest.TestCase().assertRaises((ValueError, RuntimeError)):
-                flex_shard(
+                distribute_optimizer(
                     bad_optimizer,
                     bucket_spec=[
                         BucketSpec(
@@ -401,7 +401,7 @@ def _run_cuda_forward_readiness(
             "nesterov": True,
             "ns_steps": 2,
         }
-        optimizer = flex_shard(
+        optimizer = distribute_optimizer(
             MuonAdapter(
                 [
                     {
@@ -553,7 +553,7 @@ class TestMuonAdapter(DTensorTestBase):
         )
         self.assertEqual(len(optimizer.state), 0)
 
-        flex_shard(
+        distribute_optimizer(
             optimizer,
             bucket_spec=[
                 BucketSpec(
