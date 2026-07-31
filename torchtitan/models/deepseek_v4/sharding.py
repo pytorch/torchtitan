@@ -103,7 +103,6 @@ def set_dsa_indexer_aux_loss_sharding(indexer_aux_loss_cfg) -> None:
     }
 
     indexer_aux_loss_cfg.sharding_config = ShardingConfig(
-        state_shardings={"_acc": _dense_param_rep},
         in_src_shardings=input_shardings,
         in_dst_shardings=dict(input_shardings),
         out_src_shardings=query_states,

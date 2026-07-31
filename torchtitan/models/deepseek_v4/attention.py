@@ -16,7 +16,6 @@ from torchtitan.models.common.attention import (
     create_attention_mask,
     FlexAttention,
 )
-from torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
@@ -63,22 +62,21 @@ def get_compress_topk_idxs(
     idxs = torch.where(idxs >= causal_limit, -1, idxs + offset)
     return idxs.unsqueeze(0).expand(bsz, -1, -1)
 
-
-class DSAIndexerAuxLoss(LoggedAuxLoss):
+class DSAIndexerAuxLoss(Module):
     @dataclass(kw_only=True, slots=True)
-    class Config(LoggedAuxLoss.Config):
+    class Config(Module.Config):
         num_heads: int
         softmax_scale: float
         window_size: int
         coeff: float = 1.0
-        tag: str = "dsa_indexer_loss"
         eps: float = 1e-10
 
     def __init__(self, config: Config) -> None:
-        super().__init__(config)
+        super().__init__()
         self.num_heads = config.num_heads
         self.softmax_scale = config.softmax_scale
         self.window_size = config.window_size
+        self.coeff = config.coeff
         self.eps = config.eps
 
     def _selected_main_attn_dist(
@@ -144,7 +142,6 @@ class DSAIndexerAuxLoss(LoggedAuxLoss):
 
     def forward(
         self,
-        carrier,
         q,
         kv_compress,
         compress_topk_idxs,
@@ -152,7 +149,7 @@ class DSAIndexerAuxLoss(LoggedAuxLoss):
         attn_lse,
     ):
         if index_score.numel() == 0:
-            return carrier
+            return index_score.new_zeros(())
         compress_topk_idxs = torch.where(
             compress_topk_idxs < 0,
             compress_topk_idxs,
@@ -169,9 +166,7 @@ class DSAIndexerAuxLoss(LoggedAuxLoss):
             index_score,
             compress_topk_idxs,
         )
-        if self.global_batch_size is None:
-            raise RuntimeError("DSAIndexerAuxLoss requires global_batch_size.")
-        return self.inject(carrier, loss * self.global_batch_size)
+        return loss * self.coeff
 
 
 class DSAFlexAttention(FlexAttention):
@@ -449,8 +444,7 @@ class Attention(BaseAttention):
             and index_score is not None
             and attn_lse is not None
         ):
-            o = self.indexer_aux_loss(
-                o,
+            self.indexer_aux_loss(
                 q.detach(),
                 kv_compress.detach(),
                 compress_topk_idxs,
