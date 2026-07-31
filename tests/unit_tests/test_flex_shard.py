@@ -22,7 +22,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.flex_shard import (
     BucketSpec,
-    flex_shard,
+    distribute_optimizer,
     Owned,
 )
 
@@ -142,7 +142,7 @@ def _run_cuda_pipeline_lifetime(
             for index in range(len(full_values))
         ]
 
-        pipeline_optimizer = flex_shard(
+        pipeline_optimizer = distribute_optimizer(
             _OwnedTestOptimizer(
                 [
                     {
@@ -304,7 +304,7 @@ class TestFlexShard(DTensorTestBase):
         local_ptrs = [param.to_local().data_ptr() for param in params]
         placements = [param.placements for param in params]
         versions = [param._version for param in params]
-        flex_shard(
+        distribute_optimizer(
             optimizer,
             bucket_spec=[
                 BucketSpec(
@@ -388,7 +388,7 @@ class TestFlexShard(DTensorTestBase):
         ]
         for param in params:
             param.grad = None
-        flex_shard(
+        distribute_optimizer(
             optimizer,
             bucket_spec=[
                 BucketSpec(
@@ -463,7 +463,7 @@ class TestFlexShard(DTensorTestBase):
         one_layer_optimizer.param_groups[0]["param_names"] = names
         two_layer_optimizer.param_groups[0]["param_names"] = names
 
-        flex_shard(
+        distribute_optimizer(
             one_layer_optimizer,
             bucket_spec=[
                 BucketSpec(
@@ -474,7 +474,7 @@ class TestFlexShard(DTensorTestBase):
                 for index in range(3)
             ],
         )
-        flex_shard(
+        distribute_optimizer(
             two_layer_optimizer,
             bucket_spec=[
                 BucketSpec(
@@ -511,7 +511,7 @@ class TestFlexShard(DTensorTestBase):
     @with_comms
     def test_rejects_optimization_unit_reordering(self):
         optimizer, _params, _values, _grads = self._owned_optimizer()
-        flex_shard(
+        distribute_optimizer(
             optimizer,
             bucket_spec=[
                 BucketSpec(patterns=("layers.0.*",), mesh=self.mesh)
@@ -526,7 +526,7 @@ class TestFlexShard(DTensorTestBase):
     @with_comms
     def test_rejects_optimizer_state_storage_layout_changes(self):
         optimizer, params, _values, _grads = self._owned_optimizer()
-        flex_shard(
+        distribute_optimizer(
             optimizer,
             bucket_spec=[
                 BucketSpec(patterns=("layers.0.*",), mesh=self.mesh)
@@ -544,7 +544,7 @@ class TestFlexShard(DTensorTestBase):
     def test_bucket_coverage_and_storage_layout_validation(self):
         optimizer, _params, _values, _grads = self._owned_optimizer()
         with self.assertRaisesRegex(ValueError, "not covered"):
-            flex_shard(
+            distribute_optimizer(
                 optimizer,
                 bucket_spec=[
                     BucketSpec(patterns=("layers.1.*",), mesh=self.mesh)
@@ -553,7 +553,7 @@ class TestFlexShard(DTensorTestBase):
 
         optimizer, _params, _values, _grads = self._owned_optimizer()
         with self.assertRaisesRegex(ValueError, "matched multiple"):
-            flex_shard(
+            distribute_optimizer(
                 optimizer,
                 bucket_spec=[
                     BucketSpec(patterns=("layers.*",), mesh=self.mesh),
@@ -574,7 +574,7 @@ class TestFlexShard(DTensorTestBase):
             [{"params": [param], "param_names": ["layers.0.weight"]}]
         )
         with self.assertRaisesRegex(ValueError, r"Shard\(0\)"):
-            flex_shard(
+            distribute_optimizer(
                 optimizer,
                 bucket_spec=[
                     BucketSpec(patterns=("layers.0.*",), mesh=self.mesh)
@@ -585,7 +585,7 @@ class TestFlexShard(DTensorTestBase):
     def test_requires_optimizer_step_ops(self):
         param = self._parameter(torch.ones(4, 2), torch.ones(4, 2))
         with self.assertRaisesRegex(TypeError, "does not expose OptimizerStepOps"):
-            flex_shard(
+            distribute_optimizer(
                 torch.optim.SGD(
                     [
                         {
