@@ -176,18 +176,20 @@ def _shared_experts_sharding_configs(
         if enable_ep and enable_sp
         else dense_activation_placement(tp=spmd.I if enable_ep else spmd.R)
     )
+    desired_input_layout = dense_activation_placement(tp=spmd.R)
     desired_output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.P)
     )
     return (
         ShardingConfig(
             in_src_shardings={"x": input_layout},
+            in_dst_shardings={"x": desired_input_layout},
         ),
-        _shared_expert_colwise_config(input_layout=input_layout),
+        _shared_expert_colwise_config(input_layout=desired_input_layout),
         _shared_expert_rowwise_config(output_layout=desired_output_layout),
-        _shared_expert_colwise_config(input_layout=input_layout),
+        _shared_expert_colwise_config(input_layout=desired_input_layout),
     )
 
 
@@ -228,7 +230,7 @@ def _routed_experts_sharding_configs(
     desired_experts_output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.P)
     )
 
     return (
@@ -281,7 +283,11 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     desired_input_layout = (
         sp_layout if enable_ep else dense_activation_placement(tp=spmd.R)
     )
-
+    output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.P)
+    )
     return ShardingConfig(
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
@@ -289,7 +295,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         },
         in_src_shardings={"x_BLD": sp_layout},
         in_dst_shardings={"x_BLD": desired_input_layout},
-        out_src_shardings=sp_layout,
+        out_src_shardings=output_layout,
         out_dst_shardings=sp_layout,
     )
 
