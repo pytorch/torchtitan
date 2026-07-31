@@ -33,7 +33,12 @@ def parallelize_deepseekv3(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
+    model_compile_enabled = (
+        compile_config.enable and "model" in compile_config.components
+    )
+
     if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
@@ -50,17 +55,18 @@ def parallelize_deepseekv3(
             model.parallelize(parallel_dims)
 
     if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
-    model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
-    )
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims)
 
     if ac_config is not None:
         ac_config.build(dump_folder=dump_folder).apply(model)
 
     if model_compile_enabled:
         apply_compile(model, compile_config)
+
+    # Skip FSDP wrapper for inference. FSDP's forward hooks are incompatible
+    # with torch.inference_mode() used by vLLM.
+    if skip_dp:
+        return model
 
     if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
