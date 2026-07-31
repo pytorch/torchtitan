@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import torch
@@ -122,6 +123,99 @@ class TestKimiK3FSDP(DTensorTestBase):
             )
             compared_gradients += 1
         self.assertGreater(compared_gradients, 0)
+
+
+class TestKimiK3MixedModalityFSDP(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @with_comms
+    def test_image_and_text_only_ranks_complete_forward_backward(self):
+        torch.manual_seed(3)
+        config = _small_model_config()
+        with torch.device("meta"):
+            model = config.build()
+        model.to_empty(device=self.device_type)
+        model.init_states()
+
+        parallelism = ParallelismConfig(
+            data_parallel_shard_degree=self.world_size,
+            tensor_parallel_degree=1,
+            pipeline_parallel_degree=1,
+            context_parallel_degree=1,
+            expert_parallel_degree=1,
+        )
+        parallel_dims = ParallelDims.from_config(
+            parallelism,
+            world_size=self.world_size,
+        )
+        with patch(
+            "torchtitan.distributed.parallel_dims.device_type",
+            self.device_type,
+        ):
+            parallel_dims.build_mesh()
+        gradient_division_context = (
+            patch("torchtitan.distributed.fsdp.disable_fsdp_gradient_division")
+            if self.device_type == "cpu"
+            else nullcontext()
+        )
+        with gradient_division_context:
+            model = parallelize_kimi_k3(
+                model,
+                parallel_dims=parallel_dims,
+                training=TrainingConfig(
+                    local_batch_size=1,
+                    seq_len=6,
+                    steps=1,
+                    dtype="bfloat16",
+                ),
+                parallelism=parallelism,
+                compile_config=CompileConfig(),
+                ac_config=None,
+                dump_folder="",
+            )
+
+        rank = torch.distributed.get_rank()
+        if rank == 0:
+            inputs = {
+                "tokens": torch.tensor(
+                    [[1, 7, 2, 3, 4, 5]],
+                    dtype=torch.long,
+                    device=self.device_type,
+                ),
+                "pixel_values": torch.randn(
+                    1,
+                    4,
+                    3 * 2 * 2,
+                    device=self.device_type,
+                ),
+                "grid_thw": torch.tensor(
+                    [[1, 2, 2]],
+                    dtype=torch.long,
+                    device=self.device_type,
+                ),
+                "special_tokens": {"image_id": 7},
+            }
+        else:
+            inputs = {
+                "tokens": torch.tensor(
+                    [[1, 2, 3, 4, 5, 6]],
+                    dtype=torch.long,
+                    device=self.device_type,
+                )
+            }
+
+        logits_BLV = model(**inputs)
+        logits_BLV.float().square().mean().backward()
+
+        vision_gradients = 0
+        for name, parameter in model.named_parameters():
+            if not name.startswith("vision_encoder."):
+                continue
+            self.assertIsNotNone(parameter.grad, name)
+            vision_gradients += 1
+        self.assertGreater(vision_gradients, 0)
 
 
 if __name__ == "__main__":
