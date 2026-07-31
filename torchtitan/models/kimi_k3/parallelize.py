@@ -77,8 +77,6 @@ def parallelize_kimi_k3(
     assert isinstance(model, KimiK3Model)
     vision_encoder = model.vision_encoder
     if vision_encoder is not None:
-        if dp_mesh.size() > 1:
-            model.enable_vision_encoder_on_text_only()
         apply_fsdp_to_vision_encoder(
             vision_encoder,
             dp_mesh,

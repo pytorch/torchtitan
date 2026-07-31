@@ -6,10 +6,9 @@
 
 """MoonViT3d vision encoder used by Kimi K3.
 
-This module keeps the first Kimi K3 implementation device-neutral.  Vision
-attention is an eager PyTorch reference over each visual item, which preserves
-the block-diagonal attention semantics of the HuggingFace implementation
-without requiring FlashAttention or a device-specific kernel.
+Vision attention is an eager PyTorch loop over each visual item, which
+preserves the block-diagonal attention semantics of the HuggingFace
+implementation without requiring FlashAttention or a device-specific kernel.
 
 Shape suffixes:
 - N = number of visual items
