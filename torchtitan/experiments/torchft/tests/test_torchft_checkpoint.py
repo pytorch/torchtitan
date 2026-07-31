@@ -50,6 +50,14 @@ class FakeLRSchedulersContainer:
         pass
 
 
+class FakeEMAOptimizersContainer:
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, sd: dict):
+        pass
+
+
 class FakeDataLoader(DataLoader):
     def __init__(self):
         super().__init__(dataset=[], batch_size=1)
@@ -101,6 +109,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.states = {"trainer": torch.tensor([1.2347])}
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
+        self.ema_optimizer = FakeEMAOptimizersContainer()
         self.data_loader = FakeDataLoader()
         self.ft_manager = DummyFTManager(enabled=True, participating_rank=0)
         self.patcher_group = mock.patch(
@@ -150,6 +159,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema_optimizer=self.ema_optimizer,
             states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
