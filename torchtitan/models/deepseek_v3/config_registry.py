@@ -5,10 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.distributed_muon import (
+    BucketSpec,
+    assign_balanced_owners,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import (
+    default_adamw,
+    OptimizersContainer,
+    ParamGroupConfig,
+)
 from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
@@ -157,6 +165,147 @@ def deepseek_v3_16b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=10),
         activation_checkpoint=SelectiveAC.Config(),
         compile=CompileConfig(enable=True, components=["loss"]),
+    )
+
+
+def deepseek_v3_16b_distributed_muon() -> Trainer.Config:
+    """DSV3-16B with local-block and bucketed owner-compute Muon."""
+    config = deepseek_v3_16b()
+    owner_group_size = 8
+    config.optimizer = _deepseek_v3_distributed_muon_optimizer(
+        n_layers=27,
+        wq_matrix_shape=(192, 2048),
+        wkv_a_matrix_shape=(576, 2048),
+        wkv_b_matrix_shape=(256, 512),
+        wo_matrix_shape=(2048, 128),
+        owner_group_size=owner_group_size,
+        lr=2.2e-4,
+    )
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=owner_group_size,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=4,
+        enable_sequence_parallel=False,
+        spmd_backend="spmd_types",
+    )
+    return config
+
+
+def _deepseek_v3_distributed_muon_optimizer(
+    *,
+    n_layers: int,
+    wq_matrix_shape: tuple[int, int],
+    wkv_a_matrix_shape: tuple[int, int],
+    wkv_b_matrix_shape: tuple[int, int],
+    wo_matrix_shape: tuple[int, int],
+    owner_group_size: int,
+    lr: float,
+) -> OptimizersContainer.Config:
+    muon_kwargs = {
+        "lr": lr,
+        "weight_decay": 0.1,
+        "fused": False,
+        "foreach": False,
+    }
+    adamw_kwargs = {
+        "lr": lr,
+        "betas": (0.9, 0.95),
+        "eps": 1e-8,
+        "weight_decay": 0.1,
+        "fused": False,
+        "foreach": True,
+    }
+    param_groups = [
+        ParamGroupConfig(
+            pattern=r"attention\.wq\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs={
+                **muon_kwargs,
+                "matrix_shape": wq_matrix_shape,
+            },
+        ),
+        ParamGroupConfig(
+            pattern=r"attention\.wkv_a\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs=muon_kwargs.copy(),
+        ),
+        ParamGroupConfig(
+            pattern=r"attention\.wkv_b\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs={
+                **muon_kwargs,
+                "matrix_shape": wkv_b_matrix_shape,
+            },
+        ),
+        ParamGroupConfig(
+            pattern=r"attention\.wo\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs={
+                **muon_kwargs,
+                "matrix_shape": wo_matrix_shape,
+                "matrix_block_dim": 1,
+            },
+        ),
+    ]
+    for projection in ("w1_EFD", "w2_EDF", "w3_EFD"):
+        param_groups.append(
+            ParamGroupConfig(
+                pattern=rf"routed_experts\.inner_experts\.{projection}$",
+                optimizer_name="DistributedMuon",
+                optimizer_kwargs=muon_kwargs.copy(),
+            )
+        )
+    param_groups.append(
+        ParamGroupConfig(
+            pattern=r".*",
+            optimizer_name="AdamW",
+            optimizer_kwargs=adamw_kwargs.copy(),
+        )
+    )
+
+    def layer_fqns(layer_id: int) -> tuple[str, ...]:
+        prefix = f"layers.{layer_id}"
+        fqns = tuple(
+            f"{prefix}.attention.{projection}.weight"
+            for projection in ("wq", "wkv_a", "wkv_b", "wo")
+        )
+        if layer_id:
+            fqns += tuple(
+                f"{prefix}.moe.routed_experts.inner_experts.{projection}"
+                for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
+            )
+        return fqns
+
+    layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(n_layers))
+    owner_rank_by_bucket = assign_balanced_owners(
+        layer_bucket_fqns,
+        {
+            f"layers.{layer_id}.attention.wkv_a.weight": (
+                wkv_a_matrix_shape[0] * wkv_a_matrix_shape[1]
+            )
+            for layer_id in range(n_layers)
+        },
+        num_ranks=owner_group_size,
+    )
+    bucket_spec = tuple(
+        BucketSpec(
+            name=f"layers.{layer_id}",
+            patterns=fqns,
+            owner_rank_by_fqn=owners,
+        )
+        for layer_id, (fqns, owners) in enumerate(
+            zip(layer_bucket_fqns, owner_rank_by_bucket, strict=True)
+        )
+    )
+    return OptimizersContainer.Config(
+        implementation="foreach",
+        param_groups=param_groups,
+        optimizer_init_kwargs={
+            "DistributedMuon": {"bucket_spec": bucket_spec}
+        },
     )
 
 
