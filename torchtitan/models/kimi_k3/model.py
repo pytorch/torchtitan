@@ -752,6 +752,36 @@ class KimiK3Model(Decoder):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
         self.spatial_merge_size = config.spatial_merge_size
+        self._run_vision_encoder_on_text_only = False
+
+    def enable_vision_encoder_on_text_only(self) -> None:
+        """Keep vision collectives aligned when FSDP ranks mix modalities."""
+        self._run_vision_encoder_on_text_only = True
+
+    def _get_dummy_vision_dependency(
+        self,
+        embeddings_BLD: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.vision_encoder is not None
+        kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
+        patch_dim = self.vision_encoder.patch_embed.in_features
+        pixel_values_NPK = torch.zeros(
+            1,
+            kernel_h * kernel_w,
+            patch_dim,
+            dtype=embeddings_BLD.dtype,
+            device=embeddings_BLD.device,
+        )
+        grid_thw_N3 = torch.tensor(
+            [[1, kernel_h, kernel_w]],
+            dtype=torch.long,
+            device=embeddings_BLD.device,
+        )
+        vision_embeds_NLD = self.vision_encoder(
+            pixel_values_NPK,
+            grid_thw=grid_thw_N3,
+        )
+        return vision_embeds_NLD.sum().to(embeddings_BLD.dtype) * 0.0
 
     def get_attention_masks(self, positions: torch.Tensor) -> AttentionMasksType | None:
         del positions
@@ -772,6 +802,11 @@ class KimiK3Model(Decoder):
                 "both be omitted."
             )
         if pixel_values is None:
+            if (
+                self.vision_encoder is not None
+                and self._run_vision_encoder_on_text_only
+            ):
+                return embeddings + self._get_dummy_vision_dependency(embeddings)
             return embeddings
         assert grid_thw is not None
         if self.vision_encoder is None:

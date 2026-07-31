@@ -20,6 +20,7 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
 )
+from torchtitan.models.kimi_k3.model import KimiK3Model
 
 
 def parallelize_kimi_k3(
@@ -73,8 +74,11 @@ def parallelize_kimi_k3(
     )
     dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
-    vision_encoder = getattr(model, "vision_encoder", None)
+    assert isinstance(model, KimiK3Model)
+    vision_encoder = model.vision_encoder
     if vision_encoder is not None:
+        if dp_mesh.size() > 1:
+            model.enable_vision_encoder_on_text_only()
         apply_fsdp_to_vision_encoder(
             vision_encoder,
             dp_mesh,
@@ -85,7 +89,7 @@ def parallelize_kimi_k3(
         )
 
     apply_fsdp_to_decoder(
-        model,  # pyrefly: ignore [bad-argument-type]
+        model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],

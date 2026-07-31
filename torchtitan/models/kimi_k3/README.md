@@ -4,6 +4,9 @@ This directory contains the eager numerical reference implementation of Kimi
 K3 in TorchTitan. The initial scope is a topology-complete, reduced model for
 single-device or FSDP2 training and numerical comparison with the
 [released HuggingFace implementation](https://huggingface.co/moonshotai/Kimi-K3).
+It is intended to make architecture experiments and model-structure choices
+measurable against a stable, inspectable baseline before optimized kernels and
+additional parallelisms are introduced.
 
 The implementation is device-neutral. It uses PyTorch operators and does not
 import accelerator-specific packages. The reference kernels prioritize
@@ -73,6 +76,12 @@ The reference path mirrors the released implementation in these areas:
 should preserve its input/output contract and checkpoint schema. FSDP2 only
 shards parameters and leaves this eager forward contract unchanged.
 
+When FSDP ranks contain a mixture of image and text-only batches, every rank
+invokes the independently wrapped vision encoder once. Image ranks process
+their real patches; text-only ranks process the minimum mergeable dummy grid
+and attach its zero-valued result to the text embeddings. This keeps FSDP
+all-gather and reduce-scatter ordering aligned without changing text logits.
+
 ## Checkpoint conversion
 
 `KimiK3StateDictAdapter` converts between TorchTitan and an unquantized
@@ -89,6 +98,14 @@ compressed tensors is outside this first change. Numerical comparison should
 therefore instantiate the same reduced, unquantized model on both sides and
 copy one state dict through the adapter.
 
+`test_kimi_k3_hf_parity.py` freezes the float32 outputs from a deterministic
+reduced model evaluated with the released HuggingFace code at commit
+`c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721`. The test covers text logits,
+router choices, projected vision features, and end-to-end image-text logits.
+The source model is loaded strictly from the state dict produced by
+`KimiK3StateDictAdapter`; no full checkpoint or network access is required to
+run the regression.
+
 ## Tests
 
 The CPU unit tests cover:
@@ -98,11 +115,17 @@ The CPU unit tests cover:
 - the KDA kernel against a direct recurrent formulation, including backward;
 - a small text+image model forward and backward;
 - exhaustive state-dict round-trip for that small model.
+- reduced text, vision, router, and multimodal numerical parity against frozen
+  HuggingFace eager outputs;
 - single-rank FSDP2 forward and per-parameter gradient parity with a manually
-  cast BF16 reference.
+  cast BF16 reference;
+- two-rank FSDP2 forward and backward when one rank has an image and the other
+  rank is text-only.
 
 ```bash
-pytest -q tests/unit_tests/test_kimi_k3.py
+pytest -q \
+  tests/unit_tests/test_kimi_k3.py \
+  tests/unit_tests/test_kimi_k3_hf_parity.py
 pytest -q tests/unit_tests/test_kimi_k3_fsdp.py
 ```
 
@@ -118,5 +141,8 @@ pytest -q tests/unit_tests/test_kimi_k3_fsdp.py
 - No full 2.8T flavor.
 
 These restrictions are explicit so unsupported runtime settings fail instead
-of being silently ignored. EP and optimized kernels can be added in follow-up
-changes after the eager/FSDP2 reference forward is numerically locked.
+of being silently ignored. This first contribution deliberately limits
+parallel execution to FSDP2: its purpose is to establish the eager numerical
+reference used by Kimi K3 architecture experiments. TP, PP, CP, EP, and
+optimized kernels can be added independently after that forward contract is
+locked.
