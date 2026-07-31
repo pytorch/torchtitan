@@ -17,7 +17,8 @@ import torch.distributed.tensor.placement_types as placement_types
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Partial, Placement, Replicate, Shard
 from torch.optim import OptimizationUnit, Optimizer, OptimizerStepOps
-from torch.optim._muon import muon
+from torch.optim._muon import _compute_muon_update, muon
+from torch.optim.optimizer import _to_scalar
 
 from torchtitan.components.flex_shard import Owned
 
@@ -495,23 +496,21 @@ class _MuonAdapterStepOps:
             return
 
         group = unit_metadata.parameter_group
-        scratch_param = torch.zeros_like(logical_input)
-        scratch_momentum = torch.zeros_like(logical_input)
-        muon(
-            [scratch_param],
-            [logical_input],
-            [scratch_momentum],
-            lr=group["lr"],
-            weight_decay=0.0,
-            momentum=0.0,
-            nesterov=False,
+        direction, adjusted_lr = _compute_muon_update(
+            logical_input,
+            logical_input.shape,
+            lr=_to_scalar(group["lr"]),
             ns_coefficients=group["ns_coefficients"],
             eps=group["eps"],
             ns_steps=group["ns_steps"],
             adjust_lr_fn=group["adjust_lr_fn"],
-            has_complex=False,
         )
-        logical_out.copy_(scratch_param)
+        logical_out.zero_()
+        if isinstance(adjusted_lr, Tensor):
+            direction.mul_(-adjusted_lr)
+            logical_out.add_(direction)
+        else:
+            logical_out.add_(direction, alpha=-adjusted_lr)
 
     def apply_updates(
         self, unit: OptimizationUnit, updates: Mapping[str, Tensor]
