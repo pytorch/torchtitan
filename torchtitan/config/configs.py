@@ -27,15 +27,11 @@ import torch
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
     local_batch_size: int = 8
-    """
-    Batch size processed per data-parallel rank in one gradient accumulation step.
-    With pipeline parallelism, this is split into pipeline microbatches.
-    """
+    """Local batch size (i.e., per-device batch size)"""
 
     global_batch_size: int = -1
     """
-    Global batch size across data-parallel ranks and gradient accumulation steps.
-    Defaults to `training.local_batch_size * data-parallel degree`.
+    Global batch size (defaults to `training.local_batch_size * data-parallel degree`)
     """
 
     seq_len: int = 2048
@@ -204,7 +200,9 @@ class ParallelismConfig:
     pipeline_parallel_microbatch_size: int = 1
     """
     The size of each pipeline parallel microbatch (default 1).
-    `training.local_batch_size` must be evenly divisible by this value.
+    This value is used to compute the total number of microbatches by dividing local_batch_size with
+    pipeline_parallel_microbatch_size.
+    The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
     context_parallel_degree: int = 1
