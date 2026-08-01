@@ -21,6 +21,7 @@ Shape symbols used by the API entrypoints:
     ``EP``: expert-parallel group size.
 """
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -94,6 +95,7 @@ class _MinimalAsyncEPBufferState:
     prep_stream: torch.cuda.Stream
     copy_stream: torch.cuda.Stream
     num_row_copy_ctas: int | None
+    check_receive_capacity: bool
     hidden_recv_buffer_index: int = 0
     pending_events: dict[tuple[str, int], deque[_PendingEvent]] = field(
         default_factory=dict
@@ -172,6 +174,18 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         )
 
     overlap_config = getattr(config.compile, "ep_overlap", None)
+    receive_capacity_factor = getattr(
+        overlap_config,
+        "minimal_async_ep_receive_capacity_factor",
+        None,
+    )
+    if receive_capacity_factor is not None and (
+        not math.isfinite(receive_capacity_factor) or receive_capacity_factor < 1.0
+    ):
+        raise ValueError(
+            "MinimalAsyncEP receive capacity factor must be finite and at least "
+            "1.0, or None."
+        )
     overlap_enabled = bool(getattr(overlap_config, "enabled", False))
     num_row_copy_ctas = (
         getattr(overlap_config, "minimal_async_ep_num_copy_ctas", None)
@@ -189,12 +203,14 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         ]
         token_dispatcher_cfg.num_row_copy_ctas = num_row_copy_ctas
         token_dispatcher_cfg.force_load_balance = config.debug.moe_force_load_balance
+        token_dispatcher_cfg.receive_capacity_factor = receive_capacity_factor
         token_dispatcher_cfg.receive_capacity = _buffer_rows(
             token_dispatcher_cfg.tokens_per_rank,
             token_dispatcher_cfg.top_k,
             token_dispatcher_cfg.num_experts // parallelism.expert_parallel_degree,
             parallelism.expert_parallel_degree,
             token_dispatcher_cfg.force_load_balance,
+            receive_capacity_factor,
         )[0]
 
 
@@ -248,6 +264,7 @@ def _buffer_rows(
     num_local_experts: int,
     ep_size: int,
     force_load_balance: bool,
+    receive_capacity_factor: float | None = None,
 ) -> tuple[int, int]:
     if force_load_balance:
         dispatch_rows = _forced_load_balance_receive_capacity(
@@ -255,6 +272,12 @@ def _buffer_rows(
             top_k,
             ep_size * num_local_experts,
             ep_size,
+        )
+        return dispatch_rows, tokens_per_rank * top_k
+
+    if receive_capacity_factor is not None:
+        dispatch_rows = math.ceil(
+            tokens_per_rank * top_k * receive_capacity_factor
         )
         return dispatch_rows, tokens_per_rank * top_k
 
@@ -272,6 +295,7 @@ def init_buffer(
     dtype: torch.dtype,
     device: torch.device,
     force_load_balance: bool = False,
+    receive_capacity_factor: float | None = None,
     num_row_copy_ctas: int | None = None,
 ) -> None:
     """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
@@ -293,9 +317,18 @@ def init_buffer(
         num_local_experts,
         ep_size,
         force_load_balance,
+        receive_capacity_factor,
     )
     assert dispatch_rows >= combine_rows
-    capacity_mode = "forced_load_balance" if force_load_balance else "worst_case"
+    capacity_mode = (
+        "forced_load_balance"
+        if force_load_balance
+        else (
+            f"factor_{receive_capacity_factor:g}"
+            if receive_capacity_factor is not None
+            else "worst_case"
+        )
+    )
 
     logger.info(
         "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
@@ -374,6 +407,9 @@ def init_buffer(
         prep_stream=torch.cuda.Stream(device=device),
         copy_stream=torch.cuda.Stream(device=device, priority=-1),
         num_row_copy_ctas=num_row_copy_ctas,
+        check_receive_capacity=(
+            receive_capacity_factor is not None and not force_load_balance
+        ),
     )
 
 
@@ -547,6 +583,16 @@ def _allocate_direct_metadata(
     return outputs, scratch
 
 
+def _assert_receive_capacity(
+    tokens_per_destination: torch.Tensor,
+    capacity: int,
+) -> None:
+    torch._assert_async(
+        torch.all(torch.sum(tokens_per_destination, dim=1) <= capacity),
+        "MinimalAsyncEP routing exceeded the configured receive capacity.",
+    )
+
+
 def _compute_direct_metadata(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     all_tokens_per_expert_RE: torch.Tensor,  # noqa: N803
@@ -569,6 +615,8 @@ def _compute_direct_metadata(
     torch.cumsum(counts_sde, 0, out=scratch.source_prefix)
     torch.sub(scratch.source_prefix, counts_sde, out=scratch.source_prefix)
     torch.sum(counts_sde, 0, out=scratch.totals)
+    if _buffer_state.check_receive_capacity:
+        _assert_receive_capacity(scratch.totals, receive_capacity)
     torch.cumsum(scratch.totals, 1, out=scratch.expert_starts)
     torch.sub(
         scratch.expert_starts,
