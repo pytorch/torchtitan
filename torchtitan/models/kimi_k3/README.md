@@ -79,8 +79,7 @@ The reference path mirrors the released implementation in these areas:
 `KimiKDAKernel` is the kernel boundary. It dispatches to FLA's `chunk_kda`
 with the gate activation, beta sigmoid, and query/key L2 norm fused in, so a
 future backend can replace it while preserving the same input/output contract
-and checkpoint schema. FLA's chunked kernel cannot compile head dimensions
-below 16, and the reduced flavor uses 32.
+and checkpoint schema.
 
 The vision encoder is its own FSDP unit, so its collectives only fire on ranks
 that execute it. Because a data-parallel rank can legitimately receive a batch

@@ -369,10 +369,6 @@ class TestKimiK3(unittest.TestCase):
                     assert tensor.grad is not None
                     self.assertTrue(torch.isfinite(tensor.grad).all())
 
-    def test_kda_kernel_rejects_head_dim_below_kernel_minimum(self):
-        with self.assertRaisesRegex(ValueError, "head_dim must be at least"):
-            KimiKDAKernel.Config(head_dim=8, lower_bound=-5.0).build()
-
     def test_unused_moe_experts_receive_zero_gradients(self):
         torch.manual_seed(2)
         model = _small_model_config().build()

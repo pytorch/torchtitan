@@ -40,11 +40,6 @@ from torchtitan.protocols.module import Module, ModuleList
 # K = key head dimension, V = value head dimension, E = experts,
 # T = flattened tokens, N = attention-residual entries.
 
-# Below this head dimension FLA's chunked KDA kernel fails to compile its
-# Triton block sizes; the failure is a compilation error deep in the kernel,
-# so reject it where the configuration is built instead.
-_MIN_KDA_HEAD_DIM = 16
-
 
 class KimiRMSNorm(RMSNorm):
     """RMSNorm that applies its weight after casting back to the input dtype.
@@ -266,11 +261,6 @@ class KimiKDAKernel(Module):
         self.lower_bound = config.lower_bound
         if self.lower_bound is not None and not (-5.0 <= self.lower_bound < 0.0):
             raise ValueError("KDA lower_bound must be in the safe range [-5, 0).")
-        if config.head_dim < _MIN_KDA_HEAD_DIM:
-            raise ValueError(
-                f"KDA head_dim must be at least {_MIN_KDA_HEAD_DIM} for the FLA "
-                f"chunked kernel, got {config.head_dim}."
-            )
 
     def forward(
         self,
