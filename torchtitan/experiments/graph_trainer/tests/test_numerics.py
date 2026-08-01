@@ -274,8 +274,14 @@ DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS = (
 )
 DSV3_EP_OVERLAP_EAGER = " --compile.ep_overlap.strategy eager"
 DSV3_EP_OVERLAP_GRAPH = " --compile.ep_overlap.strategy graph"
+DSV3_EP_OVERLAP_DISABLE_GRAD_CHAIN_OPT = (
+    " --compile.ep_overlap.disable_early_grad_accumulation"
+)
+DSV3_EP_OVERLAP_EAGER_BITWISE = (
+    DSV3_EP_OVERLAP_EAGER + DSV3_EP_OVERLAP_DISABLE_GRAD_CHAIN_OPT
+)
 DSV3_EP_OVERLAP_GRAPH_BITWISE = (
-    DSV3_EP_OVERLAP_GRAPH + " --compile.ep_overlap.disable_early_grad_accumulation"
+    DSV3_EP_OVERLAP_GRAPH + DSV3_EP_OVERLAP_DISABLE_GRAD_CHAIN_OPT
 )
 
 
@@ -312,7 +318,7 @@ def _run_deepseek_v3_ep_overlap_loss_compare() -> bool:
         baseline_config="graph_trainer_deepseek_v3_debugmodel",
         test_config="graph_trainer_deepseek_v3_debugmodel",
         parallelism=DSV3_EP_OVERLAP_GRAPH_PARALLELISM,
-        baseline_options_extra=DSV3_EP_OVERLAP_OPTIONS + DSV3_EP_OVERLAP_EAGER,
+        baseline_options_extra=DSV3_EP_OVERLAP_OPTIONS + DSV3_EP_OVERLAP_EAGER_BITWISE,
         test_options_extra=DSV3_EP_OVERLAP_OPTIONS + DSV3_EP_OVERLAP_GRAPH_BITWISE,
     )
 
@@ -324,7 +330,9 @@ def _run_deepseek_v3_ep_overlap_moe_seq_loss_compare() -> bool:
         baseline_config="graph_trainer_deepseek_v3_debugmodel",
         test_config="graph_trainer_deepseek_v3_debugmodel",
         parallelism=DSV3_EP_OVERLAP_GRAPH_PARALLELISM,
-        baseline_options_extra=DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS + DSV3_EP_OVERLAP_EAGER,
+        baseline_options_extra=(
+            DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS + DSV3_EP_OVERLAP_EAGER_BITWISE
+        ),
         test_options_extra=DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS
         + DSV3_EP_OVERLAP_GRAPH_BITWISE,
     )
@@ -338,7 +346,7 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
         test_config="graph_trainer_deepseek_v3_debugmodel",
         parallelism=DSV3_EP_OVERLAP_GRAPH_PARALLELISM,
         baseline_options_extra=DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS
-        + DSV3_EP_OVERLAP_EAGER,
+        + DSV3_EP_OVERLAP_EAGER_BITWISE,
         test_options_extra=DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS
         + DSV3_EP_OVERLAP_GRAPH_BITWISE,
     )
