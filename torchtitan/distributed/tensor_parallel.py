@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import warnings
 from functools import partial
 from typing import Any
 
@@ -100,7 +101,9 @@ class NoParallel(ParallelStyle):
 
 
 def maybe_enable_async_tp(
-    parallelism: ParallelismConfig, compile_config: CompileConfig, tp_mesh: DeviceMesh
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig,
+    tp_mesh: DeviceMesh,
 ):
     if not parallelism.enable_async_tensor_parallel:
         return
@@ -109,6 +112,15 @@ def maybe_enable_async_tp(
         raise RuntimeError(
             "Async TP requires 'model' in --compile.components and --compile.enable"
         )
+
+    group_name = tp_mesh.get_group().group_name
+    from torch.distributed._symmetric_memory import (
+        enable_symm_mem_for_group,  # pyrefly: ignore [deprecated]
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        enable_symm_mem_for_group(group_name)  # pyrefly: ignore [deprecated]
 
     torch._inductor.config._micro_pipeline_tp = True
 
