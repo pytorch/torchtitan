@@ -10,6 +10,7 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import patch
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -196,7 +197,7 @@ def test_forced_load_balance_receive_capacity_matches_round_robin_routing():
         assert expected == actual
 
 
-def test_buffer_rows_only_use_tight_capacity_for_forced_load_balance():
+def test_buffer_rows_use_configured_receive_capacity():
     forced = minimal_async_ep_api._buffer_rows(
         tokens_per_rank=32_768,
         top_k=8,
@@ -211,9 +212,18 @@ def test_buffer_rows_only_use_tight_capacity_for_forced_load_balance():
         ep_size=64,
         force_load_balance=False,
     )
+    capacity_limited = minimal_async_ep_api._buffer_rows(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        force_load_balance=False,
+        receive_capacity_factor=2.0,
+    )
 
     assert forced == (262_144, 262_144)
     assert worst_case == (8_388_608, 262_144)
+    assert capacity_limited == (524_288, 262_144)
 
 
 def test_671b_forced_load_balance_uses_tight_receive_capacity():
@@ -235,6 +245,43 @@ def test_671b_forced_load_balance_uses_tight_receive_capacity():
         assert isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
         assert dispatcher.force_load_balance
         assert dispatcher.receive_capacity == 131_072
+
+
+def test_671b_real_routing_uses_configured_receive_capacity():
+    from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+        graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep,
+    )
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+
+    config = graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep()
+    config.compile.memory_policy = "full"
+    config.compile.ep_overlap.minimal_async_ep_receive_capacity_factor = 4.0
+    config.model_spec.model.update_from_config(config=config)
+
+    moe_layers = [layer for layer in config.model_spec.model.layers if layer.moe]
+    assert moe_layers
+    expected_capacity = (
+        config.training.local_batch_size
+        * config.training.seq_len
+        * moe_layers[0].moe.routed_experts.token_dispatcher.top_k
+        * 4
+    )
+    for layer in moe_layers:
+        dispatcher = layer.moe.routed_experts.token_dispatcher
+        assert isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+        assert dispatcher.receive_capacity_factor == 4.0
+        assert dispatcher.receive_capacity == expected_capacity
+
+
+def test_receive_capacity_rejects_global_routing_overflow():
+    with pytest.raises(
+        RuntimeError,
+        match="routing exceeded the configured receive capacity",
+    ):
+        minimal_async_ep_api._assert_receive_capacity(
+            torch.tensor([[2, 1], [1, 0]]),
+            capacity=2,
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -306,6 +353,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 top_k=2,
                 dtype=torch.float32,
                 device=device,
+                receive_capacity_factor=2.0,
             )
             rank = dist.get_rank()
             x = (

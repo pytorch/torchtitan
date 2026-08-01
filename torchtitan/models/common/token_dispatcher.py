@@ -1115,6 +1115,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     dtype: torch.dtype | None
     buffer_device: torch.device
     force_load_balance: bool
+    receive_capacity_factor: float | None
     receive_capacity: int | None
 
     @dataclass(kw_only=True, slots=True)
@@ -1124,6 +1125,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         dtype: torch.dtype | None = None
         device: torch.device | None = None
         force_load_balance: bool = False
+        receive_capacity_factor: float | None = None
         receive_capacity: int | None = None
 
     def __init__(self, config: Config):
@@ -1134,6 +1136,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self.tokens_per_rank = config.tokens_per_rank
         self.dtype = config.dtype
         self.force_load_balance = config.force_load_balance
+        self.receive_capacity_factor = config.receive_capacity_factor
         self.receive_capacity = config.receive_capacity
         if config.device is None:
             buffer_device = torch.device(device_type, device_module.current_device())
@@ -1155,6 +1158,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             torch.dtype,
             torch.device,
             bool,
+            float | None,
             int,
         ]
         | None
@@ -1218,6 +1222,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             self.dtype,
             self.buffer_device,
             self.force_load_balance,
+            self.receive_capacity_factor,
             self.receive_capacity,
         )
         if MinimalAsyncEPTokenDispatcher._global_buffer_key is not None:
@@ -1237,6 +1242,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             dtype=self.dtype,
             device=self.buffer_device,
             force_load_balance=self.force_load_balance,
+            receive_capacity_factor=self.receive_capacity_factor,
         )
         MinimalAsyncEPTokenDispatcher._global_buffer_key = buffer_key
 
