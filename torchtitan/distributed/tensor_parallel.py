@@ -18,7 +18,6 @@ from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
 from torchtitan.config import CompileConfig, ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 
 
@@ -104,7 +103,7 @@ class NoParallel(ParallelStyle):
 def maybe_enable_async_tp(
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    parallel_dims: ParallelDims,
+    tp_mesh: DeviceMesh,
 ):
     if not parallelism.enable_async_tensor_parallel:
         return
@@ -114,7 +113,6 @@ def maybe_enable_async_tp(
             "Async TP requires 'model' in --compile.components and --compile.enable"
         )
 
-    tp_mesh = parallel_dims.get_dense_tp_mesh()
     group_name = tp_mesh.get_group().group_name
     from torch.distributed._symmetric_memory import (
         enable_symm_mem_for_group,  # pyrefly: ignore [deprecated]
