@@ -23,6 +23,7 @@ Shape symbols used by the API entrypoints:
 
 import contextlib
 import contextvars
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -44,7 +45,6 @@ from torchtitan.distributed.minimal_async_ep.kernels import (
 from torchtitan.tools.logging import logger
 
 
-_HIDDEN_RECV_BUFFER_COUNT = 2
 _DEFAULT_BUFFER_SET = 0
 
 _HIDDEN_READY_CHANNEL = 0
@@ -82,11 +82,10 @@ class _PendingEvent:
 
 @dataclass
 class _HiddenRecvPool:
-    buffers: list[torch.Tensor]
-    handles: list[Any]
-    peer_buffers: list[list[torch.Tensor]]
-    peer_ptrs: list[torch.Tensor]
-    buffer_index: int = 0
+    buffer: torch.Tensor
+    handle: Any
+    peer_buffers: list[torch.Tensor]
+    peer_ptrs: torch.Tensor
 
 
 @dataclass
@@ -108,6 +107,7 @@ class _MinimalAsyncEPBufferState:
     prep_stream: torch.cuda.Stream
     copy_stream: torch.cuda.Stream
     num_row_copy_ctas: int | None
+    check_receive_capacity: bool
     pending_events: dict[tuple[str, int], deque[_PendingEvent]] = field(
         default_factory=dict
     )
@@ -139,27 +139,18 @@ def _create_hidden_pool(
     device: torch.device,
     group: dist.ProcessGroup,
 ) -> _HiddenRecvPool:
-    buffers = [
-        symm_mem.empty(rows, hidden_dim, dtype=dtype, device=device)
-        for _ in range(_HIDDEN_RECV_BUFFER_COUNT)
-    ]
-    handles = [symm_mem.rendezvous(buffer, group) for buffer in buffers]
+    buffer = symm_mem.empty(rows, hidden_dim, dtype=dtype, device=device)
+    handle = symm_mem.rendezvous(buffer, group)
     peer_buffers = [
-        [
-            handle.get_buffer(peer, buffer.shape, buffer.dtype)
-            for peer in range(group.size())
-        ]
-        for buffer, handle in zip(buffers, handles)
+        handle.get_buffer(peer, buffer.shape, buffer.dtype)
+        for peer in range(group.size())
     ]
-    peer_ptrs = [
-        torch.tensor(
-            [peer_buffer.data_ptr() for peer_buffer in peers],
-            dtype=torch.int64,
-            device=device,
-        )
-        for peers in peer_buffers
-    ]
-    return _HiddenRecvPool(buffers, handles, peer_buffers, peer_ptrs)
+    peer_ptrs = torch.tensor(
+        [peer_buffer.data_ptr() for peer_buffer in peer_buffers],
+        dtype=torch.int64,
+        device=device,
+    )
+    return _HiddenRecvPool(buffer, handle, peer_buffers, peer_ptrs)
 
 
 def _create_counts_buffer(
@@ -263,6 +254,18 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         )
 
     overlap_config = getattr(config.compile, "ep_overlap", None)
+    receive_capacity_factor = getattr(
+        overlap_config,
+        "minimal_async_ep_receive_capacity_factor",
+        None,
+    )
+    if receive_capacity_factor is not None and (
+        not math.isfinite(receive_capacity_factor) or receive_capacity_factor < 1.0
+    ):
+        raise ValueError(
+            "MinimalAsyncEP receive capacity factor must be finite and at least "
+            "1.0, or None."
+        )
     overlap_enabled = bool(getattr(overlap_config, "enabled", False))
     if overlap_enabled and not graph_remat_enabled:
         raise ValueError(
@@ -287,6 +290,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         token_dispatcher_cfg.num_buffer_sets = num_buffer_sets
         token_dispatcher_cfg.num_row_copy_ctas = num_row_copy_ctas
         token_dispatcher_cfg.force_load_balance = config.debug.moe_force_load_balance
+        token_dispatcher_cfg.receive_capacity_factor = receive_capacity_factor
         token_dispatcher_cfg.receive_capacity = _buffer_rows_per_set(
             token_dispatcher_cfg.tokens_per_rank,
             token_dispatcher_cfg.top_k,
@@ -294,6 +298,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             parallelism.expert_parallel_degree,
             num_buffer_sets,
             token_dispatcher_cfg.force_load_balance,
+            receive_capacity_factor,
         )[0]
 
 
@@ -348,6 +353,7 @@ def _buffer_rows_per_set(
     ep_size: int,
     num_buffer_sets: int,
     force_load_balance: bool,
+    receive_capacity_factor: float | None = None,
 ) -> tuple[int, int]:
     if num_buffer_sets < 1:
         raise ValueError(f"num_buffer_sets must be positive, got {num_buffer_sets}.")
@@ -360,6 +366,11 @@ def _buffer_rows_per_set(
             ep_size * num_local_experts,
             ep_size,
         )
+        return dispatch_rows, max_tokens_per_set * top_k
+
+    if receive_capacity_factor is not None:
+        max_tokens_per_set = (tokens_per_rank + num_buffer_sets - 1) // num_buffer_sets
+        dispatch_rows = math.ceil(max_tokens_per_set * top_k * receive_capacity_factor)
         return dispatch_rows, max_tokens_per_set * top_k
 
     max_routed_tokens = ep_size * tokens_per_rank * min(top_k, num_local_experts)
@@ -385,6 +396,7 @@ def init_buffer(
     device: torch.device,
     num_buffer_sets: int = 1,
     force_load_balance: bool = False,
+    receive_capacity_factor: float | None = None,
     num_row_copy_ctas: int | None = None,
 ) -> None:
     """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
@@ -409,8 +421,17 @@ def init_buffer(
         ep_size,
         num_buffer_sets,
         force_load_balance,
+        receive_capacity_factor,
     )
-    capacity_mode = "forced_load_balance" if force_load_balance else "worst_case"
+    capacity_mode = (
+        "forced_load_balance"
+        if force_load_balance
+        else (
+            f"factor_{receive_capacity_factor:g}"
+            if receive_capacity_factor is not None
+            else "worst_case"
+        )
+    )
 
     logger.info(
         "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
@@ -437,16 +458,14 @@ def init_buffer(
 
     buffer_sets = []
     for _ in range(num_buffer_sets):
-        dispatch_pool = _create_hidden_pool(
-            dispatch_rows, hidden_dim, dtype, device, group
-        )
-        hidden_pools = {"dispatch": dispatch_pool}
-        if num_buffer_sets == 1:
-            hidden_pools["combine"] = dispatch_pool
-        else:
-            hidden_pools["combine"] = _create_hidden_pool(
+        hidden_pools = {
+            "dispatch": _create_hidden_pool(
+                dispatch_rows, hidden_dim, dtype, device, group
+            ),
+            "combine": _create_hidden_pool(
                 combine_rows, hidden_dim, dtype, device, group
-            )
+            ),
+        }
         (
             counts_buffer,
             counts_handle,
@@ -470,6 +489,9 @@ def init_buffer(
         prep_stream=torch.cuda.Stream(device=device),
         copy_stream=torch.cuda.Stream(device=device, priority=-1),
         num_row_copy_ctas=num_row_copy_ctas,
+        check_receive_capacity=(
+            receive_capacity_factor is not None and not force_load_balance
+        ),
     )
 
 
@@ -527,7 +549,7 @@ def _copy_rows_to_peers_async_cuda(
     assert _buffer_state is not None
 
     pool = _buffer_state.buffer_sets[buffer_set].hidden_pools[exchange]
-    buffer_rows = pool.buffers[0].shape[0]
+    buffer_rows = pool.buffer.shape[0]
     if receive_capacity > buffer_rows:
         raise RuntimeError(
             "MinimalAsyncEP receive capacity exceeds the initialized symmetric "
@@ -535,13 +557,7 @@ def _copy_rows_to_peers_async_cuda(
             f"buffer_rows={buffer_rows}."
         )
 
-    buffer_index = pool.buffer_index
-    pool.buffer_index = (buffer_index + 1) % len(pool.buffers)
-    hidden_recv_buffer = pool.buffers[buffer_index]
-    hidden_recv_handle = pool.handles[buffer_index]
-    hidden_recv_peer_buffers = pool.peer_buffers[buffer_index]
-    hidden_recv_peer_ptrs = pool.peer_ptrs[buffer_index]
-    hidden_recv_view = hidden_recv_buffer.narrow(0, 0, receive_capacity).narrow(
+    hidden_recv_view = pool.buffer.narrow(0, 0, receive_capacity).narrow(
         1,
         0,
         x.shape[1],
@@ -553,7 +569,7 @@ def _copy_rows_to_peers_async_cuda(
     with torch.cuda.stream(copy_stream):
         copy_rows_to_peers_kernel(
             x,
-            hidden_recv_peer_buffers,
+            pool.peer_buffers,
             dst_ranks,
             dst_rows,
             ep_size=_buffer_state.group.size(),
@@ -563,11 +579,11 @@ def _copy_rows_to_peers_async_cuda(
             num_warps=num_warps,
             src_rows=src_rows,
             src_row_divisor=src_row_divisor,
-            dst_ptrs=hidden_recv_peer_ptrs,
+            dst_ptrs=pool.peer_ptrs,
             num_valid_rows=num_valid_rows,
             num_ctas=_buffer_state.num_row_copy_ctas,
         )
-        _wait_ready(hidden_recv_handle, _HIDDEN_READY_CHANNEL)
+        _wait_ready(pool.handle, _HIDDEN_READY_CHANNEL)
         _record_pending_event(exchange, hidden_recv_view, copy_stream, retained)
     return hidden_recv_view
 
@@ -645,6 +661,16 @@ def _allocate_direct_metadata(
     return outputs, scratch
 
 
+def _assert_receive_capacity(
+    tokens_per_destination: torch.Tensor,
+    capacity: int,
+) -> None:
+    torch._assert_async(
+        torch.all(torch.sum(tokens_per_destination, dim=1) <= capacity),
+        "MinimalAsyncEP routing exceeded the configured receive capacity.",
+    )
+
+
 def _compute_direct_metadata(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     all_tokens_per_expert_RE: torch.Tensor,  # noqa: N803
@@ -667,6 +693,8 @@ def _compute_direct_metadata(
     torch.cumsum(counts_sde, 0, out=scratch.source_prefix)
     torch.sub(scratch.source_prefix, counts_sde, out=scratch.source_prefix)
     torch.sum(counts_sde, 0, out=scratch.totals)
+    if _buffer_state.check_receive_capacity:
+        _assert_receive_capacity(scratch.totals, receive_capacity)
     torch.cumsum(scratch.totals, 1, out=scratch.expert_starts)
     torch.sub(
         scratch.expert_starts,
@@ -731,7 +759,6 @@ def _compute_direct_metadata(
         dst_rows=outputs.combine_dst_rows,
         num_valid_rows=outputs.combine_num_valid_rows,
     )
-
     return outputs
 
 
