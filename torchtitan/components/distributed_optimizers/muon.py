@@ -167,6 +167,19 @@ class DistributedMuon(Optimizer):
         self._first_step_validated = False
 
     def _infer_control_group(self) -> dist.ProcessGroup | None:
+        for group, compute_placement in zip(
+            self.param_groups, self._group_compute_placements, strict=True
+        ):
+            if not isinstance(compute_placement, Owned):
+                continue
+            for param in group["params"]:
+                if isinstance(param, DTensor) and _has_owned_sharded_storage(param):
+                    mesh = param.device_mesh
+                    return (
+                        mesh.get_group()
+                        if mesh.ndim == 1
+                        else mesh._flatten().get_group()
+                    )
         for group in self.param_groups:
             for param in group["params"]:
                 if isinstance(param, DTensor) and param.device_mesh.ndim == 1:
@@ -279,11 +292,13 @@ class DistributedMuon(Optimizer):
         compute_layout: _ParameterComputeLayout,
     ) -> _RedistributionGroup:
         mesh = compute_layout.param.device_mesh
-        participants = _storage_mesh_ranks(mesh)
+        redistribution_mesh = mesh if mesh.ndim == 1 else mesh._flatten()
+        process_group = redistribution_mesh.get_group()
+        participants = tuple(dist.get_process_group_ranks(process_group))
         return _RedistributionGroup(
-            process_group=mesh.get_group(),
+            process_group=process_group,
             participants=participants,
-            local_participant=participants[mesh.get_local_rank()],
+            local_participant=participants[dist.get_rank(process_group)],
         )
 
     def _synchronize_setup_error(self, error: Exception | None) -> None:
@@ -527,6 +542,25 @@ def _has_dim0_sharded_storage(param: DTensor) -> bool:
     return has_shard
 
 
+def _has_owned_sharded_storage(param: DTensor) -> bool:
+    storage_shard_dims = tuple(
+        _normalize_dim(placement.dim, param.ndim)
+        for placement in param.placements
+        if type(placement) is Shard
+    )
+    return (
+        param.device_mesh.ndim == 1
+        and len(param.placements) == 1
+        and storage_shard_dims == (0,)
+    ) or (
+        param.device_mesh.ndim == 2
+        and param.device_mesh.mesh_dim_names is not None
+        and len(param.placements) == 2
+        and len(storage_shard_dims) == 2
+        and set(storage_shard_dims) == {0, 1}
+    )
+
+
 def _storage_mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
     if mesh.ndim == 1:
         return tuple(dist.get_process_group_ranks(mesh.get_group()))
@@ -613,15 +647,10 @@ def _validate_muon_parameter(
                 "compute tensor"
             )
         return True
-    elif (
-        param.device_mesh.ndim != 1
-        or len(param.placements) != 1
-        or type(param.placements[0]) is not Shard
-        or param.placements[0].dim % param.ndim != 0
-    ):
+    elif not _has_owned_sharded_storage(param):
         raise ValueError(
-            f"owned Muon parameter {fqn!r} requires replicated or 1D Shard(0) "
-            "matrix storage"
+            f"owned Muon parameter {fqn!r} requires replicated, 1D Shard(0), "
+            "or named 2D Shard(0)/Shard(1) matrix storage"
         )
     return False
 
@@ -714,23 +743,42 @@ def _compute_muon_update(
     return out
 
 
+def _storage_block_for_participant(
+    param: DTensor,
+    participant: int,
+) -> _MatrixBlock:
+    mesh_shape = tuple(param.device_mesh.shape)
+    mesh_rank = _storage_mesh_ranks(param.device_mesh).index(participant)
+    coordinate = [0] * len(mesh_shape)
+    for mesh_dim in range(len(mesh_shape) - 1, -1, -1):
+        mesh_rank, coordinate[mesh_dim] = divmod(mesh_rank, mesh_shape[mesh_dim])
+
+    local_shape = list(param.shape)
+    global_offsets = [0] * param.ndim
+    for mesh_dim, placement in enumerate(param.placements):
+        assert type(placement) is Shard
+        tensor_dim = _normalize_dim(placement.dim, param.ndim)
+        local_size, global_offset = Shard.local_shard_size_and_offset(
+            param.shape[tensor_dim],
+            mesh_shape[mesh_dim],
+            coordinate[mesh_dim],
+        )
+        local_shape[tensor_dim] = local_size
+        global_offsets[tensor_dim] = global_offset
+    return _MatrixBlock(
+        offsets=tuple(global_offsets),
+        shape=tuple(local_shape),
+    )
+
+
 def _owned_storage_blocks(
     compute_layout: _ParameterComputeLayout,
     participants: tuple[int, ...],
 ) -> tuple[tuple[int, _MatrixBlock], ...]:
-    shape = tuple(compute_layout.global_compute_shape)
-    blocks = []
-    for group_rank, participant in enumerate(participants):
-        row_count, row_offset = Shard.local_shard_size_and_offset(
-            shape[0], len(participants), group_rank
+    return tuple(
+        (
+            participant,
+            _storage_block_for_participant(compute_layout.param, participant),
         )
-        blocks.append(
-            (
-                participant,
-                _MatrixBlock(
-                    offsets=(row_offset, *(0 for _ in shape[1:])),
-                    shape=(row_count, *shape[1:]),
-                ),
-            )
-        )
-    return tuple(blocks)
+        for participant in participants
+    )

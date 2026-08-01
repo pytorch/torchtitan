@@ -245,7 +245,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             torch.arange(12, device=self.device).reshape(4, 3).float(), 0
         )
         with self.assertRaisesRegex(
-            ValueError, "requires replicated or 1D Shard"
+            ValueError, "requires replicated, 1D Shard"
         ):
             build(owned, "owned", Owned(), owner_rank=0)
 
@@ -753,6 +753,100 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             reference_redistributed,
             reference_local_blocks,
         )
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestTensorParallelDistributedMuon(_DistributedMuonTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def mesh(self):
+        if not hasattr(self, "_mesh"):
+            self._mesh = init_device_mesh(
+                self.device_type,
+                (2, 2),
+                mesh_dim_names=("fsdp", "tp"),
+            )
+        return self._mesh
+
+    @with_comms
+    def test_shard0_shard1_bucket_matches_plain_muon(self):
+        placements = (Shard(0), Shard(1))
+        values = [
+            torch.arange(35, device=self.device).reshape(5, 7).float().div_(10),
+            torch.arange(35, 65, device=self.device).reshape(6, 5).float().div_(10),
+        ]
+        params = [
+            torch.nn.Parameter(
+                distribute_tensor(value.clone(), self.mesh, placements)
+            )
+            for value in values
+        ]
+        names = ["layers.0.first", "layers.0.second"]
+        optimizer = build_distributed_muon(
+            [
+                {
+                    "params": params,
+                    "param_names": names,
+                    "compute_sharding": MuonComputeSharding(placement=Owned()),
+                }
+            ],
+            bucket_spec=[
+                BucketSpec(
+                    patterns=("layers.0.*",),
+                    owner_rank_by_fqn={names[0]: 1, names[1]: 3},
+                )
+            ],
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+
+        grads = [value.flip((0, 1)).contiguous() for value in values]
+        for param, grad in zip(params, grads, strict=True):
+            param.grad = distribute_tensor(grad, self.mesh, placements)
+
+        references = [torch.nn.Parameter(value.clone()) for value in values]
+        reference_optimizer = torch.optim.Muon(
+            references,
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+        for reference, grad in zip(references, grads, strict=True):
+            reference.grad = grad.clone()
+
+        all_to_all_single = dist.all_to_all_single
+        with patch(
+            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist.all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            optimizer.step()
+        reference_optimizer.step()
+
+        self.assertEqual(collective.call_count, 2)
+        for param, reference in zip(params, references, strict=True):
+            expected_param = distribute_tensor(
+                reference.detach(), self.mesh, placements
+            )
+            expected_momentum = distribute_tensor(
+                reference_optimizer.state[reference]["momentum_buffer"],
+                self.mesh,
+                placements,
+            )
+            momentum = optimizer.state[param]["momentum_buffer"]
+            self.assertEqual(param.placements, placements)
+            self.assertEqual(momentum.placements, placements)
+            torch.testing.assert_close(param.to_local(), expected_param.to_local())
+            torch.testing.assert_close(
+                momentum.to_local(), expected_momentum.to_local()
+            )
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
