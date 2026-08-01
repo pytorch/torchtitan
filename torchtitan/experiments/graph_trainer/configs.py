@@ -61,6 +61,13 @@ class EpOverlapConfig:
     the configured capacity instead of dropping tokens.
     """
 
+    minimal_async_ep_num_copy_ctas: int | None = 50
+    """Persistent row-copy grid size used by MinimalAsyncEP during overlap.
+
+    ``None`` leaves the copy kernel unbounded. This setting has no effect on
+    other EP backends or when EP overlap is disabled.
+    """
+
     disable_early_grad_accumulation: bool = False
     """Disable chunked parameter-gradient accumulation before communication.
 
@@ -223,6 +230,13 @@ def validate_ep_overlap_config(
         raise ValueError(
             "--compile.ep_overlap.minimal_async_ep_receive_capacity_factor "
             "must be finite and at least 1.0, or None"
+        )
+
+    num_copy_ctas = ep_overlap_config.minimal_async_ep_num_copy_ctas
+    if num_copy_ctas is not None and num_copy_ctas < 1:
+        raise ValueError(
+            "--compile.ep_overlap.minimal_async_ep_num_copy_ctas must be "
+            "positive or None"
         )
 
     return chunk_dim, chunk_strategy, module_fqn
