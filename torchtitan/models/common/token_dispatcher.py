@@ -1114,6 +1114,9 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     tokens_per_rank: int | None
     dtype: torch.dtype | None
     buffer_device: torch.device
+    force_load_balance: bool
+    receive_capacity_factor: float | None
+    receive_capacity: int | None
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
@@ -1121,6 +1124,9 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
+        force_load_balance: bool = False
+        receive_capacity_factor: float | None = None
+        receive_capacity: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -1129,6 +1135,9 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self.hidden_dim = config.hidden_dim
         self.tokens_per_rank = config.tokens_per_rank
         self.dtype = config.dtype
+        self.force_load_balance = config.force_load_balance
+        self.receive_capacity_factor = config.receive_capacity_factor
+        self.receive_capacity = config.receive_capacity
         if config.device is None:
             buffer_device = torch.device(device_type, device_module.current_device())
         else:
@@ -1140,7 +1149,19 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     # initializes it, same-configuration dispatchers reuse it, and differing
     # metadata is invalid because the buffer layout would not match.
     _global_buffer_key: ClassVar[
-        tuple[object, int, int, int, int, torch.dtype, torch.device] | None
+        tuple[
+            object,
+            int,
+            int,
+            int,
+            int,
+            torch.dtype,
+            torch.device,
+            bool,
+            float | None,
+            int,
+        ]
+        | None
     ] = None
 
     def wire_meshes(
@@ -1171,6 +1192,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
                 ("tokens_per_rank", self.tokens_per_rank),
                 ("dtype", self.dtype),
                 ("device", self.buffer_device),
+                ("receive_capacity", self.receive_capacity),
             )
             if value is None
         ]
@@ -1185,6 +1207,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         assert self.tokens_per_rank is not None
         assert self.dtype is not None
         assert self.buffer_device is not None
+        assert self.receive_capacity is not None
 
         ep_size = self.ep_mesh.size()
         ep_group = self.ep_mesh.get_group()
@@ -1198,6 +1221,9 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             self.top_k,
             self.dtype,
             self.buffer_device,
+            self.force_load_balance,
+            self.receive_capacity_factor,
+            self.receive_capacity,
         )
         if MinimalAsyncEPTokenDispatcher._global_buffer_key is not None:
             if MinimalAsyncEPTokenDispatcher._global_buffer_key != buffer_key:
@@ -1215,6 +1241,8 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             top_k=self.top_k,
             dtype=self.dtype,
             device=self.buffer_device,
+            force_load_balance=self.force_load_balance,
+            receive_capacity_factor=self.receive_capacity_factor,
         )
         MinimalAsyncEPTokenDispatcher._global_buffer_key = buffer_key
 
@@ -1288,10 +1316,8 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
 
         ep_size = ep_group.size()
         num_tokens = x_TD.shape[0]
-        num_local_experts = num_local_tokens_per_expert_E.numel() // ep_size
-        # TODO(xmfan): make this capacity configurable by user
-        num_receive_rows_per_source_rank = num_tokens * min(top_k, num_local_experts)
-        receive_capacity = ep_size * num_receive_rows_per_source_rank
+        assert self.receive_capacity is not None
+        receive_capacity = self.receive_capacity
 
         (
             hidden_states_RD,
