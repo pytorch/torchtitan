@@ -351,6 +351,64 @@ def _copy_rows_to_peer_ptrs_kernel(
     tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
 
 
+# Preserve the 2-D launch above for unbounded copies. Flattening its grid changes
+# peer issue order and causes severe rank imbalance at EP64.
+@triton.jit
+def _copy_rows_to_peer_ptrs_persistent_kernel(
+    src,
+    dst_ptrs: tl.pointer_type(tl.int64),
+    dst_ranks: tl.pointer_type(tl.int64),
+    dst_rows: tl.pointer_type(tl.int64),
+    num_valid_rows: tl.pointer_type(tl.int64),
+    src_rows: tl.pointer_type(tl.int64),
+    NUM_ROWS: tl.constexpr,
+    NUM_COLS: tl.constexpr,
+    SRC_ROW_STRIDE: tl.constexpr,
+    SRC_COL_STRIDE: tl.constexpr,
+    DST_ROW_STRIDE: tl.constexpr,
+    DST_DTYPE: tl.constexpr,
+    HAS_NUM_VALID_ROWS: tl.constexpr,
+    HAS_SRC_ROWS: tl.constexpr,
+    SRC_ROW_DIVISOR: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NUM_COL_TILES: tl.constexpr,
+) -> None:
+    row_limit = NUM_ROWS
+    if HAS_NUM_VALID_ROWS:
+        row_limit = tl.load(num_valid_rows)
+    num_tiles = tl.cdiv(row_limit, BLOCK_M) * NUM_COL_TILES
+    tile = tl.program_id(0)
+    while tile < num_tiles:
+        row_tile = tile // NUM_COL_TILES
+        col_tile = tile % NUM_COL_TILES
+        row = (row_tile * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
+        col = col_tile * BLOCK_N + tl.arange(0, BLOCK_N)
+        row_mask = row < row_limit
+        col_mask = col < NUM_COLS
+        mask = row_mask[:, None] & col_mask[None, :]
+        src_row = row
+        if HAS_SRC_ROWS:
+            src_row = tl.load(src_rows + row, mask=row_mask, other=0).to(tl.int64)
+            if SRC_ROW_DIVISOR != 1:
+                src_row = src_row // SRC_ROW_DIVISOR
+        dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
+        dst_row = tl.load(dst_rows + row, mask=row_mask, other=0).to(tl.int64)
+        dst_rank_mask = row_mask & (dst_rank >= 0)
+        values = tl.load(
+            src + src_row[:, None] * SRC_ROW_STRIDE + col[None, :] * SRC_COL_STRIDE,
+            mask=mask,
+        )
+        dst_base = tl.load(dst_ptrs + dst_rank, mask=dst_rank_mask, other=0)
+        dst_ptr = (
+            dst_base.to(tl.pointer_type(DST_DTYPE))[:, None]
+            + dst_row[:, None] * DST_ROW_STRIDE
+            + col[None, :]
+        )
+        tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
+        tile += tl.num_programs(0)
+
+
 def copy_full_counts_to_peers_kernel(
     counts: torch.Tensor,
     dsts: list[torch.Tensor],
@@ -397,22 +455,29 @@ def copy_rows_to_peers_kernel(
     src_rows: torch.Tensor | None = None,
     src_row_divisor: int = 1,
     num_valid_rows: torch.Tensor | None = None,
+    num_ctas: int | None = None,
 ) -> None:
     if len(dsts) != ep_size:
         raise ValueError(f"expected {ep_size} destination buffers, got {len(dsts)}.")
 
+    if num_ctas is not None and num_ctas <= 0:
+        raise ValueError(f"num_ctas must be positive, got {num_ctas}.")
+
     block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(num_cols))
-    grid = (triton.cdiv(num_rows, block_m), triton.cdiv(num_cols, block_n))
+    num_row_tiles = triton.cdiv(num_rows, block_m)
+    num_col_tiles = triton.cdiv(num_cols, block_n)
     dst_dtype = _HIDDEN_ROW_DTYPES.get(src.dtype)
     if dst_dtype is None:
         raise ValueError(f"Unsupported MinimalAsyncEP row-copy dtype: {src.dtype}.")
-    _copy_rows_to_peer_ptrs_kernel[grid](
+    common_args = (
         src,
         dst_ptrs,
         dst_ranks,
         dst_rows,
         num_valid_rows if num_valid_rows is not None else dst_rows[:1],
         src_rows if src_rows is not None else dst_rows,
+    )
+    common_kwargs = dict(
         NUM_ROWS=num_rows,
         NUM_COLS=num_cols,
         SRC_ROW_STRIDE=src.stride(0),
@@ -426,6 +491,18 @@ def copy_rows_to_peers_kernel(
         BLOCK_N=block_n,
         num_warps=num_warps,
     )
+    if num_ctas is None:
+        _copy_rows_to_peer_ptrs_kernel[(num_row_tiles, num_col_tiles)](
+            *common_args,
+            **common_kwargs,
+        )
+    else:
+        num_tiles = num_row_tiles * num_col_tiles
+        _copy_rows_to_peer_ptrs_persistent_kernel[(min(num_tiles, num_ctas),)](
+            *common_args,
+            NUM_COL_TILES=num_col_tiles,
+            **common_kwargs,
+        )
 
 
 def fill_dispatch_metadata_kernel(

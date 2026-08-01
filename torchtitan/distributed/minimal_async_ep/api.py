@@ -92,7 +92,9 @@ class _MinimalAsyncEPBufferState:
     counts_recv_handle: Any
     counts_recv_peer_buffers: list[torch.Tensor]
     counts_recv_peer_ptrs: torch.Tensor
-    comm_stream: torch.cuda.Stream
+    prep_stream: torch.cuda.Stream
+    copy_stream: torch.cuda.Stream
+    num_row_copy_ctas: int | None
     check_receive_capacity: bool
     hidden_recv_buffer_index: int = 0
     pending_events: dict[tuple[str, int], deque[_PendingEvent]] = field(
@@ -184,6 +186,12 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             "MinimalAsyncEP receive capacity factor must be finite and at least "
             "1.0, or None."
         )
+    overlap_enabled = bool(getattr(overlap_config, "enabled", False))
+    num_row_copy_ctas = (
+        getattr(overlap_config, "minimal_async_ep_num_copy_ctas", None)
+        if overlap_enabled
+        else None
+    )
 
     for token_dispatcher_cfg in dispatcher_cfgs:
         token_dispatcher_cfg.hidden_dim = model_config.dim
@@ -193,6 +201,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
             config.training.mixed_precision_param
         ]
+        token_dispatcher_cfg.num_row_copy_ctas = num_row_copy_ctas
         token_dispatcher_cfg.force_load_balance = config.debug.moe_force_load_balance
         token_dispatcher_cfg.receive_capacity_factor = receive_capacity_factor
         token_dispatcher_cfg.receive_capacity = _buffer_rows(
@@ -285,6 +294,7 @@ def init_buffer(
     device: torch.device,
     force_load_balance: bool = False,
     receive_capacity_factor: float | None = None,
+    num_row_copy_ctas: int | None = None,
 ) -> None:
     """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
     global _buffer_state
@@ -293,6 +303,11 @@ def init_buffer(
     ep_size = group.size()
     num_experts = ep_size * num_local_experts
     assert _buffer_state is None
+
+    if num_row_copy_ctas is not None and num_row_copy_ctas < 1:
+        raise ValueError(
+            f"num_row_copy_ctas must be positive or None, got {num_row_copy_ctas}."
+        )
 
     dispatch_rows, combine_rows = _buffer_rows(
         tokens_per_rank,
@@ -316,7 +331,7 @@ def init_buffer(
     logger.info(
         "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
         "top_k=%d, num_local_experts=%d, ep_size=%d, capacity_mode=%s, "
-        "buffer_rows=%d",
+        "buffer_rows=%d, num_row_copy_ctas=%s",
         hidden_dim,
         tokens_per_rank,
         top_k,
@@ -324,6 +339,7 @@ def init_buffer(
         ep_size,
         capacity_mode,
         dispatch_rows,
+        num_row_copy_ctas if num_row_copy_ctas is not None else "unbounded",
     )
     backend = symm_mem.get_backend(device)
     if backend != "CUDA":
@@ -386,7 +402,9 @@ def init_buffer(
         counts_recv_handle=counts_recv_handle,
         counts_recv_peer_buffers=counts_recv_peer_buffers,
         counts_recv_peer_ptrs=counts_recv_peer_ptrs,
-        comm_stream=torch.cuda.Stream(device=device),
+        prep_stream=torch.cuda.Stream(device=device),
+        copy_stream=torch.cuda.Stream(device=device, priority=-1),
+        num_row_copy_ctas=num_row_copy_ctas,
         check_receive_capacity=(
             receive_capacity_factor is not None and not force_load_balance
         ),
@@ -442,7 +460,7 @@ def _copy_rows_to_peers_async_cuda(
     num_valid_rows: torch.Tensor | None = None,
     retained: tuple[torch.Tensor, ...] = (),
 ) -> torch.Tensor:
-    """Launch a row copy through symmetric memory on the EP comm stream."""
+    """Launch a row copy through symmetric memory on the EP copy stream."""
     assert _buffer_state is not None
 
     buffer_rows = _buffer_state.hidden_recv_buffers[0].shape[0]
@@ -468,9 +486,9 @@ def _copy_rows_to_peers_async_cuda(
     )
 
     launch_stream = torch.cuda.current_stream(x.device)
-    comm_stream = _buffer_state.comm_stream
-    comm_stream.wait_stream(launch_stream)
-    with torch.cuda.stream(comm_stream):
+    copy_stream = _buffer_state.copy_stream
+    copy_stream.wait_stream(launch_stream)
+    with torch.cuda.stream(copy_stream):
         copy_rows_to_peers_kernel(
             x,
             hidden_recv_peer_buffers,
@@ -485,9 +503,10 @@ def _copy_rows_to_peers_async_cuda(
             src_row_divisor=src_row_divisor,
             dst_ptrs=hidden_recv_peer_ptrs,
             num_valid_rows=num_valid_rows,
+            num_ctas=_buffer_state.num_row_copy_ctas,
         )
         _wait_ready(hidden_recv_handle, _HIDDEN_READY_CHANNEL)
-        _record_pending_event(exchange, hidden_recv_view, comm_stream, retained)
+        _record_pending_event(exchange, hidden_recv_view, copy_stream, retained)
     return hidden_recv_view
 
 
@@ -764,9 +783,9 @@ def dispatch_op(
     )
 
     launch_stream = torch.cuda.current_stream(dispatch_input.device)
-    comm_stream = _buffer_state.comm_stream
-    comm_stream.wait_stream(launch_stream)
-    with torch.cuda.stream(comm_stream):
+    prep_stream = _buffer_state.prep_stream
+    prep_stream.wait_stream(launch_stream)
+    with torch.cuda.stream(prep_stream):
         torch.argsort(
             T_row_to_expert_N,
             stable=True,
