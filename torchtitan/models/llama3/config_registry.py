@@ -114,6 +114,7 @@ def llama3_debugmodel_nvfp4() -> Trainer.Config:
 def llama3_debugmodel_nvfp4_mixed() -> Trainer.Config:
     config = llama3_debugmodel()
     config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
     )
@@ -200,6 +201,7 @@ def llama3_8b() -> Trainer.Config:
 def llama3_8b_nvfp4_mixed() -> Trainer.Config:
     config = llama3_8b()
     config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
     # Enable compile so NVFP4's dynamic quantization runs at competitive perf.
     config.compile = CompileConfig(enable=True, components=["model"])
     # Mixed precision: convert the leading decoder layers to NVFP4 and keep the

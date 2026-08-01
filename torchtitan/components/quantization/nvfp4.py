@@ -18,6 +18,7 @@ reduce-scatter); NVFP4 does not move fp4 codes over the wire.
 
 import math
 from dataclasses import dataclass, field, replace
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -152,7 +153,7 @@ try:
                     )
                 return instance
 
-        def __init__(self, config: "NVFP4Linear.Config"):
+        def __init__(self, config: Linear.Config):
             TorchAONVFP4Linear.__init__(
                 self,
                 config.in_features,
@@ -206,11 +207,19 @@ try:
         def _init_self_buffers(
             self, *, buffer_device: torch.device | None = None
         ) -> None:
-            dev = buffer_device or self.weight.device
+            dev = (
+                buffer_device
+                if buffer_device is not None
+                else cast(torch.Tensor, self.weight).device
+            )
             # Per-rank seed: a plain local tensor (not distributed), so each rank
             # draws its own.
             self._sr_seed = torch.randint(
-                -(2**63), 2**63 - 1, (1,), dtype=torch.int64, device=dev
+                -9_223_372_036_854_775_808,
+                9_223_372_036_854_775_807,
+                (1,),
+                dtype=torch.int64,
+                device=dev,
             )
             # Static RHT basis: identical on every rank by construction, so it is
             # a plain local tensor with no cross-rank broadcast.
