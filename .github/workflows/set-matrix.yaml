@@ -80,26 +80,31 @@ jobs:
           EOF
           )"
 
-          # Define ROCm matrix. ``is-experiment`` means the workflow has
-          # not opted into ROCm validation, so keep these jobs CUDA-only.
-          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
-            ROCM_MATRIX=""
-            FULL_MATRIX="$CUDA_MATRIX"
-          else
-            ROCM_MATRIX="$(cat <<EOF
-          {
-            "name": "rocm",
-            "runner": "${ROCM_RUNNER}",
-            "gpu-arch-type": "rocm",
-            "gpu-arch-version": "7.2",
-            "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.2",
-            "torch-version": ""
-          }
-          EOF
-          )"
-            FULL_MATRIX="$CUDA_MATRIX,$ROCM_MATRIX"
-          fi
+          # Temporarily disable ROCm CI while the ROCm jobs are red.
+          # Re-enable by removing this override and uncommenting the original
+          # ROCm matrix block below.
+          ROCM_MATRIX=""
+          FULL_MATRIX="$CUDA_MATRIX"
+
+          # Original ROCm matrix definition:
+          # if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
+          #   ROCM_MATRIX=""
+          #   FULL_MATRIX="$CUDA_MATRIX"
+          # else
+          #   ROCM_MATRIX="$(cat <<EOF
+          # {
+          #   "name": "rocm",
+          #   "runner": "${ROCM_RUNNER}",
+          #   "gpu-arch-type": "rocm",
+          #   "gpu-arch-version": "7.2",
+          #   "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
+          #   "index-url": "https://download.pytorch.org/whl/nightly/rocm7.2",
+          #   "torch-version": ""
+          # }
+          # EOF
+          # )"
+          #   FULL_MATRIX="$CUDA_MATRIX,$ROCM_MATRIX"
+          # fi
 
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
