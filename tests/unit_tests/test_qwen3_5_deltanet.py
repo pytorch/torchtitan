@@ -159,6 +159,20 @@ class ReferenceGatedDeltaKernel(nn.Module):
         )
 
 
+def _deltanet_masks(varlen_metadata: VarlenMetadata):
+    """Wrap document offsets in the composite the model consumes.
+
+    Mirrors Qwen35Model.get_attention_masks under the varlen backend: both
+    fields share one VarlenMetadata.
+    """
+    from torchtitan.models.qwen3_5.model import Qwen35AttentionMasks
+
+    return Qwen35AttentionMasks(
+        quadratic_attention=varlen_metadata,
+        deltanet=varlen_metadata,
+    )
+
+
 class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def _make_deltanet(
         self,
@@ -288,9 +302,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             dtype=torch.int32,
         )
 
-        attention_masks = create_varlen_metadata_for_document(
-            positions,
-            include_host_offsets=True,
+        attention_masks = _deltanet_masks(
+            create_varlen_metadata_for_document(
+                positions,
+                include_host_offsets=True,
+            )
         )
         self._assert_packed_run_matches_per_document(
             model, x, positions, attention_masks
@@ -333,10 +349,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self._assert_packed_run_matches_per_document(model, x, positions, masks)
 
     def test_get_attention_masks_pairs_flex_mask_with_deltanet_offsets(self):
-        """Under the flex backend, Qwen35Model.get_attention_masks must return
-        a composite carrying both the BlockMask (quadratic full-attention
-        layers) and the document offsets (GatedDeltaNet); under varlen, a
-        plain VarlenMetadata shared by both consumers.
+        """Qwen35Model.get_attention_masks must always return the composite:
+        under flex, a BlockMask (quadratic full-attention layers) paired with
+        the document offsets (GatedDeltaNet); under varlen, one VarlenMetadata
+        shared by both fields.
         """
         from torch.nn.attention.flex_attention import BlockMask
 
@@ -371,9 +387,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         varlen_model = model_registry("debugmodel", attn_backend="varlen").model.build()
         varlen_masks = varlen_model.get_attention_masks(positions)
-        self.assertNotIsInstance(varlen_masks, Qwen35AttentionMasks)
-        self.assertIsInstance(varlen_masks, VarlenMetadata)
-        self.assertEqual(varlen_masks.cu_seq_q_host, (0, 3, 5, 10))
+        self.assertIsInstance(varlen_masks, Qwen35AttentionMasks)
+        self.assertIsInstance(varlen_masks.deltanet, VarlenMetadata)
+        self.assertIs(varlen_masks.quadratic_attention, varlen_masks.deltanet)
+        self.assertEqual(varlen_masks.deltanet.cu_seq_q_host, (0, 3, 5, 10))
 
     def _assert_fla_varlen_matches_per_document(
         self, backend: str, *, atol: float, rtol: float
@@ -412,9 +429,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         bs, seqlen = positions.shape
         x = torch.randn(bs, seqlen, 256, device=device, dtype=dtype)
 
-        attention_masks = create_varlen_metadata_for_document(
-            positions,
-            include_host_offsets=True,
+        attention_masks = _deltanet_masks(
+            create_varlen_metadata_for_document(
+                positions,
+                include_host_offsets=True,
+            )
         )
         actual = model(x, attention_masks)
 
@@ -463,10 +482,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             [[0, 1, 2, 0, 1, 2, 3, 4]],
             dtype=torch.int32,
         )
-        attention_masks = create_varlen_metadata_for_document(
+        varlen_metadata = create_varlen_metadata_for_document(
             positions,
             include_host_offsets=True,
         )
+        attention_masks = _deltanet_masks(varlen_metadata)
         captured_cu_seqlens = []
 
         def record_cu_seqlens(x_BLD, weight, cu_seqlens, cu_seqlens_cpu):
@@ -494,7 +514,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self.assertTrue(
             all(cu_seqlens is second_invocation[0] for cu_seqlens in second_invocation)
         )
-        self.assertIsNot(first_invocation[0], attention_masks.cu_seq_q)
+        self.assertIsNot(first_invocation[0], varlen_metadata.cu_seq_q)
         self.assertIsNot(second_invocation[0], first_invocation[0])
 
 
