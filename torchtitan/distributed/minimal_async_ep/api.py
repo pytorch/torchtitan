@@ -267,9 +267,7 @@ def _buffer_rows(
         return dispatch_rows, tokens_per_rank * top_k
 
     if receive_capacity_factor is not None:
-        dispatch_rows = math.ceil(
-            tokens_per_rank * top_k * receive_capacity_factor
-        )
+        dispatch_rows = math.ceil(tokens_per_rank * top_k * receive_capacity_factor)
         return dispatch_rows, tokens_per_rank * top_k
 
     max_routed_tokens = ep_size * tokens_per_rank * min(top_k, num_local_experts)
