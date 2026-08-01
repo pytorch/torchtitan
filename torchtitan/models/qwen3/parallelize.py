@@ -58,7 +58,9 @@ def parallelize_qwen3(
             model.parallelize(parallel_dims)
 
     if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+        maybe_enable_async_tp(
+            parallelism, compile_config, parallel_dims.get_dense_tp_mesh()
+        )
 
     if ac_config is not None:
         ac_config.build(dump_folder=dump_folder).apply(model)

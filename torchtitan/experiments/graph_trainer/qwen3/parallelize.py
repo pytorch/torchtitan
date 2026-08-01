@@ -71,7 +71,9 @@ def parallelize_qwen3(
         model.parallelize(parallel_dims)
 
     if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+        maybe_enable_async_tp(
+            parallelism, compile_config, parallel_dims.get_dense_tp_mesh()
+        )
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that

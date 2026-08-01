@@ -187,7 +187,7 @@ def parallelize_hf_transformers(
 
         if parallel_dims.tp_enabled:
             maybe_enable_async_tp(
-                parallelism, compile_config, parallel_dims.get_mesh("tp")
+                parallelism, compile_config, parallel_dims.get_dense_tp_mesh()
             )
 
     model_compile_enabled = (
