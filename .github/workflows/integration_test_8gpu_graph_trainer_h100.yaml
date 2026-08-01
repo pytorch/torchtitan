@@ -53,6 +53,7 @@ jobs:
       # Private-ECR image, tagged with the .ci/docker hash from set-matrix.yaml.
       docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
+      additional-fetch-refs: ""
       upload-artifact: outputs
       timeout: 45
       script: |

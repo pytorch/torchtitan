@@ -24,6 +24,7 @@ jobs:
     with:
       docker-image: torchtitan-ubuntu-22.04-clang12
       repository: pytorch/torchtitan
+      additional-fetch-refs: ""
       script: |
         set -eux
 

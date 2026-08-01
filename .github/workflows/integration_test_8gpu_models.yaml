@@ -48,6 +48,7 @@ jobs:
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
+      additional-fetch-refs: ""
       upload-artifact: outputs
       timeout: 60
       script: |
