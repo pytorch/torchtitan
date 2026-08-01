@@ -2504,9 +2504,7 @@ class TestChunkPasses(TestCase):
 
         already_initialized = dist.is_initialized()
         if not already_initialized:
-            dist.init_process_group(
-                "fake", rank=0, world_size=2, store=FakeStore()
-            )
+            dist.init_process_group("fake", rank=0, world_size=2, store=FakeStore())
         try:
             yield init_device_mesh("cpu", (2,), mesh_dim_names=("dp",))
         finally:
@@ -2588,7 +2586,9 @@ class TestChunkPasses(TestCase):
             if chunk_strategy == "eager":
                 populate_eager_chunk_metadata_pass(gm)
             else:
-                populate_chunk_dim_metadata_pass(gm, traced.example_inputs, mode="batch")
+                populate_chunk_dim_metadata_pass(
+                    gm, traced.example_inputs, mode="batch"
+                )
                 ep_overlap_chunk_pass(
                     gm,
                     mode="batch",
