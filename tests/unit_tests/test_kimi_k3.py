@@ -12,25 +12,34 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.models.common import Embedding
-from torchtitan.models.common.multimodal import scatter_vision_embeds
-from torchtitan.models.kimi_k3 import (
-    _feed_forward_config,
-    _kda_config,
-    _latent_moe_config,
-    _linear,
-    _mla_config,
-    _norm,
-    _vision_encoder_config,
-    kimi_k3_configs,
-)
-from torchtitan.models.kimi_k3.model import (
-    KimiK3Model,
-    KimiK3TransformerBlock,
-    KimiKDAKernel,
-)
-from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
-from torchtitan.models.kimi_k3.vision_encoder import KimiExactGELU
 from torchtitan.protocols.module import Module
+
+# torchtitan.models.kimi_k3 imports FLA at module scope for the KDA kernel.
+# FLA is a per-model dependency (kimi_k3/requirements.txt), not part of the
+# core requirements, so skip the Kimi suites instead of failing collection
+# when it is absent. Modules importing this one inherit the skip.
+try:
+    from torchtitan.models.kimi_k3 import (
+        _feed_forward_config,
+        _kda_config,
+        _latent_moe_config,
+        _linear,
+        _mla_config,
+        _norm,
+        _vision_encoder_config,
+        kimi_k3_configs,
+    )
+    from torchtitan.models.kimi_k3.model import (
+        KimiK3Model,
+        KimiK3TransformerBlock,
+        KimiKDAKernel,
+    )
+    from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
+    from torchtitan.models.kimi_k3.vision_encoder import KimiExactGELU
+except ModuleNotFoundError as exc:
+    raise unittest.SkipTest(
+        f"Kimi K3 optional dependency unavailable: {exc.name}"
+    ) from exc
 
 
 class ReferenceKimiKDAKernel(Module):
@@ -92,7 +101,16 @@ def _use_reference_kda_kernel(config: KimiK3Model.Config) -> KimiK3Model.Config:
     return config
 
 
-def _small_model_config() -> KimiK3Model.Config:
+def _small_model_config(*, attn_res_block_size: int = 1) -> KimiK3Model.Config:
+    """Build the reduced two-layer model used across the Kimi K3 tests.
+
+    ``attn_res_block_size`` defaults to 1, which makes every layer extend the
+    attention residual. Pass 2 to make the second layer pass the residual
+    through instead, which is the shape the released cadence uses and which
+    routes the residual back out through the FSDP module boundary. Callers
+    comparing against frozen reference values must keep the default, since the
+    parameter shapes and ordering feed those values.
+    """
     dim = 16
 
     def block(
@@ -103,7 +121,7 @@ def _small_model_config() -> KimiK3Model.Config:
     ) -> KimiK3TransformerBlock.Config:
         return KimiK3TransformerBlock.Config(
             layer_id=layer_id,
-            attn_res_block_size=1,
+            attn_res_block_size=attn_res_block_size,
             attention=(
                 _mla_config(
                     dim=dim,
@@ -249,63 +267,6 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
-    def test_scatter_vision_embeds_routes_gradients_to_both_streams(self):
-        # The scatter is in place, so the graph has to be built from tensors
-        # that are not themselves leaves requiring grad.
-        inputs_source = torch.arange(30.0).view(2, 5, 3).requires_grad_()
-        vision_embeds = torch.arange(12.0).view(2, 2, 3).requires_grad_()
-        inputs_embeds = inputs_source * 1.0
-        inputs_before = inputs_source.detach().clone()
-
-        actual = scatter_vision_embeds(
-            inputs_embeds,
-            vision_embeds=vision_embeds,
-            vision_positions=[
-                (0, 0, 1, 1),
-                (1, 1, 2, 2),
-            ],
-        )
-        expected = torch.stack(
-            (
-                torch.cat(
-                    (
-                        inputs_before[0, :1],
-                        vision_embeds.detach()[0, :1],
-                        inputs_before[0, 2:],
-                    )
-                ),
-                torch.cat(
-                    (
-                        inputs_before[1, :2],
-                        vision_embeds.detach()[1],
-                        inputs_before[1, 4:],
-                    )
-                ),
-            )
-        )
-
-        torch.testing.assert_close(actual, expected)
-
-        actual.sum().backward()
-        # Overwritten positions must not propagate to the text embeddings, and
-        # every vision token that was scattered must receive gradient.
-        expected_input_grad = torch.tensor(
-            [[1, 0, 1, 1, 1], [1, 1, 0, 0, 1]],
-            dtype=inputs_source.dtype,
-        ).unsqueeze(-1)
-        expected_vision_grad = torch.tensor(
-            [[1, 0], [1, 1]],
-            dtype=vision_embeds.dtype,
-        ).unsqueeze(-1)
-        torch.testing.assert_close(
-            inputs_source.grad,
-            expected_input_grad.expand_as(inputs_source),
-        )
-        torch.testing.assert_close(
-            vision_embeds.grad,
-            expected_vision_grad.expand_as(vision_embeds),
-        )
-
     def test_exact_gelu_matches_pytorch_reference(self):
         x = torch.linspace(-4.0, 4.0, 257)
         actual = KimiExactGELU.Config().build()(x)

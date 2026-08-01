@@ -55,9 +55,9 @@ blocks and preserve the released model's 1-based full-attention cadence.
 The released vocabulary size is retained, following other TorchTitan
 multimodal debug models and making FSDP state sharding measurable while the
 decoder widths and depths remain reduced. The resulting model has about 100
-million parameters, of which roughly 84 million are the tied-vocabulary
-embedding and output projection; the transformer itself is correspondingly
-small.
+million parameters, of which roughly 84 million are the token embedding and
+the separate output projection over that vocabulary; the transformer itself is
+correspondingly small.
 
 ## Forward structure
 
@@ -92,9 +92,7 @@ smallest grid the patch merger accepts and contribute its result through
 unchanged while keeping the encoder in the autograd graph. Every rank
 therefore issues the same all-gather and reduce-scatter regardless of what its
 batch contains, and the encoder correctly receives zero gradients from
-text-only ranks. Note that `torchtitan/models/qwen3_5` wraps its vision
-encoder the same way but still calls it conditionally, so it retains this
-hazard.
+text-only ranks.
 
 ## Checkpoint conversion
 
@@ -161,6 +159,5 @@ pytest -q tests/unit_tests/test_kimi_k3_fsdp.py
 These restrictions are explicit so unsupported runtime settings fail instead
 of being silently ignored. This first contribution deliberately limits
 parallel execution to FSDP2: its purpose is to establish the eager numerical
-reference used by Kimi K3 architecture experiments. TP, PP, CP, EP, and
-optimized kernels can be added independently after that forward contract is
-locked.
+reference used by Kimi K3 architecture experiments. TP, PP, CP, and EP can be
+added independently after that forward contract is locked.

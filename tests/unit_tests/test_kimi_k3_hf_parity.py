@@ -20,6 +20,7 @@ import unittest
 
 import torch
 
+# Inherits test_kimi_k3's module-level skip when FLA is not installed.
 from tests.unit_tests.test_kimi_k3 import _small_model_config
 
 

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import unittest
 from contextlib import nullcontext
 from unittest.mock import patch
 
@@ -17,8 +18,16 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.kimi_k3 import parallelize_kimi_k3
-from torchtitan.models.kimi_k3.model import KimiK3Model
+
+# Skip instead of failing collection when FLA, a per-model dependency of
+# kimi_k3, is not installed; see the matching guard in test_kimi_k3.py.
+try:
+    from torchtitan.models.kimi_k3 import parallelize_kimi_k3
+    from torchtitan.models.kimi_k3.model import KimiK3Model
+except ModuleNotFoundError as exc:
+    raise unittest.SkipTest(
+        f"Kimi K3 optional dependency unavailable: {exc.name}"
+    ) from exc
 
 from tests.unit_tests.test_kimi_k3 import _small_model_config
 
@@ -31,7 +40,12 @@ class TestKimiK3FSDP(DTensorTestBase):
     @with_comms
     def test_single_rank_fsdp_matches_manual_bf16_reference(self):
         torch.manual_seed(3)
-        config = _small_model_config()
+        # attn_res_block_size=2 makes the second layer pass the attention
+        # residual through rather than extend it. That path routes a tensor
+        # back out through the FSDP module boundary, and its gradient
+        # accumulation order is what keeps FSDP bitwise equal to eager, so the
+        # comparison below has to cover it.
+        config = _small_model_config(attn_res_block_size=2)
         with torch.device("meta"):
             model = config.build()
         model.to_empty(device=self.device_type)

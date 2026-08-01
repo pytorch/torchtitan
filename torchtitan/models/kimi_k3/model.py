@@ -592,6 +592,14 @@ class KimiK3TransformerBlock(Module):
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Blocks that do not extend the attention residual return it unchanged.
+        # FSDP2 aliases module inputs to drive its backward hooks, so passing it
+        # back out makes this FSDP unit return a view, which draws PyTorch's
+        # warning about in-place ops dropping the pre-backward hook. Nothing
+        # mutates it in place, and routing it back through the module boundary
+        # is what keeps FSDP gradients bitwise equal to eager -- returning None
+        # here instead reassociates the residual's gradient accumulation and
+        # perturbs tok_embeddings.weight.grad by ~2e-3 relative.
         B, L, D = x_BLD.shape
         prefix_sum_BLD: torch.Tensor | None = x_BLD
 
@@ -697,6 +705,22 @@ class KimiK3Model(Decoder):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
         self.spatial_merge_size = config.spatial_merge_size
+        if self.vision_encoder is not None:
+            # The decoder sizes each image's placeholder run from
+            # spatial_merge_size while the encoder merges patches with
+            # merge_kernel_size. A mismatch surfaces much later as a
+            # placeholder-run misalignment that blames the prompt.
+            merge_kernel_size = self.vision_encoder.merge_kernel_size
+            if merge_kernel_size != (
+                config.spatial_merge_size,
+                config.spatial_merge_size,
+            ):
+                raise ValueError(
+                    f"spatial_merge_size {config.spatial_merge_size} does not "
+                    f"match the vision encoder's merge_kernel_size "
+                    f"{merge_kernel_size}; each image would occupy a different "
+                    "number of text positions than the encoder produces."
+                )
 
     def _encode_placeholder_image(
         self,

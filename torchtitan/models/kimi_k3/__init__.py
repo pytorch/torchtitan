@@ -346,7 +346,7 @@ def _vision_encoder_config(
 
 def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
     if attn_backend != "eager":
-        raise ValueError("Kimi K3 v1 only provides the device-neutral 'eager' backend.")
+        raise ValueError("Kimi K3 v1 only provides the 'eager' backend.")
 
     dim = 256
     vocab_size = 163840
