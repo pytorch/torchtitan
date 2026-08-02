@@ -105,8 +105,8 @@ try:
                     if value % _NVFP4_BLOCK:
                         raise ValueError(
                             f"NVFP4 requires {name} divisible by {_NVFP4_BLOCK}; "
-                            f"got {name}={value}. NVFP4 cannot quantize this Linear "
-                            "(e.g. the LM head); exclude it from the converter fqns."
+                            f"got {name}={value}. NVFP4 cannot quantize this Linear; "
+                            "exclude it from the converter fqns."
                         )
 
             def build(self, **kwargs):
@@ -228,8 +228,6 @@ try:
             )
             self._refresh_rht_sign_vector_tuple()
 
-        # -- forward --
-
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return nvfp4_linear(
                 x,
@@ -277,8 +275,8 @@ class NVFP4LinearConverter(QuantizationConverter):
         """
         List of fully qualified names of modules to apply NVFP4 quantization to.
         Only Linear.Config entries whose FQN contains a match are converted.
-        If empty, all Linear modules are converted. The LM head must be excluded
-        (NVFP4 requires each GEMM dim divisible by 128; vocab is not).
+        If empty, all Linear modules are converted -- pass explicit fqns to keep
+        the LM head in bf16, which the mixed recipe leaves unquantized for stability.
         """
 
     def __init__(self, config: Config):

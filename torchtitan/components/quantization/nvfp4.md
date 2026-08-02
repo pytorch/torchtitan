@@ -18,8 +18,10 @@ throughput on NVIDIA Blackwell GPUs.
   `torchao.prototype.moe_training.nvfp4_training`.
 - `torch.compile` for competitive performance. The provided
   `llama3_8b_nvfp4_mixed` recipe enables model compilation automatically.
-- Local GEMM dimensions divisible by 128. The LM head is therefore kept in
-  bf16 because its vocabulary dimension does not meet this requirement.
+- Local GEMM dimensions divisible by 128. A Linear whose local in/out features
+  are not a multiple of 128 (after TP sharding) is rejected by the NVFP4 kernels
+  and must be excluded from the converter. The mixed recipe converts only
+  decoder layers, so the token embeddings and LM head always remain in bf16.
 
 ### NVFP4 Training Recommendations
 
@@ -65,9 +67,7 @@ are reported at step 760.
 | MXFP8 | 1.2671 | 28,084 | 179.94 GiB (97.6%) |
 | BF16 | 1.2738 | 21,919 | 174.49 GiB (94.7%) |
 
-The bf16 tail costs about 5% throughput and 8 GiB compared with full NVFP4,
-while remaining faster and using less memory than the MXFP8 and bf16 baselines
-in this run. Its final loss is on par with the compared precisions.
+In this run nvfp4 remained faster and used less memory than both the MXFP8 and bf16 baselines, and its final loss is on par with them.
 
 ![Llama 3 8B NVFP4, MXFP8, and BF16 training loss curves](../../../assets/images/nvfp4_vs_mxfp8_vs_bf16_eager_compile_200m_tokens.png)
 
@@ -98,15 +98,12 @@ GiB (30%) less peak reserved memory. It was 3% slower than MXFP8 while using
 
 *Qwen3 8B random-initialization training loss through 200M tokens at global batch size 64.*
 
-The random-initialization NVFP4 and MXFP8 runs used TorchTitan revision`20a66c9a108af41444222169982e15105de4c0e9`; the bf16 run used `34c805f3224dca3b9ea4188cd53b0a25c68bde34`.
-
 ### Versioned Environment
 
 The Llama results and instructions use the container's current upstream builds:
 
 - PyTorch: `2.14.0a0+gitd9abf9e`
 - TorchAO: `0.18.0+gitcb76f29`
-- TorchTitan: `8d6877e129566fb2da3e1769daaa8eb02292d922`
 
 ### Known Limitations
 
