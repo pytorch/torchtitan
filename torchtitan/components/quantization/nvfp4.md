@@ -8,8 +8,8 @@ throughput on NVIDIA Blackwell GPUs.
 > [!WARNING]
 > NVFP4 training is experimental. It depends on a TorchAO prototype and has no
 > backward-compatibility guarantees. NVFP4 training is not guarded by CI; the
-> results below are evidence from one 200M-token training run, not broad
-> numerical or performance validation.
+> results below are evidence from a small set of 200M-token training runs, not
+> broad numerical or performance validation.
 
 ### Requirements
 
@@ -20,6 +20,15 @@ throughput on NVIDIA Blackwell GPUs.
   `llama3_8b_nvfp4_mixed` recipe enables model compilation automatically.
 - Local GEMM dimensions divisible by 128. The LM head is therefore kept in
   bf16 because its vocabulary dimension does not meet this requirement.
+
+### NVFP4 Training Recommendations
+
+1. Train with NVFP4 for most of the run.
+2. When exact loss recovery matters, switch the linear-layer GEMM inputs to a higher precision shortly before learning-rate decay begins.
+3. Prefer switching only the forward-pass GEMMs to bf16 or, potentially, MXFP8.
+4. When maximum NVFP4 utilization matters, remain in NVFP4 until nearly the end, then use a very brief high-precision finish. This can meaningfully improve loss, but may not completely recover it because the learning rate is already small.
+5. When downstream accuracy is already sufficient, the end switch is optional.
+6. The mixed recipe follows [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149). It converts the leading 85% of decoder layers to NVFP4 and leaves the final 15% plus the LM head in bf16 for stability.
 
 ### Llama 3 8B Usage
 
@@ -41,9 +50,10 @@ torchrun --standalone --nproc_per_node 4 \
   --hf-assets-path ./tests/assets/tokenizer
 ```
 
-The mixed recipe follows [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149). It converts the leading 85% of decoder layers to NVFP4 and leaves the final 15% plus the LM head in bf16 for stability. For the 32-layer Llama 3 8B model, layers 0-26 use NVFP4 and layers 27-31 remain bf16.
+For the 32-layer Llama 3 8B model, layers 0-26 use NVFP4 and layers 27-31 remain bf16.
 
-### 200M-Token Evidence
+
+### Llama 3 8B 200M-Token Evidence
 
 The following eager + `torch.compile` runs trained Llama 3 8B on C4 for 200M
 tokens with global batch size 128 (local batch size 32, FSDP degree 4). Results
@@ -64,9 +74,58 @@ in this run. Its final loss is on par with the compared precisions.
 
 *Llama 3 8B training loss through 200M tokens at global batch size 128. All runs use eager execution with model compilation.*
 
+### Qwen3 8B 200M-Token Evidence
+
+The following eager + `torch.compile` runs trained Qwen3 8B on C4 for
+200,015,872 tokens with global batch size 64 (local batch size 16, FSDP degree
+4), sequence length 2048, and 1,526 optimizer steps. Results are reported at
+the final logged step, 1,520. The mixed NVFP4 recipe converts layers 0-29 to
+NVFP4 and leaves layers 30-35 plus the LM head in bf16.
+
+#### Random Initialization
+
+| Run | Loss | Tokens/sec (per GPU) | Peak Reserved Memory |
+| --- | ---: | ---: | ---: |
+| NVFP4 (bf16 tail) | 3.82986 | 26,732 | 78.63 GiB (42.67%) |
+| MXFP8 | 3.81545 | 27,587 | 112.63 GiB (61.12%) |
+| BF16 | 3.81439 | 20,913 | 112.88 GiB (61.25%) |
+
+In this run, NVFP4 delivered 28% more throughput than bf16 while using 34.25
+GiB (30%) less peak reserved memory. It was 3% slower than MXFP8 while using
+34.00 GiB (30%) less memory. Its final logged loss was 0.01547 above bf16 and
+0.01441 above MXFP8.
+
+![Qwen3 8B random-initialization NVFP4, MXFP8, and BF16 training loss curves](../../../assets/images/qwen3_8b_random_init_nvfp4_vs_mxfp8_vs_bf16_eager_compile_200m_tokens.png)
+
+*Qwen3 8B random-initialization training loss through 200M tokens at global batch size 64.*
+
+#### Continued Pretraining
+
+These runs initialized from a local Qwen3 8B Hugging Face checkpoint.
+
+| Run | Loss | Tokens/sec (per GPU) | Peak Reserved Memory |
+| --- | ---: | ---: | ---: |
+| NVFP4 (bf16 tail) | 2.50078 | 25,934 | 82.24 GiB (44.63%) |
+| MXFP8 | 2.47521 | 27,236 | 116.37 GiB (63.14%) |
+| BF16 | 2.47183 | 20,860 | 116.74 GiB (63.34%) |
+
+In this run, NVFP4 delivered 24% more throughput than bf16 while using 34.50
+GiB (30%) less peak reserved memory. It was 5% slower than MXFP8 while using
+34.13 GiB (29%) less memory. Its final logged loss was 0.02895 above bf16 and
+0.02557 above MXFP8.
+
+![Qwen3 8B continued-pretraining NVFP4, MXFP8, and BF16 training loss curves](../../../assets/images/qwen3_8b_continued_pretraining_nvfp4_vs_mxfp8_vs_bf16_eager_compile_200m_tokens.png)
+
+*Qwen3 8B continued-pretraining loss through 200M tokens at global batch size 64.*
+
+The random-initialization NVFP4 and MXFP8 runs used TorchTitan revision
+`20a66c9a108af41444222169982e15105de4c0e9`; the bf16 run used
+`34c805f3224dca3b9ea4188cd53b0a25c68bde34`. All three continued-pretraining
+runs used `c75cd8152400a24ba72e7524c86b956168b2662f`.
+
 ### Versioned Environment
 
-These results and instructions use the container's current upstream builds:
+The Llama results and instructions use the container's current upstream builds:
 
 - PyTorch: `2.14.0a0+gitd9abf9e`
 - TorchAO: `0.18.0+gitcb76f29`
@@ -78,4 +137,4 @@ These results and instructions use the container's current upstream builds:
 - There is no NVFP4 end-to-end GPU training coverage in CI.
 - It supports SM100 or later only.
 - NVFP4 quantizes GEMMs only; tensor-parallel all-gather and reduce-scatter remain in bf16.
-- The 200M-token result is limited to the documented Llama 3 8B C4 configuration. Validate convergence and performance for each new model, parallelism, and hardware configuration.
+- The 200M-token results are limited to the documented Llama 3 8B and Qwen3 8B C4 configurations. Validate convergence and performance for each new model, parallelism, and hardware configuration.
