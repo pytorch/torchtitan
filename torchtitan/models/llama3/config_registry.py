@@ -11,6 +11,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import (
     Float8LinearConverter,
+    MXFP8LinearConverter,
     NVFP4LinearConverter,
 )
 from torchtitan.components.quantization.nvfp4 import (
@@ -196,6 +197,68 @@ def llama3_8b() -> Trainer.Config:
             steps=1200,
         ),
     )
+
+
+def llama3_8b_continue_pretrain() -> Trainer.Config:
+    """Llama 3.1 8B C4 continued pretraining from local HF weights."""
+
+    model_spec = model_registry("8B")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./assets/hf/Llama-3.1-8B",
+        model_spec=model_spec,
+        optimizer=default_adamw(lr=2e-5),
+        training=TrainingConfig(local_batch_size=32, seq_len=2048, steps=763),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        checkpoint=CheckpointManager.Config(
+            enable=True,
+            initial_load_in_hf=True,
+        ),
+        activation_checkpoint=SelectiveAC.Config(),
+        compile=CompileConfig(enable=True, components=["model"]),
+    )
+
+
+def llama3_8b_continue_pretrain_mxfp8() -> Trainer.Config:
+    """HF-initialized C4 pretraining with MXFP8 decoder linears."""
+
+    config = llama3_8b_continue_pretrain()
+    config.model_spec = model_registry(
+        "8B",
+        converters=[
+            MXFP8LinearConverter.Config(
+                fqns=["layers"],
+                model_compile_enabled=True,
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_8b_continue_pretrain_nvfp4_mixed() -> Trainer.Config:
+    """HF-initialized C4 pretraining with a 15% bf16 decoder tail."""
+
+    config = llama3_8b_continue_pretrain()
+    config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
+    num_layers = len(config.model_spec.model.layers)
+    config.model_spec = model_registry(
+        "8B",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=nvfp4_bf16_tail_fqns(
+                    num_layers,
+                    _NVFP4_BF16_TAIL_FRACTION,
+                ),
+                model_compile_enabled=True,
+            ),
+        ],
+    )
+    return config
 
 
 def llama3_8b_nvfp4_mixed() -> Trainer.Config:

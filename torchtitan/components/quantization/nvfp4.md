@@ -62,7 +62,6 @@ are reported at step 760.
 | Run | Loss | Tokens/sec (per GPU) | Memory |
 | --- | ---: | ---: | ---: |
 | NVFP4 (bf16 tail) | 1.2715 | 30,040 | 110.95 GiB (60.2%) |
-| NVFP4 (full) | 1.2687 | 31,758 | 103.00 GiB (55.9%) |
 | MXFP8 | 1.2671 | 28,084 | 179.94 GiB (97.6%) |
 | BF16 | 1.2738 | 21,919 | 174.49 GiB (94.7%) |
 
@@ -99,29 +98,7 @@ GiB (30%) less peak reserved memory. It was 3% slower than MXFP8 while using
 
 *Qwen3 8B random-initialization training loss through 200M tokens at global batch size 64.*
 
-#### Continued Pretraining
-
-These runs initialized from a local Qwen3 8B Hugging Face checkpoint.
-
-| Run | Loss | Tokens/sec (per GPU) | Peak Reserved Memory |
-| --- | ---: | ---: | ---: |
-| NVFP4 (bf16 tail) | 2.50078 | 25,934 | 82.24 GiB (44.63%) |
-| MXFP8 | 2.47521 | 27,236 | 116.37 GiB (63.14%) |
-| BF16 | 2.47183 | 20,860 | 116.74 GiB (63.34%) |
-
-In this run, NVFP4 delivered 24% more throughput than bf16 while using 34.50
-GiB (30%) less peak reserved memory. It was 5% slower than MXFP8 while using
-34.13 GiB (29%) less memory. Its final logged loss was 0.02895 above bf16 and
-0.02557 above MXFP8.
-
-![Qwen3 8B continued-pretraining NVFP4, MXFP8, and BF16 training loss curves](../../../assets/images/qwen3_8b_continued_pretraining_nvfp4_vs_mxfp8_vs_bf16_eager_compile_200m_tokens.png)
-
-*Qwen3 8B continued-pretraining loss through 200M tokens at global batch size 64.*
-
-The random-initialization NVFP4 and MXFP8 runs used TorchTitan revision
-`20a66c9a108af41444222169982e15105de4c0e9`; the bf16 run used
-`34c805f3224dca3b9ea4188cd53b0a25c68bde34`. All three continued-pretraining
-runs used `c75cd8152400a24ba72e7524c86b956168b2662f`.
+The random-initialization NVFP4 and MXFP8 runs used TorchTitan revision`20a66c9a108af41444222169982e15105de4c0e9`; the bf16 run used `34c805f3224dca3b9ea4188cd53b0a25c68bde34`.
 
 ### Versioned Environment
 

@@ -111,10 +111,33 @@ def test_nvfp4_bf16_tail_fqns():
 
 
 @pytest.mark.parametrize(
+    "recipe",
+    [
+        "llama3_8b_continue_pretrain",
+        "llama3_8b_continue_pretrain_mxfp8",
+        "llama3_8b_continue_pretrain_nvfp4_mixed",
+    ],
+)
+def test_llama3_8b_continued_pretraining_recipes(recipe):
+    config = ConfigManager().parse_args(["--module", "llama3", "--config", recipe])
+
+    assert config.dataloader.dataset == "c4"
+    assert config.checkpoint.initial_load_in_hf
+    assert config.checkpoint.enable
+    assert config.compile.enable
+    assert "model" in config.compile.components
+    assert config.optimizer.param_groups[0].optimizer_kwargs["lr"] == 2e-5
+    assert config.training.local_batch_size == 32
+    assert config.training.seq_len == 2048
+    assert config.training.steps == 763
+
+
+@pytest.mark.parametrize(
     "module, recipe, expected_cutoff",
     [
         ("llama3", "llama3_debugmodel_nvfp4_mixed", 5),
         ("llama3", "llama3_8b_nvfp4_mixed", 27),
+        ("llama3", "llama3_8b_continue_pretrain_nvfp4_mixed", 27),
         ("qwen3", "qwen3_debugmodel_nvfp4_mixed", 6),
         ("qwen3", "qwen3_8b_nvfp4_mixed", 30),
     ],
@@ -224,6 +247,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(
         ("llama3", "llama3_debugmodel_nvfp4"),
         ("llama3", "llama3_debugmodel_nvfp4_mixed"),
         ("llama3", "llama3_8b_nvfp4_mixed"),
+        ("llama3", "llama3_8b_continue_pretrain_nvfp4_mixed"),
         ("qwen3", "qwen3_debugmodel_nvfp4"),
         ("qwen3", "qwen3_debugmodel_nvfp4_mixed"),
         ("qwen3", "qwen3_8b_nvfp4_mixed"),
