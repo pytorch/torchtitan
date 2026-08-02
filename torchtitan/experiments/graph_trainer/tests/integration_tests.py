@@ -416,6 +416,9 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+regional_inductor",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_regional_inductor",
             ngpu=8,
+            # TODO(#4047): Re-enable once FSDP bucketing no longer creates a
+            # cyclic region for this DeepSeekV3 FSDP+TP+EP configuration.
+            disabled=True,
         ),
         *[
             OverrideDefinitions(
