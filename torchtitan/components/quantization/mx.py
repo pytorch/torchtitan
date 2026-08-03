@@ -33,7 +33,9 @@ try:
         class Config(Linear.Config):
             """Drop-in replacement for Linear.Config that builds MXFP8Linear."""
 
-            pass
+            bf16_bwd: bool = False
+            """If True, quantize the forward to MXFP8 but run the backward in high
+            precision (bf16, straight-through) -- i.e. MXFP8 QAT."""
 
         def __init__(self, config: Config):
             TorchAOMXFP8Linear.__init__(
@@ -41,6 +43,7 @@ try:
                 config.in_features,
                 config.out_features,
                 bias=config.bias,
+                bf16_bwd=config.bf16_bwd,
             )
 
 except ImportError:
@@ -95,6 +98,59 @@ class MXFP8LinearConverter(QuantizationConverter):
                     setattr(parent, attr, new_config)
 
         logger.info("Converted Linear layers to MXFP8Linear")
+        return model_config
+
+
+class MXFP8LinearQATConverter(QuantizationConverter):
+    """MXFP8 QAT for dense Linear layers: real mxfp8 forward, bf16 backward.
+
+    Like MXFP8LinearConverter, but the swapped MXFP8Linear layers quantize the
+    forward to MXFP8 while computing the entire backward in high precision (bf16,
+    straight-through). Intended for QAT where a low-precision backward is not needed.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QuantizationConverter.Config):
+        fqns: list[str] = field(default_factory=list)
+        """
+        List of fully qualified names of modules to apply MXFP8 QAT to. Only
+        Linear.Config entries whose FQN contains a match are converted. If empty,
+        all Linear modules are converted.
+        """
+
+    def __init__(self, config: Config):
+        self.config = config
+
+        if MXFP8Linear is None:
+            raise ImportError(
+                "torchao is not installed. Please install it to use MXFP8 linear layers."
+            )
+
+        if not has_cuda_capability(10, 0):
+            raise ValueError("MXFP8 is only supported on SM100 or later architectures")
+
+    def convert(self, model_config):
+        assert MXFP8Linear is not None
+        fqns = self.config.fqns
+        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
+            if not fqns or any(target_fqn in fqn for target_fqn in fqns):
+                new_config = MXFP8Linear.Config(
+                    in_features=config.in_features,
+                    out_features=config.out_features,
+                    bias=config.bias,
+                    param_init=config.param_init,
+                    bf16_bwd=True,
+                )
+                if parent is None:
+                    model_config = new_config
+                elif isinstance(parent, list):
+                    parent[attr] = new_config
+                else:
+                    setattr(parent, attr, new_config)
+
+        logger.info(
+            "Converted Linear layers to MXFP8 QAT (mxfp8 forward, bf16 backward)"
+        )
         return model_config
 
 
@@ -202,5 +258,114 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
         logger.info(
             f"Converted GroupedExperts to use dynamic {self.config.recipe_name} "
             "quantization for grouped_mm ops"
+        )
+        return model_config
+
+
+_mxfp8_qat_experts_cache: dict[type, type] = {}
+
+
+def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
+    """Get or create an MXFP8 QAT subclass of *parent_cls*.
+
+    Like ``_get_mxfp8_grouped_experts_cls`` but the grouped GEMMs use the QAT
+    autograd function via the ``bf16_bwd`` config (real mxfp8 forward, bf16
+    backward), with ``KernelPreference.TRITON`` to run pure Triton kernels for the
+    forward quantization.
+    """
+    if parent_cls in _mxfp8_qat_experts_cache:
+        return _mxfp8_qat_experts_cache[parent_cls]
+
+    parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
+
+    class MXFP8QATGroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            recipe_name: str = "mxfp8_rceil"
+
+        def __init__(self, config: Config):
+            super().__init__(config)
+            from torchao.prototype.moe_training.config import MXFP8TrainingOpConfig
+            from torchao.prototype.mx_formats.config import ScaleCalculationMode
+            from torchao.quantization.quant_api import quantize_
+            from torchao.quantization.quantize_.common.kernel_preference import (
+                KernelPreference,
+            )
+
+            # QAT: real mxfp8 forward, high-precision (bf16) backward.
+            # - kernel_preference=TRITON runs pure Triton kernels for the forward
+            #   activation quant. The cutedsl quant kernels are not compatible with
+            #   nvidia-cutlass-dsl 4.6.0+; see
+            #   https://github.com/pytorch/ao/issues/4647 for context.
+            # - bf16_bwd=True routes to the autograd function whose backward is a
+            #   plain bf16 torch._grouped_mm (straight-through estimator).
+            op_config = MXFP8TrainingOpConfig(
+                kernel_preference=KernelPreference.TRITON,
+                scale_calculation_mode=ScaleCalculationMode.RCEIL,
+                bf16_bwd=True,
+            )
+            quantize_(
+                self,
+                config=op_config,
+                filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
+            )
+
+    MXFP8QATGroupedExperts.__name__ = f"MXFP8QAT{parent_cls.__name__}"
+    MXFP8QATGroupedExperts.__qualname__ = f"MXFP8QAT{parent_cls.__name__}"
+    _mxfp8_qat_experts_cache[parent_cls] = MXFP8QATGroupedExperts
+    return MXFP8QATGroupedExperts
+
+
+class MXFP8GroupedExpertsQATConverter(QuantizationConverter):
+    """MXFP8 QAT for MoE expert grouped GEMMs: real mxfp8 forward, bf16 backward.
+
+    Uses the QAT autograd function (real mxfp8 forward, bf16 backward) with
+    ``KernelPreference.TRITON`` for the forward quantization. Intended for QAT
+    (training a model to be robust to mxfp8 inference) where a low-precision backward
+    is not needed; gradients flow in high precision (bf16).
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QuantizationConverter.Config):
+        recipe_name: Literal["mxfp8_rceil"] = "mxfp8_rceil"
+        """Recipe name for the forward quantization. Options: ["mxfp8_rceil"]."""
+        pad_multiple: int = 32
+        """
+        Pad per-expert token groups to this multiple for MXFP8 grouped GEMM
+        alignment. The Triton quant kernel uses the MXFP8 block size of 32.
+        """
+
+    def __init__(self, config: Config):
+        self.config = config
+
+        if find_spec("torchao") is None:
+            raise ImportError(
+                "torchao is not installed. Please install it to use MXFP8 MoE training."
+            )
+
+        if not has_cuda_capability(10, 0):
+            raise ValueError("MXFP8 is only supported on SM100 or later architectures")
+
+    def convert(self, model_config):
+        for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
+            # ``parent`` is the RoutedExperts.Config owning inner_experts + dispatcher.
+            swap_token_dispatcher(parent, self.config.pad_multiple)
+            base_module_cls = type(config)._owner
+            quantized_cls = _get_mxfp8_qat_grouped_experts_cls(base_module_cls)
+            config_cls = quantized_cls.Config  # type: ignore[attr-defined]
+            new_config = config_cls(
+                **{f.name: getattr(config, f.name) for f in fields(config)},
+                recipe_name=self.config.recipe_name,
+            )
+            if parent is None:
+                model_config = new_config
+            elif isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+
+        logger.info(
+            "Converted GroupedExperts to MXFP8 QAT (mxfp8 forward, bf16 backward, "
+            "Triton kernels) for grouped_mm ops"
         )
         return model_config
