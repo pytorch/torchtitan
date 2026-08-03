@@ -15,7 +15,6 @@ from torchtitan.components.quantization import (
     NVFP4LinearConverter,
 )
 from torchtitan.components.quantization.nvfp4 import (
-    _NVFP4_BF16_TAIL_FRACTION,
     nvfp4_bf16_tail_fqns,
 )
 from torchtitan.components.validate import Validator
@@ -122,6 +121,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     # Mixed precision: convert the leading decoder layers to NVFP4 and keep the
     # last _NVFP4_BF16_TAIL_FRACTION of layers (plus the lm_head) in bf16.
     n_layers = len(config.model_spec.model.layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
     config.model_spec = model_registry(
         "debugmodel",
@@ -248,6 +248,7 @@ def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     # Mixed precision: convert the leading decoder layers to NVFP4 and keep the
     # last _NVFP4_BF16_TAIL_FRACTION of layers (plus the lm_head) in bf16.
     n_layers = len(config.model_spec.model.layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
     config.model_spec = model_registry(
         "8B",

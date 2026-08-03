@@ -15,7 +15,6 @@ from torchtitan.components.optimizer import (
 )
 from torchtitan.components.quantization import NVFP4LinearConverter
 from torchtitan.components.quantization.nvfp4 import (
-    _NVFP4_BF16_TAIL_FRACTION,
     nvfp4_bf16_tail_fqns,
 )
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
@@ -90,6 +89,7 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     )
     # Keep the last 15% of decoder layers and the lm_head in bf16.
     num_layers = len(config.model_spec.model.layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(
         num_layers,
         _NVFP4_BF16_TAIL_FRACTION,
@@ -238,6 +238,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     config.compile = CompileConfig(enable=True, components=["model"])
     # Keep the last 15% of decoder layers and the lm_head in bf16.
     num_layers = len(config.model_spec.model.layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(
         num_layers,
         _NVFP4_BF16_TAIL_FRACTION,

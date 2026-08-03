@@ -157,7 +157,7 @@ def test_nvfp4_first_85_pct_layers_converts_only_leading_layers(
     config = ConfigManager().parse_args(["--module", module, "--config", recipe])
     model_config = config.model_spec.model
     n_layers = len(model_config.layers)
-    cutoff = n_layers - math.ceil(n_layers * nvfp4_mod._NVFP4_BF16_TAIL_FRACTION)
+    cutoff = n_layers - math.ceil(n_layers * 0.15)
     assert cutoff == expected_cutoff
     assert 0 < cutoff < n_layers  # a real split: some NVFP4, some bf16
 

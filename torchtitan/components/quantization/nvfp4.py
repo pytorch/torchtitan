@@ -241,11 +241,6 @@ except ImportError:
     NVFP4Linear = None
 
 
-# Default fraction of decoder layers kept in bf16 at the tail (the final layers
-# are the most precision-sensitive) for the mixed-precision NVFP4 recipe.
-_NVFP4_BF16_TAIL_FRACTION = 0.15
-
-
 def nvfp4_bf16_tail_fqns(num_layers: int, bf16_tail_fraction: float) -> list[str]:
     """Converter ``fqns`` selecting the leading decoder layers for NVFP4 while
     keeping the last ``ceil(num_layers * bf16_tail_fraction)`` layers in bf16.
