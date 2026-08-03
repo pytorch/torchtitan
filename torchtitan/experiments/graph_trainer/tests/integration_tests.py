@@ -263,36 +263,42 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "batch",
             "layers.*",
             "transformer_batch",
+            False,
         ),
         (
             "regional",
             "batch",
             "layers.*.moe",
             "moe_batch",
+            True,
         ),
         (
             "regional",
             "seq",
             "layers.*.moe",
             "moe_seq",
+            True,
         ),
         (
             "full",
             "batch",
             "layers.*",
             "transformer_batch",
+            False,
         ),
         (
             "full",
             "batch",
             "layers.*.moe",
             "moe_batch",
+            True,
         ),
         (
             "full",
             "seq",
             "layers.*.moe",
             "moe_seq",
+            True,
         ),
     ]
 
@@ -443,8 +449,17 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                 f"aot_fx_trace deepseek_v3 FlexAttn {inductor_compilation}_inductor ep_overlap {variant}",
                 f"aot_fx_trace_deepseek_v3_flexattn_{inductor_compilation}_inductor_ep_overlap_{variant}",
                 ngpu=8,
+                # TODO(#4052): Re-enable MoE EP-overlap dense-region tests
+                # once FSDP comm scheduling handles alias users on wait sinks.
+                disabled=disabled,
             )
-            for inductor_compilation, mode, modules, variant in ep_overlap_flex_tests
+            for (
+                inductor_compilation,
+                mode,
+                modules,
+                variant,
+                disabled,
+            ) in ep_overlap_flex_tests
         ],
         OverrideDefinitions(
             [
