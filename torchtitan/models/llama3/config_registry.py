@@ -262,6 +262,21 @@ def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     return config
 
 
+def llama3_8b_mxfp8() -> Trainer.Config:
+    config = llama3_8b()
+    # Swap dense Linear layers for MXFP8Linear. compile is enabled so the
+    # converter's compile requirement is satisfied. This is the regular-Trainer
+    # (torch.compile) baseline counterpart to graph_trainer_llama3_8b_mxfp8.
+    config.compile = CompileConfig(enable=True, components=["model"])
+    config.model_spec = model_registry(
+        "8B",
+        converters=[
+            MXFP8LinearConverter.Config(model_compile_enabled=True),
+        ],
+    )
+    return config
+
+
 def llama3_70b() -> Trainer.Config:
     model_spec = model_registry("70B")
     return Trainer.Config(
