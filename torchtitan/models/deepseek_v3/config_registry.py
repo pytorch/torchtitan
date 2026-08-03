@@ -7,7 +7,7 @@
 from torch.distributed.tensor import Shard
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
     assign_balanced_owners,
-    BucketSpec,
+    BucketConfig,
 )
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.distributed_optimizers.muon import Owned
@@ -303,11 +303,12 @@ def _deepseek_v3_distributed_muon_optimizer(
         },
         num_ranks=owner_group_size,
     )
-    bucket_spec = tuple(
-        BucketSpec(
+    bucket_configs = tuple(
+        BucketConfig(
             name=f"layers.{layer_id}",
             patterns=fqns,
             owner_rank_by_fqn=owners,
+            mesh_axis="dp_shard",
         )
         for layer_id, (fqns, owners) in enumerate(
             zip(layer_bucket_fqns, owner_rank_by_bucket, strict=True)
@@ -317,7 +318,9 @@ def _deepseek_v3_distributed_muon_optimizer(
         implementation="foreach",
         param_groups=param_groups,
         optimizer_init_kwargs={
-            "DistributedMuon": {"bucket_spec": bucket_spec}
+            "DistributedMuon": {
+                "bucket_configs": bucket_configs,
+            }
         },
     )
 

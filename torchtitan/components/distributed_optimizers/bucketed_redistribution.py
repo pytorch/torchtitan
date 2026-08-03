@@ -20,9 +20,33 @@ from typing import Any, Generic, TypeVar
 import torch
 import torch.distributed as dist
 from torch import Tensor
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor, Shard
 
 
-__all__ = ["BucketSpec", "assign_balanced_owners"]
+__all__ = ["BucketConfig", "BucketSpec", "assign_balanced_owners"]
+
+
+@dataclass(frozen=True, slots=True)
+class BucketConfig:
+    """Static bucket configuration resolved after runtime meshes exist."""
+
+    patterns: tuple[str, ...]
+    owner_rank_by_fqn: Mapping[str, int]
+    mesh_axis: str
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "patterns", tuple(self.patterns))
+        object.__setattr__(self, "owner_rank_by_fqn", dict(self.owner_rank_by_fqn))
+
+    def bind(self, mesh: DeviceMesh) -> BucketSpec:
+        return BucketSpec(
+            patterns=self.patterns,
+            owner_rank_by_fqn=self.owner_rank_by_fqn,
+            mesh=mesh,
+            name=self.name,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,18 +55,59 @@ class BucketSpec:
 
     Patterns use case-sensitive ``fnmatch`` syntax. Every optimizer FQN must
     match exactly one bucket, and sequence order controls execution order.
+    ``mesh`` is the bucket's exact one-dimensional communication mesh.
     ``owner_rank_by_fqn`` must exactly cover parameters requiring whole-tensor
-    redistribution and uses process-group-local ranks. Compute-ready parameters
-    have no owner entry. ``name`` is diagnostic metadata only.
+    redistribution and uses mesh-local ranks. Compute-ready parameters have no
+    owner entry. ``name`` is diagnostic metadata only.
     """
 
     patterns: tuple[str, ...]
     owner_rank_by_fqn: Mapping[str, int]
+    mesh: DeviceMesh
     name: str = ""
 
     def __post_init__(self) -> None:
+        if self.mesh.ndim != 1:
+            raise ValueError("BucketSpec mesh must be one-dimensional")
         object.__setattr__(self, "patterns", tuple(self.patterns))
         object.__setattr__(self, "owner_rank_by_fqn", dict(self.owner_rank_by_fqn))
+
+
+def _bind_bucket_configs(
+    configs: Sequence[BucketConfig],
+    storage_by_fqn: Mapping[str, DTensor],
+) -> tuple[BucketSpec, ...]:
+    specs = []
+    for config in configs:
+        candidates = tuple(config.owner_rank_by_fqn) or tuple(
+            fqn
+            for fqn in storage_by_fqn
+            if any(fnmatch.fnmatchcase(fqn, pattern) for pattern in config.patterns)
+        )
+        if not candidates:
+            raise ValueError(f"bucket {config.name!r} matched no storage tensor")
+
+        meshes = []
+        for fqn in candidates:
+            if fqn not in storage_by_fqn:
+                raise ValueError(f"bucket {config.name!r} references unknown {fqn!r}")
+            storage_mesh = storage_by_fqn[fqn].device_mesh
+            if storage_mesh.mesh_dim_names is None or (
+                config.mesh_axis not in storage_mesh.mesh_dim_names
+            ):
+                raise ValueError(
+                    f"bucket {config.name!r} mesh axis {config.mesh_axis!r} "
+                    f"is not present on storage for {fqn!r}"
+                )
+            meshes.append(storage_mesh[config.mesh_axis])
+
+        mesh = meshes[0]
+        if any(not torch.equal(candidate.mesh, mesh.mesh) for candidate in meshes[1:]):
+            raise ValueError(
+                f"bucket {config.name!r} resolves to inconsistent communication meshes"
+            )
+        specs.append(config.bind(mesh))
+    return tuple(specs)
 
 
 def assign_balanced_owners(
@@ -331,6 +396,7 @@ class _BucketPlan(Generic[_ItemT]):
     local_items: tuple[_ItemT, ...]
     redistributed_items: tuple[_ItemT, ...]
     redistribution_plans: tuple[_RedistributionPlan, ...]
+    group: _RedistributionGroup
     storage_to_compute_schedule: _CommunicationSchedule
     compute_to_storage_schedule: _CommunicationSchedule
     dtype: torch.dtype
@@ -348,7 +414,6 @@ class _RedistributionGroup:
 class _BucketPlanningResult(Generic[_ItemT]):
     plans: tuple[_BucketPlan[_ItemT], ...]
     ordered_items: tuple[_ItemT, ...]
-    redistribution_participants: tuple[int, ...] | None
 
 
 @dataclass(slots=True)
@@ -810,25 +875,95 @@ def _lower_packed_all_to_all(
     )
 
 
+def _device_mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
+    if mesh.ndim == 1:
+        return tuple(dist.get_process_group_ranks(mesh.get_group()))
+    return tuple(mesh.mesh.flatten().tolist())
+
+
+def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
+    if mesh.ndim != 1:
+        raise ValueError("optimizer redistribution mesh must be one-dimensional")
+    process_group = mesh.get_group()
+    participants = tuple(dist.get_process_group_ranks(process_group))
+    return _RedistributionGroup(
+        process_group=process_group,
+        participants=participants,
+        local_participant=participants[dist.get_rank(process_group)],
+    )
+
+
+def _normalize_dim(dim: int, ndim: int) -> int:
+    normalized = dim if dim >= 0 else dim + ndim
+    if normalized < 0 or normalized >= ndim:
+        raise ValueError(f"dimension {dim} is invalid for a rank-{ndim} tensor")
+    return normalized
+
+
+def _dtensor_storage_block_for_participant(
+    tensor: DTensor,
+    participant: int,
+) -> _MatrixBlock:
+    mesh_shape = tuple(tensor.device_mesh.shape)
+    mesh_rank = _device_mesh_ranks(tensor.device_mesh).index(participant)
+    coordinate = [0] * len(mesh_shape)
+    for mesh_dim in range(len(mesh_shape) - 1, -1, -1):
+        mesh_rank, coordinate[mesh_dim] = divmod(mesh_rank, mesh_shape[mesh_dim])
+
+    local_shape = list(tensor.shape)
+    global_offsets = [0] * tensor.ndim
+    for mesh_dim, placement in enumerate(tensor.placements):
+        if type(placement) is not Shard:
+            raise ValueError(
+                "redistributed optimizer storage requires exact Shard placements"
+            )
+        tensor_dim = _normalize_dim(placement.dim, tensor.ndim)
+        local_size, global_offset = Shard.local_shard_size_and_offset(
+            tensor.shape[tensor_dim],
+            mesh_shape[mesh_dim],
+            coordinate[mesh_dim],
+        )
+        local_shape[tensor_dim] = local_size
+        global_offsets[tensor_dim] = global_offset
+    return _MatrixBlock(
+        offsets=tuple(global_offsets),
+        shape=tuple(local_shape),
+    )
+
+
+def _dtensor_storage_blocks(
+    tensor: DTensor,
+    participants: tuple[int, ...],
+) -> tuple[tuple[int, _MatrixBlock], ...]:
+    storage_participants = _device_mesh_ranks(tensor.device_mesh)
+    if storage_participants != participants:
+        raise ValueError(
+            "bucket mesh participants must match redistributed DTensor storage"
+        )
+    return tuple(
+        (
+            participant,
+            _dtensor_storage_block_for_participant(tensor, participant),
+        )
+        for participant in participants
+    )
+
+
 def _build_bucket_plans(
     items: Sequence[_ItemT],
     specs: Sequence[BucketSpec],
     *,
     fqn: Callable[[_ItemT], str],
     compute_locally: Callable[[_ItemT], bool],
-    local_tensor: Callable[[_ItemT], Tensor],
-    redistribution_group: Callable[[_ItemT], _RedistributionGroup],
-    storage_blocks: Callable[
-        [_ItemT, tuple[int, ...]], Sequence[tuple[int, _MatrixBlock]]
-    ],
+    storage_dtensor: Callable[[_ItemT], DTensor],
 ) -> _BucketPlanningResult[_ItemT]:
     resolved = _resolve_buckets(items, specs, fqn=fqn)
     plans = []
     ordered_items = []
-    redistribution_participants: tuple[int, ...] | None = None
     for spec, bucket in zip(specs, resolved, strict=True):
         if not bucket:
             continue
+        group = _redistribution_group(spec.mesh)
         local_items = tuple(
             sorted(
                 (item for item in bucket if compute_locally(item)),
@@ -854,12 +989,13 @@ def _build_bucket_plans(
         ordered_items.extend(redistributed_items)
 
         if not redistributed_items:
-            tensor = local_tensor(local_items[0])
+            tensor = storage_dtensor(local_items[0]).to_local()
             plans.append(
                 _BucketPlan(
                     local_items=local_items,
                     redistributed_items=(),
                     redistribution_plans=(),
+                    group=group,
                     storage_to_compute_schedule=_LocalSchedule(),
                     compute_to_storage_schedule=_LocalSchedule(),
                     dtype=tensor.dtype,
@@ -868,18 +1004,6 @@ def _build_bucket_plans(
             )
             continue
 
-        group = redistribution_group(redistributed_items[0])
-        if any(
-            redistribution_group(item).participants != group.participants
-            for item in redistributed_items
-        ) or (
-            redistribution_participants is not None
-            and group.participants != redistribution_participants
-        ):
-            raise ValueError(
-                "redistributed optimizer parameters must use one process group"
-            )
-        redistribution_participants = group.participants
         owner_ranks = [
             spec.owner_rank_by_fqn[fqn(item)] for item in redistributed_items
         ]
@@ -888,7 +1012,8 @@ def _build_bucket_plans(
                 f"bucket {spec.name!r} has owner outside its process group"
             )
 
-        local_tensors = [local_tensor(item) for item in redistributed_items]
+        storage_dtensors = [storage_dtensor(item) for item in redistributed_items]
+        local_tensors = [tensor.to_local() for tensor in storage_dtensors]
         dtype = local_tensors[0].dtype
         device = local_tensors[0].device
         if any(
@@ -898,8 +1023,8 @@ def _build_bucket_plans(
             raise ValueError(f"bucket {spec.name!r} mixes dtype or device")
 
         blocks_by_item = tuple(
-            tuple(storage_blocks(item, group.participants))
-            for item in redistributed_items
+            _dtensor_storage_blocks(tensor, group.participants)
+            for tensor in storage_dtensors
         )
         for tensor, blocks in zip(local_tensors, blocks_by_item, strict=True):
             local_blocks = [
@@ -927,6 +1052,7 @@ def _build_bucket_plans(
                 local_items=local_items,
                 redistributed_items=redistributed_items,
                 redistribution_plans=redistribution_plans,
+                group=group,
                 storage_to_compute_schedule=_lower_packed_all_to_all(
                     redistribution_plans,
                     direction="storage_to_compute",
@@ -947,19 +1073,16 @@ def _build_bucket_plans(
     return _BucketPlanningResult(
         plans=tuple(plans),
         ordered_items=tuple(ordered_items),
-        redistribution_participants=redistribution_participants,
     )
 
 
 def _validate_bucket_plans_across_ranks(
     plans: Sequence[_BucketPlan[_ItemT]],
     *,
-    process_group: dist.ProcessGroup | None,
-    device: torch.device,
     item_signature: Callable[[_ItemT], tuple[Any, ...]],
 ) -> None:
-    description = [
-        (
+    for plan in plans:
+        description = (
             str(plan.dtype),
             plan.device.type,
             tuple(
@@ -971,18 +1094,17 @@ def _validate_bucket_plans_across_ranks(
                 for item in plan.local_items + plan.redistributed_items
             ],
         )
-        for plan in plans
-    ]
-    digest = hashlib.sha256(repr(description).encode()).digest()
-    plan_hash = int.from_bytes(digest[:7], "little")
-    local_hash = torch.tensor(plan_hash, dtype=torch.int64, device=device)
-    gathered = [
-        torch.empty_like(local_hash)
-        for _ in range(dist.get_world_size(process_group))
-    ]
-    dist.all_gather(gathered, local_hash, group=process_group)
-    if any(value.item() != plan_hash for value in gathered):
-        raise RuntimeError("optimizer bucket plans differ across ranks")
+        digest = hashlib.sha256(repr(description).encode()).digest()
+        plan_hash = int.from_bytes(digest[:7], "little")
+        local_hash = torch.tensor(plan_hash, dtype=torch.int64, device=plan.device)
+        process_group = plan.group.process_group
+        gathered = [
+            torch.empty_like(local_hash)
+            for _ in range(dist.get_world_size(process_group))
+        ]
+        dist.all_gather(gathered, local_hash, group=process_group)
+        if any(value.item() != plan_hash for value in gathered):
+            raise RuntimeError("optimizer bucket plans differ across ranks")
 
 
 def _matrix_block_view(tensor: Tensor, block: _MatrixBlock) -> Tensor:

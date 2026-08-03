@@ -17,6 +17,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
+    BucketConfig,
     BucketSpec,
 )
 from torchtitan.components.distributed_optimizers.muon import (
@@ -65,8 +66,18 @@ class _DistributedMuonTestBase(DTensorTestBase):
     @property
     def mesh(self):
         if not hasattr(self, "_mesh"):
-            self._mesh = init_device_mesh(self.device_type, (self.world_size,))
+            self._mesh = init_device_mesh(
+                self.device_type,
+                (self.world_size,),
+                mesh_dim_names=("dp_shard",),
+            )
         return self._mesh
+
+    @property
+    def redistribution_mesh(self):
+        if not hasattr(self, "_redistribution_mesh"):
+            self._redistribution_mesh = self.mesh._flatten("optimizer")
+        return self._redistribution_mesh
 
     @property
     def device(self):
@@ -100,10 +111,11 @@ class _DistributedMuonTestBase(DTensorTestBase):
                     ),
                 },
             ],
-            bucket_spec=[
-                BucketSpec(
+            bucket_configs=[
+                BucketConfig(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={"layers.0.redistributed": 1},
+                    mesh_axis="dp_shard",
                     name="layers.0",
                 )
             ],
@@ -206,6 +218,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn=owners,
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -298,6 +311,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("*.redistributed",),
                         owner_rank_by_fqn={},
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -323,10 +337,12 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={},
+                        mesh=self.mesh,
                     ),
                     BucketSpec(
                         patterns=("*.local_blocks",),
                         owner_rank_by_fqn={},
+                        mesh=self.mesh,
                     ),
                 ],
             )
@@ -365,6 +381,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={},
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -395,6 +412,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={},
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -414,6 +432,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={},
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -436,6 +455,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={"layers.0.first": 0},
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -447,6 +467,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={"layers.0.first": 0},
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -462,6 +483,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                             "layers.0.first": 0,
                             "layers.0.second": self.world_size,
                         },
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -486,6 +508,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={"layers.0.redistributed": self.rank},
+                        mesh=self.mesh,
                     )
                 ],
             )
@@ -505,6 +528,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={"layers.0.redistributed": 0},
+                        mesh=self.mesh,
                     )
                 ],
                 lr=0.01 if self.rank == 0 else 0.02,
@@ -527,6 +551,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={"layers.0.redistributed": 0},
+                    mesh=self.mesh,
                 )
             ],
         )
@@ -573,6 +598,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={},
+                    mesh=self.mesh,
                 )
             ],
             lr=0.03,
@@ -797,6 +823,7 @@ class TestTensorParallelDistributedMuon(_DistributedMuonTestBase):
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={names[0]: 1, names[1]: 3},
+                    mesh=self.redistribution_mesh,
                 )
             ],
             lr=0.03,
@@ -848,6 +875,65 @@ class TestTensorParallelDistributedMuon(_DistributedMuonTestBase):
                 momentum.to_local(), expected_momentum.to_local()
             )
 
+    @with_comms
+    def test_distinct_bucket_meshes_use_mesh_local_owners(self):
+        fsdp_mesh = self.mesh["fsdp"]
+        tp_mesh = self.mesh["tp"]
+        meshes = (fsdp_mesh, tp_mesh)
+        values = (
+            torch.arange(15, device=self.device).reshape(5, 3).float().div_(10),
+            torch.arange(20, device=self.device).reshape(4, 5).float().div_(10),
+        )
+        params = [
+            torch.nn.Parameter(
+                distribute_tensor(value.clone(), mesh, (Shard(0),))
+            )
+            for value, mesh in zip(values, meshes, strict=True)
+        ]
+        names = ("layers.0.fsdp", "layers.1.tp")
+        optimizer = build_distributed_muon(
+            [
+                {
+                    "params": [param],
+                    "param_names": [name],
+                    "compute_sharding": MuonComputeSharding(placement=Owned()),
+                }
+                for param, name in zip(params, names, strict=True)
+            ],
+            bucket_spec=[
+                BucketSpec(
+                    patterns=(name,),
+                    owner_rank_by_fqn={name: 1},
+                    mesh=mesh,
+                )
+                for name, mesh in zip(names, meshes, strict=True)
+            ],
+            ns_steps=1,
+        )
+
+        for param, value, mesh in zip(params, values, meshes, strict=True):
+            param.grad = distribute_tensor(torch.ones_like(value), mesh, (Shard(0),))
+
+        all_to_all_single = dist.all_to_all_single
+        with patch(
+            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            optimizer.step()
+
+        for plan, mesh in zip(optimizer._plans, meshes, strict=True):
+            participants = tuple(dist.get_process_group_ranks(mesh.get_group()))
+            route = plan.redistribution_plans[0].storage_to_compute_routes[0]
+            self.assertEqual(route.destination_participants, (participants[1],))
+            self.assertEqual(
+                sum(
+                    call.kwargs["group"] is mesh.get_group()
+                    for call in collective.call_args_list
+                ),
+                2,
+            )
+
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistributedMuonPipeline(_DistributedMuonTestBase):
@@ -886,14 +972,17 @@ class TestDistributedMuonPipeline(_DistributedMuonTestBase):
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={"layers.0.redistributed": 0},
+                    mesh=self.mesh,
                 ),
                 BucketSpec(
                     patterns=("layers.1.*",),
                     owner_rank_by_fqn={},
+                    mesh=self.mesh,
                 ),
                 BucketSpec(
                     patterns=("layers.2.*",),
                     owner_rank_by_fqn={"layers.2.redistributed": 0},
+                    mesh=self.mesh,
                 ),
             ],
             lr=0.03,

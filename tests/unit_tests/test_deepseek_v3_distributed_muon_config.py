@@ -9,7 +9,7 @@ import unittest
 import torch
 from torch.distributed.tensor import Shard
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
-    BucketSpec,
+    BucketConfig,
     assign_balanced_owners,
 )
 from torchtitan.components.distributed_optimizers.muon import Owned
@@ -50,7 +50,11 @@ class TestDeepSeekV3DistributedMuonConfig(unittest.TestCase):
         )
 
         owners = {"a": 0}
-        spec = BucketSpec(patterns=("a",), owner_rank_by_fqn=owners)
+        spec = BucketConfig(
+            patterns=("a",),
+            owner_rank_by_fqn=owners,
+            mesh_axis="dp_shard",
+        )
         owners["a"] = 1
         self.assertEqual(spec.owner_rank_by_fqn, {"a": 0})
 
@@ -142,20 +146,18 @@ class TestDeepSeekV3DistributedMuonConfig(unittest.TestCase):
 
     def test_bucket_and_parallelism_config(self):
         optimizer_config = self.config.optimizer
-        bucket_specs = optimizer_config.optimizer_init_kwargs["DistributedMuon"][
-            "bucket_spec"
+        bucket_configs = optimizer_config.optimizer_init_kwargs["DistributedMuon"][
+            "bucket_configs"
         ]
         self.assertEqual(
             set(optimizer_config.optimizer_init_kwargs["DistributedMuon"]),
-            {"bucket_spec"},
+            {"bucket_configs"},
         )
-        self.assertEqual(len(bucket_specs), 27)
-        self.assertTrue(all(isinstance(spec, BucketSpec) for spec in bucket_specs))
         self.assertEqual(
-            [spec.name for spec in bucket_specs],
+            [config.name for config in bucket_configs],
             [f"layers.{layer_id}" for layer_id in range(27)],
         )
-        for layer_id, spec in enumerate(bucket_specs):
+        for layer_id, config in enumerate(bucket_configs):
             prefix = f"layers.{layer_id}"
             expected = tuple(
                 f"{prefix}.attention.{projection}.weight"
@@ -166,9 +168,10 @@ class TestDeepSeekV3DistributedMuonConfig(unittest.TestCase):
                     f"{prefix}.moe.routed_experts.inner_experts.{projection}"
                     for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
                 )
-            self.assertEqual(spec.patterns, expected)
+            self.assertEqual(config.patterns, expected)
+            self.assertEqual(config.mesh_axis, "dp_shard")
             self.assertEqual(
-                spec.owner_rank_by_fqn,
+                config.owner_rank_by_fqn,
                 {f"{prefix}.attention.wkv_a.weight": layer_id % 8},
             )
 

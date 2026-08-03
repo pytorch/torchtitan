@@ -6,10 +6,12 @@
 
 import unittest
 from dataclasses import dataclass
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
     _build_bucket_plans,
     _lower_packed_all_to_all,
@@ -27,9 +29,11 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
         @dataclass(frozen=True)
         class Item:
             fqn: str
-            tensor: torch.Tensor
+            tensor: DTensor
 
-        item = Item("layers.0.weight", torch.empty(0, 3))
+        tensor = Mock(spec=DTensor)
+        tensor.to_local.return_value = torch.empty(0, 3)
+        item = Item("layers.0.weight", tensor)
         blocks = (
             (3, _MatrixBlock(offsets=(0, 0), shape=(2, 3))),
             (7, _MatrixBlock(offsets=(2, 0), shape=(0, 3))),
@@ -39,11 +43,21 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
             participants=(3, 7),
             local_participant=7,
         )
+        mesh = Mock(spec=DeviceMesh)
+        mesh.ndim = 1
 
         with patch(
             "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
             "get_process_group_ranks",
             return_value=[3, 7],
+        ), patch(
+            "torchtitan.components.distributed_optimizers.bucketed_redistribution."
+            "_redistribution_group",
+            return_value=group,
+        ), patch(
+            "torchtitan.components.distributed_optimizers.bucketed_redistribution."
+            "_dtensor_storage_blocks",
+            return_value=blocks,
         ):
             result = _build_bucket_plans(
                 (item,),
@@ -51,13 +65,12 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={item.fqn: 0},
+                        mesh=mesh,
                     ),
                 ),
                 fqn=lambda value: value.fqn,
                 compute_locally=lambda _value: False,
-                local_tensor=lambda value: value.tensor,
-                redistribution_group=lambda _value: group,
-                storage_blocks=lambda _value, _participants: blocks,
+                storage_dtensor=lambda value: value.tensor,
             )
 
         plan = result.plans[0]

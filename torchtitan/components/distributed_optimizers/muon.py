@@ -14,9 +14,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
-import torch.distributed as dist
 from torch import Tensor
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
@@ -24,8 +22,7 @@ from .bucketed_redistribution import (
     _BucketedRedistributionRuntime,
     _BucketPlan,
     _build_bucket_plans,
-    _MatrixBlock,
-    _RedistributionGroup,
+    _device_mesh_ranks,
     _validate_bucket_plans_across_ranks,
     assign_balanced_owners,
     BucketSpec,
@@ -58,7 +55,6 @@ class DistributedMuon(Optimizer):
         _prepared_compute_views: Mapping[
             str, _PreparedParameterComputeView
         ],
-        _parameter_preparation_error: Exception | None = None,
         lr: float = 1e-3,
         weight_decay: float = 0.1,
         momentum: float = 0.95,
@@ -98,24 +94,9 @@ class DistributedMuon(Optimizer):
             group_compute_placements.append(compute_placement)
         self._group_compute_placements = tuple(group_compute_placements)
 
-        self._control_group = self._infer_control_group()
-        self._control_group_ranks = tuple(
-            dist.get_process_group_ranks(self._control_group)
-            if self._control_group is not None
-            else range(dist.get_world_size())
-        )
-
         self._specs = tuple(bucket_spec)
-
-        setup_error: Exception | None = None
-        try:
-            if _parameter_preparation_error is not None:
-                raise _parameter_preparation_error
-            self._validate_groups()
-            self._initialize_plan()
-        except Exception as error:
-            setup_error = error
-        self._synchronize_setup_error(setup_error)
+        self._validate_groups()
+        self._initialize_plan()
         self._validate_plan_across_ranks()
         self._redistribution_runtime = _BucketedRedistributionRuntime[
             _ParameterComputeLayout
@@ -165,26 +146,6 @@ class DistributedMuon(Optimizer):
         super().load_state_dict(state_dict)
         self._validate_plan_across_ranks()
         self._first_step_validated = False
-
-    def _infer_control_group(self) -> dist.ProcessGroup | None:
-        for group, compute_placement in zip(
-            self.param_groups, self._group_compute_placements, strict=True
-        ):
-            if not isinstance(compute_placement, Owned):
-                continue
-            for param in group["params"]:
-                if isinstance(param, DTensor) and _has_owned_sharded_storage(param):
-                    mesh = param.device_mesh
-                    return (
-                        mesh.get_group()
-                        if mesh.ndim == 1
-                        else mesh._flatten().get_group()
-                    )
-        for group in self.param_groups:
-            for param in group["params"]:
-                if isinstance(param, DTensor) and param.device_mesh.ndim == 1:
-                    return param.device_mesh.get_group()
-        return None
 
     def _validate_groups(self) -> None:
         for group_index, group in enumerate(self.param_groups):
@@ -272,50 +233,15 @@ class DistributedMuon(Optimizer):
             self._specs,
             fqn=lambda item: item.fqn,
             compute_locally=lambda item: item.compute_locally,
-            local_tensor=lambda item: item.param.to_local(),
-            redistribution_group=self._redistribution_group,
-            storage_blocks=_owned_storage_blocks,
+            storage_dtensor=lambda item: item.param,
         )
         self._plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
         self._tensor_device = self._plans[0].device
-        if (
-            result.redistribution_participants is not None
-            and result.redistribution_participants != self._control_group_ranks
-        ):
-            raise ValueError(
-                "redistributed Muon parameters must use the optimizer control group"
-            )
-
-    @staticmethod
-    def _redistribution_group(
-        compute_layout: _ParameterComputeLayout,
-    ) -> _RedistributionGroup:
-        mesh = compute_layout.param.device_mesh
-        redistribution_mesh = mesh if mesh.ndim == 1 else mesh._flatten()
-        process_group = redistribution_mesh.get_group()
-        participants = tuple(dist.get_process_group_ranks(process_group))
-        return _RedistributionGroup(
-            process_group=process_group,
-            participants=participants,
-            local_participant=participants[dist.get_rank(process_group)],
-        )
-
-    def _synchronize_setup_error(self, error: Exception | None) -> None:
-        first_param = cast(DTensor, self.param_groups[0]["params"][0])
-        device = first_param.to_local().device
-        status = torch.tensor(int(error is not None), dtype=torch.int32, device=device)
-        dist.all_reduce(status, group=self._control_group)
-        if status.item():
-            if error is not None:
-                raise error
-            raise RuntimeError("DistributedMuon setup failed on another rank")
 
     def _validate_plan_across_ranks(self) -> None:
         _validate_bucket_plans_across_ranks(
             self._plans,
-            process_group=self._control_group,
-            device=self._tensor_device,
             item_signature=self._plan_item_signature,
         )
 
@@ -332,7 +258,7 @@ class DistributedMuon(Optimizer):
             tuple(compute_layout.global_compute_shape),
             compute_layout.compute_locally,
             _compute_placement_key(compute_layout.compute_placement),
-            _storage_mesh_ranks(compute_layout.param.device_mesh),
+            _device_mesh_ranks(compute_layout.param.device_mesh),
             tuple(map(str, compute_layout.param.placements)),
             self._group_signature(compute_layout),
         )
@@ -360,19 +286,11 @@ class DistributedMuon(Optimizer):
 
     def _preflight_step(self) -> None:
         initialize_state = not self._first_step_validated
-        if initialize_state:
-            missing = sum(
-                compute_layout.param.grad is None
-                for compute_layout in self._parameter_compute_layouts
-            )
-            status = torch.tensor(
-                missing, dtype=torch.int32, device=self._tensor_device
-            )
-            dist.all_reduce(status, group=self._control_group)
-            if status.item():
-                raise RuntimeError(
-                    "DistributedMuon requires every configured gradient"
-                )
+        if initialize_state and any(
+            compute_layout.param.grad is None
+            for compute_layout in self._parameter_compute_layouts
+        ):
+            raise RuntimeError("DistributedMuon requires every configured gradient")
 
         gradients = []
         for compute_layout in self._parameter_compute_layouts:
@@ -398,8 +316,8 @@ class DistributedMuon(Optimizer):
         return (
             tensor.shape == compute_layout.param.shape
             and tensor.stride() == compute_layout.param.stride()
-            and _storage_mesh_ranks(tensor.device_mesh)
-            == _storage_mesh_ranks(compute_layout.param.device_mesh)
+            and _device_mesh_ranks(tensor.device_mesh)
+            == _device_mesh_ranks(compute_layout.param.device_mesh)
             and tensor.placements == compute_layout.param.placements
             and local.shape == param_local.shape
             and local.stride() == param_local.stride()
@@ -559,12 +477,6 @@ def _has_owned_sharded_storage(param: DTensor) -> bool:
         and len(storage_shard_dims) == 2
         and set(storage_shard_dims) == {0, 1}
     )
-
-
-def _storage_mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
-    if mesh.ndim == 1:
-        return tuple(dist.get_process_group_ranks(mesh.get_group()))
-    return tuple(mesh.mesh.flatten().tolist())
 
 
 def _validate_muon_parameter(
@@ -741,44 +653,3 @@ def _compute_muon_update(
     out.zero_()
     out.add_(direction, alpha=-adjusted_lr)
     return out
-
-
-def _storage_block_for_participant(
-    param: DTensor,
-    participant: int,
-) -> _MatrixBlock:
-    mesh_shape = tuple(param.device_mesh.shape)
-    mesh_rank = _storage_mesh_ranks(param.device_mesh).index(participant)
-    coordinate = [0] * len(mesh_shape)
-    for mesh_dim in range(len(mesh_shape) - 1, -1, -1):
-        mesh_rank, coordinate[mesh_dim] = divmod(mesh_rank, mesh_shape[mesh_dim])
-
-    local_shape = list(param.shape)
-    global_offsets = [0] * param.ndim
-    for mesh_dim, placement in enumerate(param.placements):
-        assert type(placement) is Shard
-        tensor_dim = _normalize_dim(placement.dim, param.ndim)
-        local_size, global_offset = Shard.local_shard_size_and_offset(
-            param.shape[tensor_dim],
-            mesh_shape[mesh_dim],
-            coordinate[mesh_dim],
-        )
-        local_shape[tensor_dim] = local_size
-        global_offsets[tensor_dim] = global_offset
-    return _MatrixBlock(
-        offsets=tuple(global_offsets),
-        shape=tuple(local_shape),
-    )
-
-
-def _owned_storage_blocks(
-    compute_layout: _ParameterComputeLayout,
-    participants: tuple[int, ...],
-) -> tuple[tuple[int, _MatrixBlock], ...]:
-    return tuple(
-        (
-            participant,
-            _storage_block_for_participant(compute_layout.param, participant),
-        )
-        for participant in participants
-    )

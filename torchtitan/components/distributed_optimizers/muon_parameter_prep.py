@@ -16,6 +16,8 @@ import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from .bucketed_redistribution import (
+    _bind_bucket_configs,
+    BucketConfig,
     BucketSpec,
 )
 from .muon import (
@@ -117,15 +119,19 @@ class _ResolvedBatchedMatrixView:
 def build_distributed_muon(
     params: Iterable[Tensor] | Iterable[dict[str, Any]],
     *,
-    bucket_spec: Sequence[BucketSpec],
+    bucket_spec: Sequence[BucketSpec] | None = None,
+    bucket_configs: Sequence[BucketConfig] | None = None,
     **kwargs: Any,
 ) -> DistributedMuon:
     """Prepare parameter views and construct the DistributedMuon runtime."""
-    compiled_params = []
+    if (bucket_spec is None) == (bucket_configs is None):
+        raise ValueError("provide exactly one of bucket_spec or bucket_configs")
+
+    prepared_params = []
     parameters_to_prepare = []
     for param_or_group in params:
         if not isinstance(param_or_group, dict):
-            compiled_params.append(param_or_group)
+            prepared_params.append(param_or_group)
             continue
         group = dict(param_or_group)
         compute_sharding = group.pop("compute_sharding", None)
@@ -148,10 +154,21 @@ def build_distributed_muon(
 
         for param, fqn in zip(group_params, param_names, strict=True):
             parameters_to_prepare.append((param, fqn, compute_view))
-        compiled_params.append(group)
+        prepared_params.append(group)
+
+    if bucket_configs is not None:
+        storage_by_fqn = {
+            fqn: param
+            for param, fqn, _compute_view in parameters_to_prepare
+            if isinstance(param, DTensor)
+        }
+        if len(storage_by_fqn) != len(parameters_to_prepare):
+            raise TypeError("bucket_configs require named DTensor parameters")
+        bucket_spec = _bind_bucket_configs(bucket_configs, storage_by_fqn)
+    assert bucket_spec is not None
+    bucket_spec = tuple(bucket_spec)
 
     prepared_compute_views = {}
-    preparation_error = None
     for param, fqn, compute_view in parameters_to_prepare:
         global_storage_shape = torch.Size(param.shape)
         if compute_view is not None and any(
@@ -175,28 +192,17 @@ def build_distributed_muon(
             global_compute_shape = resolved_view.compute_shape(
                 global_storage_shape
             )
-            try:
-                local_compute_tensor = compute_storage.view(
-                    resolved_view.compute_shape(local_storage_shape)
-                )
-            except (RuntimeError, ValueError) as error:
-                if not isinstance(param, DTensor):
-                    raise
-                # The local shard may split a matrix on only some ranks.
-                # Let DistributedMuon propagate that rank-local failure before
-                # any rank enters plan validation collectives.
-                preparation_error = error
-                break
+            local_compute_tensor = compute_storage.view(
+                resolved_view.compute_shape(local_storage_shape)
+            )
         prepared_compute_views[fqn] = _PreparedParameterComputeView(
             global_compute_shape=global_compute_shape,
             local_compute_tensor=local_compute_tensor,
         )
 
-    constructor_kwargs = {
-        "bucket_spec": bucket_spec,
-        "_prepared_compute_views": prepared_compute_views,
+    return DistributedMuon(
+        prepared_params,
+        bucket_spec=bucket_spec,
+        _prepared_compute_views=prepared_compute_views,
         **kwargs,
-    }
-    if preparation_error is not None:
-        constructor_kwargs["_parameter_preparation_error"] = preparation_error
-    return DistributedMuon(compiled_params, **constructor_kwargs)
+    )
