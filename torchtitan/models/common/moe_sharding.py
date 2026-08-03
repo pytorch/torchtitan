@@ -308,17 +308,21 @@ def set_moe_sharding_config(
         out_src_shardings=experts_out_layout,
         out_dst_shardings=experts_out_layout,
         local_map=LocalMapConfig(
+            # Declared for BOTH branches. Without EP the experts run replicated
+            # on the tp axis, so each rank's gradient w.r.t. the local_map
+            # inputs is one contribution to a sum, not the finished value --
+            # exactly what ``experts_in_grad_layout`` says above
+            # (``tp=spmd.P``). Leaving this ``None`` let it default to the
+            # input placement, Replicate, which keeps one rank's share and
+            # discards the rest: the router gate's gradient came back a factor
+            # of ~sqrt(tp) short on every MoE layer.
             in_grad_placements=(
-                (
-                    experts_in_grad_layout,
-                    experts_in_grad_layout,
-                    experts_in_grad_layout,
-                    # num_local_tokens_per_expert_E is routing metadata, but it is
-                    # still a DTensor input to local_map and must have placements.
-                    _tokens_per_expert_placement(enable_ep=enable_ep),
-                )
-                if enable_ep
-                else None
+                experts_in_grad_layout,
+                experts_in_grad_layout,
+                experts_in_grad_layout,
+                # num_local_tokens_per_expert_E is routing metadata, but it is
+                # still a DTensor input to local_map and must have placements.
+                _tokens_per_expert_placement(enable_ep=enable_ep),
             ),
         ),
     )
