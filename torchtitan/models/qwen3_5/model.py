@@ -20,8 +20,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
-from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common import vision_encoder as common_vision
+from torchtitan.models.common import Conv1d, Linear, vision_encoder as common_vision
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
