@@ -25,12 +25,29 @@ throughput on NVIDIA Blackwell GPUs.
 
 ### NVFP4 Training Recommendations
 
-1. Train with NVFP4 for most of the run.
-2. When exact loss recovery matters, switch the linear-layer GEMM inputs to a higher precision shortly before learning-rate decay begins.
-3. Prefer switching only the forward-pass GEMMs to bf16 or, potentially, MXFP8.
-4. When maximum NVFP4 utilization matters, remain in NVFP4 until nearly the end, then use a very brief high-precision finish. This can meaningfully improve loss, but may not completely recover it because the learning rate is already small.
-5. When downstream accuracy is already sufficient, the end switch is optional.
-6. The mixed recipe follows [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149). It converts the leading 85% of decoder layers to NVFP4 and leaves the final 15% plus the LM head in bf16 for stability.
+1. Use NVFP4 for most of pretraining.
+
+2. Keep a small set of numerically sensitive linear layers in higher precision throughout training. As a general rule, **leave approximately the final 15% of decoder blocks in BF16**, and keep the LM head in BF16. The layer-selection policy follows [What Matters for NVFP4 Training? A Scaling Study of Low-Precision Pre-Training Recipes](https://openreview.net/pdf?id=jlkIyaG32w). This is also consistent with [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149), which identifies the final blocks as the most precision-sensitive and recommends keeping a small fraction—fewer than approximately 15%—of the final layers in BF16. Its conservative 12B training run additionally kept the first two blocks in BF16.
+
+3. When matching higher-precision training loss is important, Appendix D recommends “switching to high precision shortly before the onset of learning rate decay” for full loss recovery. A switch performed only at the very end can still improve loss, but may not completely close the gap because the learning rate is already small.
+
+4. [Appendix D. Switching to Higher Precision](https://arxiv.org/abs/2509.25149) finds that most of the loss gap comes from quantization in the forward pass. Switching only the forward-pass GEMM inputs to BF16, while leaving Dgrad and Wgrad in NVFP4, reduced the paper's relative loss error from approximately 1.5% to 0.5%. The authors observed no corresponding benefit from a backward-only switch, and the forward-only policy placed only approximately 6% of total training computation in higher precision.
+
+5. The current TorchTitan NVFP4 integration does not support independently switching Fprop to BF16 while retaining NVFP4 for Dgrad and Wgrad. The practical fallback is a full-BF16 finish, which is more expensive than the paper's preferred forward-only policy and approximates the Appendix D experiment.
+
+* Save a TorchTitan checkpoint at the desired precision-switch boundary.
+* Restart from that checkpoint with the NVFP4 converter or override disabled.
+* Set the training dtype to BF16.
+* Restore the model, optimizer, learning-rate scheduler, dataloader, and trainer-step state, and continue the same learning-rate schedule.
+
+5. For maximum NVFP4 utilization, defer the switch until very near the end of training. A short BF16 finish can still improve loss, although it may not completely recover the higher-precision baseline because the learning rate is already small.
+
+6. Skip the end-of-training switch when the NVFP4 model already meets the desired downstream quality.
+
+The following recommendations are based on
+* [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149),
+particularly Appendix D. Switching to Higher Precision
+* [What Matters for NVFP4 Training? A Scaling Study of Low-Precision Pre-Training Recipes](https://openreview.net/pdf?id=jlkIyaG32w)
 
 ### Llama 3 8B Usage
 
