@@ -112,7 +112,7 @@ def llama3_debugmodel_nvfp4() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_nvfp4_mixed() -> Trainer.Config:
+def llama3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     config = llama3_debugmodel()
     config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
@@ -239,29 +239,7 @@ def llama3_8b_continue_pretrain_mxfp8() -> Trainer.Config:
     return config
 
 
-def llama3_8b_continue_pretrain_nvfp4_mixed() -> Trainer.Config:
-    """HF-initialized C4 pretraining with a 15% bf16 decoder tail."""
-
-    config = llama3_8b_continue_pretrain()
-    config.parallelism.spmd_backend = "spmd_types"
-    assert config.model_spec is not None
-    num_layers = len(config.model_spec.model.layers)
-    config.model_spec = model_registry(
-        "8B",
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=nvfp4_bf16_tail_fqns(
-                    num_layers,
-                    _NVFP4_BF16_TAIL_FRACTION,
-                ),
-                model_compile_enabled=True,
-            ),
-        ],
-    )
-    return config
-
-
-def llama3_8b_nvfp4_mixed() -> Trainer.Config:
+def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     config = llama3_8b()
     config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None

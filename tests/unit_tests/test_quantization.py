@@ -115,7 +115,6 @@ def test_nvfp4_bf16_tail_fqns():
     [
         "llama3_8b_continue_pretrain",
         "llama3_8b_continue_pretrain_mxfp8",
-        "llama3_8b_continue_pretrain_nvfp4_mixed",
     ],
 )
 def test_llama3_8b_continued_pretraining_recipes(recipe):
@@ -135,14 +134,13 @@ def test_llama3_8b_continued_pretraining_recipes(recipe):
 @pytest.mark.parametrize(
     "module, recipe, expected_cutoff",
     [
-        ("llama3", "llama3_debugmodel_nvfp4_mixed", 5),
-        ("llama3", "llama3_8b_nvfp4_mixed", 27),
-        ("llama3", "llama3_8b_continue_pretrain_nvfp4_mixed", 27),
-        ("qwen3", "qwen3_debugmodel_nvfp4_mixed", 6),
-        ("qwen3", "qwen3_8b_nvfp4_mixed", 30),
+        ("llama3", "llama3_debugmodel_first_85_pct_layers_nvfp4", 5),
+        ("llama3", "llama3_8b_first_85_pct_layers_nvfp4", 27),
+        ("qwen3", "qwen3_debugmodel_first_85_pct_layers_nvfp4", 6),
+        ("qwen3", "qwen3_8b_first_85_pct_layers_nvfp4", 30),
     ],
 )
-def test_nvfp4_mixed_converts_only_leading_layers(
+def test_nvfp4_first_85_pct_layers_converts_only_leading_layers(
     monkeypatch, module, recipe, expected_cutoff
 ):
     pytest.importorskip("torchao")
@@ -245,12 +243,11 @@ def test_nvfp4_build_configures_local_spmd_sharding(
     "module, recipe",
     [
         ("llama3", "llama3_debugmodel_nvfp4"),
-        ("llama3", "llama3_debugmodel_nvfp4_mixed"),
-        ("llama3", "llama3_8b_nvfp4_mixed"),
-        ("llama3", "llama3_8b_continue_pretrain_nvfp4_mixed"),
+        ("llama3", "llama3_debugmodel_first_85_pct_layers_nvfp4"),
+        ("llama3", "llama3_8b_first_85_pct_layers_nvfp4"),
         ("qwen3", "qwen3_debugmodel_nvfp4"),
-        ("qwen3", "qwen3_debugmodel_nvfp4_mixed"),
-        ("qwen3", "qwen3_8b_nvfp4_mixed"),
+        ("qwen3", "qwen3_debugmodel_first_85_pct_layers_nvfp4"),
+        ("qwen3", "qwen3_8b_first_85_pct_layers_nvfp4"),
     ],
 )
 def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
@@ -275,8 +272,8 @@ def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
     "recipe",
     [
         "qwen3_debugmodel_nvfp4",
-        "qwen3_debugmodel_nvfp4_mixed",
-        "qwen3_8b_nvfp4_mixed",
+        "qwen3_debugmodel_first_85_pct_layers_nvfp4",
+        "qwen3_8b_first_85_pct_layers_nvfp4",
     ],
 )
 def test_qwen3_recipes_resolve(monkeypatch, recipe):
@@ -286,7 +283,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
     monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
     config = ConfigManager().parse_args(["--module", "qwen3", "--config", recipe])
     assert config.model_spec.name == "qwen3"
-    if recipe == "qwen3_8b_nvfp4_mixed":
+    if recipe == "qwen3_8b_first_85_pct_layers_nvfp4":
         assert config.dataloader.dataset_path == "openai/gsm8k"
         assert config.checkpoint.initial_load_in_hf
         assert config.compile.enable

@@ -17,7 +17,7 @@ throughput on NVIDIA Blackwell GPUs.
 - A PyTorch and TorchAO build that provides
   `torchao.prototype.moe_training.nvfp4_training`.
 - `torch.compile` for competitive performance. The provided
-  `llama3_8b_nvfp4_mixed` recipe enables model compilation automatically.
+  `llama3_8b_first_85_pct_layers_nvfp4` recipe enables model compilation automatically.
 - Local GEMM dimensions divisible by 128. A Linear whose local in/out features
   are not a multiple of 128 (after TP sharding) is rejected by the NVFP4 kernels
   and must be excluded from the converter. The mixed recipe converts only
@@ -34,13 +34,13 @@ throughput on NVIDIA Blackwell GPUs.
 
 ### Llama 3 8B Usage
 
-Use the `llama3_8b_nvfp4_mixed` config for the supported Llama 3 8B recipe:
+Use the `llama3_8b_first_85_pct_layers_nvfp4` config for the supported Llama 3 8B recipe:
 
 ```bash
 torchrun --standalone --nproc_per_node 4 \
   -m torchtitan.train \
   --module llama3 \
-  --config llama3_8b_nvfp4_mixed \
+  --config llama3_8b_first_85_pct_layers_nvfp4 \
   --parallelism.tensor_parallel_degree 1 \
   --parallelism.data_parallel_shard_degree 4 \
   --training.local_batch_size 32 \
