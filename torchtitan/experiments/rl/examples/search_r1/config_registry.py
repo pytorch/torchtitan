@@ -21,6 +21,10 @@ import dataclasses
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.quantization import (
+    MXFP8GroupedExpertsQATConverter,
+    MXFP8LinearQATConverter,
+)
 from torchtitan.config import (
     CompileConfig,
     OverrideConfig,
@@ -150,6 +154,84 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         parallelism=dataclasses.replace(
             config.generator.parallelism, tensor_parallel_degree=2
         ),
+    )
+    return config
+
+
+def rl_grpo_qwen3_30b_a3b_search_r1() -> Controller.Config:
+    """GRPO Search-R1 for Qwen3-30B-A3B MoE, bf16 (8 GPUs: 4 gen + 4 train).
+
+    Stock bf16 baseline for the 30B-A3B MoE: same Search-R1 recipe as
+    ``rl_grpo_qwen3_1_7b_search_r1`` (multi-turn retrieval QA, DAPO loss), scaled up
+    to the 30B model. TP=2/EP=4 on both actors (Qwen3-30B-A3B has 4 KV heads, so TP
+    cannot exceed 4), with compile and cudagraph disabled -- the MoE EP all-to-all
+    issues unpinned D2H copies that block ``torch.compile`` and CUDA-graph capture.
+
+    This is the baseline that ``rl_grpo_qwen3_30b_a3b_search_r1_mxfp8`` compares
+    against: the mxfp8 config differs only by adding the QAT converters and forcing
+    TP=1. Requires a running retrieval server (see README).
+    """
+    config = rl_grpo_qwen3_1_7b_search_r1()
+    config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B"
+    config.model_spec = model_registry("30B-A3B", attn_backend="varlen")
+    # 30B-scale rollout width (matches the 30B deepep Search-R1 config).
+    config.async_loop.num_prompts_per_train_step = 32
+    # MoE EP all-to-all blocks torch.compile / cudagraph capture; disable both.
+    config.compile = CompileConfig(enable=False)
+    config.generator.cudagraph = VLLMCudagraphConfig(enable=False)
+    # TP=2/EP=4 on both actors: generator DP=2/TP=2/EP=4, trainer FSDP=2/TP=2/EP=4.
+    config.generator.parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    config.trainer.parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        data_parallel_replicate_degree=1,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    return config
+
+
+def rl_grpo_qwen3_30b_a3b_search_r1_mxfp8() -> Controller.Config:
+    """GRPO Search-R1 for Qwen3-30B-A3B MoE with MXFP8 QAT (8 GPUs: 4 gen + 4 train).
+
+    Identical to the bf16 ``rl_grpo_qwen3_30b_a3b_search_r1`` baseline except it adds
+    MXFP8 QAT -- real mxfp8 forward, high-precision (bf16) backward -- on the dense
+    attention linears and the MoE expert grouped GEMMs, and forces TP=1 (mxfp8 linear
+    currently fails with TP>1). This exercises the generator's mxfp8 inference weight
+    cache (``mxfp8_cache_weights``): expert weights are quantized once per policy sync
+    instead of every decode step.
+
+    Requires Blackwell/SM100. Generator DP=4/TP=1/EP=4; trainer FSDP=4/TP=1/EP=4.
+    """
+    config = rl_grpo_qwen3_30b_a3b_search_r1()
+    config.model_spec = model_registry(
+        "30B-A3B",
+        attn_backend="varlen",
+        # model_compile_enabled=False matches the baseline's compile=False.
+        converters=[
+            MXFP8LinearQATConverter.Config(
+                fqns=["attention"], model_compile_enabled=False
+            ),
+            MXFP8GroupedExpertsQATConverter.Config(
+                pad_multiple=32, model_compile_enabled=False
+            ),
+        ],
+    )
+    # mxfp8 linear currently fails with TP>1, so force TP=1 on both actors.
+    # Generator DP=4/TP=1/EP=4; trainer FSDP=4/TP=1/EP=4.
+    config.generator.parallelism = InferenceParallelismConfig(
+        data_parallel_degree=4,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=4,
+    )
+    config.trainer.parallelism = ParallelismConfig(
+        data_parallel_shard_degree=4,
+        data_parallel_replicate_degree=1,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=4,
     )
     return config
 

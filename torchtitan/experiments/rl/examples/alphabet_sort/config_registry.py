@@ -40,7 +40,11 @@ from torchtitan.experiments.rl.controller import (
     ValidationConfig,
 )
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
-from torchtitan.components.quantization import MXFP8LinearConverter
+from torchtitan.components.quantization import (
+    MXFP8GroupedExpertsQATConverter,
+    MXFP8LinearConverter,
+    MXFP8LinearQATConverter,
+)
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -809,6 +813,51 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_mxfp8() -> Controller.Config:
+    """GRPO config for Qwen3-30B-A3B MoE with MXFP8 QAT (8 GPUs: 4 gen + 4 train).
+
+    Applies MXFP8 QAT -- a real mxfp8 forward with a high-precision (bf16) backward --
+    to the dense transformer-block linears and the MoE expert GEMMs.
+
+    Note: requires Blackwell/SM100. Runs with TP=1 (see below).
+    """
+    config = rl_grpo_qwen3_30b_a3b_varlen()
+    config.model_spec = model_registry(
+        "30B-A3B",
+        attn_backend="varlen",
+        # model_compile_enabled=False matches the inherited compile=False: the
+        # MoE EP all-to-all path issues unpinned D2H copies that block
+        # torch.compile and CUDA graph capture.
+        converters=[
+            MXFP8LinearQATConverter.Config(
+                fqns=["attention"], model_compile_enabled=False
+            ),
+            MXFP8GroupedExpertsQATConverter.Config(
+                pad_multiple=32, model_compile_enabled=False
+            ),
+        ],
+    )
+    # mxfp8 linear fails with TP > 1 currently with this error:
+    #    ValueError: MXFP8Linear: output DTensor has placements (Shard(dim=0),),
+    #    but out_src_shardings expects (Partial(sum),).
+    # Here we force TP=1 for both the trainer and the generator, and update
+    # the remaining values accordingly.
+    # Base values: generator DP=2/TP=2/EP=4, trainer FSDP=2/TP=2/EP=4
+    # New values: generator DP=4/TP=1/EP=4, trainer FSDP=4/TP=1/EP=4
+    config.generator.parallelism = InferenceParallelismConfig(
+        data_parallel_degree=4,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=4,
+    )
+    config.trainer.parallelism = ParallelismConfig(
+        data_parallel_shard_degree=4,
+        data_parallel_replicate_degree=1,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=4,
+    )
+    return config
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
