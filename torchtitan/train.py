@@ -12,9 +12,6 @@ from torchtitan.config import ConfigManager
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer
-from torchtitan.experiments.graph_trainer.hw_queues import (
-    maybe_set_gpu_max_hw_queues,
-)
 
 
 def main() -> None:
@@ -40,8 +37,6 @@ def main() -> None:
         enable=config.debug.enable_structured_logging,
     )
     sl.log_trace_instant("structured_logger_started")
-
-    maybe_set_gpu_max_hw_queues(config)
 
     trainer: Trainer | None = None
 
