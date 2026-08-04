@@ -177,6 +177,12 @@ def add_zero_valued_dependency(
     batch that happens to carry no images, for example -- would therefore
     issue collectives on a subset of the process group and deadlock the step.
 
+    Context parallelism reaches the same deadlock by a second route: a rank's
+    sequence shard can hold zero vision placeholders even when every rank
+    received images, so "this batch has images" is not a sufficient condition
+    for running the module. Decide from the process group, not from the local
+    batch.
+
     A rank with no real work for such a module runs it on a placeholder input
     and routes the result through this helper. Scaling by zero leaves
     ``output`` numerically unchanged while preserving the graph edge, so every
