@@ -155,6 +155,23 @@ class TestMuonParameterPrep(unittest.TestCase):
             )
 
     def test_builder_requires_compute_sharding(self):
+        with self.assertRaisesRegex(TypeError, "named parameter groups"):
+            build_distributed_muon([torch.empty(2, 2)], bucket_spec=())
+
+        with self.assertRaisesRegex(TypeError, "DTensor parameters"):
+            build_distributed_muon(
+                [
+                    {
+                        "params": [torch.empty(2, 2)],
+                        "param_names": ["weight"],
+                        "compute_sharding": MuonComputeSharding(
+                            placement=Owned()
+                        ),
+                    }
+                ],
+                bucket_spec=(),
+            )
+
         with self.assertRaisesRegex(TypeError, "must be a MuonComputeSharding"):
             build_distributed_muon(
                 [{"params": [], "param_names": [], "compute_sharding": object()}],
