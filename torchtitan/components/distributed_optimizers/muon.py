@@ -21,7 +21,7 @@ from torch.optim import Optimizer
 from .bucketed_redistribution import (
     _BucketedRedistributionRuntime,
     _BucketPlan,
-    _build_bucket_plans,
+    _build_owned_bucket_plans,
     _device_mesh_ranks,
     _validate_bucket_plans_across_ranks,
     assign_balanced_owners,
@@ -228,7 +228,7 @@ class DistributedMuon(Optimizer):
 
     def _initialize_plan(self) -> None:
         compute_layouts = self._build_parameter_compute_layouts()
-        result = _build_bucket_plans(
+        result = _build_owned_bucket_plans(
             compute_layouts,
             self._specs,
             fqn=lambda item: item.fqn,

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Bucketed storage-to-compute redistribution for optimizer steps."""
+"""Private bucketed storage-to-compute runtime for DistributedMuon."""
 
 from __future__ import annotations
 
@@ -1038,7 +1038,7 @@ def _dtensor_storage_blocks(
     )
 
 
-def _build_bucket_plans(
+def _build_owned_bucket_plans(
     items: Sequence[_ItemT],
     specs: Sequence[BucketSpec],
     *,
@@ -1046,6 +1046,13 @@ def _build_bucket_plans(
     compute_locally: Callable[[_ItemT], bool],
     storage_dtensor: Callable[[_ItemT], DTensor],
 ) -> _BucketPlanningResult[_ItemT]:
+    """Build the local and whole-matrix-owned DistributedMuon plans.
+
+    The active planner supports Replicate -> Replicate and Shard(0) matrix
+    batches as local compute, plus Shard(...) -> Owned through packed
+    all-to-all and Owned -> Shard(...) through reverse packed all-to-all.
+    Other placement transitions are intentionally unsupported.
+    """
     resolved = _resolve_buckets(items, specs, fqn=fqn)
     plans = []
     ordered_items = []
