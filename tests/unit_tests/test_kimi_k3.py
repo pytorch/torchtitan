@@ -288,7 +288,7 @@ class TestKimiK3(unittest.TestCase):
                 for layer_idx, layer in enumerate(config.layers)
                 if layer.attention is not None
             ],
-            [4, 8, 12],
+            [4, 8, 12, 13],
         )
         self.assertIsNotNone(config.layers[0].feed_forward)
         self.assertTrue(all(layer.moe is not None for layer in config.layers[1:]))

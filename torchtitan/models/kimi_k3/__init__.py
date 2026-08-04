@@ -344,32 +344,49 @@ def _vision_encoder_config(
     )
 
 
-def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
-    if attn_backend != "eager":
-        raise ValueError("Kimi K3 v1 only provides the 'eager' backend.")
+def _kimi_k3_config(
+    *,
+    dim: int,
+    vocab_size: int,
+    num_layers: int,
+    full_attention_layers: set[int],
+    attn_res_block_size: int,
+    num_heads: int,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
+    kda_head_dim: int,
+    conv_kernel_size: int,
+    dense_hidden_dim: int,
+    latent_dim: int,
+    expert_hidden_dim: int,
+    num_experts: int,
+    top_k: int,
+    num_shared_experts: int,
+    vision_encoder: KimiK3VisionEncoder.Config,
+) -> KimiK3Model.Config:
+    """Assemble a Kimi K3 config from the released topology's free parameters.
 
-    dim = 256
-    vocab_size = 163840
-    num_layers = 13
-    full_attention_layers = {4, 8, 12}
-    num_heads = 4
-    qk_nope_head_dim = 32
-    qk_rope_head_dim = 16
-    v_head_dim = 32
-
+    ``full_attention_layers`` holds 1-based layer indices, matching the
+    released ``linear_attn_config.full_attn_layers``. Every other layer is KDA.
+    Layer 0 is the single dense FFN layer (released
+    ``first_k_dense_replace=1``); the rest are LatentMoE.
+    """
     layers = []
     for layer_idx in range(num_layers):
         is_full_attention = (layer_idx + 1) in full_attention_layers
         layers.append(
             KimiK3TransformerBlock.Config(
                 layer_id=layer_idx,
-                attn_res_block_size=12,
+                attn_res_block_size=attn_res_block_size,
                 attention=(
                     _mla_config(
                         dim=dim,
                         num_heads=num_heads,
-                        q_lora_rank=128,
-                        kv_lora_rank=64,
+                        q_lora_rank=q_lora_rank,
+                        kv_lora_rank=kv_lora_rank,
                         qk_nope_head_dim=qk_nope_head_dim,
                         qk_rope_head_dim=qk_rope_head_dim,
                         v_head_dim=v_head_dim,
@@ -383,12 +400,12 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
                     else _kda_config(
                         dim=dim,
                         num_heads=num_heads,
-                        head_dim=32,
-                        conv_kernel_size=4,
+                        head_dim=kda_head_dim,
+                        conv_kernel_size=conv_kernel_size,
                     )
                 ),
                 feed_forward=(
-                    _feed_forward_config(dim=dim, hidden_dim=1024)
+                    _feed_forward_config(dim=dim, hidden_dim=dense_hidden_dim)
                     if layer_idx == 0
                     else None
                 ),
@@ -397,11 +414,11 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
                     if layer_idx == 0
                     else _latent_moe_config(
                         dim=dim,
-                        latent_dim=128,
-                        expert_hidden_dim=128,
-                        num_experts=8,
-                        top_k=2,
-                        num_shared_experts=2,
+                        latent_dim=latent_dim,
+                        expert_hidden_dim=expert_hidden_dim,
+                        num_experts=num_experts,
+                        top_k=top_k,
+                        num_shared_experts=num_shared_experts,
                     )
                 ),
                 attention_norm=_norm(dim),
@@ -430,6 +447,44 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
         ),
         output_res_norm=_norm(dim),
         output_res_proj=_linear(dim, 1),
+        vision_encoder=vision_encoder,
+        spatial_merge_size=2,
+    )
+
+
+def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
+    """Return the topology-complete Kimi K3 debug model.
+
+    The depth is one past a multiple of both the full-attention period and the
+    attention-residual block size, so the last layer is a full-attention layer
+    directly after a scheduled one and the trailing residual block is short.
+    Both are properties of the released 93-layer stack, whose
+    ``full_attn_layers`` ends ``..., 88, 92, 93``.
+    """
+    if attn_backend != "eager":
+        raise ValueError("Kimi K3 v1 only provides the 'eager' backend.")
+
+    dim = 256
+    return _kimi_k3_config(
+        dim=dim,
+        vocab_size=163840,
+        num_layers=13,
+        full_attention_layers={4, 8, 12, 13},
+        attn_res_block_size=12,
+        num_heads=4,
+        q_lora_rank=128,
+        kv_lora_rank=64,
+        qk_nope_head_dim=32,
+        qk_rope_head_dim=16,
+        v_head_dim=32,
+        kda_head_dim=32,
+        conv_kernel_size=4,
+        dense_hidden_dim=1024,
+        latent_dim=128,
+        expert_hidden_dim=128,
+        num_experts=8,
+        top_k=2,
+        num_shared_experts=2,
         vision_encoder=_vision_encoder_config(
             text_dim=dim,
             dim=256,
@@ -438,7 +493,6 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
             num_layers=4,
             num_heads=3,
         ),
-        spatial_merge_size=2,
     )
 
 
