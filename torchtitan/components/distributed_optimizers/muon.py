@@ -480,6 +480,25 @@ def _has_dim0_sharded_storage(param: DTensor) -> bool:
     return has_shard
 
 
+def _has_owned_sharded_storage(param: DTensor) -> bool:
+    storage_shard_dims = tuple(
+        _normalize_dim(placement.dim, param.ndim)
+        for placement in param.placements
+        if type(placement) is Shard
+    )
+    return (
+        param.device_mesh.ndim == 1
+        and len(param.placements) == 1
+        and len(storage_shard_dims) == 1
+    ) or (
+        param.device_mesh.ndim == 2
+        and param.device_mesh.mesh_dim_names is not None
+        and len(param.placements) == 2
+        and len(storage_shard_dims) == 2
+        and set(storage_shard_dims) == {0, 1}
+    )
+
+
 def _validate_muon_parameter(
     fqn: str,
     param: DTensor,
@@ -560,14 +579,10 @@ def _validate_muon_parameter(
                 "compute tensor"
             )
         return True
-    elif (
-        param.device_mesh.ndim != 1
-        or len(param.placements) != 1
-        or type(param.placements[0]) is not Shard
-    ):
+    elif not _has_owned_sharded_storage(param):
         raise ValueError(
-            f"owned Muon parameter {fqn!r} requires replicated or 1D Shard "
-            "matrix storage"
+            f"owned Muon parameter {fqn!r} requires replicated, 1D Shard, "
+            "or named 2D Shard(0)/Shard(1) matrix storage"
         )
     return False
 
