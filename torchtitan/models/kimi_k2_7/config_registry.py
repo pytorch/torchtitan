@@ -181,3 +181,11 @@ def kimi_k2_5() -> Trainer.Config:
         activation_checkpoint=FullAC.Config(),
         compile=compile_config,
     )
+
+
+def kimi_k2_7() -> Trainer.Config:
+    """Kimi K2.7-Code using the shared K2.x architecture."""
+    config = kimi_k2_5()
+    config.model_spec = model_registry("Kimi-K2.7-Code", attn_backend="flex")
+    config.hf_assets_path = "./assets/hf/Kimi-K2.7-Code"
+    return config
