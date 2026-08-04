@@ -121,7 +121,7 @@ class _DistributedMuonTestBase(DTensorTestBase):
                         if isinstance(redistributed_compute_placement, Owned)
                         else {}
                     ),
-                    mesh_axis="dp_shard",
+                    mesh_axes=("dp_shard",),
                     name="layers.0",
                 )
             ],

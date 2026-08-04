@@ -29,16 +29,23 @@ __all__ = ["BucketConfig", "BucketSpec", "assign_balanced_owners"]
 
 @dataclass(frozen=True, slots=True)
 class BucketConfig:
-    """Static bucket configuration resolved after runtime meshes exist."""
+    """Static bucket configuration resolved after runtime meshes exist.
+
+    ``mesh_axes`` selects an ordered storage submesh. Multiple axes are
+    flattened into the one-dimensional communication mesh used by the bucket.
+    """
 
     patterns: tuple[str, ...]
     owner_rank_by_fqn: Mapping[str, int]
-    mesh_axis: str
+    mesh_axes: tuple[str, ...]
     name: str = ""
 
     def __post_init__(self) -> None:
+        if isinstance(self.mesh_axes, str) or not self.mesh_axes:
+            raise ValueError("mesh_axes must be a non-empty sequence of axis names")
         object.__setattr__(self, "patterns", tuple(self.patterns))
         object.__setattr__(self, "owner_rank_by_fqn", dict(self.owner_rank_by_fqn))
+        object.__setattr__(self, "mesh_axes", tuple(self.mesh_axes))
 
     def bind(self, mesh: DeviceMesh) -> BucketSpec:
         return BucketSpec(
@@ -92,14 +99,30 @@ def _bind_bucket_configs(
             if fqn not in storage_by_fqn:
                 raise ValueError(f"bucket {config.name!r} references unknown {fqn!r}")
             storage_mesh = storage_by_fqn[fqn].device_mesh
-            if storage_mesh.mesh_dim_names is None or (
-                config.mesh_axis not in storage_mesh.mesh_dim_names
+            if storage_mesh.mesh_dim_names is None or any(
+                axis not in storage_mesh.mesh_dim_names
+                for axis in config.mesh_axes
             ):
                 raise ValueError(
-                    f"bucket {config.name!r} mesh axis {config.mesh_axis!r} "
-                    f"is not present on storage for {fqn!r}"
+                    f"bucket {config.name!r} mesh axes {config.mesh_axes!r} "
+                    f"are not present on storage for {fqn!r}"
                 )
-            meshes.append(storage_mesh[config.mesh_axis])
+            storage_axis_order = tuple(
+                axis
+                for axis in storage_mesh.mesh_dim_names
+                if axis in config.mesh_axes
+            )
+            if storage_axis_order != config.mesh_axes:
+                raise ValueError(
+                    f"bucket {config.name!r} mesh axes must follow storage "
+                    f"order {storage_mesh.mesh_dim_names!r}"
+                )
+            selected_mesh = storage_mesh[config.mesh_axes]
+            meshes.append(
+                selected_mesh._flatten()
+                if selected_mesh.ndim > 1
+                else selected_mesh
+            )
 
         mesh = meshes[0]
         if any(not torch.equal(candidate.mesh, mesh.mesh) for candidate in meshes[1:]):

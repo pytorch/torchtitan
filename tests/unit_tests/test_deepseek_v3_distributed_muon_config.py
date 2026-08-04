@@ -53,7 +53,7 @@ class TestDeepSeekV3DistributedMuonConfig(unittest.TestCase):
         spec = BucketConfig(
             patterns=("a",),
             owner_rank_by_fqn=owners,
-            mesh_axis="dp_shard",
+            mesh_axes=("dp_shard",),
         )
         owners["a"] = 1
         self.assertEqual(spec.owner_rank_by_fqn, {"a": 0})
@@ -169,7 +169,7 @@ class TestDeepSeekV3DistributedMuonConfig(unittest.TestCase):
                     for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
                 )
             self.assertEqual(config.patterns, expected)
-            self.assertEqual(config.mesh_axis, "dp_shard")
+            self.assertEqual(config.mesh_axes, ("dp_shard",))
             self.assertEqual(
                 config.owner_rank_by_fqn,
                 {f"{prefix}.attention.wkv_a.weight": layer_id % 8},
