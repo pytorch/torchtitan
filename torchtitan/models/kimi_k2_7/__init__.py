@@ -456,7 +456,6 @@ kimi_k2_5_configs = {
     "moonlight-16B-A3B": _moonlight_16b_a3b,
     "Kimi-VL-A3B": _kimi_vl_a3b,
     "Kimi-K2.5": _kimi_k2_5,
-    "Kimi-K2.7-Code": _kimi_k2_5,
 }
 
 
