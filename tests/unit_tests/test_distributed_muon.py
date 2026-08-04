@@ -287,8 +287,10 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         redistributed.grad = distribute_tensor(
             torch.ones(4, 3, device=self.device), self.mesh, (Shard(0),)
         )
-        with self.assertRaisesRegex(RuntimeError, "layers.0.local_blocks"):
-            optimizer.step()
+        with patch("torch.distributed.all_reduce") as validation_collective:
+            with self.assertRaisesRegex(RuntimeError, "layers.0.local_blocks"):
+                optimizer.step()
+        validation_collective.assert_not_called()
         self.assertEqual(len(optimizer.state), 0)
         torch.testing.assert_close(redistributed.to_local(), redistributed_before)
         redistributed.grad = None
