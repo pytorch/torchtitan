@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import cast
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -14,9 +16,7 @@ from torchtitan.components.optimizer import (
     ParamGroupConfig,
 )
 from torchtitan.components.quantization import NVFP4LinearConverter
-from torchtitan.components.quantization.nvfp4 import (
-    nvfp4_bf16_tail_fqns,
-)
+from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import (
@@ -27,6 +27,7 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+from .model import Qwen3Model
 
 
 def qwen3_debugmodel() -> Trainer.Config:
@@ -88,7 +89,7 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
         config.compile.enable and "model" in config.compile.components
     )
     # Keep the last 15% of decoder layers and the lm_head in bf16.
-    num_layers = len(config.model_spec.model.layers)
+    num_layers = len(cast(Qwen3Model.Config, config.model_spec.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(
         num_layers,
@@ -237,7 +238,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     assert config.model_spec is not None
     config.compile = CompileConfig(enable=True, components=["model"])
     # Keep the last 15% of decoder layers and the lm_head in bf16.
-    num_layers = len(config.model_spec.model.layers)
+    num_layers = len(cast(Qwen3Model.Config, config.model_spec.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(
         num_layers,

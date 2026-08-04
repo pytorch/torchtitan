@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import cast
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -14,9 +16,7 @@ from torchtitan.components.quantization import (
     MXFP8LinearConverter,
     NVFP4LinearConverter,
 )
-from torchtitan.components.quantization.nvfp4 import (
-    nvfp4_bf16_tail_fqns,
-)
+from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -29,6 +29,7 @@ from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+from .model import Llama3Model
 
 
 def llama3_debugmodel() -> Trainer.Config:
@@ -120,7 +121,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     )
     # Mixed precision: convert the leading decoder layers to NVFP4 and keep the
     # last _NVFP4_BF16_TAIL_FRACTION of layers (plus the lm_head) in bf16.
-    n_layers = len(config.model_spec.model.layers)
+    n_layers = len(cast(Llama3Model.Config, config.model_spec.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
     config.model_spec = model_registry(
@@ -247,7 +248,7 @@ def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     config.compile = CompileConfig(enable=True, components=["model"])
     # Mixed precision: convert the leading decoder layers to NVFP4 and keep the
     # last _NVFP4_BF16_TAIL_FRACTION of layers (plus the lm_head) in bf16.
-    n_layers = len(config.model_spec.model.layers)
+    n_layers = len(cast(Llama3Model.Config, config.model_spec.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
     config.model_spec = model_registry(
