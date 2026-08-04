@@ -233,6 +233,9 @@ class DistributedMuon(Optimizer):
                     compute_view_key=prepared.compute_view_key,
                     global_compute_shape=global_compute_shape,
                     local_compute_tensor=local_compute_tensor,
+                    local_storage_signature=_local_storage_signature(
+                        param.to_local()
+                    ),
                     compute_placement=compute_placement,
                     compute_locally=compute_locally,
                 )
@@ -351,8 +354,8 @@ class DistributedMuon(Optimizer):
         for compute_layout in self._parameter_compute_layouts:
             if (
                 compute_layout.compute_locally
-                and compute_layout.param.to_local().untyped_storage().data_ptr()
-                != compute_layout.local_compute_tensor.untyped_storage().data_ptr()
+                and _local_storage_signature(compute_layout.param.to_local())
+                != compute_layout.local_storage_signature
             ):
                 raise RuntimeError(
                     f"parameter local storage changed for {compute_layout.fqn!r}; "
@@ -510,8 +513,20 @@ class _ParameterComputeLayout:
     compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
     local_compute_tensor: Tensor
+    local_storage_signature: tuple[Any, ...]
     compute_placement: Owned | Replicate | Shard
     compute_locally: bool
+
+
+def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:
+    return (
+        tensor.data_ptr(),
+        tensor.storage_offset(),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.dtype,
+        tensor.device,
+    )
 
 
 def _has_replicated_storage(param: DTensor) -> bool:
