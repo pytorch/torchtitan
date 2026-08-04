@@ -463,7 +463,7 @@ class _ParameterComputeLayout:
     group_index: int
     global_compute_shape: torch.Size
     local_compute_tensor: Tensor
-    compute_placement: Owned | Shard
+    compute_placement: Owned | Replicate | Shard
     compute_locally: bool
 
 
@@ -543,7 +543,22 @@ def _validate_muon_parameter(
         )
 
     replicated_storage = _has_replicated_storage(param)
-    if isinstance(compute_placement, Shard):
+    if isinstance(compute_placement, Replicate):
+        if not replicated_storage:
+            raise ValueError(
+                f"compute Replicate for {fqn!r} requires replicated storage"
+            )
+        if local_compute_tensor.shape != global_compute_shape:
+            raise ValueError(
+                f"replicated storage for {fqn!r} must contain the complete "
+                "compute tensor"
+            )
+        return True
+    elif replicated_storage:
+        raise ValueError(
+            f"replicated storage for {fqn!r} requires compute Replicate"
+        )
+    elif isinstance(compute_placement, Shard):
         if len(global_compute_shape) < 3:
             raise ValueError(
                 "compute Shard requires a batch of complete Muon matrices"
@@ -557,13 +572,7 @@ def _validate_muon_parameter(
             raise ValueError(
                 f"compute Shard(0) for {fqn!r} must keep complete matrices local"
             )
-        if replicated_storage:
-            if local_compute_tensor.shape != global_compute_shape:
-                raise ValueError(
-                    f"replicated storage for {fqn!r} must contain the complete "
-                    "compute tensor"
-                )
-        elif (
+        if (
             local_compute_tensor.shape[1:] != global_compute_shape[1:]
             or not _has_dim0_sharded_storage(param)
         ):
@@ -577,17 +586,10 @@ def _validate_muon_parameter(
         raise ValueError(
             f"owned Muon parameter {fqn!r} requires matrix storage"
         )
-    elif replicated_storage:
-        if local_compute_tensor.shape != global_compute_shape:
-            raise ValueError(
-                f"replicated storage for {fqn!r} must contain the complete "
-                "compute tensor"
-            )
-        return True
     elif not _has_owned_sharded_storage(param):
         raise ValueError(
-            f"owned Muon parameter {fqn!r} requires replicated, 1D Shard, "
-            "or named 2D Shard(0)/Shard(1) matrix storage"
+            f"owned Muon parameter {fqn!r} requires 1D Shard or named 2D "
+            "Shard(0)/Shard(1) matrix storage"
         )
     return False
 
@@ -600,10 +602,12 @@ def _normalize_dim(dim: int, ndim: int) -> int:
 
 
 def _compute_placement_key(
-    placement: Owned | Shard,
+    placement: Owned | Replicate | Shard,
 ) -> tuple[Any, ...]:
     if isinstance(placement, Owned):
         return ("owned",)
+    if isinstance(placement, Replicate):
+        return ("replicate",)
     return ("shard", placement.dim)
 
 

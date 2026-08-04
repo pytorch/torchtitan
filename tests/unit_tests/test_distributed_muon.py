@@ -634,37 +634,25 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         )
 
     @with_comms
-    def test_replicated_storage_matches_plain_muon_without_redistribution(self):
-        values = [
-            torch.arange(offset, offset + 12, device=self.device)
+    def test_replicated_storage_and_compute_match_plain_muon(self):
+        value = (
+            torch.arange(1, 13, device=self.device)
             .reshape(4, 3)
             .float()
             .div_(10)
-            for offset in (1, 13)
-        ]
-        owned, batched = (
-            torch.nn.Parameter(
-                distribute_tensor(value.clone(), self.mesh, (Replicate(),))
-            )
-            for value in values
+        )
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), self.mesh, (Replicate(),))
         )
         optimizer = build_distributed_muon(
             [
                 {
-                    "params": [owned],
-                    "param_names": ["layers.0.owned"],
-                    "compute_sharding": MuonComputeSharding(placement=Owned()),
-                },
-                {
-                    "params": [batched],
-                    "param_names": ["layers.0.batched"],
+                    "params": [parameter],
+                    "param_names": ["layers.0.matrix"],
                     "compute_sharding": MuonComputeSharding(
-                        view_before_placement=BatchedMatrixComputeView(
-                            num_matrices=2, matrices_flattened_into_dim=0
-                        ),
-                        placement=Shard(0),
+                        placement=Replicate()
                     ),
-                },
+                }
             ],
             bucket_spec=[
                 BucketSpec(
@@ -680,25 +668,18 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             ns_steps=2,
         )
 
-        grads = [value.flip(0).contiguous() for value in values]
-        for param, grad in zip((owned, batched), grads, strict=True):
-            param.grad = distribute_tensor(grad, self.mesh, (Replicate(),))
-
-        references = [
-            torch.nn.Parameter(values[0].clone()),
-            torch.nn.Parameter(values[1].view(2, 2, 3).clone()),
-        ]
+        grad = value.flip(0).contiguous()
+        parameter.grad = distribute_tensor(grad, self.mesh, (Replicate(),))
+        reference = torch.nn.Parameter(value.clone())
+        reference.grad = grad.clone()
         reference_optimizer = torch.optim.Muon(
-            references,
+            [reference],
             lr=0.03,
             weight_decay=0.2,
             momentum=0.8,
             nesterov=True,
             ns_steps=2,
         )
-        references[0].grad = grads[0]
-        references[1].grad = grads[1].view(2, 2, 3)
-
         all_to_all_single = dist.all_to_all_single
         with patch(
             "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
@@ -709,22 +690,64 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         reference_optimizer.step()
 
         collective.assert_not_called()
-        for param, reference in zip(
-            (owned, batched), references, strict=True
+        self.assertEqual(parameter.placements, (Replicate(),))
+        self.assertEqual(parameter.grad.placements, (Replicate(),))
+        momentum = optimizer.state[parameter]["momentum_buffer"]
+        self.assertEqual(momentum.placements, (Replicate(),))
+        torch.testing.assert_close(parameter.to_local(), reference)
+        torch.testing.assert_close(
+            momentum.to_local(),
+            reference_optimizer.state[reference]["momentum_buffer"],
+        )
+
+    @with_comms
+    def test_constructor_rejects_mismatched_replicated_compute_placement(self):
+        value = torch.arange(12, device=self.device).reshape(4, 3).float()
+        replicated = torch.nn.Parameter(
+            distribute_tensor(value.clone(), self.mesh, (Replicate(),))
+        )
+        sharded = self._parameter(value)
+
+        for storage, placement, compute_view, owners, message in (
+            (
+                replicated,
+                Owned(),
+                None,
+                {"layers.0.weight": 0},
+                "requires compute Replicate",
+            ),
+            (
+                replicated,
+                Shard(0),
+                BatchedMatrixComputeView(num_matrices=2),
+                {},
+                "requires compute Replicate",
+            ),
+            (sharded, Replicate(), None, {}, "requires replicated storage"),
         ):
-            self.assertEqual(param.placements, (Replicate(),))
-            self.assertEqual(param.grad.placements, (Replicate(),))
-            momentum = optimizer.state[param]["momentum_buffer"]
-            self.assertEqual(momentum.placements, (Replicate(),))
-            torch.testing.assert_close(
-                param.to_local(), reference.view(param.shape)
-            )
-            torch.testing.assert_close(
-                momentum.to_local(),
-                reference_optimizer.state[reference]["momentum_buffer"].view(
-                    param.shape
-                ),
-            )
+            with self.subTest(
+                storage=storage.placements, placement=placement
+            ):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_distributed_muon(
+                        [
+                            {
+                                "params": [storage],
+                                "param_names": ["layers.0.weight"],
+                                "compute_sharding": MuonComputeSharding(
+                                    view_before_placement=compute_view,
+                                    placement=placement,
+                                ),
+                            }
+                        ],
+                        bucket_spec=[
+                            BucketSpec(
+                                patterns=("layers.0.*",),
+                                owner_rank_by_fqn=owners,
+                                mesh=self.mesh,
+                            )
+                        ],
+                    )
 
     @with_comms
     def test_step_matches_plain_muon_and_continues_from_state_dict(self):
