@@ -8,12 +8,11 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Annotated, Any, cast, Generic, Literal, overload, Protocol, TypeVar
+from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
 import torch
 import torch.distributed.tensor
 import torch.nn as nn
-import tyro
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
@@ -44,8 +43,8 @@ class ParamGroupConfig:
     """Configuration for a parameter group with its own optimizer.
 
     Each entry specifies a regex pattern matching parameter FQNs and a
-    self-contained parameter-group setup. ``optimizer_name`` and
-    ``optimizer_kwargs`` fully define the group — no implicit inheritance.
+    self-contained optimizer setup. ``optimizer_name`` and ``optimizer_kwargs``
+    fully define the optimizer for matched parameters — no implicit inheritance.
 
     Patterns are checked in order; first match wins. Place specific patterns
     before broad ones, and use ``r".*"`` as the last entry to catch all
@@ -109,9 +108,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         regex pattern and a self-contained optimizer setup.
         Patterns are checked in order; first match wins."""
 
-        optimizer_init_kwargs: Annotated[
-            dict[str, dict[str, Any]], tyro.conf.Suppress
-        ] = field(default_factory=dict)
+        optimizer_init_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
         """Programmatic optimizer-wide constructor arguments keyed by name.
 
         Use this for instance-wide objects such as communication bucket specs;
@@ -219,14 +216,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
         param_group_configs = config.param_groups
-        unknown_init_kwargs = config.optimizer_init_kwargs.keys() - {
-            group.optimizer_name for group in param_group_configs
-        }
-        if unknown_init_kwargs:
-            raise ValueError(
-                "optimizer_init_kwargs contains unconfigured optimizers: "
-                f"{sorted(unknown_init_kwargs)}"
-            )
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
