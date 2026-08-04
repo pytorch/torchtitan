@@ -8,7 +8,10 @@ import itertools
 import unittest
 
 import torch
-from torchtitan.components.distributed_optimizers.muon import _compute_muon_update
+from torchtitan.components.distributed_optimizers.muon import (
+    _adjust_learning_rate,
+    _compute_muon_update,
+)
 
 
 class TestDistributedMuonMath(unittest.TestCase):
@@ -54,14 +57,17 @@ class TestDistributedMuonMath(unittest.TestCase):
                         actual_momentum,
                         optimizer_kwargs["momentum"],
                     )
-                    update, adjusted_lr = _compute_muon_update(
+                    update = _compute_muon_update(
                         prepared,
                         out=torch.empty_like(prepared),
-                        lr=optimizer_kwargs["lr"],
                         ns_coefficients=optimizer_kwargs["ns_coefficients"],
                         ns_steps=optimizer_kwargs["ns_steps"],
                         eps=optimizer_kwargs["eps"],
-                        adjust_lr_fn=optimizer_kwargs["adjust_lr_fn"],
+                    )
+                    adjusted_lr = _adjust_learning_rate(
+                        optimizer_kwargs["lr"],
+                        optimizer_kwargs["adjust_lr_fn"],
+                        prepared.shape,
                     )
                     actual_param.mul_(
                         1
@@ -80,25 +86,23 @@ class TestDistributedMuonMath(unittest.TestCase):
 
     def test_batched_update_matches_independent_matrices(self):
         kwargs = {
-            "lr": 0.03,
             "ns_coefficients": (3.4445, -4.7750, 2.0315),
             "ns_steps": 3,
             "eps": 1e-7,
-            "adjust_lr_fn": "match_rms_adamw",
         }
 
         for shape in ((4, 3, 5), (4, 5, 3)):
             with self.subTest(shape=shape):
                 generator = torch.Generator().manual_seed(5)
                 prepared = torch.randn(shape, generator=generator)
-                batched, _ = _compute_muon_update(
+                batched = _compute_muon_update(
                     prepared, out=torch.empty_like(prepared), **kwargs
                 )
                 independent = torch.stack(
                     [
                         _compute_muon_update(
                             matrix, out=torch.empty_like(matrix), **kwargs
-                        )[0]
+                        )
                         for matrix in prepared
                     ]
                 )

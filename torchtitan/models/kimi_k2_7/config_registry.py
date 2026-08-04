@@ -64,7 +64,6 @@ def _kimi_k2_5_distributed_muon_optimizer(
     muon_kwargs = {
         "lr": lr,
         "weight_decay": 0.1,
-        "fused": False,
         "foreach": False,
     }
     adamw_kwargs = {
@@ -72,8 +71,6 @@ def _kimi_k2_5_distributed_muon_optimizer(
         "betas": (0.9, 0.95),
         "eps": 1e-8,
         "weight_decay": 0.1,
-        "fused": False,
-        "foreach": True,
     }
     per_head = MuonComputeSharding(
         view_before_placement=BatchedMatrixComputeView(
@@ -88,6 +85,7 @@ def _kimi_k2_5_distributed_muon_optimizer(
         "wkv_a": MuonComputeSharding(placement=Owned()),
         "wkv_b": per_head,
     }
+    expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
     param_groups = [
         ParamGroupConfig(
             pattern=rf"attention\.{projection}\.weight$",
@@ -99,7 +97,7 @@ def _kimi_k2_5_distributed_muon_optimizer(
         )
         for projection, compute_sharding in attention_shardings.items()
     ]
-    for projection in ("w1_EFD", "w2_EDF", "w3_EFD"):
+    for projection in expert_projections:
         param_groups.append(
             ParamGroupConfig(
                 pattern=rf"routed_experts\.inner_experts\.{projection}$",
@@ -129,7 +127,7 @@ def _kimi_k2_5_distributed_muon_optimizer(
         if layer_id:
             fqns += tuple(
                 f"{prefix}.moe.routed_experts.inner_experts.{projection}"
-                for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
+                for projection in expert_projections
             )
         return fqns
 

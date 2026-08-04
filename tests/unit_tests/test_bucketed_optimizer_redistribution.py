@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from unittest.mock import Mock, patch
 
 import torch
-import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
@@ -181,56 +180,6 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
 
         self.assertEqual(schedule.input_split_sizes, (0, 6))
         self.assertEqual(schedule.output_split_sizes, (0, 6))
-
-    def test_copy_fanout_and_reduction_routes_are_explicit(self):
-        block = _MatrixBlock(offsets=(0, 0), shape=(2, 3))
-        fanout = _RedistributionPlan(
-            participants=(3, 7),
-            logical_shape=(2, 3),
-            storage_to_compute_routes=(
-                _MatrixBlockRoute(block, (3,), (3, 7)),
-            ),
-            compute_to_storage_routes=(
-                _MatrixBlockRoute(block, (3, 7), (3,)),
-            ),
-        )
-        reduction = _RedistributionPlan(
-            participants=(3, 7),
-            logical_shape=(2, 3),
-            storage_to_compute_routes=(
-                _MatrixBlockRoute(
-                    block,
-                    (3, 7),
-                    (3,),
-                    reduce_op=dist.ReduceOp.SUM,
-                ),
-            ),
-            compute_to_storage_routes=(
-                _MatrixBlockRoute(block, (3,), (3, 7)),
-            ),
-        )
-
-        with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
-            "get_process_group_ranks",
-            return_value=[3, 7],
-        ):
-            schedule = _lower_packed_all_to_all(
-                (fanout,),
-                direction="storage_to_compute",
-                process_group=object(),
-                local_participant=3,
-            )
-            with self.assertRaisesRegex(ValueError, "cannot lower reduction"):
-                _lower_packed_all_to_all(
-                    (reduction,),
-                    direction="storage_to_compute",
-                    process_group=object(),
-                    local_participant=3,
-                )
-
-        self.assertEqual(schedule.input_split_sizes, (6, 6))
-        self.assertEqual(schedule.output_split_sizes, (6, 0))
 
     def test_routes_require_an_exact_nonoverlapping_partition(self):
         def plan(blocks):

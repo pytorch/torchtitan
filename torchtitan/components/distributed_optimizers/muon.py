@@ -475,11 +475,9 @@ class DistributedMuon(Optimizer):
         group = self._group(compute_layout)
         _compute_muon_update(
             compute,
-            lr=group["lr"],
             ns_coefficients=group["ns_coefficients"],
             ns_steps=group["ns_steps"],
             eps=group["eps"],
-            adjust_lr_fn=group["adjust_lr_fn"],
             out=compute,
         )
 
@@ -721,20 +719,16 @@ def _adjust_learning_rate(
 def _compute_muon_update(
     prepared: Tensor,
     *,
-    lr: float,
     ns_coefficients: tuple[float, float, float],
     ns_steps: int,
     eps: float,
-    adjust_lr_fn: str | None,
     out: Tensor,
-) -> tuple[Tensor, float]:
+) -> Tensor:
     direction = _zeropower_via_newtonschulz(
         prepared,
         ns_coefficients=ns_coefficients,
         ns_steps=ns_steps,
         eps=eps,
     )
-    adjusted_lr = _adjust_learning_rate(lr, adjust_lr_fn, prepared.shape)
-    # Pre-scaling the direction can change FP32 rounding versus Muon's add_.
     out.copy_(direction)
-    return out, adjusted_lr
+    return out
