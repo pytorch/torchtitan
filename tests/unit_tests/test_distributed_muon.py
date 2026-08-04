@@ -29,6 +29,7 @@ from torchtitan.components.distributed_optimizers.muon import (
 from torchtitan.components.checkpoint_utils import (
     get_flat_optim_state_dict,
     init_optim_state,
+    load_flat_optim_state_dict,
 )
 from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
     build_distributed_muon,
@@ -86,20 +87,27 @@ class _DistributedMuonTestBase(DTensorTestBase):
         self,
         redistributed: torch.nn.Parameter,
         local_blocks: torch.nn.Parameter,
+        *,
+        local_num_matrices: int = 2,
+        owner_rank: int = 1,
+        redistributed_compute_placement: Owned | Replicate = Owned(),
     ) -> DistributedMuon:
         return build_distributed_muon(
             [
                 {
                     "params": [redistributed],
                     "param_names": ["layers.0.redistributed"],
-                    "compute_sharding": MuonComputeSharding(placement=Owned()),
+                    "compute_sharding": MuonComputeSharding(
+                        placement=redistributed_compute_placement
+                    ),
                 },
                 {
                     "params": [local_blocks],
                     "param_names": ["layers.0.local_blocks"],
                     "compute_sharding": MuonComputeSharding(
                         view_before_placement=BatchedMatrixComputeView(
-                            num_matrices=2, matrices_flattened_into_dim=0
+                            num_matrices=local_num_matrices,
+                            matrices_flattened_into_dim=0,
                         ),
                         placement=Shard(0),
                     ),
@@ -108,7 +116,11 @@ class _DistributedMuonTestBase(DTensorTestBase):
             bucket_configs=[
                 BucketConfig(
                     patterns=("layers.0.*",),
-                    owner_rank_by_fqn={"layers.0.redistributed": 1},
+                    owner_rank_by_fqn=(
+                        {"layers.0.redistributed": owner_rank}
+                        if isinstance(redistributed_compute_placement, Owned)
+                        else {}
+                    ),
                     mesh_axis="dp_shard",
                     name="layers.0",
                 )
@@ -825,6 +837,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             optimizer.step()
 
         state_dict = optimizer.state_dict()
+        flat_state_dict = get_flat_optim_state_dict(optimizer)
         self.assertTrue(
             all(
                 "compute_sharding" not in group
@@ -836,10 +849,43 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         resumed_local_blocks = self._parameter(
             torch.cat([parameter.detach() for parameter in reference_local_blocks])
         )
-        resumed_optimizer = self._optimizer(
-            resumed_redistributed, resumed_local_blocks
+        changed_view_optimizer = self._optimizer(
+            self._parameter(reference_redistributed.detach()),
+            self._parameter(
+                torch.cat(
+                    [parameter.detach() for parameter in reference_local_blocks]
+                )
+            ),
+            local_num_matrices=4,
         )
-        resumed_optimizer.load_state_dict(state_dict)
+        with self.assertRaisesRegex(ValueError, "compute layout"):
+            changed_view_optimizer.load_state_dict(state_dict)
+
+        changed_placement_optimizer = self._optimizer(
+            torch.nn.Parameter(
+                distribute_tensor(
+                    reference_redistributed.detach().clone(),
+                    self.mesh,
+                    (Replicate(),),
+                )
+            ),
+            self._parameter(
+                torch.cat(
+                    [parameter.detach() for parameter in reference_local_blocks]
+                )
+            ),
+            redistributed_compute_placement=Replicate(),
+        )
+        with self.assertRaisesRegex(ValueError, "compute layout"):
+            changed_placement_optimizer.load_state_dict(state_dict)
+
+        resumed_optimizer = self._optimizer(
+            resumed_redistributed,
+            resumed_local_blocks,
+            owner_rank=0,
+        )
+        init_optim_state(resumed_optimizer)
+        load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
 
         second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
         second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()

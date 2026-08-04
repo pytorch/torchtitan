@@ -185,9 +185,15 @@ def build_distributed_muon(
         )
         local_storage_shape = torch.Size(local_storage.shape)
         if compute_view is None:
+            compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
             local_compute_tensor = compute_storage
         else:
+            compute_view_key = (
+                "batched_matrix",
+                compute_view.num_matrices,
+                compute_view.matrices_flattened_into_dim,
+            )
             resolved_view = compute_view._resolve(global_storage_shape)
             global_compute_shape = resolved_view.compute_shape(
                 global_storage_shape
@@ -196,6 +202,7 @@ def build_distributed_muon(
                 resolved_view.compute_shape(local_storage_shape)
             )
         prepared_compute_views[fqn] = _PreparedParameterComputeView(
+            compute_view_key=compute_view_key,
             global_compute_shape=global_compute_shape,
             local_compute_tensor=local_compute_tensor,
         )
