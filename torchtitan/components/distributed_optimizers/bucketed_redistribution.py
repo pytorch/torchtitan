@@ -199,16 +199,11 @@ class _MatrixBlock:
 
 @dataclass(frozen=True, slots=True)
 class _MatrixBlockRoute:
-    """Map one logical block from storage holders to compute holders.
-
-    ``None`` means the sources hold equivalent copies and one may be selected.
-    A reduction requires contributions from every source participant.
-    """
+    """Map one logical block from storage holders to compute holders."""
 
     block: _MatrixBlock
     source_participants: tuple[int, ...]
     destination_participants: tuple[int, ...]
-    reduce_op: dist.ReduceOp | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,7 +356,7 @@ class _CommunicationSchedule:
 
     def execute(
         self, output: Tensor, input: Tensor
-    ) -> tuple[dist.Work, ...]:
+    ) -> None:
         raise NotImplementedError
 
 
@@ -385,7 +380,7 @@ class _PackedAllToAllSchedule(_CommunicationSchedule):
 
     def execute(
         self, output: Tensor, input: Tensor
-    ) -> tuple[dist.Work, ...]:
+    ) -> None:
         dist.all_to_all_single(
             output[: self.output_buffer_numel],
             input[: self.input_buffer_numel],
@@ -393,94 +388,6 @@ class _PackedAllToAllSchedule(_CommunicationSchedule):
             input_split_sizes=list(self.input_split_sizes),
             group=self.process_group,
         )
-        return ()
-
-
-@dataclass(frozen=True, slots=True)
-class _AllGatherSchedule(_CommunicationSchedule):
-    process_group: dist.ProcessGroup
-    participants: tuple[int, ...]
-    local_participant: int
-    input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
-    output_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
-    input_buffer_numel: int
-    output_buffer_numel: int
-
-    def execute(
-        self, output: Tensor, input: Tensor
-    ) -> tuple[dist.Work, ...]:
-        dist.all_gather_into_tensor(
-            output[: self.output_buffer_numel],
-            input[: self.input_buffer_numel],
-            group=self.process_group,
-        )
-        return ()
-
-
-@dataclass(frozen=True, slots=True)
-class _ReduceScatterSchedule(_CommunicationSchedule):
-    process_group: dist.ProcessGroup
-    participants: tuple[int, ...]
-    local_participant: int
-    input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
-    output_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
-    input_buffer_numel: int
-    output_buffer_numel: int
-    reduce_op: dist.ReduceOp
-
-    def execute(
-        self, output: Tensor, input: Tensor
-    ) -> tuple[dist.Work, ...]:
-        dist.reduce_scatter_tensor(
-            output[: self.output_buffer_numel],
-            input[: self.input_buffer_numel],
-            op=self.reduce_op,
-            group=self.process_group,
-        )
-        return ()
-
-
-@dataclass(frozen=True, slots=True)
-class _PackedP2PTransfer:
-    peer: int
-    buffer_offset: int
-    numel: int
-
-
-@dataclass(frozen=True, slots=True)
-class _P2PSchedule(_CommunicationSchedule):
-    process_group: dist.ProcessGroup
-    participants: tuple[int, ...]
-    local_participant: int
-    input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
-    output_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
-    sends: tuple[_PackedP2PTransfer, ...]
-    receives: tuple[_PackedP2PTransfer, ...]
-    input_buffer_numel: int
-    output_buffer_numel: int
-
-    def execute(
-        self, output: Tensor, input: Tensor
-    ) -> tuple[dist.Work, ...]:
-        operations = [
-            dist.P2POp(
-                dist.isend,
-                input.narrow(0, transfer.buffer_offset, transfer.numel),
-                transfer.peer,
-                self.process_group,
-            )
-            for transfer in self.sends
-        ]
-        operations.extend(
-            dist.P2POp(
-                dist.irecv,
-                output.narrow(0, transfer.buffer_offset, transfer.numel),
-                transfer.peer,
-                self.process_group,
-            )
-            for transfer in self.receives
-        )
-        return tuple(dist.batch_isend_irecv(operations)) if operations else ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,13 +401,12 @@ class _LocalSchedule(_CommunicationSchedule):
 
     def execute(
         self, output: Tensor, input: Tensor
-    ) -> tuple[dist.Work, ...]:
+    ) -> None:
         if self.input_buffer_numel != self.output_buffer_numel:
             raise ValueError("local schedules require equal buffer sizes")
         output[: self.output_buffer_numel].copy_(
             input[: self.input_buffer_numel]
         )
-        return ()
 
 
 @dataclass(slots=True)
@@ -536,8 +442,6 @@ class _BucketWork(Generic[_ItemT]):
     forward_ready: torch.Event | None = None
     compute_done: torch.Event | None = None
     done: torch.Event | None = None
-    storage_to_compute_works: tuple[dist.Work, ...] = ()
-    compute_to_storage_works: tuple[dist.Work, ...] = ()
 
 
 @dataclass(slots=True)
@@ -721,8 +625,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             )
             work = _BucketWork(plan, storage_buffer, compute_fragment_buffer)
             _prepare_redistributed(plan, storage_buffer, prepare=prepare)
-            work.storage_to_compute_works = _execute_schedule(
-                plan.storage_to_compute_schedule,
+            plan.storage_to_compute_schedule.execute(
                 output=compute_fragment_buffer,
                 input=storage_buffer,
             )
@@ -761,8 +664,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         transfer = context.transfer_stream
         with handle.stream(transfer):
             transfer.wait_event(work.compute_done)
-            work.compute_to_storage_works = _execute_schedule(
-                work.plan.compute_to_storage_schedule,
+            work.plan.compute_to_storage_schedule.execute(
                 output=work.storage_buffer,
                 input=work.compute_fragment_buffer,
             )
@@ -812,18 +714,6 @@ def _prepare_redistributed(
             span.buffer_offset : span.buffer_offset + span.numel
         ].view(span.block.shape)
         prepare(item, out)
-
-
-def _execute_schedule(
-    schedule: _CommunicationSchedule,
-    *,
-    output: Tensor,
-    input: Tensor,
-) -> tuple[dist.Work, ...]:
-    works = schedule.execute(output, input)
-    for work in works:
-        work.wait()
-    return works
 
 
 def _compute_redistributed(
@@ -888,8 +778,6 @@ def _copy_transfers(
     }
     transfers = []
     for route in routes:
-        if route.reduce_op is not None:
-            raise ValueError("packed all-to-all cannot lower reduction routes")
         sources = tuple(
             sorted(route.source_participants, key=participant_order.__getitem__)
         )
@@ -1245,7 +1133,6 @@ def _redistribution_plan_key(plan: _RedistributionPlan) -> tuple[Any, ...]:
             route.block.shape,
             route.source_participants,
             route.destination_participants,
-            str(route.reduce_op),
         )
 
     return (

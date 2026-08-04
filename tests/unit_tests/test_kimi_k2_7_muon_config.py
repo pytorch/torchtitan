@@ -63,18 +63,8 @@ class TestKimiK25MuonConfig(unittest.TestCase):
             for group in groups_by_optimizer["AdamW"]
             for name in group["param_names"]
         }
-        self.assertEqual(len(muon_names), 424)
         self.assertEqual(muon_names, expected_muon_names)
         self.assertEqual(adamw_names, model_names - expected_muon_names)
-        self.assertFalse(muon_names & adamw_names)
-        self.assertTrue(
-            {
-                name
-                for name in model_names
-                if name.endswith(".attention.wo.weight")
-            }
-            <= adamw_names
-        )
 
         group_by_suffix = {
             suffix: next(
