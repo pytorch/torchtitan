@@ -13,7 +13,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
-    _build_bucket_plans,
+    _build_owned_bucket_plans,
     _build_owned_redistribution_plan,
     _lower_packed_all_to_all,
     _MatrixBlock,
@@ -61,7 +61,7 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
             "_dtensor_storage_blocks",
             return_value=blocks,
         ):
-            result = _build_bucket_plans(
+            result = _build_owned_bucket_plans(
                 (item,),
                 (
                     BucketSpec(
