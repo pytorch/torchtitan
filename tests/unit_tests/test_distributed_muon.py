@@ -273,7 +273,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             torch.arange(12, device=self.device).reshape(4, 3).float(), 0
         )
         with self.assertRaisesRegex(
-            ValueError, "requires replicated, 1D Shard"
+            ValueError, "requires 1D Shard or named 2D"
         ):
             build(owned, "owned", Owned(), owner_rank=0)
 
