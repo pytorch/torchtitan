@@ -117,7 +117,7 @@ class _ResolvedBatchedMatrixView:
 
 
 def build_distributed_muon(
-    params: Iterable[Tensor] | Iterable[dict[str, Any]],
+    params: Iterable[dict[str, Any]],
     *,
     bucket_spec: Sequence[BucketSpec] | None = None,
     bucket_configs: Sequence[BucketConfig] | None = None,
@@ -129,11 +129,10 @@ def build_distributed_muon(
 
     prepared_params = []
     parameters_to_prepare = []
-    for param_or_group in params:
-        if not isinstance(param_or_group, dict):
-            prepared_params.append(param_or_group)
-            continue
-        group = dict(param_or_group)
+    for param_group in params:
+        if not isinstance(param_group, dict):
+            raise TypeError("DistributedMuon requires named parameter groups")
+        group = dict(param_group)
         compute_sharding = group.pop("compute_sharding", None)
         if not isinstance(compute_sharding, MuonComputeSharding):
             raise TypeError("compute_sharding must be a MuonComputeSharding")

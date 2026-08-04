@@ -54,7 +54,7 @@ class DistributedMuon(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor] | Iterable[dict[str, Any]],
+        params: Iterable[dict[str, Any]],
         *,
         bucket_spec: Sequence[BucketSpec],
         _prepared_compute_views: Mapping[
@@ -79,20 +79,14 @@ class DistributedMuon(Optimizer):
             "ns_steps": ns_steps,
             "adjust_lr_fn": adjust_lr_fn,
         }
-        params = [
-            dict(param_or_group)
-            if isinstance(param_or_group, dict)
-            else param_or_group
-            for param_or_group in params
-        ]
+        params = list(params)
+        if any(not isinstance(param_group, dict) for param_group in params):
+            raise TypeError("DistributedMuon requires named parameter groups")
+        params = [dict(param_group) for param_group in params]
         self._first_step_validated = False
         self._prepared_compute_views = dict(_prepared_compute_views)
         super().__init__(params, defaults)
-        assert all(
-            isinstance(param, DTensor) and param.device.type == "cuda"
-            for group in self.param_groups
-            for param in group["params"]
-        ), "DistributedMuon requires CUDA DTensor parameters"
+        self._tensor_device = self._validate_parameter_storage()
         group_compute_placements = []
         for group in self.param_groups:
             compute_placement = group.pop("_compute_placement", None)
@@ -181,6 +175,22 @@ class DistributedMuon(Optimizer):
             ):
                 raise ValueError(f"invalid DistributedMuon group {group_index}")
 
+    def _validate_parameter_storage(self) -> torch.device:
+        local_devices = set()
+        for group in self.param_groups:
+            for param in group["params"]:
+                if not isinstance(param, DTensor):
+                    raise TypeError("DistributedMuon requires DTensor parameters")
+                local_device = param.to_local().device
+                if local_device.type != "cuda":
+                    raise ValueError("DistributedMuon requires CUDA parameters")
+                local_devices.add(local_device)
+        if len(local_devices) != 1:
+            raise ValueError(
+                "DistributedMuon requires one CUDA device per process"
+            )
+        return local_devices.pop()
+
     def _build_parameter_compute_layouts(
         self,
     ) -> tuple[_ParameterComputeLayout, ...]:
@@ -253,7 +263,6 @@ class DistributedMuon(Optimizer):
         )
         self._plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
-        self._tensor_device = self._plans[0].device
 
     def _set_checkpoint_layout_fingerprints(self) -> None:
         layouts_by_fqn = {
