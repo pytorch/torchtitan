@@ -127,7 +127,7 @@ class _DistributedMuonTestBase(DTensorTestBase):
                         if isinstance(redistributed_compute_placement, Owned)
                         else {}
                     ),
-                    mesh_axis="dp_shard",
+                    mesh_axes=("dp_shard",),
                     name="layers.0",
                 )
             ],
@@ -964,11 +964,11 @@ class TestTensorParallelDistributedMuon(_DistributedMuonTestBase):
                     "compute_sharding": MuonComputeSharding(placement=Owned()),
                 }
             ],
-            bucket_spec=[
-                BucketSpec(
+            bucket_configs=[
+                BucketConfig(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={names[0]: 1, names[1]: 3},
-                    mesh=self.redistribution_mesh,
+                    mesh_axes=("fsdp", "tp"),
                 )
             ],
             lr=0.03,
