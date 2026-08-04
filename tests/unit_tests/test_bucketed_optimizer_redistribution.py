@@ -21,11 +21,33 @@ from torchtitan.components.distributed_optimizers.bucketed_redistribution import
     _PackedAllToAllSchedule,
     _RedistributionGroup,
     _RedistributionPlan,
+    assign_balanced_owners,
+    BucketConfig,
     BucketSpec,
 )
 
 
 class TestBucketedOptimizerRedistribution(unittest.TestCase):
+    def test_balanced_owner_assignment(self):
+        self.assertEqual(
+            assign_balanced_owners(
+                [("a", "b"), ("c",)],
+                {"a": 8, "b": 4, "c": 4},
+                num_ranks=2,
+                initial_memory_by_rank=(0, 4),
+            ),
+            ({"a": 0, "b": 1}, {"c": 0}),
+        )
+
+        owners = {"a": 0}
+        config = BucketConfig(
+            patterns=("a",),
+            owner_rank_by_fqn=owners,
+            mesh_axes=("dp_shard",),
+        )
+        owners["a"] = 1
+        self.assertEqual(config.owner_rank_by_fqn, {"a": 0})
+
     def test_bucket_planner_preserves_empty_local_storage_block(self):
         @dataclass(frozen=True)
         class Item:
