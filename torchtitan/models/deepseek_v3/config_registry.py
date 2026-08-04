@@ -4,11 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torch.distributed.tensor import Shard
+from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
+    assign_balanced_owners,
+    BucketConfig,
+)
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.distributed_optimizers.muon import Owned
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
+    BatchedMatrixComputeView,
+    MuonComputeSharding,
+)
+from torchtitan.components.optimizer import (
+    default_adamw,
+    OptimizersContainer,
+    ParamGroupConfig,
+)
 from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
@@ -157,6 +171,157 @@ def deepseek_v3_16b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=10),
         activation_checkpoint=SelectiveAC.Config(),
         compile=CompileConfig(enable=True, components=["loss"]),
+    )
+
+
+def deepseek_v3_16b_distributed_muon() -> Trainer.Config:
+    """DSV3-16B with local-block and bucketed owner-compute Muon."""
+    config = deepseek_v3_16b()
+    owner_group_size = 8
+    config.optimizer = _deepseek_v3_distributed_muon_optimizer(
+        n_layers=27,
+        num_matrices=16,
+        wkv_a_matrix_shape=(576, 2048),
+        owner_group_size=owner_group_size,
+        lr=2.2e-4,
+    )
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=owner_group_size,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=4,
+        enable_sequence_parallel=False,
+        spmd_backend="spmd_types",
+    )
+    return config
+
+
+def _deepseek_v3_distributed_muon_optimizer(
+    *,
+    n_layers: int,
+    num_matrices: int,
+    wkv_a_matrix_shape: tuple[int, int],
+    owner_group_size: int,
+    lr: float,
+) -> OptimizersContainer.Config:
+    muon_kwargs = {
+        "lr": lr,
+        "weight_decay": 0.1,
+        "fused": False,
+        "foreach": False,
+    }
+    adamw_kwargs = {
+        "lr": lr,
+        "betas": (0.9, 0.95),
+        "eps": 1e-8,
+        "weight_decay": 0.1,
+        "fused": False,
+        "foreach": True,
+    }
+    param_groups = [
+        ParamGroupConfig(
+            pattern=r"attention\.wq\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs={
+                **muon_kwargs,
+                "compute_sharding": MuonComputeSharding(
+                    view_before_placement=BatchedMatrixComputeView(
+                        num_matrices=num_matrices,
+                        matrices_flattened_into_dim=0,
+                    ),
+                    placement=Shard(0),
+                ),
+            },
+        ),
+        ParamGroupConfig(
+            pattern=r"attention\.wkv_a\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs={
+                **muon_kwargs,
+                "compute_sharding": MuonComputeSharding(placement=Owned()),
+            },
+        ),
+        ParamGroupConfig(
+            pattern=r"attention\.wkv_b\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs={
+                **muon_kwargs,
+                "compute_sharding": MuonComputeSharding(
+                    view_before_placement=BatchedMatrixComputeView(
+                        num_matrices=num_matrices,
+                        matrices_flattened_into_dim=0,
+                    ),
+                    placement=Shard(0),
+                ),
+            },
+        ),
+    ]
+    for projection in ("w1_EFD", "w2_EDF", "w3_EFD"):
+        param_groups.append(
+            ParamGroupConfig(
+                pattern=rf"routed_experts\.inner_experts\.{projection}$",
+                optimizer_name="DistributedMuon",
+                optimizer_kwargs={
+                    **muon_kwargs,
+                    "compute_sharding": MuonComputeSharding(
+                        placement=Shard(0)
+                    ),
+                },
+            )
+        )
+    param_groups.append(
+        ParamGroupConfig(
+            pattern=r".*",
+            optimizer_name="AdamW",
+            optimizer_kwargs=adamw_kwargs.copy(),
+        )
+    )
+
+    def layer_fqns(layer_id: int) -> tuple[str, ...]:
+        prefix = f"layers.{layer_id}"
+        fqns = tuple(
+            f"{prefix}.attention.{projection}.weight"
+            for projection in ("wq", "wkv_a", "wkv_b")
+        )
+        if layer_id:
+            fqns += tuple(
+                f"{prefix}.moe.routed_experts.inner_experts.{projection}"
+                for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
+            )
+        return fqns
+
+    layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(n_layers))
+    owner_rank_by_bucket = assign_balanced_owners(
+        layer_bucket_fqns,
+        {
+            f"layers.{layer_id}.attention.wkv_a.weight": (
+                wkv_a_matrix_shape[0] * wkv_a_matrix_shape[1]
+            )
+            for layer_id in range(n_layers)
+        },
+        num_ranks=owner_group_size,
+    )
+    bucket_configs = tuple(
+        BucketConfig(
+            name=f"layers.{layer_id}",
+            patterns=fqns,
+            owner_rank_by_fqn=owners,
+            mesh_axis="dp_shard",
+        )
+        for layer_id, (fqns, owners) in enumerate(
+            zip(layer_bucket_fqns, owner_rank_by_bucket, strict=True)
+        )
+    )
+    return OptimizersContainer.Config(
+        implementation="foreach",
+        param_groups=param_groups,
+        optimizer_init_kwargs={
+            "DistributedMuon": {
+                "bucket_configs": bucket_configs,
+            }
+        },
     )
 
 
