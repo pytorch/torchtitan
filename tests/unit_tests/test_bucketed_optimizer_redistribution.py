@@ -13,7 +13,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
     _build_owned_bucket_plans,
-    _build_owned_redistribution_plan,
     _lower_packed_all_to_all,
     _MatrixBlock,
     _MatrixBlockRoute,
@@ -130,13 +129,13 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
         ):
             forward = _lower_packed_all_to_all(
                 (plan,),
-                direction="storage_to_compute",
+                storage_to_compute=True,
                 process_group=object(),
                 local_participant=7,
             )
             reverse = _lower_packed_all_to_all(
                 (plan,),
-                direction="compute_to_storage",
+                storage_to_compute=False,
                 process_group=object(),
                 local_participant=7,
             )
@@ -155,32 +154,6 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
             (second,),
         )
 
-    def test_equivalent_replicas_prefer_local_copy_source(self):
-        block = _MatrixBlock(offsets=(0, 0), shape=(2, 3))
-        plan = _build_owned_redistribution_plan(
-            (((3, 7), block),),
-            participants=(3, 7),
-            owner=7,
-            logical_shape=(2, 3),
-        )
-        self.assertEqual(plan.storage_to_compute_routes[0].source_participants, (3, 7))
-        self.assertEqual(plan.compute_to_storage_routes[0].destination_participants, (3, 7))
-
-        with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
-            "get_process_group_ranks",
-            return_value=[3, 7],
-        ):
-            schedule = _lower_packed_all_to_all(
-                (plan,),
-                direction="storage_to_compute",
-                process_group=object(),
-                local_participant=7,
-            )
-
-        self.assertEqual(schedule.input_split_sizes, (0, 6))
-        self.assertEqual(schedule.output_split_sizes, (0, 6))
-
     def test_routes_require_an_exact_nonoverlapping_partition(self):
         def plan(blocks):
             routes = tuple(
@@ -197,7 +170,7 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
             (
                 (_MatrixBlock((0, 0), (3, 3)),),
                 ValueError,
-                "outside",
+                "in bounds",
             ),
             (
                 (

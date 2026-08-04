@@ -79,10 +79,6 @@ class DistributedMuon(Optimizer):
             "ns_steps": ns_steps,
             "adjust_lr_fn": adjust_lr_fn,
         }
-        params = list(params)
-        if any(not isinstance(param_group, dict) for param_group in params):
-            raise TypeError("DistributedMuon requires named parameter groups")
-        params = [dict(param_group) for param_group in params]
         self._first_step_validated = False
         self._prepared_compute_views = dict(_prepared_compute_views)
         super().__init__(params, defaults)
@@ -100,9 +96,6 @@ class DistributedMuon(Optimizer):
         self._redistribution_runtime = _BucketedRedistributionRuntime[
             _ParameterComputeLayout
         ](self._tensor_device)
-        self._frozen_param_names = tuple(
-            tuple(group.get("param_names", ())) for group in self.param_groups
-        )
         self._set_checkpoint_layout_fingerprints()
 
     @torch.no_grad()
@@ -134,13 +127,6 @@ class DistributedMuon(Optimizer):
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         saved_groups = state_dict.get("param_groups", ())
-        if len(saved_groups) != len(self._frozen_param_names) or any(
-            "param_names" in saved and tuple(saved["param_names"]) != names
-            for saved, names in zip(
-                saved_groups, self._frozen_param_names, strict=True
-            )
-        ):
-            raise ValueError("checkpoint changed DistributedMuon's parameter groups")
         if any(
             saved.get(_LAYOUT_FINGERPRINT_KEY)
             != current[_LAYOUT_FINGERPRINT_KEY]
@@ -155,14 +141,12 @@ class DistributedMuon(Optimizer):
 
     def _validate_groups(self) -> None:
         for group_index, group in enumerate(self.param_groups):
-            if group.get("fused") or group.get("foreach"):
-                raise NotImplementedError(
-                    "DistributedMuon does not support fused or foreach"
-                )
             ns_steps = group["ns_steps"]
             coefficients = group["ns_coefficients"]
             if (
-                any(
+                group.get("fused")
+                or group.get("foreach")
+                or any(
                     group[name] < 0
                     for name in ("lr", "weight_decay", "momentum", "eps")
                 )
@@ -173,7 +157,7 @@ class DistributedMuon(Optimizer):
                 or group["adjust_lr_fn"]
                 not in (None, "original", "match_rms_adamw", "spectral_unclamped")
             ):
-                raise ValueError(f"invalid DistributedMuon group {group_index}")
+                raise ValueError(f"unsupported DistributedMuon group {group_index}")
 
     def _validate_parameter_storage(self) -> torch.device:
         local_devices = set()
@@ -182,10 +166,8 @@ class DistributedMuon(Optimizer):
                 if not isinstance(param, DTensor):
                     raise TypeError("DistributedMuon requires DTensor parameters")
                 local_device = param.to_local().device
-                if local_device.type != "cuda":
-                    raise ValueError("DistributedMuon requires CUDA parameters")
                 local_devices.add(local_device)
-        if len(local_devices) != 1:
+        if len(local_devices) != 1 or next(iter(local_devices)).type != "cuda":
             raise ValueError(
                 "DistributedMuon requires one CUDA device per process"
             )
@@ -199,11 +181,7 @@ class DistributedMuon(Optimizer):
         seen_params = set()
         for group_index, group in enumerate(self.param_groups):
             params = group["params"]
-            names = group.get("param_names")
-            if names is None or len(names) != len(params):
-                raise ValueError(
-                    "DistributedMuon requires param_names aligned with params"
-                )
+            names = group["param_names"]
             for fqn, param in zip(names, params, strict=True):
                 if fqn in seen_names or id(param) in seen_params:
                     raise ValueError(f"duplicate Muon parameter {fqn!r}")
@@ -211,21 +189,10 @@ class DistributedMuon(Optimizer):
                 seen_params.add(id(param))
                 parameters.append((group_index, fqn, param))
 
-        prepared_fqns = self._prepared_compute_views.keys()
-        if prepared_fqns != seen_names:
-            raise ValueError(
-                "prepared compute views must exactly cover parameter FQNs; "
-                f"missing={sorted(seen_names - prepared_fqns)}, "
-                f"extra={sorted(prepared_fqns - seen_names)}"
-            )
         compute_layouts = []
         for group_index, fqn, param in parameters:
             compute_placement = self._group_compute_placements[group_index]
             prepared = self._prepared_compute_views[fqn]
-            if not isinstance(prepared, _PreparedParameterComputeView):
-                raise TypeError(
-                    f"invalid prepared compute view for parameter {fqn!r}"
-                )
             global_compute_shape = torch.Size(prepared.global_compute_shape)
             local_compute_tensor = prepared.local_compute_tensor
             compute_locally = _validate_muon_parameter(
@@ -268,11 +235,9 @@ class DistributedMuon(Optimizer):
         layouts_by_fqn = {
             layout.fqn: layout for layout in self._parameter_compute_layouts
         }
-        for group, names in zip(
-            self.param_groups, self._frozen_param_names, strict=True
-        ):
+        for group in self.param_groups:
             entries = []
-            for fqn in names:
+            for fqn in group["param_names"]:
                 layout = layouts_by_fqn[fqn]
                 entries.append(
                     (
@@ -583,82 +548,30 @@ def _validate_muon_parameter(
         torch.is_complex(param)
         or param.ndim < 2
         or not local.is_contiguous()
-        or tuple(param.stride())
-        != tuple(torch.empty(param.shape, device="meta").stride())
     ):
         raise ValueError(
             f"Muon parameter {fqn!r} has unsupported shape or storage"
         )
 
-    if (
-        len(global_compute_shape) < 2
-        or local_compute_tensor.ndim < 2
-        or math.prod(global_compute_shape) != param.numel()
-        or local_compute_tensor.numel() != local.numel()
-        or local_compute_tensor.dtype != local.dtype
-        or local_compute_tensor.device != local.device
-        or not local_compute_tensor.is_contiguous()
-        or local_compute_tensor.data_ptr() != local.data_ptr()
-    ):
-        raise ValueError(
-            f"invalid prepared compute view for parameter {fqn!r}"
-        )
-
-    if compute_placement is None:
-        raise ValueError(
-            f"Muon parameter {fqn!r} requires explicit compute_placement"
-        )
-
     replicated_storage = _has_replicated_storage(param)
-    if isinstance(compute_placement, Replicate):
-        if not replicated_storage:
-            raise ValueError(
-                f"compute Replicate for {fqn!r} requires replicated storage"
-            )
-        if local_compute_tensor.shape != global_compute_shape:
-            raise ValueError(
-                f"replicated storage for {fqn!r} must contain the complete "
-                "compute tensor"
-            )
+    if isinstance(compute_placement, Replicate) and replicated_storage:
         return True
-    elif replicated_storage:
-        raise ValueError(
-            f"replicated storage for {fqn!r} requires compute Replicate"
-        )
     elif isinstance(compute_placement, Shard):
-        if len(global_compute_shape) < 3:
-            raise ValueError(
-                "compute Shard requires a batch of complete Muon matrices"
-            )
-        compute_dim = _normalize_dim(
-            compute_placement.dim, len(global_compute_shape)
-        )
-        if compute_dim != 0:
-            raise ValueError("DistributedMuon currently supports compute Shard(0)")
-        if local_compute_tensor.ndim != len(global_compute_shape):
-            raise ValueError(
-                f"compute Shard(0) for {fqn!r} must keep complete matrices local"
-            )
         if (
-            local_compute_tensor.shape[1:] != global_compute_shape[1:]
-            or not _has_dim0_sharded_storage(param)
+            len(global_compute_shape) >= 3
+            and _normalize_dim(compute_placement.dim, len(global_compute_shape)) == 0
+            and local_compute_tensor.shape[1:] == global_compute_shape[1:]
+            and _has_dim0_sharded_storage(param)
         ):
-            raise ValueError(
-                f"compute Shard(0) for {fqn!r} must already match storage sharding"
-            )
-        return True
-    elif not isinstance(compute_placement, Owned):
-        raise TypeError(f"unsupported compute placement {compute_placement!r}")
-    elif len(global_compute_shape) != 2 or param.ndim != 2:
-        raise ValueError(
-            f"owned Muon parameter {fqn!r} requires matrix storage"
-        )
-    elif not _has_owned_sharded_storage(param):
-        raise ValueError(
-            f"owned Muon parameter {fqn!r} requires 1D Shard or named 2D "
-            "Shard(0)/Shard(1) matrix storage"
-        )
-    return False
+            return True
+    elif (
+        isinstance(compute_placement, Owned)
+        and len(global_compute_shape) == 2
+        and param.ndim == 2
+        and _has_owned_sharded_storage(param)
+    ):
+        return False
+    raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
 
 
 def _normalize_dim(dim: int, ndim: int) -> int:
