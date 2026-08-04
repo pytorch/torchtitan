@@ -125,6 +125,7 @@ def parallelize_kimi_k2_5(
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             pp_enabled=parallel_dims.pp_enabled,
+            dp_mesh_dims=dp_mesh_dims,
         )
 
     apply_fsdp_to_decoder(
