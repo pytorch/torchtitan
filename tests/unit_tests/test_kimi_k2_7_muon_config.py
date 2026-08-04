@@ -46,9 +46,17 @@ class TestKimiK25MuonConfig(unittest.TestCase):
             (".attention.wq_b.weight", 61),
             (".attention.wkv_a.weight", 61),
             (".attention.wkv_b.weight", 61),
+            (".attention.wo.weight", 61),
+            (".feed_forward.w1.weight", 1),
+            (".feed_forward.w2.weight", 1),
+            (".feed_forward.w3.weight", 1),
             (".moe.routed_experts.inner_experts.w1_EFD", 60),
             (".moe.routed_experts.inner_experts.w2_EDF", 60),
             (".moe.routed_experts.inner_experts.w3_EFD", 60),
+            (".moe.router.gate.weight", 60),
+            (".moe.shared_experts.w1.weight", 60),
+            (".moe.shared_experts.w2.weight", 60),
+            (".moe.shared_experts.w3.weight", 60),
         ):
             names = {name for name in model_names if name.endswith(suffix)}
             self.assertEqual(len(names), count, suffix)
@@ -77,6 +85,10 @@ class TestKimiK25MuonConfig(unittest.TestCase):
                 ".attention.wq_b.weight",
                 ".attention.wkv_a.weight",
                 ".attention.wkv_b.weight",
+                ".attention.wo.weight",
+                ".feed_forward.w1.weight",
+                ".moe.router.gate.weight",
+                ".moe.shared_experts.w1.weight",
                 ".moe.routed_experts.inner_experts.w1_EFD",
             )
         }
@@ -92,6 +104,12 @@ class TestKimiK25MuonConfig(unittest.TestCase):
             ".attention.wq_b.weight": per_head,
             ".attention.wkv_a.weight": MuonComputeSharding(placement=Owned()),
             ".attention.wkv_b.weight": per_head,
+            ".attention.wo.weight": MuonComputeSharding(placement=Owned()),
+            ".feed_forward.w1.weight": MuonComputeSharding(placement=Owned()),
+            ".moe.router.gate.weight": MuonComputeSharding(placement=Owned()),
+            ".moe.shared_experts.w1.weight": MuonComputeSharding(
+                placement=Owned()
+            ),
             ".moe.routed_experts.inner_experts.w1_EFD": MuonComputeSharding(
                 placement=Shard(0)
             ),
@@ -109,22 +127,37 @@ class TestKimiK25MuonConfig(unittest.TestCase):
             prefix = f"layers.{layer_id}"
             expected = tuple(
                 f"{prefix}.attention.{projection}.weight"
-                for projection in ("wq_a", "wq_b", "wkv_a", "wkv_b")
+                for projection in ("wq_a", "wq_b", "wkv_a", "wkv_b", "wo")
             )
-            if layer_id:
+            expected_owners = {
+                f"{prefix}.attention.{projection}.weight"
+                for projection in ("wq_a", "wkv_a", "wo")
+            }
+            if not layer_id:
+                dense_fqns = tuple(
+                    f"{prefix}.feed_forward.{projection}.weight"
+                    for projection in ("w1", "w2", "w3")
+                )
+                expected += dense_fqns
+                expected_owners.update(dense_fqns)
+            else:
                 expected += tuple(
                     f"{prefix}.moe.routed_experts.inner_experts.{projection}"
                     for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
                 )
+                router_fqn = f"{prefix}.moe.router.gate.weight"
+                shared_fqns = tuple(
+                    f"{prefix}.moe.shared_experts.{projection}.weight"
+                    for projection in ("w1", "w2", "w3")
+                )
+                expected += (router_fqn,) + shared_fqns
+                expected_owners.update((router_fqn, *shared_fqns))
             self.assertEqual(bucket.name, prefix)
             self.assertEqual(bucket.patterns, expected)
             self.assertEqual(bucket.mesh_axes, ("dp_shard",))
             self.assertEqual(
                 set(bucket.owner_rank_by_fqn),
-                {
-                    f"{prefix}.attention.wq_a.weight",
-                    f"{prefix}.attention.wkv_a.weight",
-                },
+                expected_owners,
             )
             self.assertTrue(
                 all(rank in range(64) for rank in bucket.owner_rank_by_fqn.values())
