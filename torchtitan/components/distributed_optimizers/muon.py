@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -32,6 +33,9 @@ from .bucketed_redistribution import (
 __all__ = ["BucketSpec", "assign_balanced_owners", "Owned"]
 
 
+_LAYOUT_FINGERPRINT_KEY = "_distributed_muon_layout_fingerprint"
+_LAYOUT_FINGERPRINT_VERSION = 1
+
 
 @dataclass(frozen=True, slots=True)
 class Owned:
@@ -40,6 +44,7 @@ class Owned:
 
 @dataclass(frozen=True, slots=True)
 class _PreparedParameterComputeView:
+    compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
     local_compute_tensor: Tensor
 
@@ -104,6 +109,7 @@ class DistributedMuon(Optimizer):
         self._frozen_param_names = tuple(
             tuple(group.get("param_names", ())) for group in self.param_groups
         )
+        self._set_checkpoint_layout_fingerprints()
 
     @torch.no_grad()
     def step(
@@ -133,8 +139,6 @@ class DistributedMuon(Optimizer):
         super().add_param_group(param_group)
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # Compute layout is intentionally not duplicated in optimizer state. TorchTitan
-        # must reconstruct it from the same model and optimizer config before resume.
         saved_groups = state_dict.get("param_groups", ())
         if len(saved_groups) != len(self._frozen_param_names) or any(
             "param_names" in saved and tuple(saved["param_names"]) != names
@@ -143,6 +147,14 @@ class DistributedMuon(Optimizer):
             )
         ):
             raise ValueError("checkpoint changed DistributedMuon's parameter groups")
+        if any(
+            saved.get(_LAYOUT_FINGERPRINT_KEY)
+            != current[_LAYOUT_FINGERPRINT_KEY]
+            for saved, current in zip(
+                saved_groups, self.param_groups, strict=True
+            )
+        ):
+            raise ValueError("checkpoint changed DistributedMuon's compute layout")
         super().load_state_dict(state_dict)
         self._validate_plan_across_ranks()
         self._first_step_validated = False
@@ -218,6 +230,7 @@ class DistributedMuon(Optimizer):
                     fqn=fqn,
                     param=param,
                     group_index=group_index,
+                    compute_view_key=prepared.compute_view_key,
                     global_compute_shape=global_compute_shape,
                     local_compute_tensor=local_compute_tensor,
                     compute_placement=compute_placement,
@@ -239,6 +252,35 @@ class DistributedMuon(Optimizer):
         self._parameter_compute_layouts = result.ordered_items
         self._tensor_device = self._plans[0].device
 
+    def _set_checkpoint_layout_fingerprints(self) -> None:
+        layouts_by_fqn = {
+            layout.fqn: layout for layout in self._parameter_compute_layouts
+        }
+        for group, names in zip(
+            self.param_groups, self._frozen_param_names, strict=True
+        ):
+            entries = []
+            for fqn in names:
+                layout = layouts_by_fqn[fqn]
+                entries.append(
+                    (
+                        fqn,
+                        tuple(layout.param.shape),
+                        layout.compute_view_key,
+                        tuple(layout.global_compute_shape),
+                        _compute_placement_key(
+                            layout.compute_placement,
+                            len(layout.global_compute_shape),
+                        ),
+                    )
+                )
+            # Flat optimizer checkpoints repeat group fields for every FQN, so
+            # store a fixed-size digest rather than the full group descriptor.
+            group[_LAYOUT_FINGERPRINT_KEY] = (
+                _LAYOUT_FINGERPRINT_VERSION,
+                hashlib.sha256(repr(tuple(entries)).encode()).hexdigest(),
+            )
+
     def _validate_plan_across_ranks(self) -> None:
         _validate_bucket_plans_across_ranks(
             self._plans,
@@ -257,7 +299,11 @@ class DistributedMuon(Optimizer):
             compute_layout.param.to_local().device.type,
             tuple(compute_layout.global_compute_shape),
             compute_layout.compute_locally,
-            _compute_placement_key(compute_layout.compute_placement),
+            compute_layout.compute_view_key,
+            _compute_placement_key(
+                compute_layout.compute_placement,
+                len(compute_layout.global_compute_shape),
+            ),
             _device_mesh_ranks(compute_layout.param.device_mesh),
             tuple(map(str, compute_layout.param.placements)),
             self._group_signature(compute_layout),
@@ -461,6 +507,7 @@ class _ParameterComputeLayout:
     fqn: str
     param: DTensor
     group_index: int
+    compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
     local_compute_tensor: Tensor
     compute_placement: Owned | Replicate | Shard
@@ -603,12 +650,13 @@ def _normalize_dim(dim: int, ndim: int) -> int:
 
 def _compute_placement_key(
     placement: Owned | Replicate | Shard,
+    ndim: int,
 ) -> tuple[Any, ...]:
     if isinstance(placement, Owned):
         return ("owned",)
     if isinstance(placement, Replicate):
         return ("replicate",)
-    return ("shard", placement.dim)
+    return ("shard", _normalize_dim(placement.dim, ndim))
 
 
 # Keep the functional math aligned with torch.optim.Muon while owning the
