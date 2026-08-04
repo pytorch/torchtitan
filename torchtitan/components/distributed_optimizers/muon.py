@@ -285,6 +285,11 @@ class DistributedMuon(Optimizer):
         )
 
     def _preflight_step(self) -> None:
+        """Fail the local worker before bucket communication on invalid input.
+
+        TorchTitan's elastic launcher terminates peer workers after this error
+        escapes. Do not add a validation collective to the optimizer hot path.
+        """
         initialize_state = not self._first_step_validated
         missing_gradients = [
             compute_layout.fqn
