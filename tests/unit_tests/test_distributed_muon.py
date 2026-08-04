@@ -255,6 +255,35 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         with self.assertRaisesRegex(RuntimeError, "local storage changed"):
             optimizer.step()
 
+        backing = torch.arange(24, device=self.device).float()
+        first_region = backing[:12].view(2, 2, 3)
+        second_region = backing[12:].view(2, 2, 3)
+        shared_storage = torch.nn.Parameter(
+            DTensor.from_local(
+                first_region,
+                self.mesh,
+                (Shard(0),),
+                run_check=False,
+            )
+        )
+        shared_optimizer = build(shared_storage, "shared_storage", Shard(0))
+        shared_storage.grad = DTensor.from_local(
+            torch.ones_like(first_region),
+            self.mesh,
+            (Shard(0),),
+            run_check=False,
+        )
+        self.assertEqual(
+            shared_storage.to_local().untyped_storage().data_ptr(),
+            second_region.untyped_storage().data_ptr(),
+        )
+        self.assertNotEqual(
+            shared_storage.to_local().data_ptr(), second_region.data_ptr()
+        )
+        shared_storage._local_tensor = second_region
+        with self.assertRaisesRegex(RuntimeError, "local storage changed"):
+            shared_optimizer.step()
+
         dim1_sharded = make_parameter(
             torch.arange(24, device=self.device).reshape(2, 4, 3).float(), 1
         )
