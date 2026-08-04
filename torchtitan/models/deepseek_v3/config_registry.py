@@ -308,7 +308,7 @@ def _deepseek_v3_distributed_muon_optimizer(
             name=f"layers.{layer_id}",
             patterns=fqns,
             owner_rank_by_fqn=owners,
-            mesh_axis="dp_shard",
+            mesh_axes=("dp_shard",),
         )
         for layer_id, (fqns, owners) in enumerate(
             zip(layer_bucket_fqns, owner_rank_by_bucket, strict=True)
