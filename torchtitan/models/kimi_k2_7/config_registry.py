@@ -84,6 +84,7 @@ def _kimi_k2_5_distributed_muon_optimizer(
         "wq_b": per_head,
         "wkv_a": MuonComputeSharding(placement=Owned()),
         "wkv_b": per_head,
+        "wo": MuonComputeSharding(placement=Owned()),
     }
     expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
     param_groups = [
@@ -110,6 +111,23 @@ def _kimi_k2_5_distributed_muon_optimizer(
                 },
             )
         )
+    for pattern in (
+        r"feed_forward\.w[123]\.weight$",
+        r"moe\.router\.gate\.weight$",
+        r"moe\.shared_experts\.w[123]\.weight$",
+    ):
+        param_groups.append(
+            ParamGroupConfig(
+                pattern=pattern,
+                optimizer_name="DistributedMuon",
+                optimizer_kwargs={
+                    **muon_kwargs,
+                    "compute_sharding": MuonComputeSharding(
+                        placement=Owned()
+                    ),
+                },
+            )
+        )
     param_groups.append(
         ParamGroupConfig(
             pattern=r".*",
@@ -124,24 +142,43 @@ def _kimi_k2_5_distributed_muon_optimizer(
             f"{prefix}.attention.{projection}.weight"
             for projection in attention_shardings
         )
-        if layer_id:
+        if not layer_id:
+            fqns += tuple(
+                f"{prefix}.feed_forward.{projection}.weight"
+                for projection in ("w1", "w2", "w3")
+            )
+        else:
             fqns += tuple(
                 f"{prefix}.moe.routed_experts.inner_experts.{projection}"
                 for projection in expert_projections
             )
+            fqns += (f"{prefix}.moe.router.gate.weight",)
+            fqns += tuple(
+                f"{prefix}.moe.shared_experts.{projection}.weight"
+                for projection in ("w1", "w2", "w3")
+            )
         return fqns
 
     layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(n_layers))
-    owned_projection_numel = {
-        "wq_a": 1536 * 7168,
-        "wkv_a": 576 * 7168,
+    owned_parameter_numel_by_suffix = {
+        "attention.wq_a.weight": 1536 * 7168,
+        "attention.wkv_a.weight": 576 * 7168,
+        "attention.wo.weight": 7168 * 8192,
+        "feed_forward.w1.weight": 18432 * 7168,
+        "feed_forward.w2.weight": 7168 * 18432,
+        "feed_forward.w3.weight": 18432 * 7168,
+        "moe.router.gate.weight": 384 * 7168,
+        "moe.shared_experts.w1.weight": 2048 * 7168,
+        "moe.shared_experts.w2.weight": 7168 * 2048,
+        "moe.shared_experts.w3.weight": 2048 * 7168,
     }
     owner_rank_by_bucket = assign_balanced_owners(
         layer_bucket_fqns,
         {
-            f"layers.{layer_id}.attention.{projection}.weight": numel
-            for layer_id in range(n_layers)
-            for projection, numel in owned_projection_numel.items()
+            f"layers.{layer_id}.{suffix}": numel
+            for layer_id, fqns in enumerate(layer_bucket_fqns)
+            for suffix, numel in owned_parameter_numel_by_suffix.items()
+            if f"layers.{layer_id}.{suffix}" in fqns
         },
         num_ranks=owner_group_size,
     )
@@ -311,7 +348,7 @@ def kimi_k2_5() -> Trainer.Config:
 
 
 def kimi_k2_5_muon() -> Trainer.Config:
-    """Full Kimi K2.5 with projection and per-expert DistributedMuon."""
+    """Full Kimi K2.5 with DistributedMuon for text-tower matrices."""
     config = kimi_k2_5()
     owner_group_size = 64
     config.optimizer = _kimi_k2_5_distributed_muon_optimizer(
