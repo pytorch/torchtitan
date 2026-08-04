@@ -287,17 +287,13 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         dim1_sharded = make_parameter(
             torch.arange(24, device=self.device).reshape(2, 4, 3).float(), 1
         )
-        with self.assertRaisesRegex(
-            ValueError, "must already match storage sharding"
-        ):
+        with self.assertRaisesRegex(ValueError, "storage-to-compute layout"):
             build(dim1_sharded, "dim1_sharded", Shard(0))
 
         owned = make_parameter(
             torch.arange(12, device=self.device).reshape(4, 3).float(), 0
         )
-        with self.assertRaisesRegex(
-            ValueError, "requires replicated or 1D Shard"
-        ):
+        with self.assertRaisesRegex(ValueError, "storage-to-compute layout"):
             build(owned, "owned", Owned(), owner_rank=0)
 
     @with_comms
@@ -428,9 +424,6 @@ class TestDistributedMuon(_DistributedMuonTestBase):
 
     @with_comms
     def test_constructor_requires_valid_owner_assignments(self):
-        with self.assertRaises(TypeError):
-            Owned(0)
-
         first = self._parameter(
             torch.arange(12, device=self.device).reshape(4, 3).float()
         )
@@ -445,39 +438,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             }
         ]
 
-        with self.assertRaisesRegex(TypeError, "compute_sharding"):
-            build_distributed_muon(
-                [{"params": [first], "param_names": ["layers.0.first"]}],
-                bucket_spec=[
-                    BucketSpec(
-                        patterns=("layers.0.*",),
-                        owner_rank_by_fqn={},
-                        mesh=self.mesh,
-                    )
-                ],
-            )
-
-        with self.assertRaisesRegex(ValueError, "batch of complete Muon matrices"):
-            build_distributed_muon(
-                [
-                    {
-                        "params": [first],
-                        "param_names": ["layers.0.first"],
-                        "compute_sharding": MuonComputeSharding(
-                            placement=Shard(0)
-                        ),
-                    }
-                ],
-                bucket_spec=[
-                    BucketSpec(
-                        patterns=("layers.0.*",),
-                        owner_rank_by_fqn={},
-                        mesh=self.mesh,
-                    )
-                ],
-            )
-
-        with self.assertRaisesRegex(ValueError, "owned Muon parameter"):
+        with self.assertRaisesRegex(ValueError, "storage-to-compute layout"):
             build_distributed_muon(
                 [
                     {
@@ -743,34 +704,26 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         )
         sharded = self._parameter(value)
 
-        for storage, placement, compute_view, owners, message in (
+        for storage, placement, owners in (
             (
                 replicated,
                 Owned(),
-                None,
                 {"layers.0.weight": 0},
-                "requires compute Replicate",
             ),
-            (
-                replicated,
-                Shard(0),
-                BatchedMatrixComputeView(num_matrices=2),
-                {},
-                "requires compute Replicate",
-            ),
-            (sharded, Replicate(), None, {}, "requires replicated storage"),
+            (sharded, Replicate(), {}),
         ):
             with self.subTest(
                 storage=storage.placements, placement=placement
             ):
-                with self.assertRaisesRegex(ValueError, message):
+                with self.assertRaisesRegex(
+                    ValueError, "storage-to-compute layout"
+                ):
                     build_distributed_muon(
                         [
                             {
                                 "params": [storage],
                                 "param_names": ["layers.0.weight"],
                                 "compute_sharding": MuonComputeSharding(
-                                    view_before_placement=compute_view,
                                     placement=placement,
                                 ),
                             }

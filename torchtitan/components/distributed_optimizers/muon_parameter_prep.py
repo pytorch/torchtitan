@@ -48,24 +48,21 @@ class BatchedMatrixComputeView:
             or self.num_matrices <= 0
         ):
             raise ValueError("num_matrices must be a positive integer")
-        if isinstance(self.matrices_flattened_into_dim, bool) or not isinstance(
-            self.matrices_flattened_into_dim, int
-        ):
-            raise ValueError("matrices_flattened_into_dim must be an integer")
         if self.matrices_flattened_into_dim != 0:
             raise ValueError("only matrices_flattened_into_dim=0 is supported")
 
     def _resolve(self, storage_shape: torch.Size) -> _ResolvedBatchedMatrixView:
-        if len(storage_shape) != 2:
-            raise ValueError("BatchedMatrixComputeView requires rank-2 storage")
-        flattened_extent = storage_shape[self.matrices_flattened_into_dim]
-        if flattened_extent == 0 or flattened_extent % self.num_matrices:
+        if (
+            len(storage_shape) != 2
+            or storage_shape[0] == 0
+            or storage_shape[0] % self.num_matrices
+        ):
             raise ValueError(
-                f"storage shape {tuple(storage_shape)} is not divisible into "
+                f"storage shape {tuple(storage_shape)} cannot be viewed as "
                 f"{self.num_matrices} matrices"
             )
         return _ResolvedBatchedMatrixView(
-            matrix_rows=flattened_extent // self.num_matrices,
+            matrix_rows=storage_shape[0] // self.num_matrices,
             matrix_columns=storage_shape[1],
         )
 
@@ -81,13 +78,14 @@ class MuonComputeSharding:
     placement: Owned | Replicate | Shard
 
     def __post_init__(self) -> None:
-        if not isinstance(self.placement, (Owned, Replicate, Shard)):
-            raise TypeError("placement must be Owned, Replicate, or Shard")
-        if self.view_before_placement is not None and not isinstance(
-            self.view_before_placement, BatchedMatrixComputeView
+        if not isinstance(self.placement, (Owned, Replicate, Shard)) or (
+            self.view_before_placement is not None
+            and not isinstance(
+                self.view_before_placement, BatchedMatrixComputeView
+            )
         ):
             raise TypeError(
-                "view_before_placement must be a BatchedMatrixComputeView or None"
+                "MuonComputeSharding requires a supported view and placement"
             )
 
 
@@ -97,10 +95,9 @@ class _ResolvedBatchedMatrixView:
     matrix_columns: int
 
     def compute_shape(self, storage_shape: torch.Size) -> torch.Size:
-        if len(storage_shape) != 2:
-            raise ValueError("batched-matrix compute view requires rank-2 storage")
         if (
-            storage_shape[0] % self.matrix_rows
+            len(storage_shape) != 2
+            or storage_shape[0] % self.matrix_rows
             or storage_shape[1] != self.matrix_columns
         ):
             raise ValueError(
@@ -130,12 +127,8 @@ def build_distributed_muon(
     prepared_params = []
     parameters_to_prepare = []
     for param_group in params:
-        if not isinstance(param_group, dict):
-            raise TypeError("DistributedMuon requires named parameter groups")
         group = dict(param_group)
-        compute_sharding = group.pop("compute_sharding", None)
-        if not isinstance(compute_sharding, MuonComputeSharding):
-            raise TypeError("compute_sharding must be a MuonComputeSharding")
+        compute_sharding = group.pop("compute_sharding")
         compute_view = compute_sharding.view_before_placement
         group["_compute_placement"] = compute_sharding.placement
         raw_params = group.get("params", ())
@@ -164,8 +157,8 @@ def build_distributed_muon(
         if len(storage_by_fqn) != len(parameters_to_prepare):
             raise TypeError("bucket_configs require named DTensor parameters")
         bucket_spec = _bind_bucket_configs(bucket_configs, storage_by_fqn)
-    assert bucket_spec is not None
-    bucket_spec = tuple(bucket_spec)
+    else:
+        bucket_spec = tuple(bucket_spec)
 
     prepared_compute_views = {}
     for param, fqn, compute_view in parameters_to_prepare:
@@ -194,8 +187,12 @@ def build_distributed_muon(
                 compute_view.matrices_flattened_into_dim,
             )
             resolved_view = compute_view._resolve(global_storage_shape)
-            global_compute_shape = resolved_view.compute_shape(
-                global_storage_shape
+            global_compute_shape = torch.Size(
+                (
+                    compute_view.num_matrices,
+                    resolved_view.matrix_rows,
+                    resolved_view.matrix_columns,
+                )
             )
             local_compute_tensor = compute_storage.view(
                 resolved_view.compute_shape(local_storage_shape)

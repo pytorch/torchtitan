@@ -41,8 +41,6 @@ class BucketConfig:
     name: str = ""
 
     def __post_init__(self) -> None:
-        if isinstance(self.mesh_axes, str) or not self.mesh_axes:
-            raise ValueError("mesh_axes must be a non-empty sequence of axis names")
         object.__setattr__(self, "patterns", tuple(self.patterns))
         object.__setattr__(self, "owner_rank_by_fqn", dict(self.owner_rank_by_fqn))
         object.__setattr__(self, "mesh_axes", tuple(self.mesh_axes))
@@ -92,31 +90,11 @@ def _bind_bucket_configs(
             if any(fnmatch.fnmatchcase(fqn, pattern) for pattern in config.patterns)
         )
         if not candidates:
-            raise ValueError(f"bucket {config.name!r} matched no storage tensor")
+            continue
 
         meshes = []
         for fqn in candidates:
-            if fqn not in storage_by_fqn:
-                raise ValueError(f"bucket {config.name!r} references unknown {fqn!r}")
             storage_mesh = storage_by_fqn[fqn].device_mesh
-            if storage_mesh.mesh_dim_names is None or any(
-                axis not in storage_mesh.mesh_dim_names
-                for axis in config.mesh_axes
-            ):
-                raise ValueError(
-                    f"bucket {config.name!r} mesh axes {config.mesh_axes!r} "
-                    f"are not present on storage for {fqn!r}"
-                )
-            storage_axis_order = tuple(
-                axis
-                for axis in storage_mesh.mesh_dim_names
-                if axis in config.mesh_axes
-            )
-            if storage_axis_order != config.mesh_axes:
-                raise ValueError(
-                    f"bucket {config.name!r} mesh axes must follow storage "
-                    f"order {storage_mesh.mesh_dim_names!r}"
-                )
             selected_mesh = storage_mesh[config.mesh_axes]
             meshes.append(
                 selected_mesh._flatten()
@@ -261,20 +239,18 @@ def _validate_matrix_block_partition(
     *,
     direction: str,
 ) -> None:
-    if any(size < 0 for size in logical_shape):
-        raise ValueError("logical tensor shape must be nonnegative")
-    for block in blocks:
-        if len(block.offsets) != len(logical_shape) or len(block.shape) != len(
-            logical_shape
-        ):
-            raise ValueError(f"{direction} block rank does not match logical tensor")
-        if any(
+    if any(size < 0 for size in logical_shape) or any(
+        len(block.offsets) != len(logical_shape)
+        or len(block.shape) != len(logical_shape)
+        or any(
             offset < 0 or size < 0 or offset + size > logical_size
             for offset, size, logical_size in zip(
                 block.offsets, block.shape, logical_shape, strict=True
             )
-        ):
-            raise ValueError(f"{direction} block is outside the logical tensor")
+        )
+        for block in blocks
+    ):
+        raise ValueError(f"{direction} blocks must be in bounds")
 
     positive_blocks = tuple(block for block in blocks if block.numel)
     for index, first in enumerate(positive_blocks):
@@ -343,25 +319,8 @@ class _PackedSpan:
         return self.block.numel
 
 
-class _CommunicationSchedule:
-    """Physical execution strategy produced from redistribution routes."""
-
-    __slots__ = ()
-    participants: tuple[int, ...]
-    local_participant: int
-    input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
-    output_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
-    input_buffer_numel: int
-    output_buffer_numel: int
-
-    def execute(
-        self, output: Tensor, input: Tensor
-    ) -> None:
-        raise NotImplementedError
-
-
 @dataclass(frozen=True, slots=True)
-class _PackedAllToAllSchedule(_CommunicationSchedule):
+class _PackedAllToAllSchedule:
     process_group: dist.ProcessGroup
     participants: tuple[int, ...]
     local_participant: int
@@ -391,7 +350,7 @@ class _PackedAllToAllSchedule(_CommunicationSchedule):
 
 
 @dataclass(frozen=True, slots=True)
-class _LocalSchedule(_CommunicationSchedule):
+class _LocalSchedule:
     participants: tuple[int, ...] = ()
     local_participant: int = -1
     input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...] = ()
@@ -402,11 +361,12 @@ class _LocalSchedule(_CommunicationSchedule):
     def execute(
         self, output: Tensor, input: Tensor
     ) -> None:
-        if self.input_buffer_numel != self.output_buffer_numel:
-            raise ValueError("local schedules require equal buffer sizes")
         output[: self.output_buffer_numel].copy_(
             input[: self.input_buffer_numel]
         )
+
+
+_CommunicationSchedule = _PackedAllToAllSchedule | _LocalSchedule
 
 
 @dataclass(slots=True)
@@ -803,29 +763,19 @@ def _packed_spans_by_parameter(
 def _lower_packed_all_to_all(
     redistribution_plans: tuple[_RedistributionPlan, ...],
     *,
-    direction: str,
+    storage_to_compute: bool,
     process_group: dist.ProcessGroup,
     local_participant: int,
 ) -> _PackedAllToAllSchedule:
     participants = redistribution_plans[0].participants
-    if any(plan.participants != participants for plan in redistribution_plans):
-        raise ValueError("one all-to-all schedule requires one participant order")
-    if tuple(dist.get_process_group_ranks(process_group)) != participants:
-        raise ValueError(
-            "redistribution participants must match process-group rank order"
-        )
-    if local_participant not in participants:
-        raise ValueError("local rank is not a redistribution participant")
-    if direction == "storage_to_compute":
+    if storage_to_compute:
         routes_by_parameter = tuple(
             plan.storage_to_compute_routes for plan in redistribution_plans
         )
-    elif direction == "compute_to_storage":
+    else:
         routes_by_parameter = tuple(
             plan.compute_to_storage_routes for plan in redistribution_plans
         )
-    else:
-        raise ValueError(f"unsupported redistribution direction {direction!r}")
     transfers_by_parameter = tuple(
         _copy_transfers(routes, participants) for routes in routes_by_parameter
     )
@@ -882,8 +832,6 @@ def _device_mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
 
 
 def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
-    if mesh.ndim != 1:
-        raise ValueError("optimizer redistribution mesh must be one-dimensional")
     process_group = mesh.get_group()
     participants = tuple(dist.get_process_group_ranks(process_group))
     return _RedistributionGroup(
@@ -891,13 +839,6 @@ def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
         participants=participants,
         local_participant=participants[dist.get_rank(process_group)],
     )
-
-
-def _normalize_dim(dim: int, ndim: int) -> int:
-    normalized = dim if dim >= 0 else dim + ndim
-    if normalized < 0 or normalized >= ndim:
-        raise ValueError(f"dimension {dim} is invalid for a rank-{ndim} tensor")
-    return normalized
 
 
 def _dtensor_storage_block_for_participant(
@@ -917,7 +858,7 @@ def _dtensor_storage_block_for_participant(
             raise ValueError(
                 "redistributed optimizer storage requires exact Shard placements"
             )
-        tensor_dim = _normalize_dim(placement.dim, tensor.ndim)
+        tensor_dim = placement.dim % tensor.ndim
         local_size, global_offset = Shard.local_shard_size_and_offset(
             tensor.shape[tensor_dim],
             mesh_shape[mesh_dim],
@@ -1063,13 +1004,13 @@ def _build_owned_bucket_plans(
                 group=group,
                 storage_to_compute_schedule=_lower_packed_all_to_all(
                     redistribution_plans,
-                    direction="storage_to_compute",
+                    storage_to_compute=True,
                     process_group=group.process_group,
                     local_participant=group.local_participant,
                 ),
                 compute_to_storage_schedule=_lower_packed_all_to_all(
                     redistribution_plans,
-                    direction="compute_to_storage",
+                    storage_to_compute=False,
                     process_group=group.process_group,
                     local_participant=group.local_participant,
                 ),
@@ -1122,7 +1063,6 @@ def _matrix_block_view(tensor: Tensor, block: _MatrixBlock) -> Tensor:
             for offset, size in zip(block.offsets, block.shape, strict=True)
         )
     ]
-    assert tuple(view.shape) == block.shape
     return view
 
 

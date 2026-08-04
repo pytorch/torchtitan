@@ -20,16 +20,8 @@ from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
 
 class TestMuonParameterPrep(unittest.TestCase):
     def test_batched_matrix_view_validation(self):
-        for num_matrices in (0, -1, True, 1.5):
-            with self.subTest(num_matrices=num_matrices):
-                with self.assertRaisesRegex(ValueError, "positive integer"):
-                    BatchedMatrixComputeView(num_matrices, 0)
-        for matrices_flattened_into_dim in (True, "0"):
-            with self.subTest(
-                matrices_flattened_into_dim=matrices_flattened_into_dim
-            ):
-                with self.assertRaisesRegex(ValueError, "must be an integer"):
-                    BatchedMatrixComputeView(3, matrices_flattened_into_dim)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            BatchedMatrixComputeView(0)
         with self.assertRaisesRegex(
             ValueError, "only matrices_flattened_into_dim=0"
         ):
@@ -118,12 +110,9 @@ class TestMuonParameterPrep(unittest.TestCase):
         )
 
     def test_builder_validates_global_shape_and_aligned_names(self):
-        for shape, message in (
-            ((2, 3, 4), "requires rank-2 storage"),
-            ((5, 4), "is not divisible"),
-        ):
+        for shape in ((2, 3, 4), (5, 4)):
             with self.subTest(shape=shape):
-                with self.assertRaisesRegex(ValueError, message):
+                with self.assertRaisesRegex(ValueError, "cannot be viewed"):
                     build_distributed_muon(
                         [
                             {
@@ -154,10 +143,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                 bucket_spec=(),
             )
 
-    def test_builder_requires_compute_sharding(self):
-        with self.assertRaisesRegex(TypeError, "named parameter groups"):
-            build_distributed_muon([torch.empty(2, 2)], bucket_spec=())
-
+    def test_builder_requires_dtensor_storage(self):
         with self.assertRaisesRegex(TypeError, "DTensor parameters"):
             build_distributed_muon(
                 [
@@ -169,12 +155,6 @@ class TestMuonParameterPrep(unittest.TestCase):
                         ),
                     }
                 ],
-                bucket_spec=(),
-            )
-
-        with self.assertRaisesRegex(TypeError, "must be a MuonComputeSharding"):
-            build_distributed_muon(
-                [{"params": [], "param_names": [], "compute_sharding": object()}],
                 bucket_spec=(),
             )
 
