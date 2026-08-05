@@ -1367,8 +1367,8 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
         dispatcher_cfgs.append(token_dispatcher_cfg)
 
     required_num_max_tokens_per_rank = None
-    training = getattr(config, "training", None)
-    if dispatcher_cfgs and training is not None:
+    if dispatcher_cfgs:
+        training = config.training
         # CP and TP/SP shard the token axis before MoE, so derive the
         # per-rank capacity from the configured input shape.
         num_token_shards = (
@@ -1379,6 +1379,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
         )
 
     for token_dispatcher_cfg in dispatcher_cfgs:
+        assert required_num_max_tokens_per_rank is not None
         if parallelism.expert_parallel_degree == 1:
             raise ValueError(
                 f"{type(token_dispatcher_cfg).__qualname__} requires expert "
@@ -1393,20 +1394,11 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
                 "num_max_tokens_per_rank must be positive, got "
                 f"{configured_capacity}."
             )
-        if configured_capacity is None and required_num_max_tokens_per_rank is not None:
+        if configured_capacity is None:
             token_dispatcher_cfg.num_max_tokens_per_rank = (
                 required_num_max_tokens_per_rank
             )
-        elif configured_capacity is None:
-            raise ValueError(
-                f"{type(token_dispatcher_cfg).__qualname__} requires "
-                "num_max_tokens_per_rank when the runtime configuration does "
-                "not provide a token bound."
-            )
-        elif (
-            required_num_max_tokens_per_rank is not None
-            and configured_capacity < required_num_max_tokens_per_rank
-        ):
+        elif configured_capacity < required_num_max_tokens_per_rank:
             raise ValueError(
                 f"{type(token_dispatcher_cfg).__qualname__} "
                 f"num_max_tokens_per_rank ({configured_capacity}) is smaller "
