@@ -14,11 +14,35 @@ import math
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol
 
 import torch
 
 from torchtitan.tools.logging import logger
+
+
+class GroupedGemmShapes(NamedTuple):
+    """Local ``(in_features, out_features)`` of an expert's three grouped GEMMs.
+
+    ``in_features`` is the contraction extent and ``out_features`` the output
+    extent of one expert's slice, i.e. the ``K`` and ``N`` of the GEMM (``M``
+    is the routed-token count, which the hook reads from the input tensor).
+    These are *local* extents: under TP the hidden dimension is sharded, so a
+    rank reports the slice it actually multiplies.
+
+    Expert modules report these via ``GroupedExperts.grouped_gemm_shapes`` so
+    the metrics hook stays independent of how a variant lays out its weights
+    (three separate tensors, a fused gate+up tensor, ...).
+    """
+
+    gate: tuple[int, int]
+    """Gate projection (stock ``w1_EFD``)."""
+
+    up: tuple[int, int]
+    """Up projection (stock ``w3_EFD``)."""
+
+    down: tuple[int, int]
+    """Down projection (stock ``w2_EDF``)."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1464,6 +1488,17 @@ def set_active_moe_metric_collector(collector: MoEMetricCollector | None) -> Non
     _COLLECTOR_INSTALLED = collector is not None
 
 
+def moe_metrics_collector_installed() -> bool:
+    """Whether a collector is installed, i.e. whether hooks should do any work.
+
+    Callers gate on this *before* building hook arguments so that the disabled
+    path costs nothing. It is a plain module-global bool read, so Dynamo
+    specializes on the ``False`` default and compiles the guarded body away
+    (see the note in ``maybe_record_grouped_gemm``).
+    """
+    return _COLLECTOR_INSTALLED
+
+
 def get_active_moe_metric_collector() -> MoEMetricCollector | None:
     return _ACTIVE_COLLECTOR.get()
 
@@ -1559,9 +1594,7 @@ def collect_dense_gemm_templates(
 def maybe_record_grouped_gemm(
     *,
     x_RD: torch.Tensor,
-    w1_EFD: torch.Tensor,
-    w2_EDF: torch.Tensor,
-    w3_EFD: torch.Tensor,
+    gemm_shapes: GroupedGemmShapes,
     num_tokens_per_expert_E: torch.Tensor,
     token_dispatcher: object | None = None,
     dispatch_metadata: object | None = None,
@@ -1575,6 +1608,11 @@ def maybe_record_grouped_gemm(
     model that routes through it (llama4, qwen3, deepseek_v3, etc.). It is a
     no-op unless a collector is active and the current step is sampled.
 
+    ``gemm_shapes`` comes from ``GroupedExperts.grouped_gemm_shapes``, so this
+    hook never inspects expert weights directly and works unchanged for
+    variants that store them differently (a fused gate+up ``w13``, gpt_oss
+    ``mlp1`` / ``mlp2``, ...).
+
     ``_COLLECTOR_INSTALLED`` is a plain module-global bool checked before any
     other work. ``RoutedExperts.forward`` is compiled with ``fullgraph=True``
     (see ``apply_compile``), and the ``ContextVar.get`` below is an unsupported
@@ -1584,13 +1622,6 @@ def maybe_record_grouped_gemm(
     collector IS installed, the body is incompatible with ``fullgraph`` compile;
     metrics collection therefore requires ``compile.enable = false`` (enforced
     at setup and documented in the RFC).
-
-    Not supported at this point: expert variants that do not keep the three
-    separate ``w1_EFD`` / ``w2_EDF`` / ``w3_EFD`` grouped-GEMM weights.
-    ``GptOssGroupedExperts`` uses its own ``mlp1`` / ``mlp2`` weights and
-    ``FusedGroupedExperts`` fuses gate and up into a single ``w13``, so
-    ``RoutedExperts`` skips the call for both and their grouped-GEMM shapes and
-    per-expert load are not captured. Wiring them up is left as follow-up work.
     """
     if not _COLLECTOR_INSTALLED:
         return
@@ -1649,9 +1680,9 @@ def maybe_record_grouped_gemm(
         ep_rank=ep_rank,
         ep_size=ep_size,
         top_k=top_k,
-        gemm_w1=(m_total, int(w1_EFD.shape[-1]), int(w1_EFD.shape[-2])),
-        gemm_w3=(m_total, int(w3_EFD.shape[-1]), int(w3_EFD.shape[-2])),
-        gemm_w2=(m_total, int(w2_EDF.shape[-1]), int(w2_EDF.shape[-2])),
+        gemm_w1=(m_total, *gemm_shapes.gate),
+        gemm_w3=(m_total, *gemm_shapes.up),
+        gemm_w2=(m_total, *gemm_shapes.down),
         dtype=str(x_RD.dtype).replace("torch.", ""),
         dispatcher=dispatcher,
         tokens_tensor=tokens_tensor,

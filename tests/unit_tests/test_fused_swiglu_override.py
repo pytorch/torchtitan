@@ -329,3 +329,8 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         assert x.grad is not None
         assert x_ref.grad is not None
         torch.testing.assert_close(x.grad, x_ref.grad, atol=5e-2, rtol=5e-2)
+
+        # The fused variant deletes w1_EFD/w3_EFD in favour of a fused w13, so
+        # MoE metrics can only cover it if it reports the same logical GEMM
+        # extents as the stock experts.
+        self.assertEqual(fused.grouped_gemm_shapes(), base.grouped_gemm_shapes())

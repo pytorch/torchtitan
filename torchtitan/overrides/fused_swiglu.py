@@ -62,10 +62,11 @@ import triton.language as tl
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.components.moe_metrics import GroupedGemmShapes
 from torchtitan.config import derive, override
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.moe import GroupedExperts, local_param_shape
 from torchtitan.protocols.sharding import ShardingConfig
 
 __all__ = [
@@ -537,6 +538,13 @@ class FusedGroupedExperts(GroupedExperts):
 
         self.register_state_dict_post_hook(self._split_w13_on_save)
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
+
+    def grouped_gemm_shapes(self) -> GroupedGemmShapes:
+        # w13 is (E, F, 2, D) and fuses gate+up into one (D, 2F) GEMM. Report
+        # the two logical halves so records stay comparable with the unfused
+        # experts; the FLOP total is identical either way.
+        F_local, _, D = local_param_shape(self.w13)[-3:]
+        return GroupedGemmShapes(gate=(D, F_local), up=(D, F_local), down=(F_local, D))
 
     def forward(
         self,

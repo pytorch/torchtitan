@@ -122,9 +122,7 @@ def forward(self, x_BLD, topk_scores_BLK, topk_expert_ids_BLK, ...):
     routed_input_RD, num_tokens_per_expert, metadata = self.token_dispatcher.dispatch(...)
     maybe_record_grouped_gemm(
         x_RD=routed_input_RD,
-        w1_EFD=self.inner_experts.w1_EFD,
-        w2_EDF=self.inner_experts.w2_EDF,
-        w3_EFD=self.inner_experts.w3_EFD,
+        gemm_shapes=self.inner_experts.grouped_gemm_shapes(),
         num_tokens_per_expert_E=num_tokens_per_expert,
         token_dispatcher=self.token_dispatcher,
         dispatch_metadata=metadata,
@@ -142,12 +140,30 @@ the `GroupedExperts.forward` signature untouched, so expert variants that
 subclass it do not have to thread extra arguments.
 
 Because the hook lives in the shared `RoutedExperts.forward`, it covers every
-model that routes through it (`deepseek_v3`, `llama4`, `qwen3`, etc.). Expert
-variants that do not keep the three separate `w1_EFD` / `w2_EDF` / `w3_EFD`
-grouped-GEMM weights are **not supported at this point** and are skipped:
-`GptOssGroupedExperts` uses its own `mlp1` / `mlp2` weights, and
-`FusedGroupedExperts` fuses gate and up into a single `w13`. Wiring those up is
-left as follow-up work.
+model that routes through it (`deepseek_v3`, `llama4`, `qwen3`, etc.).
+
+Expert variants lay their weights out differently, so rather than have the hook
+inspect weights it cannot know the layout of, each variant reports its own GEMM
+extents through `GroupedExperts.grouped_gemm_shapes()`:
+
+| Variant | Weights | `grouped_gemm_shapes()` derives from |
+| --- | --- | --- |
+| `GroupedExperts` | `w1_EFD`, `w2_EDF`, `w3_EFD` | `w1_EFD` |
+| `FusedGroupedExperts` | fused `w13` `(E, F, 2, D)`, `w2_EDF` | `w13` |
+| `GptOssGroupedExperts` | `mlp1_weight_EGD` `(E, 2F, D)`, `mlp2_weight_EDF` | `mlp1_weight_EGD` |
+
+The two fused variants issue gate and up as one `(M, D, 2F)` GEMM. They report
+the two logical `(M, D, F)` halves so records stay comparable across variants;
+the FLOP total is identical either way.
+
+Shapes are the extents of the slice a rank actually multiplies, read from
+`DTensor._local_tensor` where applicable. Under TP the hidden dimension is
+sharded (`w1_EFD: Shard(1)`, `w2_EDF: Shard(2)`), so the global `.shape` would
+overstate it by the TP degree.
+
+A variant that does not implement `grouped_gemm_shapes()` is skipped with a
+one-time warning naming the class, so enabling metrics never yields a silently
+empty output.
 
 `maybe_record_grouped_gemm` is a single `if not enabled: return` check on the
 hot path. When enabled it issues exactly one `.cpu().tolist()` on the

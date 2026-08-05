@@ -15,6 +15,7 @@ import torch
 from torchtitan.components.moe_metrics import (
     collect_dense_gemm_templates,
     GroupedGemmRecord,
+    GroupedGemmShapes,
     maybe_record_grouped_gemm,
     MoEMetricCollector,
     MoEMetricsConfig,
@@ -116,9 +117,6 @@ class TestMoEMetricCollector(unittest.TestCase):
             set_active_moe_metric_collector(collector)
 
             x_RD = torch.randn(12, 16)
-            w1_EFD = torch.randn(2, 32, 16)
-            w2_EDF = torch.randn(2, 16, 32)
-            w3_EFD = torch.randn(2, 32, 16)
             num_tokens_per_expert_E = torch.tensor([4, 8], dtype=torch.int64)
             padded_num_tokens_per_expert_E = torch.tensor([8, 8], dtype=torch.int64)
 
@@ -129,9 +127,9 @@ class TestMoEMetricCollector(unittest.TestCase):
             )
             maybe_record_grouped_gemm(
                 x_RD=x_RD,
-                w1_EFD=w1_EFD,
-                w2_EDF=w2_EDF,
-                w3_EFD=w3_EFD,
+                gemm_shapes=GroupedGemmShapes(
+                    gate=(16, 32), up=(16, 32), down=(32, 16)
+                ),
                 num_tokens_per_expert_E=num_tokens_per_expert_E,
                 dispatch_metadata=dispatch_metadata,
                 layer_id=7,
@@ -169,9 +167,7 @@ class TestMoEMetricCollector(unittest.TestCase):
 
             maybe_record_grouped_gemm(
                 x_RD=torch.randn(2, 4),
-                w1_EFD=torch.randn(1, 8, 4),
-                w2_EDF=torch.randn(1, 4, 8),
-                w3_EFD=torch.randn(1, 8, 4),
+                gemm_shapes=GroupedGemmShapes(gate=(4, 8), up=(4, 8), down=(8, 4)),
                 num_tokens_per_expert_E=torch.tensor([2], dtype=torch.int64),
             )
             collector.flush()
@@ -203,9 +199,7 @@ class TestMoEMetricCollector(unittest.TestCase):
             def forward(self, x_RD, counts):
                 maybe_record_grouped_gemm(
                     x_RD=x_RD,
-                    w1_EFD=self.w1_EFD,
-                    w2_EDF=self.w2_EDF,
-                    w3_EFD=self.w3_EFD,
+                    gemm_shapes=GroupedGemmShapes(gate=(4, 8), up=(4, 8), down=(8, 4)),
                     num_tokens_per_expert_E=counts,
                 )
                 return x_RD @ self.w1_EFD[0].t()
@@ -218,6 +212,44 @@ class TestMoEMetricCollector(unittest.TestCase):
         # Must not raise Unsupported / graph break under fullgraph.
         out = compiled(x, counts)
         self.assertEqual(out.shape, (3, 8))
+
+
+class TestGroupedGemmShapes(unittest.TestCase):
+    """Every expert variant must report the same logical GEMM extents.
+
+    The metrics hook no longer inspects expert weights, so a variant that lays
+    them out differently (fused gate+up, gpt_oss mlp1/mlp2) stays covered only
+    as long as its ``grouped_gemm_shapes`` agrees with the stock one.
+    """
+
+    DIM = 16
+    HIDDEN = 32
+    EXPERTS = 4
+
+    def _expected(self) -> GroupedGemmShapes:
+        return GroupedGemmShapes(
+            gate=(self.DIM, self.HIDDEN),
+            up=(self.DIM, self.HIDDEN),
+            down=(self.HIDDEN, self.DIM),
+        )
+
+    def test_base_grouped_experts(self):
+        from torchtitan.models.common.moe import GroupedExperts
+
+        experts = GroupedExperts.Config(
+            dim=self.DIM, hidden_dim=self.HIDDEN, num_experts=self.EXPERTS
+        ).build()
+        self.assertEqual(experts.grouped_gemm_shapes(), self._expected())
+
+    def test_gpt_oss_grouped_experts_match_base(self):
+        from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
+
+        experts = GptOssGroupedExperts.Config(
+            dim=self.DIM, hidden_dim=self.HIDDEN, num_experts=self.EXPERTS
+        ).build()
+        # mlp1 packs gate and up into one (E, 2F, D) weight; the reported
+        # shapes must still be the two logical (D, F) halves.
+        self.assertEqual(experts.grouped_gemm_shapes(), self._expected())
 
 
 class TestHistogramSinkAndManifest(unittest.TestCase):
