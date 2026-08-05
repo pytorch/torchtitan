@@ -22,6 +22,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort import (
 from torchtitan.experiments.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.experiments.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.types import RolloutTurnID
 
 
@@ -369,9 +370,11 @@ def test_rollouter_builds_one_env_per_group_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_names(monkeypatch)
-    rollouter = AlphabetSortRollouter(AlphabetSortRollouter.Config())
+    config = AlphabetSortRollouter.Config()
+    rollouter = AlphabetSortRollouter(config)
+    worker = config.worker_cls(config=config)
     sample = rollouter.get_training_sample()
-    envs = rollouter.make_env_group(sample=sample, group_size=3, renderer=None)
+    envs = worker.make_env_group(sample=sample, group_size=3, renderer=None)
     assert len(envs) == 3
 
 
@@ -379,6 +382,7 @@ def test_rollouter_config_wires_alphabet_sort() -> None:
     config = AlphabetSortRollouter.Config()
     assert isinstance(config.train_dataset, AlphabetSortDataset.Config)
     assert isinstance(config.validation_dataset, AlphabetSortDataset.Config)
+    assert config.worker_cls is RolloutWorker
     assert isinstance(config.message_env, AlphabetSortEnv.Config)
     assert len(config.rubric.reward_fns) == 1
     assert isinstance(config.rubric.reward_fns[0], RewardAlphabetSort.Config)
