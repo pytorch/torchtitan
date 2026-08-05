@@ -32,10 +32,7 @@ from dataclasses import dataclass
 # imports transitively importing torch.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# TODO: Remove `_src` after monarch cuts a new release. This is already a public
-# API in monarch nightly. https://github.com/meta-pytorch/monarch/pull/4327
-from monarch._src.actor.host_mesh import default_bootstrap_cmd
-from monarch.actor import HostMesh, ProcMesh, this_host
+from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
 from torchtitan.experiments.rl.controller import Controller
