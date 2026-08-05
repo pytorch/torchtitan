@@ -56,11 +56,13 @@ class Qwen3TransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        num_actual_tokens: torch.Tensor | None = None,
     ):
         x = x + self.attention(self.attention_norm(x), attention_masks, positions)
 
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            x = x + self.moe(self.ffn_norm(x), num_actual_tokens=num_actual_tokens)
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x

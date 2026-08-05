@@ -17,6 +17,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.config import DebugConfig
@@ -362,6 +363,28 @@ def test_sequence_parallel_padding_rounds_runner_tokens():
     )
 
     assert TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5) == 8
+
+
+def test_runner_passes_persistent_actual_token_count(monkeypatch):
+    runner = TorchTitanGPUModelRunner.__new__(TorchTitanGPUModelRunner)
+    runner._torchtitan_num_actual_tokens = torch.zeros(1, dtype=torch.int64)
+    base_runner_cls = TorchTitanGPUModelRunner.__mro__[1]
+    monkeypatch.setattr(base_runner_cls, "_init_model_kwargs", lambda self: {})
+    monkeypatch.setattr(
+        base_runner_cls,
+        "_preprocess",
+        lambda self, scheduler_output, num_input_tokens, intermediate_tensors=None: (
+            num_input_tokens,
+            intermediate_tensors,
+        ),
+    )
+
+    model_kwargs = runner._init_model_kwargs()
+    self_count = model_kwargs["num_actual_tokens"]
+    assert self_count is runner._torchtitan_num_actual_tokens
+
+    runner._preprocess(SimpleNamespace(total_num_scheduled_tokens=5), 8)
+    assert self_count.item() == 5
 
 
 def test_cudagraph_default_mode_is_full_decode_only():

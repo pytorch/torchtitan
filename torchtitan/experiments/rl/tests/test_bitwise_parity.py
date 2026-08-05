@@ -847,6 +847,30 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     min_world_size = 4
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
 
+    def test_vllm_single_request_short_decode(self):
+        """A single decode token must be padded across the TP sequence shards."""
+        prompts = [self.prompt_ids[0]]
+        generated_ids, decode_logprobs = vllm_generate(
+            self.engine,
+            prompts,
+            max_tokens=2,
+            ignore_eos=True,
+        )
+        prefill_logprobs = vllm_2nd_pass_prefill(
+            self.engine,
+            prompts,
+            generated_ids,
+        )
+
+        self.assertEqual(len(generated_ids[0]), 2)
+        self._assert_logprobs_equal(
+            "single-request decode vs prefill",
+            decode_logprobs[0],
+            prefill_logprobs[0],
+            "Decode",
+            "2ndPrefill",
+        )
+
 
 class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):
     """Bitwise parity for GPT-OSS varlen attention."""

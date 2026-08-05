@@ -32,6 +32,44 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 #   N = routed tokens (T*K), R = routed tokens assigned to local experts
 
 
+def _build_token_valid_mask(
+    input_BL: torch.Tensor,
+    num_actual_tokens: torch.Tensor,
+    *,
+    tp_rank: int,
+    tp_size: int,
+) -> torch.Tensor:
+    """Build a placement-preserving mask for tail-padded token rows.
+
+    ``num_actual_tokens`` is the number of real tokens in this DP rank's batch
+    before tail padding. ``input_BL`` provides the local shape and placement.
+    ``tp_rank`` and ``tp_size`` identify this rank's shard in an even TP split.
+
+    For example, five real tokens padded to eight and sharded over four TP
+    ranks give two local tokens per rank. The returned masks are
+    ``[True, True]``, ``[True, True]``, ``[True, False]``, and
+    ``[False, False]`` for TP ranks 0 through 3.
+    """
+    valid_BL = torch.ones_like(input_BL, dtype=torch.bool)
+    local_valid_BL = (
+        valid_BL._local_tensor if isinstance(valid_BL, DTensor) else valid_BL
+    )
+    B, L = local_valid_BL.shape
+    global_L = L * tp_size
+    batch_offsets_B1 = (
+        torch.arange(
+            B, device=local_valid_BL.device, dtype=num_actual_tokens.dtype
+        ).unsqueeze(1)
+        * global_L
+    )
+    sequence_indices_1L = torch.arange(
+        L, device=local_valid_BL.device, dtype=num_actual_tokens.dtype
+    ).unsqueeze(0)
+    global_indices_BL = batch_offsets_B1 + tp_rank * L + sequence_indices_1L
+    local_valid_BL.copy_(global_indices_BL < num_actual_tokens)
+    return valid_BL
+
+
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -121,6 +159,8 @@ class RoutedExperts(Module):
         super().__init__()
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
+        self.tp_rank = 0
+        self.tp_size = 1
 
     def forward(
         self,
@@ -128,13 +168,17 @@ class RoutedExperts(Module):
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_actual_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
         DTensor->local conversion from the configured input placements and
         local->DTensor wrapping with the configured output placement. The
-        forward body operates on plain local tensors.
+        forward body operates on plain local tensors. ``num_actual_tokens``
+        counts the real-token prefix before TP sequence sharding; this local
+        region derives the portion belonging to its TP shard.
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
@@ -143,6 +187,29 @@ class RoutedExperts(Module):
 
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
+
+        original_x_TD = x_TD
+        valid_T = None
+        static_deepep = (
+            isinstance(self.token_dispatcher, DeepEPTokenDispatcher)
+            and self.token_dispatcher.cudagraphable
+            and not torch.is_grad_enabled()
+        )
+        if num_actual_tokens is not None:
+            valid_T = _build_token_valid_mask(
+                x_BLD[..., 0],
+                num_actual_tokens,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+            ).view(T)
+            # DeepEP expand keeps the captured extent and converts the zero
+            # scores set by MoE into no-route expert IDs. Dynamic dispatchers
+            # instead remove invalid rows before routing.
+            if not static_deepep:
+                x_TD = x_TD[valid_T]
+                topk_scores_TK = topk_scores_TK[valid_T]
+                topk_expert_ids_TK = topk_expert_ids_TK[valid_T]
+
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -162,6 +229,10 @@ class RoutedExperts(Module):
             metadata,
             x_TD,
         )
+        if valid_T is not None and not static_deepep:
+            compact_out_TD = out_TD
+            out_TD = torch.zeros_like(original_x_TD)
+            out_TD[valid_T] = compact_out_TD
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
         return out_TD.view(B, -1, D)
@@ -170,11 +241,17 @@ class RoutedExperts(Module):
         """Parallelize the grouped experts, then wire the EP mesh on the
         dispatcher so dispatch/combine see the right mesh at runtime."""
         super().parallelize(parallel_dims)
+        ep_mesh = parallel_dims.get_optional_mesh("ep")
+        if ep_mesh is not None:
+            tp_mesh = parallel_dims.get_optional_mesh("tp")
+            if tp_mesh is not None:
+                self.tp_rank = tp_mesh.get_local_rank()
+                self.tp_size = tp_mesh.size()
         # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
         # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
         # DeepEPTokenDispatcher.
         self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            ep_mesh=ep_mesh,
         )
 
 
@@ -359,11 +436,15 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        input_sequence_parallel: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
+        self.input_sequence_parallel = config.input_sequence_parallel
+        self.tp_rank = 0
+        self.tp_size = 1
         self.routed_experts = config.routed_experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -391,10 +472,18 @@ class MoE(Module):
             persistent=False,
         )
 
-    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x_BLD: torch.Tensor,
+        *,
+        num_actual_tokens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Args:
             x_BLD: Input ``(B, L, D)``.
+            num_actual_tokens: Optional one-element GPU tensor containing the
+                number of real tokens in this DP rank's logical, unsharded
+                token tensor. Real tokens must form a contiguous prefix.
 
         Returns:
             Output ``(B, L, D)``.
@@ -406,6 +495,21 @@ class MoE(Module):
         DTensors; the DTensor->local conversion happens at the GroupedExperts
         boundary. GroupedExperts operates on local tensors.
         """
+        if num_actual_tokens is not None and num_actual_tokens.numel() != 1:
+            raise ValueError(
+                "num_actual_tokens must contain exactly one element, got "
+                f"shape {tuple(num_actual_tokens.shape)}"
+            )
+
+        input_valid_BL = None
+        if num_actual_tokens is not None:
+            input_valid_BL = _build_token_valid_mask(
+                x_BLD[..., 0],
+                num_actual_tokens,
+                tp_rank=self.tp_rank if self.input_sequence_parallel else 0,
+                tp_size=self.tp_size if self.input_sequence_parallel else 1,
+            )
+
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
         (
@@ -423,6 +527,17 @@ class MoE(Module):
             topk_expert_ids_BLK,
             True,
         )
+        if num_actual_tokens is not None:
+            routed_valid_BL = _build_token_valid_mask(
+                topk_scores_BLK[..., 0],
+                num_actual_tokens,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+            )
+            topk_scores_BLK = topk_scores_BLK.masked_fill(
+                ~routed_valid_BL.unsqueeze(-1), 0.0
+            )
+            routing_map_BLE = routing_map_BLE & routed_valid_BL.unsqueeze(-1)
         num_local_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
@@ -438,12 +553,17 @@ class MoE(Module):
             topk_scores_BLK,
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
+            num_actual_tokens=num_actual_tokens,
         )
 
         # shared_experts runs in parallel with deepep combine communication.
         shared_out_BLD = (
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
+        if shared_out_BLD is not None and input_valid_BL is not None:
+            shared_out_BLD = shared_out_BLD.masked_fill(
+                ~input_valid_BL.unsqueeze(-1), 0.0
+            )
 
         if isinstance(self.routed_experts.token_dispatcher, DeepEPTokenDispatcher):
             # Sync the combine operation before using routed_output.
@@ -456,6 +576,15 @@ class MoE(Module):
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD
+
+    def parallelize(self, parallel_dims) -> None:
+        ep_mesh = parallel_dims.get_optional_mesh("ep")
+        if ep_mesh is not None:
+            tp_mesh = parallel_dims.get_optional_mesh("tp")
+            if tp_mesh is not None:
+                self.tp_rank = tp_mesh.get_local_rank()
+                self.tp_size = tp_mesh.size()
+        super().parallelize(parallel_dims)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
