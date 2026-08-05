@@ -4,11 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torch.distributed.tensor import Shard
+from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
+    assign_balanced_owners,
+    BucketConfig,
+)
+from torchtitan.components.distributed_optimizers.muon import Owned
+from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
+    BatchedMatrixComputeView,
+    MuonComputeSharding,
+)
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import (
+    default_adamw,
+    OptimizersContainer,
+    ParamGroupConfig,
+)
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -37,6 +51,156 @@ def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
         image_mean=(0.5, 0.5, 0.5),
         image_std=(0.5, 0.5, 0.5),
         **kwargs,
+    )
+
+
+def _kimi_k2_5_distributed_muon_optimizer(
+    *,
+    n_layers: int,
+    num_heads: int,
+    owner_group_size: int,
+    lr: float,
+) -> OptimizersContainer.Config:
+    muon_kwargs = {
+        "lr": lr,
+        "weight_decay": 0.1,
+        "foreach": False,
+    }
+    adamw_kwargs = {
+        "lr": lr,
+        "betas": (0.9, 0.95),
+        "eps": 1e-8,
+        "weight_decay": 0.1,
+    }
+    per_head = MuonComputeSharding(
+        view_before_placement=BatchedMatrixComputeView(
+            num_matrices=num_heads,
+            matrices_flattened_into_dim=0,
+        ),
+        placement=Shard(0),
+    )
+    attention_shardings = {
+        "wq_a": MuonComputeSharding(placement=Owned()),
+        "wq_b": per_head,
+        "wkv_a": MuonComputeSharding(placement=Owned()),
+        "wkv_b": per_head,
+        "wo": MuonComputeSharding(placement=Owned()),
+    }
+    expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
+    param_groups = [
+        ParamGroupConfig(
+            pattern=rf"attention\.{projection}\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs={
+                **muon_kwargs,
+                "compute_sharding": compute_sharding,
+            },
+        )
+        for projection, compute_sharding in attention_shardings.items()
+    ]
+    for projection in expert_projections:
+        param_groups.append(
+            ParamGroupConfig(
+                pattern=rf"routed_experts\.inner_experts\.{projection}$",
+                optimizer_name="DistributedMuon",
+                optimizer_kwargs={
+                    **muon_kwargs,
+                    "compute_sharding": MuonComputeSharding(
+                        placement=Shard(0)
+                    ),
+                },
+            )
+        )
+    for pattern in (
+        r"feed_forward\.w[123]\.weight$",
+        r"moe\.router\.gate\.weight$",
+        r"moe\.shared_experts\.w[123]\.weight$",
+    ):
+        param_groups.append(
+            ParamGroupConfig(
+                pattern=pattern,
+                optimizer_name="DistributedMuon",
+                optimizer_kwargs={
+                    **muon_kwargs,
+                    "compute_sharding": MuonComputeSharding(
+                        placement=Owned()
+                    ),
+                },
+            )
+        )
+    param_groups.append(
+        ParamGroupConfig(
+            pattern=r".*",
+            optimizer_name="AdamW",
+            optimizer_kwargs=adamw_kwargs,
+        )
+    )
+
+    def layer_fqns(layer_id: int) -> tuple[str, ...]:
+        prefix = f"layers.{layer_id}"
+        fqns = tuple(
+            f"{prefix}.attention.{projection}.weight"
+            for projection in attention_shardings
+        )
+        if not layer_id:
+            fqns += tuple(
+                f"{prefix}.feed_forward.{projection}.weight"
+                for projection in ("w1", "w2", "w3")
+            )
+        else:
+            fqns += tuple(
+                f"{prefix}.moe.routed_experts.inner_experts.{projection}"
+                for projection in expert_projections
+            )
+            fqns += (f"{prefix}.moe.router.gate.weight",)
+            fqns += tuple(
+                f"{prefix}.moe.shared_experts.{projection}.weight"
+                for projection in ("w1", "w2", "w3")
+            )
+        return fqns
+
+    layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(n_layers))
+    owned_parameter_numel_by_suffix = {
+        "attention.wq_a.weight": 1536 * 7168,
+        "attention.wkv_a.weight": 576 * 7168,
+        "attention.wo.weight": 7168 * 8192,
+        "feed_forward.w1.weight": 18432 * 7168,
+        "feed_forward.w2.weight": 7168 * 18432,
+        "feed_forward.w3.weight": 18432 * 7168,
+        "moe.router.gate.weight": 384 * 7168,
+        "moe.shared_experts.w1.weight": 2048 * 7168,
+        "moe.shared_experts.w2.weight": 7168 * 2048,
+        "moe.shared_experts.w3.weight": 2048 * 7168,
+    }
+    owner_rank_by_bucket = assign_balanced_owners(
+        layer_bucket_fqns,
+        {
+            f"layers.{layer_id}.{suffix}": numel
+            for layer_id, fqns in enumerate(layer_bucket_fqns)
+            for suffix, numel in owned_parameter_numel_by_suffix.items()
+            if f"layers.{layer_id}.{suffix}" in fqns
+        },
+        num_ranks=owner_group_size,
+    )
+    bucket_configs = tuple(
+        BucketConfig(
+            name=f"layers.{layer_id}",
+            patterns=fqns,
+            owner_rank_by_fqn=owners,
+            mesh_axes=("dp_shard",),
+        )
+        for layer_id, (fqns, owners) in enumerate(
+            zip(layer_bucket_fqns, owner_rank_by_bucket, strict=True)
+        )
+    )
+    return OptimizersContainer.Config(
+        implementation="foreach",
+        param_groups=param_groups,
+        optimizer_init_kwargs={
+            "DistributedMuon": {
+                "bucket_configs": bucket_configs,
+            }
+        },
     )
 
 
@@ -181,3 +345,26 @@ def kimi_k2_5() -> Trainer.Config:
         activation_checkpoint=FullAC.Config(),
         compile=compile_config,
     )
+
+
+def kimi_k2_5_muon() -> Trainer.Config:
+    """Full Kimi K2.5 with DistributedMuon for text-tower matrices."""
+    config = kimi_k2_5()
+    owner_group_size = 64
+    config.optimizer = _kimi_k2_5_distributed_muon_optimizer(
+        n_layers=61,
+        num_heads=64,
+        owner_group_size=owner_group_size,
+        lr=2.2e-4,
+    )
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=owner_group_size,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=8,
+        enable_sequence_parallel=False,
+        spmd_backend="spmd_types",
+    )
+    return config
