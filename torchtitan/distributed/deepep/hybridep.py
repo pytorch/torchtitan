@@ -14,7 +14,7 @@ Configuration (via HybridEPTokenDispatcher.Config):
         None = blocking mode (default).  HybridEP calls cudaStreamSynchronize
         after dispatch and computes the exact num_permuted_tokens on the host.
         float in (0, 1] = non-blocking mode; num_permuted_tokens is estimated as
-        num_local_tokens_after_seq_dim_padding * ep_size *
+        num_max_tokens_per_rank * ep_size *
         min(num_local_experts, top_k) * capacity_factor, aligned for MXFP8.
         See _num_permuted_tokens_for_non_blocking().
 """
@@ -78,7 +78,7 @@ class DispatchState:
 
 
 def _num_permuted_tokens_for_non_blocking(
-    num_local_tokens_after_seq_dim_padding: int,
+    num_max_tokens_per_rank: int,
     ep_size: int,
     num_local_experts: int,
     top_k: int,
@@ -87,7 +87,7 @@ def _num_permuted_tokens_for_non_blocking(
 ) -> int:
     """Pre-allocated output buffer size for non-blocking dispatch.
 
-    Formula: num_local_tokens_after_seq_dim_padding * ep_size *
+    Formula: num_max_tokens_per_rank * ep_size *
     min(num_local_experts, top_k) * capacity_factor, aligned to pad_multiple
     if set.
 
@@ -99,7 +99,7 @@ def _num_permuted_tokens_for_non_blocking(
     is roughly uniform, so values < 1.0 are safe in practice.
     """
     n = int(
-        num_local_tokens_after_seq_dim_padding
+        num_max_tokens_per_rank
         * ep_size
         * min(num_local_experts, top_k)
         * moe_expert_capacity_factor
@@ -120,7 +120,7 @@ def _dispatch_impl(
     num_experts: int,
     ep_size: int,
     group_name: str,
-    num_local_tokens_after_seq_dim_padding: int,
+    num_max_tokens_per_rank: int,
     non_blocking: bool = False,
     moe_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
@@ -140,9 +140,9 @@ def _dispatch_impl(
     group = dist.distributed_c10d._resolve_process_group(group_name)
     assert _buffer is not None, "HybridEP buffer must be initialized before dispatch"
     assert _buffer.group == group
-    assert x.shape[0] <= num_local_tokens_after_seq_dim_padding
+    assert x.shape[0] <= num_max_tokens_per_rank
     assert (
-        num_local_tokens_after_seq_dim_padding
+        num_max_tokens_per_rank
         <= _buffer.configurer.buffer_config.max_num_of_tokens_per_rank
     )
     num_local_experts = num_experts // ep_size
@@ -159,7 +159,7 @@ def _dispatch_impl(
             moe_expert_capacity_factor is not None
         ), "moe_expert_capacity_factor is required for non_blocking dispatch"
         num_permuted_tokens = _num_permuted_tokens_for_non_blocking(
-            num_local_tokens_after_seq_dim_padding,
+            num_max_tokens_per_rank,
             ep_size,
             num_local_experts,
             topk_idx.shape[1],
@@ -203,7 +203,7 @@ def _dispatch_fake(
     num_experts: int,
     ep_size: int,
     group_name: str,
-    num_local_tokens_after_seq_dim_padding: int,
+    num_max_tokens_per_rank: int,
     non_blocking: bool = False,
     moe_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
@@ -212,7 +212,7 @@ def _dispatch_fake(
     num_local_experts = num_experts // ep_size
     if non_blocking:
         out_tokens = _num_permuted_tokens_for_non_blocking(
-            num_local_tokens_after_seq_dim_padding,
+            num_max_tokens_per_rank,
             ep_size,
             num_local_experts,
             topk_idx.shape[1],
@@ -356,7 +356,7 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
         else None
     )
     # Gradients for: x, topk_idx, topk_weights, num_experts, ep_size, group,
-    #                num_local_tokens_after_seq_dim_padding, non_blocking,
+    #                num_max_tokens_per_rank, non_blocking,
     #                moe_expert_capacity_factor, pad_multiple
     return grad_x, None, grad_weights, None, None, None, None, None, None, None
 
@@ -467,7 +467,7 @@ def dispatch_tokens(
     num_experts: int,
     group: dist.ProcessGroup,
     *,
-    num_local_tokens_after_seq_dim_padding: int,
+    num_max_tokens_per_rank: int,
     non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
@@ -483,14 +483,14 @@ def dispatch_tokens(
         num_local_experts: Experts on this EP rank
         num_experts: Total experts across all ranks
         group: EP ProcessGroup
-        num_local_tokens_after_seq_dim_padding: Current logical per-rank input
-            capacity. It must be identical across the EP group and no larger
-            than the maximum used to initialize HybridEP storage. Blocking
-            dispatch uses exact routed counts; non-blocking dispatch uses this
-            value to size its current fused-permute output view.
+        num_max_tokens_per_rank: Current per-rank input capacity. It must be
+            identical across the EP group and no larger than the maximum used
+            to initialize HybridEP storage. Blocking dispatch uses exact routed
+            counts; non-blocking dispatch uses this value to size its current
+            fused-permute output view.
         non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
-            tensor as num_local_tokens_after_seq_dim_padding * ep_size *
+            tensor as num_max_tokens_per_rank * ep_size *
             min(num_local_experts, top_k) * capacity_factor, aligned to
             pad_multiple.
         pad_multiple: Pad per-expert token groups to this multiple (e.g. 32 for
@@ -519,7 +519,7 @@ def dispatch_tokens(
         num_experts,
         ep_size,
         group_name,
-        num_local_tokens_after_seq_dim_padding,
+        num_max_tokens_per_rank,
         non_blocking,
         non_blocking_expert_capacity_factor,
         pad_multiple,
