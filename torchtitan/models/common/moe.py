@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.components.moe_metrics import maybe_record_grouped_gemm
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
@@ -133,6 +134,13 @@ class RoutedExperts(Module):
         super().__init__()
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
+        # Index of the transformer layer this expert group belongs to. Set by
+        # Decoder.__init__ after construction; -1 means "unknown" (e.g. when the
+        # module is built outside a Decoder). Used only for metrics attribution.
+        self.layer_id: int = -1
+        # Router top_k for this MoE block, set by Decoder.__init__ alongside
+        # layer_id; -1 means "unknown". Used only for metrics attribution.
+        self.top_k: int = -1
 
     def forward(
         self,
@@ -167,6 +175,9 @@ class RoutedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
+        self._maybe_record_grouped_gemm(
+            routed_input_RD, num_global_tokens_per_local_expert_e, metadata
+        )
         with maybe_set_sparse_mesh():
             routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
@@ -181,6 +192,60 @@ class RoutedExperts(Module):
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
         return out_TD.view(B, -1, D)
+
+    def _maybe_record_grouped_gemm(
+        self,
+        routed_input_RD: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
+        dispatch_metadata: object,
+    ) -> None:
+        """Record grouped-GEMM shapes for the upcoming ``inner_experts`` call.
+
+        No-op unless a MoE metric collector is active. Expert variants that do
+        not keep the three separate ``w1/w2/w3`` grouped-GEMM weights (e.g. the
+        gpt_oss experts) are not covered and are skipped.
+        """
+        w1_EFD = getattr(self.inner_experts, "w1_EFD", None)
+        w2_EDF = getattr(self.inner_experts, "w2_EDF", None)
+        w3_EFD = getattr(self.inner_experts, "w3_EFD", None)
+        if w1_EFD is None or w2_EDF is None or w3_EFD is None:
+            return
+
+        metadata_tokens_per_expert = getattr(
+            dispatch_metadata, "num_tokens_per_local_expert_e", None
+        )
+        metadata_padded_tokens_per_expert = getattr(
+            dispatch_metadata, "padded_num_tokens_per_local_expert_e", None
+        )
+        metadata_dispatcher = getattr(dispatch_metadata, "dispatcher", None)
+
+        maybe_record_grouped_gemm(
+            x_RD=routed_input_RD,
+            w1_EFD=w1_EFD,
+            w2_EDF=w2_EDF,
+            w3_EFD=w3_EFD,
+            num_tokens_per_expert_E=(
+                metadata_tokens_per_expert
+                if isinstance(metadata_tokens_per_expert, torch.Tensor)
+                else num_tokens_per_expert_E
+            ),
+            padded_num_tokens_per_expert_E=(
+                metadata_padded_tokens_per_expert
+                if isinstance(metadata_padded_tokens_per_expert, torch.Tensor)
+                else num_tokens_per_expert_E
+            ),
+            dispatcher=(
+                metadata_dispatcher
+                if isinstance(metadata_dispatcher, str)
+                else type(self.token_dispatcher)
+                .__name__.replace("TokenDispatcher", "")
+                .lower()
+            ),
+            layer_id=self.layer_id,
+            ep_rank=getattr(self.token_dispatcher, "ep_rank", 0),
+            ep_size=getattr(self.token_dispatcher, "ep_size", 1),
+            top_k=self.top_k,
+        )
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize the grouped experts, then wire EP/TP meshes on the
