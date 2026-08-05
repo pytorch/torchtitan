@@ -451,6 +451,25 @@ class MetricsProcessor(Configurable):
         moe_tb_log_dir = self._resolve_tb_log_dir(
             parallel_dims=parallel_dims, pp_schedule=pp_schedule
         )
+        # The grouped-GEMM metrics hook runs inside GroupedExperts._experts_forward,
+        # which is compiled with fullgraph=True when the model is compiled. Its
+        # active-collector body (ContextVar read, record construction) is not
+        # traceable, so an enabled collector is incompatible with model compile.
+        # The disabled path is compile-safe (dead-code-eliminated), so this only
+        # blocks the both-on combination.
+        compile_cfg = (config_dict or {}).get("compile", {})
+        compiles_model = compile_cfg.get("enable", False) and "model" in (
+            compile_cfg.get("components", ["model", "loss"])
+        )
+        if config.moe.enabled and compiles_model:
+            raise ValueError(
+                "MoE metrics collection (metrics.moe.enabled=true) is incompatible "
+                "with model compilation (compile.enable=true with 'model' in "
+                "compile.components): the grouped-GEMM metrics hook runs inside the "
+                "fullgraph-compiled expert forward and cannot be traced. To collect "
+                "metrics, set compile.enable=false (or remove 'model' from "
+                "compile.components); otherwise set metrics.moe.enabled=false."
+            )
         self.moe_metric_collector = MoEMetricCollector(
             config=config.moe,
             dump_folder=dump_folder,
@@ -477,6 +496,13 @@ class MetricsProcessor(Configurable):
         local_dir = (
             self.logger.tb_log_dir if isinstance(self.logger, LoggerContainer) else None
         )
+        # When the MoE collector is disabled it never builds the tb sink, so
+        # ranks do not need to agree on the log dir. Skip the broadcast to keep
+        # MetricsProcessor construction collective-free when the feature is off.
+        # config.moe.enabled is identical on every rank, so all ranks either
+        # skip together or broadcast together.
+        if not self.config.moe.enabled:
+            return local_dir
         if not (
             torch.distributed.is_available() and torch.distributed.is_initialized()
         ):

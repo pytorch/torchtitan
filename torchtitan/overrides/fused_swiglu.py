@@ -286,7 +286,7 @@ def silu_and_mul_backward_kernel(
 @torch.library.custom_op(
     "torchtitan::silu_and_mul",
     mutates_args=(),
-    device_types="cuda",
+    device_types=("cuda", "xpu"),
 )
 def silu_and_mul_op(
     gate: torch.Tensor,
@@ -309,7 +309,7 @@ def silu_and_mul_op_fake(
 @torch.library.custom_op(
     "torchtitan::silu_and_mul_backward",
     mutates_args=(),
-    device_types="cuda",
+    device_types=("cuda", "xpu"),
 )
 def silu_and_mul_backward_op(
     grad_out: torch.Tensor,
