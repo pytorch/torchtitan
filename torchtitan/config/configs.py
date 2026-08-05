@@ -34,6 +34,9 @@ class TrainingConfig:
     Global batch size (defaults to `training.local_batch_size * data-parallel degree`)
     """
 
+    # TODO: Separate the packed model-input length from the per-document maximum.
+    # seq_len currently also controls document rejection, maximum position IDs,
+    # and the required RoPE cache length.
     seq_len: int = 2048
     """Sequence length"""
 
