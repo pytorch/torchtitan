@@ -162,6 +162,12 @@ def _dispatch_op_impl(
         topk_idx=topk_idx,
         topk_weights=topk_weights,
         num_experts=num_experts,
+        # Denote C = num_tokens_per_rank. DeepEP uses C as the per-rank layout stride
+        # (global token ID = rank * C + local token ID). With our no-CPU-sync
+        # expand path, C also determines recv_x's worst-case size. Use the current
+        # call or graph-bucket bound instead of the configured lifetime maximum to
+        # avoid a maximum-sized output on every call. ElasticBuffer was already
+        # preallocated for the lifetime maximum, and the handle retains C for combine.
         num_max_tokens_per_rank=num_tokens_per_rank,
         num_sms=num_sms,
         do_expand=cudagraphable,
