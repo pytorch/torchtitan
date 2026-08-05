@@ -18,7 +18,6 @@ from unittest import mock
 import fsspec
 import torch
 import torch.nn as nn
-from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import (
@@ -922,7 +921,12 @@ class TestCheckpointManager(unittest.TestCase):
         model = ModelWithExtra()
         cfg = self.trainer_config.checkpoint
         cfg.allow_partial_load_on_model = True
-        cfg.exclude_from_loading = ['trainer','optimizer','dataloader','lr_scheduler']
+        cfg.exclude_from_loading = [
+            "trainer",
+            "optimizer",
+            "dataloader",
+            "lr_scheduler",
+        ]
         step_dir = os.path.join(self.test_folder, "step-1")
         os.makedirs(step_dir, exist_ok=True)
         open(os.path.join(step_dir, ".metadata"), "w").close()

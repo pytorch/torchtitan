@@ -359,7 +359,7 @@ class CheckpointManager(Configurable):
 
         allow_partial_load_on_model: bool = False
         """
-        enables loose checkpoint loading for the model portion of the state dict only.
+        Enable loose checkpoint loading for the model portion of the state dict only.
         When allow_partial_load_on_model=True, model keys present in the in-memory state
         dict but absent from the checkpoint are skipped (left at their current / random init)
         instead of raising a runtime error. Non-model state
@@ -691,7 +691,9 @@ class CheckpointManager(Configurable):
             AssertionError: If `from_hf` is True but no `sd_adapter` is available.
         """
 
-        model_planner = DefaultLoadPlanner(allow_partial_load=self.allow_partial_load_on_model)
+        model_planner = DefaultLoadPlanner(
+            allow_partial_load=self.allow_partial_load_on_model
+        )
 
         if from_hf:
             assert self.sd_adapter is not None, (
@@ -704,20 +706,28 @@ class CheckpointManager(Configurable):
                 checkpoint_id, from_quantized
             )
 
-            dcp.load(hf_state_dict, storage_reader=hf_storage_reader, planner=model_planner)
+            dcp.load(
+                hf_state_dict, storage_reader=hf_storage_reader, planner=model_planner
+            )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
             if self.allow_partial_load_on_model:
-                model_sd = (self.states[MODEL].state_dict() if MODEL in self.states else {})
+                model_sd = (
+                    self.states[MODEL].state_dict() if MODEL in self.states else {}
+                )
                 non_model_sd = {
                     k: v for k, v in state_dict.items() if k not in model_sd
                 }
 
                 dcp.load(model_sd, checkpoint_id=checkpoint_id, planner=model_planner)
                 if non_model_sd:
-                    dcp.load(non_model_sd, checkpoint_id=checkpoint_id, planner=DefaultLoadPlanner())
+                    dcp.load(
+                        non_model_sd,
+                        checkpoint_id=checkpoint_id,
+                        planner=DefaultLoadPlanner(),
+                    )
 
                 if MODEL in self.states:
                     self.states[MODEL].load_state_dict(model_sd)
@@ -729,15 +739,22 @@ class CheckpointManager(Configurable):
                 if MODEL in self.states:
                     self.states[MODEL].load_state_dict(state_dict)
 
-        if getattr(model_planner, "metadata", None) is not None:
-            skipped = sorted(
-                set(model_planner.state_dict)
-                - set(model_planner.metadata.state_dict_metadata)
-            )
-            if skipped:
-                logger.warning(
-                    "%d key(s) absent from checkpoint: %s", len(skipped), skipped
+        if self.allow_partial_load_on_model:
+            planner_metadata = model_planner.metadata
+            if planner_metadata is not None:
+                skipped = sorted(
+                    set(model_planner.state_dict)
+                    - set(planner_metadata.state_dict_metadata)
                 )
+                if skipped:
+                    if len(skipped) > 10:
+                        logger.warning(
+                            f"Missing {len(skipped)} keys from checkpoint: {skipped[:10]}... (and {len(skipped) - 10} more)"
+                        )
+                    else:
+                        logger.warning(
+                            f"Missing {len(skipped)} keys from checkpoint: {skipped}"
+                        )
 
     @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
