@@ -21,10 +21,12 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.config import Configurable, Function
-from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
+from torchtitan.distributed.parallel_dims import (
+    MeshAxisName,
+    SpmdLayout,
+)
 
 from torchtitan.distributed.spmd_types import (
-    current_spmd_mesh,
     spmd_layout_to_dtensor_placements,
     spmd_mesh_size,
 )
@@ -99,7 +101,7 @@ class PerAxisRedistribution(Function):
             backward_options["out_dtype"] = self.config.bwd_out_dtype
         return spmd.redistribute(
             x,
-            current_spmd_mesh().get_group(axis),  # pyrefly: ignore[missing-attribute]
+            axis,
             src=self.config.src,
             dst=self.config.dst,
             op_dtype=self.config.fwd_op_dtype,
@@ -192,7 +194,7 @@ def resolve_placements(
             raise ValueError(
                 f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
-                f"{sorted(k.value for k in layout.axes())}; "
+                f"{sorted(k.value for k in layout.local_type)}; "
                 f"required: {list(mesh.mesh_dim_names)}."
             )
         p = placements[key]

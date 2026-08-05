@@ -19,7 +19,7 @@ from torchtitan.distributed.minimal_async_ep import (
     init_buffer as minimal_async_ep_init_buffer,
     MinimalAsyncEPDispatchMetadata,
 )
-from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_sparse_mesh
+from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.tools.utils import device_module, device_type
@@ -442,9 +442,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         # generate the input splits and output splits for all-to-all
         with maybe_set_sparse_mesh():
             pg = (
-                current_spmd_mesh().get_group(  # pyrefly: ignore [missing-attribute]
-                    "ep"
-                )
+                "ep"
                 if get_spmd_backend() == "spmd_types"
                 else self.ep_mesh.get_group()
             )
@@ -612,9 +610,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         with maybe_set_sparse_mesh():
             pg = (
-                current_spmd_mesh().get_group(  # pyrefly: ignore [missing-attribute]
-                    "ep"
-                )
+                "ep"
                 if get_spmd_backend() == "spmd_types"
                 else self.ep_mesh.get_group()
             )

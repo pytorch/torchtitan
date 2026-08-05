@@ -1336,11 +1336,11 @@ class VLLMGenerator(Actor, Configurable):
                         continue
                     raise KeyError(f"{name} is missing SPMD layout metadata")
 
-                mesh = model.parallel_dims.resolve_mesh(layout.axes())
+                mesh = model.parallel_dims.resolve_mesh(layout.local_type.keys())
                 if mesh is None:
                     active_axes = [
                         axis
-                        for axis in layout.axes()
+                        for axis in layout.local_type
                         if model.parallel_dims.get_optional_mesh(axis) is not None
                     ]
                     if active_axes:

@@ -18,7 +18,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Placement
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallel_dims import MeshAxisName, spmd_layout_per_axis_types
 from torchtitan.distributed.utils import get_spmd_backend
 
 # Avoid circular import: protocols.__init__ imports module.py, which imports us.
@@ -139,10 +139,13 @@ def spmd_layout_to_dtensor_placements(
     layout: "SpmdLayout",
 ) -> dict["MeshAxisName", Placement]:
     """Convert an SPMD layout to DTensor placements keyed by mesh axis name."""
-    from torchtitan.distributed.parallel_dims import MeshAxisName
+    from torchtitan.distributed.parallel_dims import (
+        MeshAxisName,
+        spmd_layout_per_axis_types,
+    )
 
     result: dict[MeshAxisName, Placement] = {}
-    for axis_name, axis_type in layout.per_axis_spmd_types().items():
+    for axis_name, axis_type in spmd_layout_per_axis_types(layout).items():
         dtensor_placement = spmd.spmd_type_to_dtensor_placement(axis_type)
 
         if axis_name == MeshAxisName.DP:
@@ -161,7 +164,7 @@ def resolve_dtensor_dst_placements(
     """Resolve DTensor placements after applying one redistribution config."""
     from torchtitan.protocols.sharding import resolve_placements
 
-    src_axis_type = layout.per_axis_spmd_types().get(redist.axis)
+    src_axis_type = spmd_layout_per_axis_types(layout).get(redist.axis)
     if src_axis_type is not None and src_axis_type != redist.src:
         raise ValueError(
             "PerAxisRedistribution src does not match source sharding for "
@@ -238,9 +241,9 @@ def validate_sharding_config(
 
         location = f"{module_name}: {name}" if module_name is not None else name
         prefix = f"{location}: "
-        layout_axes = set(layout.axis_types)
+        layout_axes = set(layout.local_type)
 
-        # PartitionSpec axes must be explicit V entries in axis_types.
+        # PartitionSpec axes must be explicit V entries in local_type.
         if layout.partition_spec is not None:
             for dim, spec_entry in enumerate(layout.partition_spec):
                 if spec_entry is None:
@@ -250,7 +253,7 @@ def validate_sharding_config(
                 )
                 for axis in dim_axes:
                     layout_axes.add(axis)
-                    axis_type = layout.axis_types.get(axis)
+                    axis_type = layout.local_type.get(axis)
                     if axis_type is not spmd.V:
                         raise ValueError(
                             f"{prefix}PartitionSpec axis {axis.value!r} must "
@@ -267,16 +270,23 @@ def validate_sharding_config(
                 f"{tuple(axis.value for axis in sorted(layout_axes))}."
             )
 
-        # Repeated direct sharding should be expressed in PartitionSpec.
+        # Local type shouldn't contain spmd.S(dim) if PartitionSpec is set,
+        # and repeated sharding should be expressed in PartitionSpec.
         shard_dims: set[int] = set()
-        for axis_type in layout.axis_types.values():
+        for axis, axis_type in layout.local_type.items():
             if not isinstance(axis_type, spmd.Shard):
                 continue
+            if layout.partition_spec is not None:
+                raise ValueError(
+                    f"{prefix}axis {axis.value!r} has local type {axis_type!r}; "
+                    "use either V + PartitionSpec, or per-axis sharding without "
+                    "repeated shard dims."
+                )
             if axis_type.dim in shard_dims:
                 raise ValueError(
                     f"{prefix}multiple axes directly shard tensor dim "
                     f"{axis_type.dim}; shard order must be expressed in "
-                    f"PartitionSpec, with V in local_type: {layout.axis_types}."
+                    f"PartitionSpec, with V in local_type: {layout.local_type}."
                 )
             shard_dims.add(axis_type.dim)
 
@@ -299,7 +309,7 @@ def validate_sharding_config(
         )
 
         # src type must match between redistribution & placement.
-        src_types = src.per_axis_spmd_types()
+        src_types = spmd_layout_per_axis_types(src)
         src_axis_type = src_types.get(redist.axis)
         if src_axis_type is None:
             raise ValueError(
@@ -371,7 +381,9 @@ def spmd_distribute_tensor(
     same tensor dim, e.g. ``(DP, CP)`` means shard by DP, then shard each DP
     slice by CP.
     """
-    shard_types = layout.per_axis_spmd_types()
+    from torchtitan.distributed.parallel_dims import spmd_layout_per_axis_types
+
+    shard_types = spmd_layout_per_axis_types(layout)
     if layout.partition_spec is None:
         axis_shard_dims = [
             (axis_name, axis_type.dim)

@@ -30,7 +30,6 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -429,11 +428,9 @@ class VLLMModelWrapper(Module):
             # full local logits tensor that vLLM expects.
             if self.parallel_dims.tp_enabled:
                 if self.parallel_dims.spmd_backend == "spmd_types":
-                    mesh = current_spmd_mesh()
-                    assert mesh is not None
                     logits = spmd.redistribute(
                         logits,
-                        mesh.get_group("tp"),
+                        "tp",
                         src=spmd.S(-1),
                         dst=spmd.R,
                         backward_options={"op_dtype": logits.dtype},
