@@ -653,6 +653,10 @@ class MetricsProcessor(Configurable):
             mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
         time_end_to_end = time_delta / self.config.log_freq
+        # Feed the per-step wall time to the MoE collector so its TB sink can
+        # overlay end_to_end(s) against the summed per-layer peak expert load.
+        # No-op unless MoE metrics collection is enabled.
+        self.moe_metric_collector.record_step_end_to_end(step, time_end_to_end)
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 

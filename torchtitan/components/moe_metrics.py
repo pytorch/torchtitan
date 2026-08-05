@@ -365,6 +365,13 @@ class TensorBoardMoESink:
       * ``moe_layer_spread/{tokens_max,tokens_min,tokens_range,tokens_mean}`` -
         one line-chart image per statistic, overlaying every MoE layer's
         per-step value so all layers are comparable in a single chart.
+      * ``moe_layer_spread/sum_layer_max_vs_end_to_end`` - a dual-axis chart
+        overlaying the summed per-layer peak expert load (sum over layers of
+        each layer's max tokens) against the trainer's per-step
+        ``time_metrics/end_to_end(s)`` wall time.
+      * ``moe_layer_spread/sum_layer_max_over_end_to_end`` - a scatter of the
+        summed per-layer peak expert load (y) against the per-step
+        ``time_metrics/end_to_end(s)`` wall time (x), one point per step.
       * ``run_metadata`` - the run manifest rendered as a markdown table. This
         is logged for any network (MoE or dense); MoE-specific charts above are
         only emitted when grouped-GEMM records were collected. The manifest
@@ -409,6 +416,9 @@ class TensorBoardMoESink:
         self._num_local_experts: int | None = None
         self._gemm_templates: dict | None = None
         self._dense_gemm_templates: dict | None = None
+        # Trainer end-to-end wall time (seconds) per logged step, for the
+        # sum(layer max) vs end_to_end(s) overlay chart. Empty when unavailable.
+        self._step_end_to_end: dict[int, float] = {}
 
     def set_gemm_templates(self, templates: dict) -> None:
         """Provide the invariant (N, K) GEMM templates for the manifest text."""
@@ -417,6 +427,10 @@ class TensorBoardMoESink:
     def set_dense_gemm_templates(self, templates: dict) -> None:
         """Provide the dense (per-``nn.Linear``) (N, K) templates for the text."""
         self._dense_gemm_templates = templates
+
+    def set_step_end_to_end(self, step_end_to_end: dict[int, float]) -> None:
+        """Provide per-step end-to-end wall times for the overlay chart."""
+        self._step_end_to_end = step_end_to_end
 
     def write_record(self, record: GroupedGemmRecord) -> None:
         if self._world_rank is None:
@@ -537,9 +551,15 @@ class TensorBoardMoESink:
             writer.add_text("run_metadata", self._manifest_markdown(), 0)
             if cube is None:
                 return
+            # Log the cheap, high-value summary curves (per-layer spread + the
+            # sum(layer max) vs end_to_end overlay) first and flush them, so they
+            # survive even if the far more expensive per-layer/expert heatmap
+            # rendering below is interrupted (e.g. a peer rank crashes during
+            # shutdown and the launcher SIGTERMs this one mid-render).
+            self._log_layer_spread_curves(writer, cube, steps, layers, np)
+            writer.flush()
             self._log_layer_slices(writer, cube, steps, layers, num_local_experts, np)
             self._log_expert_slices(writer, cube, steps, layers, np)
-            self._log_layer_spread_curves(writer, cube, steps, layers, np)
         finally:
             writer.close()
 
@@ -629,6 +649,26 @@ class TensorBoardMoESink:
         mins = np.nanmin(cube, axis=0)
         means = np.nanmean(cube, axis=0)
         ranges = maxes - mins
+        # Whole-model peak-load proxy: sum across layers of each layer's
+        # hottest-expert token count, per step. Overlaid against the trainer's
+        # end_to_end(s) wall time so load imbalance and step latency line up on
+        # one chart. Rendered (and flushed) first as it is the headline chart.
+        sum_layer_max = np.nansum(maxes, axis=0)  # (num_steps,)
+        overlay = self._render_sum_layer_max_overlay(sum_layer_max, steps, np=np)
+        if overlay is not None:
+            self._add_figure(
+                writer, "moe_layer_spread/sum_layer_max_vs_end_to_end", overlay
+            )
+            writer.flush()
+        # Direct correlation: sum(layer max) on y vs the per-step end_to_end(s)
+        # wall time on x (one point per step), to read off whether higher peak
+        # load tracks slower steps.
+        scatter = self._render_sum_layer_max_vs_time(sum_layer_max, steps, np=np)
+        if scatter is not None:
+            self._add_figure(
+                writer, "moe_layer_spread/sum_layer_max_over_end_to_end", scatter
+            )
+            writer.flush()
         for tag, values, ylabel in (
             ("tokens_max", maxes, "max tokens over experts"),
             ("tokens_min", mins, "min tokens over experts"),
@@ -640,6 +680,119 @@ class TensorBoardMoESink:
             )
             if fig is not None:
                 self._add_figure(writer, f"moe_layer_spread/{tag}", fig)
+
+    def _render_sum_layer_max_overlay(
+        self, sum_layer_max, steps, *, np
+    ) -> "object | None":
+        """Overlay sum(layer max) and end_to_end(s) on a shared step axis.
+
+        Left axis: sum across MoE layers of each layer's hottest-expert token
+        count (a whole-model peak-load proxy). Right axis: the trainer's
+        ``time_metrics/end_to_end(s)`` per-step wall time. Steps without a
+        recorded end-to-end time are dropped from the latency line only; the
+        latency trace is omitted entirely when no times were provided. Needs
+        matplotlib; skipped (with a warning) if it is unavailable.
+        """
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            from matplotlib.ticker import MaxNLocator
+        except ImportError:
+            logger.warning(
+                "matplotlib not installed; skipping MoE sum(layer max) vs "
+                "end_to_end(s) overlay chart."
+            )
+            return None
+
+        fig, ax_load = plt.subplots(figsize=(12, 7), constrained_layout=True)
+        load_color = "tab:blue"
+        (load_line,) = ax_load.plot(
+            steps,
+            sum_layer_max,
+            color=load_color,
+            linewidth=1.5,
+            marker="o",
+            markersize=3,
+            label="sum(layer max)",
+        )
+        ax_load.set_title("sum(layer max) vs end_to_end(s)")
+        ax_load.set_xlabel("training step")
+        ax_load.set_ylabel("sum over layers of max tokens per expert", color=load_color)
+        ax_load.tick_params(axis="y", labelcolor=load_color)
+        ax_load.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax_load.grid(True, alpha=0.3)
+
+        lines = [load_line]
+        time_steps = [s for s in steps if s in self._step_end_to_end]
+        if time_steps:
+            time_values = [self._step_end_to_end[s] for s in time_steps]
+            ax_time = ax_load.twinx()
+            time_color = "tab:red"
+            (time_line,) = ax_time.plot(
+                time_steps,
+                time_values,
+                color=time_color,
+                linewidth=1.5,
+                marker="s",
+                markersize=3,
+                label="end_to_end(s)",
+            )
+            ax_time.set_ylabel("end_to_end(s)", color=time_color)
+            ax_time.tick_params(axis="y", labelcolor=time_color)
+            lines.append(time_line)
+        ax_load.legend(lines, [line.get_label() for line in lines], loc="best")
+        return fig
+
+    def _render_sum_layer_max_vs_time(
+        self, sum_layer_max, steps, *, np
+    ) -> "object | None":
+        """Scatter sum(layer max) (y) against per-step end_to_end(s) (x).
+
+        One point per step for which a ``time_metrics/end_to_end(s)`` wall time
+        was recorded; points are ordered by step and annotated with their step
+        index so the trajectory is readable. Returns None when no end-to-end
+        times were provided or matplotlib is unavailable.
+        """
+        paired = [
+            (self._step_end_to_end[s], float(sum_layer_max[i]), s)
+            for i, s in enumerate(steps)
+            if s in self._step_end_to_end
+        ]
+        if not paired:
+            return None
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            logger.warning(
+                "matplotlib not installed; skipping MoE sum(layer max) over "
+                "end_to_end(s) scatter chart."
+            )
+            return None
+
+        times = [p[0] for p in paired]
+        loads = [p[1] for p in paired]
+        step_ids = [p[2] for p in paired]
+        fig, ax = plt.subplots(figsize=(12, 7), constrained_layout=True)
+        ax.plot(times, loads, color="tab:purple", linewidth=0.8, alpha=0.5)
+        ax.scatter(times, loads, color="tab:purple", s=25, zorder=3)
+        for t, load, step_id in zip(times, loads, step_ids):
+            ax.annotate(
+                str(step_id),
+                (t, load),
+                textcoords="offset points",
+                xytext=(4, 4),
+                fontsize=7,
+            )
+        ax.set_title("sum(layer max) over end_to_end(s)")
+        ax.set_xlabel("end_to_end(s)")
+        ax.set_ylabel("sum over layers of max tokens per expert")
+        ax.grid(True, alpha=0.3)
+        return fig
 
     def _render_layer_curves(
         self, values, steps, layers, *, title, ylabel, np
@@ -804,6 +957,10 @@ class MoEMetricCollector:
         # Per-(step, layer) intra-rank accumulators over per-expert M values,
         # populated in flush(). Storage is O(sampled steps * MoE layers).
         self._imbalance: dict[tuple[int, int], _ImbalanceAccum] = {}
+        # Trainer end-to-end wall time (seconds) per logged step, fed by the
+        # MetricsProcessor. Used only to overlay step latency on the summed
+        # per-layer peak-load curve in the TB sink.
+        self._step_end_to_end: dict[int, float] = {}
 
         self._enabled = config.enabled and self._is_rank_selected(config.ranks)
         self._output_dir = Path(dump_folder) / config.output_dir
@@ -850,6 +1007,16 @@ class MoEMetricCollector:
 
     def begin_step(self, step: int) -> None:
         self._step = step
+
+    def record_step_end_to_end(self, step: int, seconds: float) -> None:
+        """Record the trainer's end-to-end wall time (s) for a logged step.
+
+        No-op unless collection is enabled. Consumed by the TB sink to overlay
+        step latency against the summed per-layer peak expert load.
+        """
+        if not self._enabled:
+            return
+        self._step_end_to_end[step] = seconds
 
     def should_record_current_step(self) -> bool:
         if not self._enabled:
@@ -986,6 +1153,10 @@ class MoEMetricCollector:
             for sink in self._sinks:
                 if isinstance(sink, TensorBoardMoESink):
                     sink.set_dense_gemm_templates(self._dense_gemm_templates)
+        if self._step_end_to_end:
+            for sink in self._sinks:
+                if isinstance(sink, TensorBoardMoESink):
+                    sink.set_step_end_to_end(self._step_end_to_end)
         for sink in self._sinks:
             sink.close()
 
