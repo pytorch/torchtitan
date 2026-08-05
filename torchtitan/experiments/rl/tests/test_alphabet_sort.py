@@ -386,3 +386,10 @@ def test_rollouter_config_wires_alphabet_sort() -> None:
     assert isinstance(config.message_env, AlphabetSortEnv.Config)
     assert len(config.rubric.reward_fns) == 1
     assert isinstance(config.rubric.reward_fns[0], RewardAlphabetSort.Config)
+
+
+def test_rollouter_config_validates_worker_pool_size() -> None:
+    with pytest.raises(ValueError, match="worker_pool_size"):
+        AlphabetSortRollouter.Config(worker_pool_size=0)
+    with pytest.raises(ValueError, match="num_threads_per_worker"):
+        AlphabetSortRollouter.Config(num_threads_per_worker=0)
