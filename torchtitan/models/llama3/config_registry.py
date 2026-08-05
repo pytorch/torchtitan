@@ -200,46 +200,6 @@ def llama3_8b() -> Trainer.Config:
     )
 
 
-def llama3_8b_continue_pretrain() -> Trainer.Config:
-    """Llama 3.1 8B C4 continued pretraining from local HF weights."""
-
-    model_spec = model_registry("8B")
-    return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
-            ),
-        ),
-        hf_assets_path="./assets/hf/Llama-3.1-8B",
-        model_spec=model_spec,
-        optimizer=default_adamw(lr=2e-5),
-        training=TrainingConfig(local_batch_size=32, seq_len=2048, steps=763),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        checkpoint=CheckpointManager.Config(
-            enable=True,
-            initial_load_in_hf=True,
-        ),
-        activation_checkpoint=SelectiveAC.Config(),
-        compile=CompileConfig(enable=True, components=["model"]),
-    )
-
-
-def llama3_8b_continue_pretrain_mxfp8() -> Trainer.Config:
-    """HF-initialized C4 pretraining with MXFP8 decoder linears."""
-
-    config = llama3_8b_continue_pretrain()
-    config.model_spec = model_registry(
-        "8B",
-        converters=[
-            MXFP8LinearConverter.Config(
-                fqns=["layers"],
-                model_compile_enabled=True,
-            ),
-        ],
-    )
-    return config
-
-
 def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     config = llama3_8b()
     config.parallelism.spmd_backend = "spmd_types"
