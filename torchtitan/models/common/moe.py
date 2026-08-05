@@ -538,6 +538,8 @@ class MoE(Module):
         dispatcher. Otherwise it stays 1 and no padding is applied.
         """
         super().parallelize(parallel_dims)
+        # TODO: Remove this parallel_dims mesh lookup after DTensor backend
+        # is deprecated. spmd_types can derive this size from its global context.
         ep_mesh = parallel_dims.get_optional_mesh("ep")
         tp_mesh = parallel_dims.get_optional_mesh("tp")
         if ep_mesh is not None and tp_mesh is not None:
