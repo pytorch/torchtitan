@@ -11,6 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import distribute_tensor, Shard
 
 from torchtitan.components.moe_metrics import (
     collect_dense_gemm_templates,
@@ -250,6 +253,83 @@ class TestGroupedGemmShapes(unittest.TestCase):
         # mlp1 packs gate and up into one (E, 2F, D) weight; the reported
         # shapes must still be the two logical (D, F) halves.
         self.assertEqual(experts.grouped_gemm_shapes(), self._expected())
+
+
+class TestGroupedGemmShapesUnderTensorParallel(unittest.TestCase):
+    """Reported extents must be this rank's slice, not the global weight.
+
+    TP shards the expert hidden dim, so ``DTensor.shape`` would overstate it
+    by the TP degree and every recorded FLOP count would be wrong by that
+    factor. A fake process group lets us shard for real without any devices.
+    """
+
+    DIM = 16
+    HIDDEN = 32
+    EXPERTS = 4
+    TP = 4
+
+    def setUp(self):
+        from torch.testing._internal.distributed.fake_pg import FakeStore
+
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=self.TP)
+        self.mesh = init_device_mesh("cpu", (self.TP,), mesh_dim_names=("tp",))
+
+    def tearDown(self):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+    def _shard(self, module: torch.nn.Module, plan: dict[str, int]) -> None:
+        """Shard named params of ``module`` along the given dims."""
+        for name, dim in plan.items():
+            param = getattr(module, name)
+            setattr(
+                module,
+                name,
+                torch.nn.Parameter(
+                    distribute_tensor(param, self.mesh, [Shard(dim)]),
+                    requires_grad=False,
+                ),
+            )
+
+    def _expected_local(self) -> GroupedGemmShapes:
+        hidden = self.HIDDEN // self.TP
+        return GroupedGemmShapes(
+            gate=(self.DIM, hidden),
+            up=(self.DIM, hidden),
+            down=(hidden, self.DIM),
+        )
+
+    def test_base_grouped_experts_report_local_hidden_dim(self):
+        from torchtitan.models.common.moe import GroupedExperts
+
+        experts = GroupedExperts.Config(
+            dim=self.DIM, hidden_dim=self.HIDDEN, num_experts=self.EXPERTS
+        ).build()
+        # Mirrors _GROUPED_EXPERTS_PARAM_LAYOUT in deepseek_v3/sharding.py.
+        self._shard(experts, {"w1_EFD": 1, "w2_EDF": 2, "w3_EFD": 1})
+        self.assertEqual(experts.grouped_gemm_shapes(), self._expected_local())
+
+    def test_fused_grouped_experts_report_local_hidden_dim(self):
+        from torchtitan.overrides.fused_swiglu import FusedGroupedExperts
+
+        experts = FusedGroupedExperts.Config(
+            dim=self.DIM, hidden_dim=self.HIDDEN, num_experts=self.EXPERTS
+        ).build()
+        # w13 is (E, F, 2, D), so the hidden dim is axis 1.
+        self._shard(experts, {"w13": 1, "w2_EDF": 2})
+        self.assertEqual(experts.grouped_gemm_shapes(), self._expected_local())
+
+    def test_gpt_oss_grouped_experts_report_local_hidden_dim(self):
+        from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
+
+        experts = GptOssGroupedExperts.Config(
+            dim=self.DIM, hidden_dim=self.HIDDEN, num_experts=self.EXPERTS
+        ).build()
+        # mlp1 is (E, 2F, D): sharding axis 1 splits the packed gate+up pair.
+        self._shard(experts, {"mlp1_weight_EGD": 1, "mlp2_weight_EDF": 2})
+        self.assertEqual(experts.grouped_gemm_shapes(), self._expected_local())
 
 
 class TestHistogramSinkAndManifest(unittest.TestCase):
