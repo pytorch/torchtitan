@@ -787,7 +787,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         loss_kwargs = {"global_valid_tokens": global_valid_tokens}
         with self.train_context():
             losses = [] if self.pp_has_last_stage else None
-            self.pp_schedule.step(
+            # These microbatches are already split, so drive the schedule's
+            # pre-split entry point. `step()` takes *whole-batch* input and
+            # splits it itself, and has no arg_mbs/kwarg_mbs/target_mbs
+            # parameters -- passing them there sends the lists through **kwargs
+            # as ordinary model kwargs, so the schedule re-splits a single
+            # already-split batch and fails its own length check with
+            # "Expecting N arg_mbs but got 1".
+            #
+            # `_step_microbatches` is the split-free half of `step()`, so the
+            # per-iteration setup `step()` would otherwise do has to happen
+            # here: propagate has_backward to the stage and clear the previous
+            # iteration's runtime state. (`step()`'s third guard -- rejecting a
+            # no_grad context -- is not needed: this is the training path and
+            # always runs with grad enabled.)
+            # PipelineScheduleSingle exposes one `_stage`; PipelineScheduleMulti
+            # exposes `_stages`.
+            pp_stages = getattr(
+                self.pp_schedule, "_stages", None
+            ) or [self.pp_schedule._stage]
+            for stage in pp_stages:
+                stage.has_backward = self.pp_schedule._has_backward
+                stage.clear_runtime_states()
+            self.pp_schedule._step_microbatches(
                 arg_mbs=arg_mbs if self.pp_has_first_stage else None,
                 kwarg_mbs=kwarg_mbs,
                 target_mbs=target_mbs,
