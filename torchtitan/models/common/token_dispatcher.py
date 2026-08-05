@@ -143,8 +143,6 @@ class LocalTokenDispatcher(Configurable):
         routed_output_RD: torch.Tensor,
         metadata: LocalDispatchMetadata,
         x_TD: torch.Tensor,
-        *,
-        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Score and scatter_add routed expert outputs.
 
@@ -152,13 +150,10 @@ class LocalTokenDispatcher(Configurable):
             routed_output_RD: ``(R, D)`` expert outputs
             metadata: LocalDispatchMetadata from dispatch()
             x_TD: ``(T, D)`` original input tokens
-            num_local_tokens_after_padding: Unused for local dispatch; kept
-                for a shared dispatcher combine signature.
 
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        del num_local_tokens_after_padding
         out_TD = torch.zeros_like(x_TD)
 
         routed_output_RD = (
@@ -543,8 +538,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         routed_output_RD: torch.Tensor,
         metadata: AllToAllDispatchMetadata,
         x_TD: torch.Tensor,
-        *,
-        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
@@ -555,14 +548,9 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD: ``(R, D)`` expert outputs in expert-major order
             metadata: AllToAllDispatchMetadata from dispatch()
             x_TD: ``(T, D)`` original input tokens
-            num_local_tokens_after_padding: Local token count after logical
-                sequence padding. MoE padding passes this count without
-                materializing pad rows.
 
         Returns:
-            out_TD: Combined local output ``(num_local_tokens_after_padding, D)``.
-                Without SP this is ``(T, D)``; with SP this is the local
-                sequence shard.
+            out_TD: Combined local output ``(T, D)``.
         """
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
@@ -571,7 +559,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 routed_output_RD,
                 metadata,
                 x_TD,
-                num_local_tokens_after_padding=num_local_tokens_after_padding,
             )
 
         with maybe_set_sparse_mesh():
@@ -601,12 +588,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                     routed_output_RD, spmd.current_mesh()
                 )
 
-        out_TD = torch.zeros(
-            num_local_tokens_after_padding,
-            x_TD.shape[-1],
-            device=x_TD.device,
-            dtype=x_TD.dtype,
-        )
+        out_TD = torch.zeros_like(x_TD)
 
         routed_output_RD = (
             routed_output_RD.to(torch.float32)
@@ -692,23 +674,17 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         routed_output_RD,
         metadata,
         x_TD,
-        *,
-        num_local_tokens_after_padding: int,
     ):
         if self.ep_mesh is not None:
             return super().combine(
                 routed_output_RD,
                 metadata,
                 x_TD,
-                num_local_tokens_after_padding=num_local_tokens_after_padding,
             )
 
         # EP=1: strip the padding (via _unpermute) to recover expert-sorted
         # order, then apply the local score + scatter_add used by the EP=1
-        # path. Mirrors LocalTokenDispatcher.combine, plus the unpad. The
-        # padding count is unused for the EP=1 combine, matching
-        # LocalTokenDispatcher.combine.
-        del num_local_tokens_after_padding
+        # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
         assert isinstance(metadata, AllToAllDispatchMetadata)
         routed_output_RD = self._unpermute(
             routed_output_RD, metadata.input_shape, metadata.permuted_indices
@@ -891,15 +867,13 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         routed_output_RD: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
-        *,
-        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via DeepEP.
 
         Combine is async; ``MoE.forward`` calls ``sync_combine()`` before
         using the result, enabling overlap with ``shared_experts``.
         """
-        del x_TD, num_local_tokens_after_padding
+        del x_TD
 
         from torchtitan.distributed.deepep.deepep import combine_tokens
 
@@ -1000,11 +974,9 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         routed_output_RD: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
-        *,
-        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via HybridEP."""
-        del x_TD, num_local_tokens_after_padding
+        del x_TD
 
         from torchtitan.distributed.deepep import hybridep
 
@@ -1201,11 +1173,9 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         routed_output_RD: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
-        *,
-        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
-        del x_TD, num_local_tokens_after_padding
+        del x_TD
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
         combined_TD, _routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
             routed_output_RD,

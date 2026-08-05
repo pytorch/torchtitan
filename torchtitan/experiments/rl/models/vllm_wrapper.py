@@ -375,6 +375,9 @@ class VLLMModelWrapper(Module):
         with self.spmd_context():
             # Convert vLLM interface to TorchTitan interface
             # vLLM: [total_tokens] -> TorchTitan: [batch_size, seq_len]
+            # EP+TP batches may include runner-added sequence padding. Keep the
+            # padded extent through the model; the runner selects scheduled
+            # token positions from the returned hidden states.
             tokens_2d = input_ids.unsqueeze(0)
 
             # Get embeddings
