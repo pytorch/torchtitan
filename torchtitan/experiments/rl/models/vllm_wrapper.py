@@ -351,6 +351,7 @@ class VLLMModelWrapper(Module):
         input_ids: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        num_actual_tokens: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -361,6 +362,7 @@ class VLLMModelWrapper(Module):
             input_ids: Token IDs [total_tokens] (1D varlen format)
             positions: Position indices [total_tokens] (1D varlen format)
             inputs_embeds: Pre-computed embeddings (optional)
+            num_actual_tokens: Number of scheduled tokens before runner padding.
             **kwargs: Additional vLLM kwargs
 
         Returns:
@@ -375,6 +377,9 @@ class VLLMModelWrapper(Module):
         with self.spmd_context():
             # Convert vLLM interface to TorchTitan interface
             # vLLM: [total_tokens] -> TorchTitan: [batch_size, seq_len]
+            # EP+TP batches may include runner-added sequence padding. Keep the
+            # padded extent through the model; the runner selects scheduled
+            # token positions from the returned hidden states.
             tokens_2d = input_ids.unsqueeze(0)
 
             # Get embeddings
@@ -384,7 +389,12 @@ class VLLMModelWrapper(Module):
 
             # Pass through transformer layers
             for layer in self.model.layers.values():
-                h = layer(h, attention_masks=None, positions=positions)
+                h = layer(
+                    h,
+                    attention_masks=None,
+                    positions=positions,
+                    num_actual_tokens=num_actual_tokens,
+                )
 
             h = self.model.norm(h)
         # Inference disables sequence parallelism, so final hidden states should

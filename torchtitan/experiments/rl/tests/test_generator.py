@@ -17,6 +17,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.config import DebugConfig
@@ -30,6 +31,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
+from torchtitan.experiments.rl.models.vllm_worker import TorchTitanGPUModelRunner
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
@@ -318,6 +320,71 @@ def test_cudagraph_disabled_returns_none():
         VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(max_num_seqs=256)
         is None
     )
+
+
+def test_sequence_parallel_padding_filters_cudagraph_sizes():
+    parallelism = InferenceParallelismConfig(
+        tensor_parallel_degree=4,
+        expert_parallel_degree=4,
+    )
+    expert_sequence_parallel_size = parallelism.expert_sequence_parallel_size
+    cfg = VLLMCudagraphConfig(
+        enable=True,
+        capture_sizes=[1, 4, 5, 8],
+    ).get_vllm_compilation_config(
+        max_num_seqs=8,
+        expert_sequence_parallel_size=expert_sequence_parallel_size,
+    )
+
+    assert expert_sequence_parallel_size == 4
+    assert cfg.cudagraph_capture_sizes == [4, 8]
+
+
+def test_sequence_parallel_padding_disabled_without_ep():
+    parallelism = InferenceParallelismConfig(
+        tensor_parallel_degree=4,
+        expert_parallel_degree=1,
+    )
+
+    assert parallelism.expert_sequence_parallel_size == 1
+
+
+def test_sequence_parallel_padding_rounds_runner_tokens():
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="torchtitan")
+            ),
+            parallel_config=SimpleNamespace(
+                enable_expert_parallel=True,
+                tensor_parallel_size=4,
+            ),
+        )
+    )
+
+    assert TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5) == 8
+
+
+def test_runner_passes_persistent_actual_token_count(monkeypatch):
+    runner = TorchTitanGPUModelRunner.__new__(TorchTitanGPUModelRunner)
+    runner._torchtitan_num_actual_tokens = torch.zeros(1, dtype=torch.int64)
+    base_runner_cls = TorchTitanGPUModelRunner.__mro__[1]
+    monkeypatch.setattr(base_runner_cls, "_init_model_kwargs", lambda self: {})
+    monkeypatch.setattr(
+        base_runner_cls,
+        "_preprocess",
+        lambda self, scheduler_output, num_input_tokens, intermediate_tensors=None: (
+            num_input_tokens,
+            intermediate_tensors,
+        ),
+    )
+
+    model_kwargs = runner._init_model_kwargs()
+    self_count = model_kwargs["num_actual_tokens"]
+    assert self_count is runner._torchtitan_num_actual_tokens
+
+    runner._preprocess(SimpleNamespace(total_num_scheduled_tokens=5), 8)
+    assert self_count.item() == 5
 
 
 def test_cudagraph_default_mode_is_full_decode_only():

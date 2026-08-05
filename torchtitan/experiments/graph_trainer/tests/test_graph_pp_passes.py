@@ -121,7 +121,7 @@ def _trace_dsv3_moe_block_stage(
         )
         model_config.update_from_config(config=runtime_config)
         moe_layer_config = model_config.layers[1]
-        if moe_layer_config.moe is None or not moe_layer_config.moe.seq_dim_tp_sharded:
+        if moe_layer_config.moe is None:
             raise AssertionError("DeepSeek V3 MoE layer must be configured with EP")
 
         with torch.device("meta"):

@@ -44,7 +44,10 @@ class Llama3TransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        num_actual_tokens: torch.Tensor | None = None,
     ):
+        del num_actual_tokens
         h = x + self.attention(self.attention_norm(x), attention_masks, positions)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out

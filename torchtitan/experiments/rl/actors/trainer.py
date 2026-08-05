@@ -282,6 +282,19 @@ class PolicyTrainer(Actor, Configurable):
                 f"length {max_seq_len}."
             )
 
+        uses_tp_sequence_shards = (
+            config.parallelism.enable_sequence_parallel or self.parallel_dims.ep_enabled
+        )
+        seq_len_divisor = (self.parallel_dims.tp if uses_tp_sequence_shards else 1) * (
+            2 * self.parallel_dims.cp if self.parallel_dims.cp > 1 else 1
+        )
+        if seq_len % seq_len_divisor != 0:
+            raise ValueError(
+                f"Training sequence length ({seq_len}) must be divisible by "
+                f"{seq_len_divisor} for the configured "
+                "sequence/context/expert parallelism."
+            )
+
         for layer_cfg in model_spec.model.layers:
             attention_cfg = getattr(layer_cfg, "attention", None)
             if attention_cfg is not None:

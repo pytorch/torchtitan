@@ -42,6 +42,11 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 # torchtitan ConfigParser registered below.
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
+# Selects the experiment-owned runner that performs EP+TP token padding.
+TORCHTITAN_WORKER_CLS = (
+    "torchtitan.experiments.rl.models.vllm_worker.TorchTitanGPUWorker"
+)
+
 
 @dataclass(kw_only=True, slots=True)
 class InferenceParallelismConfig:
@@ -70,6 +75,13 @@ class InferenceParallelismConfig:
 
     spmd_backend: Literal["default", "spmd_types"] = "default"
     """SPMD backend used by TorchTitan model parallelization in the generator."""
+
+    @property
+    def expert_sequence_parallel_size(self) -> int:
+        """TP-axis shard count used internally by expert-parallel MoE."""
+        if self.expert_parallel_degree <= 1:
+            return 1
+        return self.tensor_parallel_degree
 
     def to_training(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
