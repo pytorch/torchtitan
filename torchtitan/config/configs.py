@@ -27,11 +27,15 @@ import torch
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
     local_batch_size: int = 8
-    """Local batch size (i.e., per-device batch size)"""
+    """
+    Batch size processed per data-parallel rank in one gradient accumulation step.
+    With pipeline parallelism, this is split into pipeline microbatches.
+    """
 
     global_batch_size: int = -1
     """
-    Global batch size (defaults to `training.local_batch_size * data-parallel degree`)
+    Global batch size across data-parallel ranks and gradient accumulation steps.
+    Defaults to `training.local_batch_size * data-parallel degree`.
     """
 
     seq_len: int = 2048
@@ -200,9 +204,7 @@ class ParallelismConfig:
     pipeline_parallel_microbatch_size: int = 1
     """
     The size of each pipeline parallel microbatch (default 1).
-    This value is used to compute the total number of microbatches by dividing local_batch_size with
-    pipeline_parallel_microbatch_size.
-    The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
+    `training.local_batch_size` must be evenly divisible by this value.
     """
 
     context_parallel_degree: int = 1
@@ -214,6 +216,15 @@ class ParallelismConfig:
     - "headtail": Use HeadTailLoadBalancer for SDPA
     - "ptrr": Use PTRRLoadBalancer for FlexAttention
     - None: Disable load balancing
+    """
+
+    context_parallel_ptrr_mask_key: str | None = None
+    """
+    When the load balancer is "ptrr" and the attention masks are a
+    dict[str, BlockMask], this selects which mask in the dict the
+    PTRRLoadBalancer is built from. The chosen balancer is then used to shard
+    every mask in the dict as well as the inputs. Only relevant for the "ptrr"
+    load balancer with dict-valued attention masks; ignored otherwise.
     """
 
     def __post_init__(self):

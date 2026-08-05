@@ -6,28 +6,39 @@
 
 from collections.abc import Callable
 from functools import partial
-from typing import Literal
 
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.distributed.pipeline_parallel import pipeline_vlm
 
-from torchtitan.models.common import Conv1d, Embedding, Linear  # noqa: F401
+from torchtitan.models.common import (  # noqa: F401
+    Conv1d,
+    Embedding,
+    Linear,
+    SigmoidGatedFeedForward,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_experts_config,
     make_ffn_config,
     make_moe_config,
+    make_routed_experts_config,
     make_router_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.common.vision_encoder import (
+    VisionAttention,
+    VisionMLP,
+    VisionTransformerBlock,
+)
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import (
+    GatedDeltaBackend,
     GatedDeltaKernel,
     GatedDeltaNet,
     OffsetRMSNorm,
@@ -35,19 +46,13 @@ from .model import (
     Qwen35Model,
     Qwen35TransformerBlock,
     RMSNormGated,
-    SharedExperts,
 )
-from .parallelize import parallelize_qwen3_5, pipeline_qwen3_5
+
+from .parallelize import parallelize_qwen3_5
 from .rope import MRoPE
 from .state_dict_adapter import Qwen35StateDictAdapter
-from .vision_encoder import (
-    PatchMerger,
-    Qwen35VisionEncoder,
-    VisionAttention,
-    VisionMLP,
-    VisionRotaryEmbedding,
-    VisionTransformerBlock,
-)
+
+from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
 
 __all__ = [
     "parallelize_qwen3_5",
@@ -118,7 +123,7 @@ def _offset_norm(dim: int) -> OffsetRMSNorm.Config:
 
 def _shared_experts_config(
     *, dim: int, hidden_dim: int, layer_id: int
-) -> SharedExperts.Config:
+) -> SigmoidGatedFeedForward.Config:
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
     ffn = make_ffn_config(
         dim=dim,
@@ -126,7 +131,7 @@ def _shared_experts_config(
         w1_param_init=_LINEAR_INIT,
         w2w3_param_init=_depth_init(layer_id),
     )
-    return SharedExperts.Config(
+    return SigmoidGatedFeedForward.Config(
         w1=ffn.w1,
         w2=ffn.w2,
         w3=ffn.w3,
@@ -248,9 +253,7 @@ def _qwen35_deltanet_config(
     value_head_dim: int,
     layer_id: int,
     conv_kernel_size: int = 4,
-    fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_native"
-    ] = "fla_chunked",
+    fla_backend: GatedDeltaBackend = "fla_chunked",
 ) -> GatedDeltaNet.Config:
     """Build a fully-specified GatedDeltaNet.Config."""
     key_dim = n_key_heads * key_head_dim
@@ -316,9 +319,7 @@ def _build_qwen35_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_native"
-    ] = "fla_chunked",
+    fla_backend: GatedDeltaBackend = "fla_chunked",
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3.5 models."""
     layers = []
@@ -389,9 +390,7 @@ def _build_qwen35_moe_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_native"
-    ] = "fla_chunked",
+    fla_backend: GatedDeltaBackend = "fla_chunked",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> list[Qwen35TransformerBlock.Config]:
@@ -442,7 +441,7 @@ def _build_qwen35_moe_layers(
                         score_func="softmax",
                         route_norm=True,
                     ),
-                    experts=make_experts_config(
+                    routed_experts=make_routed_experts_config(
                         dim=dim,
                         hidden_dim=moe_hidden_dim,
                         num_experts=num_experts,
@@ -1104,7 +1103,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_qwen3_5,
-        pipelining_fn=pipeline_qwen3_5,
+        pipelining_fn=pipeline_vlm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=Qwen35StateDictAdapter,
     )

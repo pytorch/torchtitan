@@ -346,7 +346,7 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.moe.router",
                         f"layers.{layer_id}.moe.shared_experts",
                     ],
-                    f"layers.{layer_id}.moe.experts",
+                    f"layers.{layer_id}.moe.routed_experts.inner_experts",
                 ]
             )
         else:
@@ -415,8 +415,9 @@ def apply_simple_fsdp(
 ) -> nn.Module:
     """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
 
-    For MoE-enabled models, ``moe.experts`` submodules are separately wrapped
-    on the EDP mesh when expert parallelism is enabled.
+    For MoE-enabled models, the ``moe.routed_experts.inner_experts`` submodules
+    (the routed-expert weights) are separately wrapped on the EDP mesh when expert
+    parallelism is enabled.
     """
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
@@ -450,12 +451,13 @@ def apply_simple_fsdp(
             moe = getattr(transformer_block, "moe", None)
             if moe is None:
                 continue
+            inner_experts = moe.routed_experts.inner_experts
             experts_shard_dim = 0
-            if edp_mesh["efsdp"].size() * parallel_dims.ep > moe.experts.num_experts:
+            if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
                 experts_shard_dim = 1
 
-            moe.experts = data_parallel(
-                moe.experts,
+            moe.routed_experts.inner_experts = data_parallel(
+                inner_experts,
                 edp_mesh,
                 dp_mode,
                 mp_policy=mp_policy,

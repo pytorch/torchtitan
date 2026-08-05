@@ -112,6 +112,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "Batch-invariant mode is not supported in pre-training."
                 )
 
+            pp_microbatch_size = self.parallelism.pipeline_parallel_microbatch_size
+            if pp_microbatch_size <= 0:
+                raise ValueError(
+                    "parallelism.pipeline_parallel_microbatch_size must be "
+                    "greater than 0."
+                )
+            if (
+                self.parallelism.pipeline_parallel_degree > 1
+                and self.training.local_batch_size % pp_microbatch_size != 0
+            ):
+                raise ValueError(
+                    f"training.local_batch_size ({self.training.local_batch_size}) "
+                    "must be evenly divisible by "
+                    "parallelism.pipeline_parallel_microbatch_size "
+                    f"({pp_microbatch_size}) when pipeline parallelism is enabled."
+                )
+
             if (
                 self.parallelism.spmd_backend == "spmd_types"
                 and self.debug.spmd_typechecking
@@ -157,6 +174,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     d["model_spec"] = {
                         "name": self.model_spec.name,
                         "flavor": self.model_spec.flavor,
+                        "model": self.model_spec.model.to_dict(),
                     }
                 else:
                     val = getattr(self, f.name)
@@ -212,6 +230,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.SpmdContext
     gradient_accumulation_steps: int
+    num_pipeline_parallel_microbatches: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
 
@@ -366,6 +385,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
+        self.num_pipeline_parallel_microbatches = (
+            config.training.local_batch_size
+            // config.parallelism.pipeline_parallel_microbatch_size
+            if parallel_dims.pp_enabled
+            else 1
+        )
 
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
@@ -496,14 +521,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
+        dataloader_batch_size = (
+            config.parallelism.pipeline_parallel_microbatch_size
+            if parallel_dims.pp_enabled
+            else config.training.local_batch_size
+        )
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
+            local_batch_size=dataloader_batch_size,
             snapshot_every_n_steps=(
-                config.checkpoint.interval * self.gradient_accumulation_steps
+                config.checkpoint.interval
+                * self.gradient_accumulation_steps
+                * self.num_pipeline_parallel_microbatches
                 if config.checkpoint.enable
                 else None
             ),
@@ -674,6 +706,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
+                self.config.parallelism.context_parallel_ptrr_mask_key,
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual
@@ -698,62 +731,76 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
         global_valid_tokens: float,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
+        if parallel_dims.pp_enabled:
+            assert isinstance(input_dict, list)
+            assert isinstance(labels, list)
+            return self.pp_forward_backward_step(
+                input_dict_mbs=input_dict,
+                label_mbs=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
+
+        assert isinstance(input_dict, dict)
+        assert isinstance(labels, torch.Tensor)
         inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
-        if parallel_dims.pp_enabled:
-            # Pipeline Parallel forward / backward inside step() call
-            loss_kwargs = {"global_valid_tokens": global_valid_tokens}
-            with self.train_context():
-                targets, losses = (
-                    (labels, []) if self.pp_has_last_stage else (None, None)
-                )
-                if self.pp_has_first_stage:
-                    self.pp_schedule.step(
-                        inputs,
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        loss_kwargs=loss_kwargs,
-                        return_outputs=False,
-                    )
-                else:
-                    self.pp_schedule.step(
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        loss_kwargs=loss_kwargs,
-                        return_outputs=False,
-                    )
-
-            # accumulate losses across pipeline microbatches
-            # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-            if self.pp_has_last_stage:
-                assert losses is not None
-                # All loss classes scale by global_valid_tokens internally
-                loss = torch.sum(torch.stack(losses)).to(self.device)
-            else:
-                loss = torch.tensor([-1.0], device=self.device)
-        else:
-            # Non-PP forward / backward
-            assert len(model_parts) == 1
-            with self.train_context():
-                pred = model_parts[0](inputs, **extra_kwargs)
-                loss, _ = self.loss_fn(pred, labels, global_valid_tokens)
-                del pred
-                with spmd.no_typecheck():
-                    # this propagates types through BWD, causing unnecessary conflicts
-                    # between torch_function and internals (e.g. AC). FWD is sufficient.
-                    loss.backward()
+        assert len(model_parts) == 1
+        with self.train_context():
+            pred = model_parts[0](inputs, **extra_kwargs)
+            loss, _ = self.loss_fn(pred, labels, global_valid_tokens)
+            del pred
+            with spmd.no_typecheck():
+                # this propagates types through BWD, causing unnecessary conflicts
+                # between torch_function and internals (e.g. AC). FWD is sufficient.
+                loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
+
+    def pp_forward_backward_step(
+        self,
+        *,
+        input_dict_mbs: list[dict[str, torch.Tensor]],
+        label_mbs: list[torch.Tensor],
+        global_valid_tokens: float,
+    ) -> torch.Tensor:
+        arg_mbs: list[tuple[torch.Tensor, ...]] = []
+        kwarg_mbs: list[dict[str, Any]] = []
+        target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
+        for input_dict, labels in zip(input_dict_mbs, label_mbs, strict=True):
+            inputs, labels, extra_kwargs = self.post_dataloading_process(
+                input_dict, labels
+            )
+            if self.pp_has_first_stage:
+                arg_mbs.append((inputs,))
+            kwarg_mbs.append(extra_kwargs)
+            if target_mbs is not None:
+                target_mbs.append(labels)
+
+        loss_kwargs = {"global_valid_tokens": global_valid_tokens}
+        with self.train_context():
+            losses = [] if self.pp_has_last_stage else None
+            self.pp_schedule.step(
+                arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                kwarg_mbs=kwarg_mbs,
+                target_mbs=target_mbs,
+                losses=losses,
+                loss_kwargs=loss_kwargs,
+                return_outputs=False,
+            )
+
+        # TODO: PP+FSDP unexpectedly puts the loss back to the CPU.
+        if self.pp_has_last_stage:
+            assert losses is not None
+            return torch.sum(torch.stack(losses)).to(self.device)
+        return torch.tensor([-1.0], device=self.device)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -765,15 +812,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
-
-        # Collect all microbatches on CPU and count total valid tokens
-        microbatches = []
+        # All groups form one optimizer step; each group feeds one fwd-bwd call.
+        microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
-        for _microbatch in range(self.gradient_accumulation_steps):
-            with sl.log_trace_span("fetching_batch"):
-                input_dict, labels = next(data_iterator)
+        for _ in range(self.gradient_accumulation_steps):
+            microbatches = []
+            for _ in range(self.num_pipeline_parallel_microbatches):
+                with sl.log_trace_span("fetching_batch"):
+                    input_dict, labels = next(data_iterator)
                 local_valid_tokens += (labels != IGNORE_INDEX).sum()
                 microbatches.append((input_dict, labels))
+            microbatch_groups.append(microbatches)
         sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
 
         # All-reduce to get global token count across DP ranks
@@ -786,18 +835,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
-        # Process each microbatch: move to GPU, forward/backward, then free
+        # Process each gradient accumulation step, then free its inputs.
         accumulated_losses = []
-        for input_dict, labels in microbatches:
-            # Move tensors to GPU
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(self.device)
-            labels = labels.to(self.device)
+        for microbatches in microbatch_groups:
+            input_dict_mbs = []
+            label_mbs = []
+            for input_dict, labels in microbatches:
+                for key, value in input_dict.items():
+                    if isinstance(value, torch.Tensor):
+                        input_dict[key] = value.to(self.device)
+                input_dict_mbs.append(input_dict)
+                label_mbs.append(labels.to(self.device))
+
+            if parallel_dims.pp_enabled:
+                fwd_bwd_input_dict = input_dict_mbs
+                fwd_bwd_labels = label_mbs
+            else:
+                assert len(input_dict_mbs) == len(label_mbs) == 1
+                fwd_bwd_input_dict = input_dict_mbs[0]
+                fwd_bwd_labels = label_mbs[0]
 
             loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
+                input_dict=fwd_bwd_input_dict,
+                labels=fwd_bwd_labels,
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())

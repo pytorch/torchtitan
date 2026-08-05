@@ -54,12 +54,17 @@ class Trainer(ForgeEngine):
         )
 
         # build dataloader
+        dataloader_batch_size = (
+            config.parallelism.pipeline_parallel_microbatch_size
+            if self.parallel_dims.pp_enabled
+            else config.training.local_batch_size
+        )
         self.dataloader = config.dataloader.build(
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
+            local_batch_size=dataloader_batch_size,
         )
 
         model_args = self.model_config
@@ -192,6 +197,7 @@ class Trainer(ForgeEngine):
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
+                self.config.parallelism.context_parallel_ptrr_mask_key,
             )
 
         return inputs, labels, extra_kwargs
@@ -199,62 +205,72 @@ class Trainer(ForgeEngine):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
         global_valid_tokens: float,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
+        if parallel_dims.pp_enabled:
+            assert isinstance(input_dict, list)
+            assert isinstance(labels, list)
+            return self.pp_forward_backward_step(
+                input_dict_mbs=input_dict,
+                label_mbs=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
+
+        assert isinstance(input_dict, dict)
+        assert isinstance(labels, torch.Tensor)
         inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
-        if parallel_dims.pp_enabled:
-            # Pipeline Parallel forward / backward inside step() call
-            with self.train_context():
-                targets, losses = (
-                    (labels, []) if self.pp_has_last_stage else (None, None)
-                )
-                if self.pp_has_first_stage:
-                    self.pp_schedule.step(
-                        inputs,
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                    )
-                else:
-                    self.pp_schedule.step(
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                    )
+        with self.train_context():
+            assert len(model_parts) == 1
+            pred = model_parts[0](inputs, **extra_kwargs)
+            loss_sum, _ = self.loss_fn(pred, labels)
+            loss = loss_sum / global_valid_tokens
+            del pred
+            loss.backward()
 
-            # accumulate losses across pipeline microbatches
-            # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-            loss = (
-                # Rescale PP loss to be "local loss sum / global valid tokens"
-                # because each microbatch could have different number of valid tokens
-                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
-                if self.pp_has_last_stage
-                else torch.tensor([-1.0], device=self.device)
-            )
-        else:
-            # Non-PP forward / backward
-            with self.train_context():
-                assert len(model_parts) == 1
-                pred = model_parts[0](inputs, **extra_kwargs)
-                # Compute loss sum (reduction='sum')
-                loss_sum, _ = self.loss_fn(pred, labels)
-
-                # Scale the loss by the inverse of the total weight denominator before backward
-                # This ensures gradients are properly normalized across all microbatches
-                loss = loss_sum / global_valid_tokens
-
-                # need to free pred before bwd to avoid peaking memory
-                del pred
-                loss.backward()
-
-        # The returned loss here is local SUM loss / global_valid_tokens
         return loss
+
+    def pp_forward_backward_step(
+        self,
+        *,
+        input_dict_mbs: list[dict[str, torch.Tensor]],
+        label_mbs: list[torch.Tensor],
+        global_valid_tokens: float,
+    ) -> torch.Tensor:
+        arg_mbs: list[tuple[torch.Tensor, ...]] = []
+        kwarg_mbs: list[dict[str, Any]] = []
+        target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
+        for input_dict, labels in zip(input_dict_mbs, label_mbs, strict=True):
+            inputs, labels, extra_kwargs = self.post_dataloading_process(
+                input_dict, labels
+            )
+            if self.pp_has_first_stage:
+                arg_mbs.append((inputs,))
+            kwarg_mbs.append(extra_kwargs)
+            if target_mbs is not None:
+                target_mbs.append(labels)
+
+        with self.train_context():
+            losses = [] if self.pp_has_last_stage else None
+            self.pp_schedule.step(
+                arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                kwarg_mbs=kwarg_mbs,
+                target_mbs=target_mbs,
+                losses=losses,
+            )
+
+        # TODO: PP+FSDP unexpectedly puts the loss back to the CPU.
+        if self.pp_has_last_stage:
+            assert losses is not None
+            return (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
+                self.device
+            )
+        return torch.tensor([-1.0], device=self.device)
 
     def train_step(
         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -264,15 +280,16 @@ class Trainer(ForgeEngine):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
-
-        # Collect all microbatches on CPU and count total valid tokens
-        # Here we assume the inputs/labels are on GPU
-        microbatches = []
+        # All groups form one optimizer step; each group feeds one fwd-bwd call.
+        microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
-        for _microbatch in range(self.gradient_accumulation_steps):
-            input_dict, labels = next(data_iterator)
-            local_valid_tokens += (labels != IGNORE_INDEX).sum()
-            microbatches.append((input_dict, labels))
+        for _ in range(self.gradient_accumulation_steps):
+            microbatches = []
+            for _ in range(self.num_pipeline_parallel_microbatches):
+                input_dict, labels = next(data_iterator)
+                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                microbatches.append((input_dict, labels))
+            microbatch_groups.append(microbatches)
 
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
@@ -284,18 +301,28 @@ class Trainer(ForgeEngine):
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
-        # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
-        for input_dict, labels in microbatches:
-            # Move tensors to GPU
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(self.device)
-            labels = labels.to(self.device)
+        for microbatches in microbatch_groups:
+            input_dict_mbs = []
+            label_mbs = []
+            for input_dict, labels in microbatches:
+                for key, value in input_dict.items():
+                    if isinstance(value, torch.Tensor):
+                        input_dict[key] = value.to(self.device)
+                input_dict_mbs.append(input_dict)
+                label_mbs.append(labels.to(self.device))
+
+            if parallel_dims.pp_enabled:
+                fwd_bwd_input_dict = input_dict_mbs
+                fwd_bwd_labels = label_mbs
+            else:
+                assert len(input_dict_mbs) == len(label_mbs) == 1
+                fwd_bwd_input_dict = input_dict_mbs[0]
+                fwd_bwd_labels = label_mbs[0]
 
             loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
+                input_dict=fwd_bwd_input_dict,
+                labels=fwd_bwd_labels,
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())
