@@ -28,7 +28,12 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    MoE,
+    RoutedExperts,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import (
@@ -258,7 +263,7 @@ def make_moe_config(
     *,
     num_experts: int = 8,
     router: TokenChoiceTopKRouter.Config,
-    experts: GroupedExperts.Config,
+    routed_experts: RoutedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
@@ -267,7 +272,7 @@ def make_moe_config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
         router=router,
-        experts=experts,
+        routed_experts=routed_experts,
         shared_experts=shared_experts,
     )
 
@@ -335,7 +340,7 @@ def make_token_dispatcher_config(
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
         # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
         # selects the static no-host-sync expand layout (set on the generator by the
-        # deepep_inference override). ``num_max_tokens_per_rank`` is the per-rank EXPAND
+        # deepep_override). ``num_max_tokens_per_rank`` is the per-rank EXPAND
         # capacity: training infers it (the compact path auto-sizes), inference must set it
         # >= the largest per-rank token count for droplessness.
         return DeepEPTokenDispatcher.Config(
@@ -368,7 +373,7 @@ def make_token_dispatcher_config(
         )
 
 
-def make_experts_config(
+def make_routed_experts_config(
     *,
     dim: int,
     hidden_dim: int,
@@ -379,13 +384,15 @@ def make_experts_config(
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
-) -> GroupedExperts.Config:
-    """Build a fully-specified GroupedExperts.Config."""
-    return GroupedExperts.Config(
-        dim=dim,
-        hidden_dim=hidden_dim,
-        num_experts=num_experts,
-        param_init=param_init,
+) -> RoutedExperts.Config:
+    """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
+    return RoutedExperts.Config(
+        inner_experts=GroupedExperts.Config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            num_experts=num_experts,
+            param_init=param_init,
+        ),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
