@@ -96,6 +96,7 @@ def parallelize_qwen3_5(
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             pp_enabled=parallel_dims.pp_enabled,
+            dp_mesh_dims=None,
         )
 
     edp_mesh = None
