@@ -32,7 +32,7 @@ class _GeneratorState(Enum):
 
 @dataclass(kw_only=True, slots=True)
 class _GeneratorHandle(RoutingCandidate):
-    """Controller-side metadata for one generator mesh."""
+    """Router-side metadata for one generator mesh."""
 
     actor: Any
     """Monarch actor handle for the full generator mesh. Used for fan-out calls
