@@ -14,7 +14,12 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import (
+    LocalMapConfig,
+    PerAxisRedistribution,
+    ShardingConfig,
+    SpmdLayout,
+)
 
 if TYPE_CHECKING:
     from torchtitan.models.flux.model.model import FluxModel
@@ -39,7 +44,6 @@ def flux_activation_placement(
 def set_flux_inner_attention_local_map(inner_attention_cfg) -> None:
     q_layout = flux_activation_placement(cp=spmd.S(1))
     kv_src_layout = flux_activation_placement(cp=spmd.S(1))
-    kv_dst_layout = flux_activation_placement(cp=spmd.R)
     kv_grad_layout = flux_activation_placement(cp=spmd.P)
 
     inner_attention_cfg.sharding_config = ShardingConfig(
@@ -48,10 +52,17 @@ def set_flux_inner_attention_local_map(inner_attention_cfg) -> None:
             "k_BLNH": kv_src_layout,
             "v_BLNH": kv_src_layout,
         },
-        in_dst_shardings={
-            "q_BLNH": q_layout,
-            "k_BLNH": kv_dst_layout,
-            "v_BLNH": kv_dst_layout,
+        in_redist={
+            "k_BLNH": PerAxisRedistribution.Config(
+                axis=CP,
+                src=spmd.S(1),
+                dst=spmd.R,
+            ),
+            "v_BLNH": PerAxisRedistribution.Config(
+                axis=CP,
+                src=spmd.S(1),
+                dst=spmd.R,
+            ),
         },
         out_src_shardings=q_layout,
         local_map=LocalMapConfig(

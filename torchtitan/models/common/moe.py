@@ -182,10 +182,10 @@ class RoutedExperts(Module):
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
         return out_TD.view(B, -1, D)
 
-    def parallelize(self, parallel_dims) -> None:
-        """Parallelize the grouped experts, then wire EP/TP meshes on the
-        dispatcher so dispatch/combine see the right meshes at runtime."""
-        super().parallelize(parallel_dims)
+    def parallelize(self, parallel_dims, *, module_fqn: str | None = None) -> None:
+        """Parallelize the grouped experts, then wire EP/TP meshes on the dispatcher
+        so dispatch/combine see the right meshes at runtime."""
+        super().parallelize(parallel_dims, module_fqn=module_fqn)
         # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
         # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
         # DeepEPTokenDispatcher.

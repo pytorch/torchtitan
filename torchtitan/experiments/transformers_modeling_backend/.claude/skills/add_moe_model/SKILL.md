@@ -547,9 +547,10 @@ helpers from ``torchtitan/models/common/decoder_sharding.py`` and
 - ``_replicate_config(module)`` — for modules that should have
   Replicate params/buffers without TP sharding (dynamically enumerates
   params and buffers to avoid ``_shard_states`` errors)
-- ``ShardingConfig(in_src_shardings=..., in_dst_shardings=...)`` —
-  for input redistribution at module boundaries (e.g. attention,
-  MLP gather from Shard(1) to Replicate)
+- ``ShardingConfig(in_src_shardings=..., in_redist=...)`` with a
+  ``PerAxisRedistribution.Config`` — for explicit input redistribution
+  at module boundaries (e.g. attention or MLP gather from Shard(1) to
+  Replicate)
 
 Do NOT use ``register_forward_pre_hook`` / ``register_forward_hook``
 to manually convert DTensor ↔ local tensors. Do NOT use
