@@ -919,6 +919,71 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
         return self._mesh
 
     @with_comms
+    def test_shard0_shard1_bucket_matches_plain_muon(self):
+        placements = (Shard(0), Shard(1))
+        value = torch.arange(35, device=self.device).reshape(5, 7).float().div_(10)
+        param = torch.nn.Parameter(
+            distribute_tensor(value.clone(), self.mesh, placements)
+        )
+        name = "layers.0.weight"
+        optimizer = build_distributed_muon(
+            [
+                {
+                    "params": [param],
+                    "param_names": [name],
+                    "compute_sharding": MuonComputeSharding(placement=Owned()),
+                }
+            ],
+            bucket_configs=[
+                BucketConfig(
+                    patterns=(name,),
+                    owner_rank_by_fqn={name: 1},
+                    mesh_axes=("fsdp", "tp"),
+                )
+            ],
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+
+        grad = value.flip((0, 1)).contiguous()
+        param.grad = distribute_tensor(grad, self.mesh, placements)
+
+        reference = torch.nn.Parameter(value.clone())
+        reference_optimizer = torch.optim.Muon(
+            [reference],
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+        reference.grad = grad.clone()
+
+        all_to_all_single = dist.all_to_all_single
+        with patch(
+            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist.all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            optimizer.step()
+        reference_optimizer.step()
+
+        self.assertEqual(collective.call_count, 2)
+        expected_param = distribute_tensor(reference.detach(), self.mesh, placements)
+        expected_momentum = distribute_tensor(
+            reference_optimizer.state[reference]["momentum_buffer"],
+            self.mesh,
+            placements,
+        )
+        momentum = optimizer.state[param]["momentum_buffer"]
+        self.assertEqual(param.placements, placements)
+        self.assertEqual(momentum.placements, placements)
+        torch.testing.assert_close(param.to_local(), expected_param.to_local())
+        torch.testing.assert_close(momentum.to_local(), expected_momentum.to_local())
+
+    @with_comms
     def test_distinct_bucket_meshes_use_mesh_local_owners(self):
         fsdp_mesh = self.mesh["fsdp"]
         tp_mesh = self.mesh["tp"]

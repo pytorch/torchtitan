@@ -520,10 +520,19 @@ def _has_dim0_sharded_storage(param: DTensor) -> bool:
 
 
 def _has_owned_sharded_storage(param: DTensor) -> bool:
+    storage_shard_dims = tuple(
+        _normalize_dim(placement.dim, param.ndim)
+        for placement in param.placements
+        if type(placement) is Shard
+    )
     return (
         param.device_mesh.ndim == 1
         and len(param.placements) == 1
-        and type(param.placements[0]) is Shard
+        and len(storage_shard_dims) == 1
+    ) or (
+        param.device_mesh.ndim == 2
+        and len(param.placements) == 2
+        and storage_shard_dims == (0, 1)
     )
 
 
