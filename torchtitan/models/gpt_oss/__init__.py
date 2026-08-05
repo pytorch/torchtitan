@@ -30,7 +30,7 @@ from torchtitan.models.common.config_utils import (
     make_token_dispatcher_config,
 )
 from torchtitan.models.common.linear import ScaledBiasRowwiseLinear
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
@@ -155,8 +155,8 @@ def _make_gptoss_experts_config(
     top_k: int,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-) -> GptOssGroupedExperts.Config:
-    """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
+) -> RoutedExperts.Config:
+    """Build a fully-specified RoutedExperts.Config for a single GPT-OSS layer."""
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
         "mlp1_weight_EGD": partial(nn.init.trunc_normal_, std=std),
@@ -164,11 +164,13 @@ def _make_gptoss_experts_config(
         "mlp2_weight_EDF": partial(nn.init.trunc_normal_, std=std),
         "mlp2_bias_ED": partial(nn.init.trunc_normal_, std=std),
     }
-    return GptOssGroupedExperts.Config(
-        dim=dim,
-        hidden_dim=hidden_dim,
-        num_experts=num_experts,
-        param_init=experts_init,
+    return RoutedExperts.Config(
+        inner_experts=GptOssGroupedExperts.Config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            num_experts=num_experts,
+            param_init=experts_init,
+        ),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
@@ -208,7 +210,7 @@ def _build_gptoss_layers(
             fuse_qkv=fuse_qkv,
             rope=rope,
         )
-        experts_cfg = _make_gptoss_experts_config(
+        routed_experts_cfg = _make_gptoss_experts_config(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
@@ -220,7 +222,7 @@ def _build_gptoss_layers(
         moe_cfg = GptOssMoE.Config(
             num_experts=num_experts,
             load_balance_coeff=load_balance_coeff,
-            experts=experts_cfg,
+            routed_experts=routed_experts_cfg,
             router=TokenChoiceTopKRouter.Config(
                 num_experts=num_experts,
                 score_func="softmax",
