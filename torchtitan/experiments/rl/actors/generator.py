@@ -32,6 +32,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     InferenceParallelismConfig,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
+    TORCHTITAN_WORKER_CLS,
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.routing.intra_generator_router import (
@@ -201,7 +202,8 @@ class VLLMCudagraphConfig:
     capture_sizes: list[int] | None = None
     """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
     auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
-    exact sizes. When set, exactly these sizes are captured (deduped and sorted)."""
+    exact sizes. When set, these sizes are deduped and sorted. When EP and TP are
+    enabled, only capture sizes divisible by the TP degree are retained."""
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
@@ -213,7 +215,11 @@ class VLLMCudagraphConfig:
     # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
-        self, *, max_num_seqs: int, max_num_batched_tokens: int | None = None
+        self,
+        *,
+        max_num_seqs: int,
+        max_num_batched_tokens: int | None = None,
+        expert_sequence_parallel_size: int = 1,
     ) -> CompilationConfig | None:
         """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
         when CUDA graphs are disabled.
@@ -228,6 +234,12 @@ class VLLMCudagraphConfig:
         ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it
         -- otherwise prefill chunks larger than the cap fall back to eager.
 
+        ``expert_sequence_parallel_size`` is the TP-axis shard count used by the
+        internally sequence-sharded MoE path. A value greater than one removes
+        capture sizes that are not divisible by this count; one disables the
+        filtering. This prevents CUDA graph padding from changing an aligned
+        token count to one that cannot be evenly sharded across the TP axis.
+
         All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
         cudagraph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
@@ -237,6 +249,11 @@ class VLLMCudagraphConfig:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
+        if expert_sequence_parallel_size <= 0:
+            raise ValueError(
+                "expert_sequence_parallel_size must be positive, got "
+                f"{expert_sequence_parallel_size}"
+            )
         if max_num_batched_tokens is not None:
             _max_cudagraph_capture_size = max_num_batched_tokens
         else:
@@ -261,6 +278,11 @@ class VLLMCudagraphConfig:
             if cap not in sizes:
                 sizes.append(cap)
             sizes = sorted(sizes)
+
+        if expert_sequence_parallel_size > 1:
+            sizes = [
+                size for size in sizes if size % expert_sequence_parallel_size == 0
+            ]
 
         return CompilationConfig(
             cudagraph_mode=self.mode,
@@ -839,6 +861,7 @@ class VLLMGenerator(Actor, Configurable):
             # explicit EP degree: when this boolean is set, it converts all
             # DP * TP ranks into the expert-parallel group for MoE layers.
             enable_expert_parallel=enable_ep,
+            worker_cls=TORCHTITAN_WORKER_CLS,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
@@ -864,9 +887,11 @@ class VLLMGenerator(Actor, Configurable):
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
+        expert_sequence_parallel_size = config.parallelism.expert_sequence_parallel_size
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
+            expert_sequence_parallel_size=expert_sequence_parallel_size,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config

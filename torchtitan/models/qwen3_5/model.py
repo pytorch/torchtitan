@@ -462,6 +462,8 @@ class Qwen35TransformerBlock(Module):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        num_actual_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = self.attention_norm(x)
         if self.full_attn:
@@ -472,7 +474,7 @@ class Qwen35TransformerBlock(Module):
 
         h = self.ffn_norm(x)
         if self.moe_enabled:
-            x = x + self.moe(h)
+            x = x + self.moe(h, num_actual_tokens=num_actual_tokens)
         else:
             x = x + self.feed_forward(h)
         return x
@@ -732,6 +734,7 @@ class Qwen35Model(Decoder):
         positions: torch.Tensor | None = None,
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
+        num_actual_tokens: torch.Tensor | None = None,
     ):
         if self.tok_embeddings is not None:
             x = self._prepare_multimodal_embeds(
@@ -749,7 +752,12 @@ class Qwen35Model(Decoder):
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
         for layer in self.layers.values():
-            x = layer(x, attention_masks, rope_positions)
+            x = layer(
+                x,
+                attention_masks,
+                rope_positions,
+                num_actual_tokens=num_actual_tokens,
+            )
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

@@ -240,15 +240,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
 
-        # validate dense activation sequence length evenness
-        seq_len_divisor = (
-            parallel_dims.tp if config.parallelism.enable_sequence_parallel else 1
-        ) * (2 * parallel_dims.cp if parallel_dims.cp > 1 else 1)
+        # Validate sequence-shard evenness.
+        # EP sequence-shards routed MoE tokens over TP even when dense-layer
+        # sequence parallelism is disabled.
+        uses_tp_sequence_shards = (
+            config.parallelism.enable_sequence_parallel or parallel_dims.ep_enabled
+        )
+        seq_len_divisor = (parallel_dims.tp if uses_tp_sequence_shards else 1) * (
+            2 * parallel_dims.cp if parallel_dims.cp > 1 else 1
+        )
         if config.training.seq_len % seq_len_divisor != 0:
             raise ValueError(
                 f"Training sequence length ({config.training.seq_len}) must be "
                 f"divisible by {seq_len_divisor} for the configured "
-                "sequence/context parallelism."
+                "sequence/context/expert parallelism."
             )
 
         # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
