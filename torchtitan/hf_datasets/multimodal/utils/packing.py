@@ -38,6 +38,18 @@ class MMSamplePacker:
         self._next_id: int = 0
         self.packed_samples: deque = deque()
 
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "sample_buffer": dict(self._sample_buffer),
+            "next_id": self._next_id,
+            "packed_samples": list(self.packed_samples),
+        }
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self._sample_buffer = dict(state["sample_buffer"])
+        self._next_id = state["next_id"]
+        self.packed_samples = deque(state["packed_samples"])
+
     def _pack_buffered_samples(self, flush: bool = False) -> None:
         """Pack buffered samples into sequences using scan-and-pick.
 
@@ -97,5 +109,5 @@ class MMSamplePacker:
             self._pack_buffered_samples()
 
     def flush(self) -> None:
-        """Pack and yield all remaining samples, including leftovers."""
+        """Append packed outputs for every buffered sample."""
         self._pack_buffered_samples(flush=True)

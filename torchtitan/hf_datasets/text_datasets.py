@@ -30,6 +30,8 @@ def _read_text(sample: dict[str, Any]) -> str:
 
 
 class TextProcessor(SampleProcessor):
+    """Tokenizes plain text with loss enabled on every token."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
         text_fn: Annotated[
@@ -80,7 +82,8 @@ class ChatProcessor(SampleProcessor):
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
         """Validate that messages are a single-turn [user, assistant] pair."""
-        # TODO: expand this to multi-turn
+        # TODO(data-sft-multiturn): Extend validation and loss masking before
+        # accepting multi-turn conversations.
         if len(messages) != 2:
             raise ValueError(
                 f"Expected single-turn [user, assistant], got {len(messages)} messages"
@@ -117,6 +120,8 @@ class ChatProcessor(SampleProcessor):
             logger.info(f"[ChatProcessor] First sample full:\n{full_text}")
             self._logged_first_sample = True
 
+        # TODO(data-sft-overflow): Consider truncating oversized examples instead.
+        # Causal loss remains valid for the retained response prefix.
         # Drop oversized examples rather than truncating.
         if len(full_tokens) > self._seq_len:
             logger.debug(

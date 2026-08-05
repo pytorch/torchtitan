@@ -75,16 +75,6 @@ def _process_cc12m_image(
     np_img = np.array(resized_img).transpose((2, 0, 1))
     tensor_img = torch.tensor(np_img).float() / 255.0 * 2.0 - 1.0
 
-    # NOTE: The following commented code is an alternative way
-    # img_transform = transforms.Compose(
-    #     [
-    #         transforms.Resize(max(output_size, output_size)),
-    #         transforms.CenterCrop((output_size, output_size)),
-    #         transforms.ToTensor(),
-    #     ]
-    # )
-    # tensor_img = img_transform(img)
-
     return tensor_img
 
 
@@ -306,6 +296,8 @@ class FluxValidationDatasetConfig:
             dataset_iteration_policy=dataset_iteration_policy,
         )
         if isinstance(dataset, grain.MapDataset):
+            # Validation cycles through eight diffusion timesteps by sample index.
+            # Convert after filtering so index gaps do not skip parts of that cycle.
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
         return dataset.map_with_index(_add_validation_timestep)
 

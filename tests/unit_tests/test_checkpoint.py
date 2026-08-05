@@ -1092,6 +1092,32 @@ class TestTrainerRNGState(unittest.TestCase):
         self.assertEqual(np.random.random(), expected_numpy)
         self.assertTrue(torch.equal(torch.rand(1), expected_torch))
 
+    @unittest.skipUnless(
+        dist_utils.device_module.is_available(),
+        "requires an accelerator",
+    )
+    def test_restores_accelerator_rng(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.step = 5
+        trainer.ntokens_seen = 123
+        accelerator_state = dist_utils.device_module.get_rng_state()
+        self.addCleanup(
+            dist_utils.device_module.set_rng_state,
+            accelerator_state,
+        )
+
+        state = trainer.state_dict()
+        expected = torch.rand(8, device=dist_utils.device_type)
+        torch.rand(8, device=dist_utils.device_type)
+        trainer.load_state_dict(state)
+
+        self.assertTrue(
+            torch.equal(
+                torch.rand(8, device=dist_utils.device_type),
+                expected,
+            )
+        )
+
     def test_distributed_checkpoint_restores_rank_local_rng(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             torch.multiprocessing.spawn(

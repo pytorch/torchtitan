@@ -18,6 +18,7 @@ from torchtitan.components.data import (
     GrainDataLoader,
     TextCollator,
 )
+from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
@@ -125,6 +126,7 @@ class Validator(BaseValidator):
         self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
+        # A bounded validation run repeats data; steps=-1 consumes one finite pass.
         self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
@@ -236,7 +238,7 @@ class Validator(BaseValidator):
             local_batch_size=self.local_batch_size,
         )
 
-        for input_dict, labels in _iterate_and_close_dataloader(validation_dataloader):
+        for input_dict, labels in iterate_and_close_dataloader(validation_dataloader):
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
@@ -321,8 +323,10 @@ class Validator(BaseValidator):
             model.train()
 
 
-def _iterate_and_close_dataloader(dataloader: BaseDataLoader) -> Iterator[Any]:
-    """Close a temporary dataloader whenever its consumer stops iterating."""
+def iterate_and_close_dataloader(
+    dataloader: BaseDataLoader,
+) -> Iterator[TrainerBatch]:
+    """Close a temporary dataloader when its consumer stops iterating."""
     try:
         yield from dataloader
     finally:

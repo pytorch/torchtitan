@@ -247,3 +247,17 @@ def test_multimodal_collator_masks_cross_sample_target():
     _, labels = collator([packed])
 
     assert labels[0, :4].tolist() == [2, IGNORE_INDEX, 4, IGNORE_INDEX]
+
+
+def test_mm_finite_underfilled_tail_flushes():
+    rows = list(
+        _dataset(
+            [
+                _row(1, length=3),
+                _row(10, length=2),
+            ]
+        )
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["input_ids"].tolist() == [1, 2, 3, 10, 11]

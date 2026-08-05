@@ -61,7 +61,6 @@ Workflow overview::
                      special_tokens: dict[str, int]}, labels
 """
 
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -151,10 +150,13 @@ def _process_mm_sample(
                     width=processed_img.shape[2],
                     patch_size=patch_size,
                     spatial_merge_size=spatial_merge_size,
+                    # TODO(data-mm-temporal-patches): Unify image/video token counting;
+                    # the configured temporal patch size is unused by this image path.
                     temporal_patch_size=1,
                 )
                 processed_images.append(processed_img)
                 num_image_tokens.append(num_tokens)
+                # Keep the accepted image at this aligned position as a placeholder.
                 texts[idx] = None
 
     if len(processed_images) != len([_ for _ in images if _ is not None]):
@@ -262,7 +264,7 @@ def _process_cc12_wd_sample(
 
 
 class MultiModalProcessor(SampleProcessor):
-    """Binds an existing multimodal sample processor to the Grain map contract."""
+    """Adapts a multimodal processor to Grain's map contract."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
@@ -305,10 +307,7 @@ class MultiModalProcessor(SampleProcessor):
             video_min_frames=self._config.video_min_frames,
             video_max_frames=self._config.video_max_frames,
         )
-        if (
-            processed is not None
-            and processed["input_ids"].shape[0] > self._seq_len
-        ):
+        if processed is not None and processed["input_ids"].shape[0] > self._seq_len:
             logger.warning(
                 f"Sample length {processed['input_ids'].shape[0]} > training "
                 f"seq_len={self._seq_len}. Skip"
@@ -355,6 +354,8 @@ MM_DATASETS: dict[str, SingleDatasetConfig] = {
 
 
 class _MMSamplePackingDataset(grain.IterDataset[dict[str, Any]]):
+    """Packs multimodal samples while preserving Grain iterator state."""
+
     def __init__(
         self,
         parent: grain.IterDataset[dict[str, Any]],
@@ -375,6 +376,8 @@ class _MMSamplePackingDataset(grain.IterDataset[dict[str, Any]]):
 
 
 class _MMSamplePackingIterator(grain.DatasetIterator[dict[str, Any]]):
+    """Feeds samples through `MMSamplePacker` and checkpoints buffered work."""
+
     def __init__(
         self,
         parent: grain.DatasetIterator[dict[str, Any]],
@@ -407,25 +410,21 @@ class _MMSamplePackingIterator(grain.DatasetIterator[dict[str, Any]]):
     def get_state(self) -> dict[str, Any]:
         return {
             "parent": self._parent.get_state(),
-            "sample_buffer": dict(self._packer._sample_buffer),
-            "next_id": self._packer._next_id,
-            "packed_samples": list(self._packer.packed_samples),
+            "packer": self._packer.get_state(),
             "parent_exhausted": self._parent_exhausted,
             "flushed": self._flushed,
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
         self._parent.set_state(state["parent"])
-        self._packer._sample_buffer = dict(state["sample_buffer"])
-        self._packer._next_id = state["next_id"]
-        self._packer.packed_samples = deque(state["packed_samples"])
+        self._packer.set_state(state["packer"])
         self._parent_exhausted = state["parent_exhausted"]
         self._flushed = state["flushed"]
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class MMSamplePackingConfig:
-    """Packs multimodal rows with the existing scan-and-pick algorithm.
+    """Packs multimodal samples with the scan-and-pick algorithm.
 
     With repeated input, packing buffers may span source repeat boundaries.
     """
@@ -448,10 +447,8 @@ class MMSamplePackingConfig:
         )
         if isinstance(parent, grain.MapDataset):
             parent = parent.to_iter_dataset(read_options=context.read_options)
-        if not isinstance(parent, grain.IterDataset):
-            raise TypeError("multimodal packing requires a Grain dataset")
-        # TODO(data-global-pack-plan): Each DP rank packs its own documents, so
-        # changing the DP size changes packed rows. Plan rows before DP sharding.
+        # TODO(data-global-pack-plan): Consider packing before DP sharding so
+        # ranks receive similar text and media work.
         return _MMSamplePackingDataset(
             parent,
             max_seq_length=context.seq_len,

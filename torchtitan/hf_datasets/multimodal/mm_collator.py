@@ -317,6 +317,7 @@ class MultiModalCollator(Collator):
 
     def __call__(self, batch: Sequence[dict[str, Any]]) -> TrainerBatch:
         """Collate batch with patch-based approach."""
+        # Count media in each sample.
         batch = list(batch)
         images_per_sample: list[int] = []
         for sample in batch:
@@ -325,9 +326,11 @@ class MultiModalCollator(Collator):
                 num_images += vid.shape[0] // self.temporal_patch_size
             images_per_sample.append(num_images)
 
+        # Drop samples that exceed the batch media limit.
         total_images = sum(images_per_sample)
-        # TODO(data-mm-collator-admission): batch.pop() here drops rows the loader
-        # already consumed; enforce media budgets before batching instead.
+        # TODO(data-mm-collator-admission): Rows dropped above
+        # max_images_per_batch are already consumed. Move admission earlier so
+        # deferred rows can be reused.
         while total_images > self.max_images_per_batch and batch:
             removed_images = images_per_sample.pop()
             total_images -= removed_images
@@ -337,6 +340,7 @@ class MultiModalCollator(Collator):
                 f"total <= {self.max_images_per_batch}"
             )
 
+        # Collate image and video patches.
         all_images = [
             img
             for sample in batch
@@ -357,6 +361,7 @@ class MultiModalCollator(Collator):
             self.collate_images(all_videos) if all_videos else (None, None)
         )
 
+        # Pad and shift text.
         input_ids, labels, positions = self.collate_text(batch)
         input_dict = {
             "input": input_ids,
@@ -371,6 +376,7 @@ class MultiModalCollator(Collator):
             },
         }
 
+        # Build multimodal RoPE positions.
         if self.build_mrope_positions and (
             grids is not None or video_grids is not None
         ):

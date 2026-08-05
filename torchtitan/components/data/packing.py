@@ -16,38 +16,6 @@ from torchtitan.components.data.types import DatasetBuildContext, DatasetIterati
 from torchtitan.components.loss import IGNORE_INDEX
 
 
-def _text_sequence_to_packing_dict(
-    sample: TextSequence,
-) -> dict[str, np.ndarray]:
-    """Expose token-aligned arrays consumed by the packing operators."""
-    positions = sample.positions
-    if positions is None:
-        positions = np.arange(len(sample.input_ids), dtype=np.int64)
-    return {
-        "input_ids": np.asarray(sample.input_ids),
-        "labels": np.asarray(sample.labels),
-        "positions": np.asarray(positions),
-    }
-
-
-def _packed_dict_to_text_sequence(
-    packed: dict[str, np.ndarray],
-) -> TextSequence:
-    """Finalize packed text by masking padding and canonicalizing positions."""
-    labels = np.asarray(packed["labels"]).copy()
-    labels[np.asarray(packed["input_ids_segment_ids"]) == 0] = IGNORE_INDEX
-
-    boundaries = np.asarray(packed["positions"]) == 0
-    token_indices = np.arange(len(boundaries), dtype=np.int64)
-    segment_starts = np.maximum.accumulate(np.where(boundaries, token_indices, 0))
-
-    return TextSequence(
-        input_ids=np.asarray(packed["input_ids"]),
-        labels=labels,
-        positions=token_indices - segment_starts,
-    )
-
-
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ConcatThenSplitPackingConfig:
     """Concatenates tokenized documents and splits fixed-length rows."""
@@ -64,11 +32,9 @@ class ConcatThenSplitPackingConfig:
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
         )
-        dataset = dataset.map(_text_sequence_to_packing_dict)
+        dataset = dataset.map(_text_sequence_to_packing_input)
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
-        # TODO(data-global-pack-plan): Each DP rank packs its own documents, so
-        # changing the DP size changes packed rows. Plan rows before DP sharding.
         # TODO(data-overflow-policy): Concat-then-split chunks long documents, while
         # first-fit drops them. Expose a shared split, truncate, or drop policy.
         dataset = grain.experimental.ConcatThenSplitIterDataset(
@@ -79,7 +45,7 @@ class ConcatThenSplitPackingConfig:
                 "positions": context.seq_len,
             },
         )
-        return dataset.map(_packed_dict_to_text_sequence)
+        return dataset.map(_packing_output_to_text_sequence)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -107,11 +73,11 @@ class FirstFitPackingConfig:
         dataset = dataset.filter(
             lambda sample: len(sample.input_ids) <= context.seq_len
         )
-        dataset = dataset.map(_text_sequence_to_packing_dict)
+        dataset = dataset.map(_text_sequence_to_packing_input)
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
-        # TODO(data-global-pack-plan): Each DP rank packs its own documents, so
-        # changing the DP size changes packed rows. Plan rows before DP sharding.
+        # TODO(data-global-pack-plan): Consider packing before DP sharding so
+        # ranks receive similarly filled rows.
         dataset = grain.experimental.FirstFitPackIterDataset(
             dataset,
             length_struct={
@@ -129,4 +95,41 @@ class FirstFitPackingConfig:
             seed=dataset_iteration_policy.seed,
             shuffle_bins=dataset_iteration_policy.shuffle,
         )
-        return dataset.map(_packed_dict_to_text_sequence)
+        return dataset.map(_packing_output_to_text_sequence)
+
+
+def _text_sequence_to_packing_input(
+    text_sequence: TextSequence,
+) -> dict[str, np.ndarray]:
+    """Convert a `TextSequence` to the array dictionary expected by text packing.
+
+    Missing positions become `0..num_tokens-1`.
+    """
+    positions = text_sequence.positions
+    if positions is None:
+        positions = np.arange(len(text_sequence.input_ids), dtype=np.int64)
+    return {
+        "input_ids": np.asarray(text_sequence.input_ids),
+        "labels": np.asarray(text_sequence.labels),
+        "positions": np.asarray(positions),
+    }
+
+
+def _packing_output_to_text_sequence(
+    packing_output: dict[str, np.ndarray],
+) -> TextSequence:
+    """Finalize packed text by masking padding and canonicalizing positions."""
+    labels = np.asarray(packing_output["labels"]).copy()
+    labels[np.asarray(packing_output["input_ids_segment_ids"]) == 0] = IGNORE_INDEX
+
+    # A zero starts a document. For [0, 1, 2, 0, 1], segment_starts is
+    # [0, 0, 0, 3, 3], so subtracting it restores [0, 1, 2, 0, 1].
+    boundaries = np.asarray(packing_output["positions"]) == 0
+    token_indices = np.arange(len(boundaries), dtype=np.int64)
+    segment_starts = np.maximum.accumulate(np.where(boundaries, token_indices, 0))
+
+    return TextSequence(
+        input_ids=np.asarray(packing_output["input_ids"]),
+        labels=labels,
+        positions=token_indices - segment_starts,
+    )

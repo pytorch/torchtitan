@@ -17,7 +17,7 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import (
-    _iterate_and_close_dataloader,
+    iterate_and_close_dataloader,
     ValidationContext,
     Validator,
 )
@@ -98,6 +98,7 @@ class FluxValidator(Validator):
         dataset = config.dataloader.dataset
         if isinstance(dataset, FluxValidationDatasetConfig):
             dataset = dataset.dataset
+        # A bounded validation run repeats data; steps=-1 consumes one finite pass.
         self.dl_config = replace(
             config.dataloader,
             dataset=(
@@ -166,7 +167,7 @@ class FluxValidator(Validator):
             seq_len=self.seq_len,
         )
 
-        for input_dict, labels in _iterate_and_close_dataloader(validation_dataloader):
+        for input_dict, labels in iterate_and_close_dataloader(validation_dataloader):
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
