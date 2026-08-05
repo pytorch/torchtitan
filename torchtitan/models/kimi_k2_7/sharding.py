@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -30,7 +31,11 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import (
+    LocalMapConfig,
+    PerAxisRedistribution,
+    ShardingConfig,
+)
 
 if TYPE_CHECKING:
     from torchtitan.models.kimi_k2_7.model import KimiK25Model
@@ -41,8 +46,6 @@ _REPLICATE_ACT = dense_activation_placement(tp=spmd.R)
 _REPLICATE_NORM = ShardingConfig(
     state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM},
     in_src_shardings={"input": _REPLICATE_ACT},
-    in_dst_shardings={"input": _REPLICATE_ACT},
-    out_dst_shardings=_REPLICATE_ACT,
 )
 
 
@@ -76,9 +79,12 @@ def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> Non
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": _REPLICATE_ACT},
-        in_dst_shardings={"input": _REPLICATE_ACT},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=_REPLICATE_ACT,
+        out_redist=PerAxisRedistribution.Config(
+            axis=MeshAxisName.TP,
+            src=spmd.P,
+            dst=spmd.R,
+        ),
         local_map=LocalMapConfig(in_grad_placements=None),
     )
 
@@ -90,7 +96,6 @@ def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> Non
     )
     layer0.attention.sharding_config = ShardingConfig(
         in_src_shardings={"x": _REPLICATE_ACT},
-        in_dst_shardings={"x": _REPLICATE_ACT},
     )
 
 
@@ -111,8 +116,6 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
     ve_cfg.patch_embed_proj.sharding_config = ShardingConfig(
         state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM},
         in_src_shardings={"input": _REPLICATE_ACT},
-        in_dst_shardings={"input": _REPLICATE_ACT},
-        out_dst_shardings=_REPLICATE_ACT,
     )
 
     # Transformer block sub-modules (shared VisionTransformerBlock: norm1/norm2).
@@ -124,7 +127,6 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
     # tensor input so it is DTensor-wrapped before meeting head-sharded q/k.
     block.attn.sharding_config = ShardingConfig(
         in_src_shardings={"rope_cache": _REPLICATE_ACT},
-        in_dst_shardings={"rope_cache": _REPLICATE_ACT},
     )
     block.attn.wq.sharding_config = colwise_config()
     block.attn.wk.sharding_config = colwise_config()

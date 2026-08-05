@@ -145,10 +145,6 @@ try:
                             **(sc.in_src_shardings or {}),
                             "x": in_layout,
                         },
-                        in_dst_shardings={
-                            **(sc.in_dst_shardings or {}),
-                            "x": in_layout,
-                        },
                         local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
                     )
                 return instance

@@ -30,7 +30,6 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
     dense_param_placement,
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
@@ -119,7 +118,6 @@ def build_and_swap_native_moe(
                     "weight": dense_param_placement(tp=spmd.R),
                     "bias": dense_param_placement(tp=spmd.R),
                 },
-                out_dst_shardings=dense_activation_placement(tp=spmd.R),
             )
 
         with torch.device("meta"):

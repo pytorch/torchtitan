@@ -187,7 +187,6 @@ class GptOssGroupedExperts(GroupedExperts):
         b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree, h_RD.dtype)
         return h_RD + b2_RD
 
-
 class GptOssMoE(MoE):
     """GptOss MoE implementation that inherits from the base MoE class."""
 

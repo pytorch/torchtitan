@@ -204,7 +204,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(
     assert sc.local_map is not None
     input_layout = dense_activation_placement(tp=input_tp)
     assert sc.in_src_shardings == {"x": input_layout}
-    assert sc.in_dst_shardings == {"x": input_layout}
+    assert sc.in_redist is None
     assert sc.local_map.in_grad_placements == (
         dense_activation_placement(tp=input_grad_tp),
     )
