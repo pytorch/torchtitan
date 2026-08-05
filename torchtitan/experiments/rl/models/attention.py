@@ -19,7 +19,7 @@ from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import get_cuda_flash_attention_impl
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -89,15 +89,16 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
-        # Hopper (SM 9.0) uses FA3
-        if has_cuda_capability(9, 0):
+        flash_attention_impl = get_cuda_flash_attention_impl()
+        if flash_attention_impl is not None:
             # activate_flash_attention_impl() will restore internal global state
             # and re-run register function, so we want to only call it once.
-            if current_flash_attention_impl() != "FA3":
-                activate_flash_attention_impl("FA3")
+            if current_flash_attention_impl() != flash_attention_impl:
+                activate_flash_attention_impl(flash_attention_impl)
         else:
             warn_once(
-                logger, "FA3 not available (requires SM 9.0+), falling back to FA2. "
+                logger,
+                "FA3/FA4 not available on this CUDA architecture, falling back to FA2. ",
             )
 
     # Based on vLLM's FlashAttentionImpl.forward():
@@ -125,7 +126,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -169,8 +170,10 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             AttentionType.ENCODER,
         ), "Encoder-only attention not supported yet."
 
-        # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(1)
+        # vLLM #44455 packs K and V into the content dim: the cache is stored as
+        # (num_blocks, num_kv_heads, block_size, 2 * head_size). Undo the packing
+        # to (num_blocks, block_size, num_kv_heads, head_size) per tensor.
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         assert not self.kv_cache_dtype.startswith(
             "fp8"

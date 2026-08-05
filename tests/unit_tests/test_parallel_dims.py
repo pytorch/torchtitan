@@ -307,10 +307,13 @@ class TestSpmdLayout(DTensorTestBase):
                         dst=spmd.R,
                     ),
                 )
-        )
+            )
         self.assertExpectedInline(
             str(cm.exception),
-            """output: unsharding axis 'dp' from tensor dim 0 is only valid for the innermost mesh axis; source shard order is ('dp', 'cp'); PartitionSpec is PartitionSpec((<MeshAxisName.DP: 'dp'>, <MeshAxisName.CP: 'cp'>), None).""",
+            "output: unsharding axis 'dp' from tensor dim 0 is only valid for "
+            "the innermost mesh axis; source shard order is ('dp', 'cp'); "
+            "PartitionSpec is PartitionSpec((<MeshAxisName.DP: 'dp'>, "
+            "<MeshAxisName.CP: 'cp'>), None).",
         )
 
     def test_rejects_partition_spec_axis_missing_v_local_type(self):
@@ -340,7 +343,9 @@ class TestSpmdLayout(DTensorTestBase):
             validate_sharding_config(ShardingConfig(out_src_shardings=layout))
         self.assertExpectedInline(
             str(cm.exception),
-            """output: SPMD layout axes must be a subset of either dense mesh axes ('dp', 'cp', 'tp') or sparse mesh axes ('dp_replicate', 'efsdp', 'ep'), got ('dp', 'ep').""",
+            "output: SPMD layout axes must be a subset of either dense mesh "
+            "axes ('dp', 'cp', 'tp') or sparse mesh axes ('dp_replicate', "
+            "'efsdp', 'ep'), got ('dp', 'ep').",
         )
 
     @with_comms

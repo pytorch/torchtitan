@@ -50,7 +50,6 @@ class TestApplyCompile(unittest.TestCase):
         apply_compile(model, compile_config)
 
         from torchtitan.models.common.moe import GroupedExperts
-        from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 
         num_experts = 8
         dim = 128
@@ -60,10 +59,6 @@ class TestApplyCompile(unittest.TestCase):
                 dim=dim,
                 hidden_dim=hidden_dim,
                 num_experts=num_experts,
-                token_dispatcher=LocalTokenDispatcher.Config(
-                    num_experts=num_experts,
-                    top_k=1,
-                ),
             )
         ).cuda()
         num_tokens_per_expert = torch.tensor(
@@ -72,7 +67,7 @@ class TestApplyCompile(unittest.TestCase):
         total_tokens = num_tokens_per_expert.sum().item()
         x = torch.randn(total_tokens, dim, device="cuda")
 
-        output = experts._experts_forward(x, num_tokens_per_expert)
+        output = experts(x, num_tokens_per_expert)
 
         self.assertEqual(output.shape, x.shape)
 
