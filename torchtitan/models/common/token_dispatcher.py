@@ -959,7 +959,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             topk_scores_TK,
             num_local_experts,
             self.num_experts,
-            num_local_tokens_after_seq_dim_padding=num_local_tokens_after_seq_dim_padding,
+            num_max_tokens_per_rank=num_local_tokens_after_seq_dim_padding,
             cudagraphable=self.cudagraphable,
         )
 
