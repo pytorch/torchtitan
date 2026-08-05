@@ -62,10 +62,9 @@ class LocalTokenDispatcher(Configurable):
         self,
         *,
         ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
     ) -> None:
         """No-op for the EP=1 dispatcher. Subclasses override."""
-        del ep_mesh, tp_mesh
+        del ep_mesh
 
     def _local_reorder(
         self,
@@ -146,7 +145,6 @@ class LocalTokenDispatcher(Configurable):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
-        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Score and scatter_add routed expert outputs.
 
@@ -156,13 +154,11 @@ class LocalTokenDispatcher(Configurable):
             x_TD: ``(T, D)`` original input tokens
             num_local_tokens_after_padding: Unused for local dispatch; kept
                 for a shared dispatcher combine signature.
-            local_seq_len_after_padding: Unused for local dispatch; kept for
-                a shared dispatcher combine signature.
 
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        del num_local_tokens_after_padding, local_seq_len_after_padding
+        del num_local_tokens_after_padding
         out_TD = torch.zeros_like(x_TD)
 
         routed_output_RD = (
@@ -194,40 +190,14 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
-        # Sequence-parallel split coordinates derived from tp_mesh.
-        # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
-        # ``SymInt`` under CooR precompile, keeping the FX graph
-        # rank-agnostic. Defaults are the TP=1 values.
-        self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
 
     def wire_meshes(
         self,
         *,
         ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
     ) -> None:
-        """Install the EP mesh and SP coordinates used by dispatch / combine."""
+        """Install the EP mesh used by dispatch / combine."""
         self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
-
-    def _sp_global_token_indices(
-        self,
-        local_indices: torch.Tensor,
-        local_seq_len: int,
-    ) -> torch.Tensor:
-        if self.sp_size == 1:
-            return local_indices
-
-        local_pos = local_indices % local_seq_len
-        batch_idx = local_indices // local_seq_len
-        global_seq_len = local_seq_len * self.sp_size
-        global_indices = batch_idx * global_seq_len + local_pos
-        return torch.add(  # pyrefly: ignore [no-matching-overload]
-            global_indices, self.sp_rank * local_seq_len
-        )
 
     def dispatch(self, *args, **kwargs):
         raise NotImplementedError("BaseEPTokenDispatcher does not implement dispatch")
@@ -242,9 +212,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     Handles the full token routing lifecycle:
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
-    ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
-    by the owning ``RoutedExperts.parallelize`` override via
-    ``wire_meshes``.
+    ``ep_mesh`` is wired by the owning ``RoutedExperts.parallelize`` override
+    via ``wire_meshes``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -576,28 +545,24 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
-        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
-        When sp_size > 1, dispatch uses local token indices.
-        Combine offsets them to global positions so scatter_add
-        into full x_TD is correct.
+        Combine returns the local token shard. With EP, local_map annotates
+        this output as sequence-sharded on the TP/SP axis.
 
         Args:
             routed_output_RD: ``(R, D)`` expert outputs in expert-major order
             metadata: AllToAllDispatchMetadata from dispatch()
             x_TD: ``(T, D)`` original input tokens
-            num_local_tokens_after_padding: Local token count to use for the
-                combined SP view after logical padding. MoE padding passes this
-                count without materializing pad rows.
-            local_seq_len_after_padding: Per-batch local sequence length after
-                logical padding, used to map local token indices to global SP
-                positions.
+            num_local_tokens_after_padding: Local token count after logical
+                sequence padding. MoE padding passes this count without
+                materializing pad rows.
 
         Returns:
-            out_TD: Combined output. With SP, shape is
-                ``(num_local_tokens_after_padding * sp_size, D)``.
+            out_TD: Combined local output ``(num_local_tokens_after_padding, D)``.
+                Without SP this is ``(T, D)``; with SP this is the local
+                sequence shard.
         """
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
@@ -607,7 +572,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 metadata,
                 x_TD,
                 num_local_tokens_after_padding=num_local_tokens_after_padding,
-                local_seq_len_after_padding=local_seq_len_after_padding,
             )
 
         with maybe_set_sparse_mesh():
@@ -637,10 +601,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                     routed_output_RD, spmd.current_mesh()
                 )
 
-        # With SP, create a full-size buffer for scatter_add so routed results
-        # from all SP ranks can be placed at global positions.
         out_TD = torch.zeros(
-            num_local_tokens_after_padding * self.sp_size,
+            num_local_tokens_after_padding,
             x_TD.shape[-1],
             device=x_TD.device,
             dtype=x_TD.dtype,
@@ -651,12 +613,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
         ).to(routed_output_RD.dtype)
 
-        token_indices_experts_sorted_N = self._sp_global_token_indices(
-            metadata.token_indices_experts_sorted_N,
-            local_seq_len_after_padding,
-        )
+        token_indices_experts_sorted_N = metadata.token_indices_experts_sorted_N
 
-        assert isinstance(token_indices_experts_sorted_N, torch.Tensor)
         out_TD = deterministic_scatter_add(
             out_TD,
             token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, out_TD.shape[-1]),
@@ -736,7 +694,6 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         x_TD,
         *,
         num_local_tokens_after_padding: int,
-        local_seq_len_after_padding: int,
     ):
         if self.ep_mesh is not None:
             return super().combine(
@@ -744,15 +701,14 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
                 metadata,
                 x_TD,
                 num_local_tokens_after_padding=num_local_tokens_after_padding,
-                local_seq_len_after_padding=local_seq_len_after_padding,
             )
 
         # EP=1: strip the padding (via _unpermute) to recover expert-sorted
         # order, then apply the local score + scatter_add used by the EP=1
         # path. Mirrors LocalTokenDispatcher.combine, plus the unpad. The
-        # padding counts are unused for the EP=1 combine (no all-to-all SP
-        # view to reconstruct), matching LocalTokenDispatcher.combine.
-        del num_local_tokens_after_padding, local_seq_len_after_padding
+        # padding count is unused for the EP=1 combine, matching
+        # LocalTokenDispatcher.combine.
+        del num_local_tokens_after_padding
         assert isinstance(metadata, AllToAllDispatchMetadata)
         routed_output_RD = self._unpermute(
             routed_output_RD, metadata.input_shape, metadata.permuted_indices
@@ -862,15 +818,15 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
-    def wire_meshes(self, *, ep_mesh=None, tp_mesh=None) -> None:
-        """Wire EP/SP meshes. For the cudagraph (inference) path, EAGERLY create the
+    def wire_meshes(self, *, ep_mesh=None) -> None:
+        """Wire the EP mesh. For the cudagraph (inference) path, EAGERLY create the
         ElasticBuffer so its construction-time barrier runs at parallelize time, never
         inside a CUDA graph capture. The compact (training) path skips this: it sizes the
         buffer from the actual per-rank token count at first dispatch (no capture, so the
         one-time construction barrier there is fine), which frees the user from setting
         num_max_tokens_per_rank for training.
         """
-        super().wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
+        super().wire_meshes(ep_mesh=ep_mesh)
         # TODO(unify-ep-buffers): move this eager buffer creation into an init_buffer() like
         # MinimalAsyncEPTokenDispatcher, and unify DeepEP / HybridEP / MinimalAsyncEP buffer setup.
         if self.cudagraphable and ep_mesh is not None:
@@ -937,39 +893,18 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
-        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via DeepEP.
 
-        When sp_size == 1, combine is async — sync_combine() is deferred
-        to MoE.forward, enabling overlap with shared_experts.
-        When sp_size > 1, there is no overlap: sync is forced here because
-        the SP expansion must read the combine result before returning.
+        Combine is async; ``MoE.forward`` calls ``sync_combine()`` before
+        using the result, enabling overlap with ``shared_experts``.
         """
-        from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
+        del x_TD, num_local_tokens_after_padding
+
+        from torchtitan.distributed.deepep.deepep import combine_tokens
 
         # pyrefly: ignore [bad-argument-type]
-        combined_TD = combine_tokens(routed_output_RD, metadata.state)
-
-        if self.sp_size > 1:
-            sync_combine()
-            out_TD = torch.zeros(
-                num_local_tokens_after_padding * self.sp_size,
-                combined_TD.shape[-1],
-                device=combined_TD.device,
-                dtype=combined_TD.dtype,
-            )
-            local_indices = torch.arange(
-                combined_TD.shape[0], device=combined_TD.device
-            )
-            global_indices = self._sp_global_token_indices(
-                local_indices,
-                local_seq_len_after_padding,
-            )
-            out_TD[global_indices] = combined_TD
-            return out_TD
-
-        return combined_TD
+        return combine_tokens(routed_output_RD, metadata.state)
 
 
 class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
@@ -1067,46 +1002,27 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
-        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via HybridEP."""
+        del x_TD, num_local_tokens_after_padding
+
         from torchtitan.distributed.deepep import hybridep
 
-        combined_TD = hybridep.combine_tokens(
+        return hybridep.combine_tokens(
             routed_output_RD,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
             pad_multiple=self.pad_multiple,
         )
 
-        if self.sp_size > 1:
-            out_TD = torch.zeros(
-                num_local_tokens_after_padding * self.sp_size,
-                combined_TD.shape[-1],
-                device=combined_TD.device,
-                dtype=combined_TD.dtype,
-            )
-            local_indices = torch.arange(
-                combined_TD.shape[0], device=combined_TD.device
-            )
-            global_indices = self._sp_global_token_indices(
-                local_indices,
-                local_seq_len_after_padding,
-            )
-            out_TD[global_indices] = combined_TD
-            return out_TD
-
-        return combined_TD
-
 
 class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     """Token dispatcher using MinimalAsyncEP for constrained EP communication.
 
-    This first integration supports EP with ``sp_size == 1`` only. TP/SP, CP,
+    This first integration supports EP with SP degree 1 only. TP/SP, CP,
     PP, padding, and async combine overlap are intentionally out of scope.
     """
 
     ep_mesh: DeviceMesh | None
-    sp_size: int
     hidden_dim: int | None
     tokens_per_rank: int | None
     dtype: torch.dtype | None
@@ -1122,7 +1038,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
-        self.sp_size: int = 1
         self.hidden_dim = config.hidden_dim
         self.tokens_per_rank = config.tokens_per_rank
         self.dtype = config.dtype
@@ -1144,7 +1059,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self,
         *,
         ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
     ) -> None:
         """Install the EP mesh used by MinimalAsyncEP dispatch / combine."""
         if ep_mesh is None:
@@ -1152,9 +1066,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
                 "MinimalAsyncEPTokenDispatcher requires expert parallelism "
                 "(ep_mesh must be set)."
             )
-        del tp_mesh
         self.ep_mesh = ep_mesh
-        self.sp_size = 1
         self.init_buffer()
 
     def init_buffer(self) -> None:
@@ -1291,10 +1203,9 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
-        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
-        del num_local_tokens_after_padding, local_seq_len_after_padding
+        del x_TD, num_local_tokens_after_padding
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
         combined_TD, _routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
             routed_output_RD,
