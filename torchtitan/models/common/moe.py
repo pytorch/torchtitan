@@ -20,7 +20,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -166,6 +166,7 @@ class RoutedExperts(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
+            num_tokens_per_rank=num_local_tokens_after_seq_dim_padding,
         )
         with maybe_set_sparse_mesh():
             routed_output_RD = self.inner_experts(
@@ -361,11 +362,9 @@ class MoE(Module):
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
           - LocalTokenDispatcher (no EP): scatter_add only.
           - AllToAll: all-to-all communication, then scatter_add.
-          - DeepEP: async combine_tokens (sync deferred to step 4 when
-            sp_size == 1; forced inside combine when sp_size > 1).
+          - DeepEP: combine_tokens followed by backend synchronization.
           - HybridEP: synchronous combine_tokens.
-    3. Shared experts run on DTensor. Overlaps with DeepEP async combine
-       when sp_size == 1; no overlap otherwise.
+    3. Shared experts compute their output.
     4. Routed and shared expert outputs are summed.
     """
 
@@ -499,21 +498,9 @@ class MoE(Module):
             ),
         )
 
-        # shared_experts runs in parallel with deepep combine communication.
         shared_out_BLD = (
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
-
-        if (
-            isinstance(self.routed_experts.token_dispatcher, DeepEPTokenDispatcher)
-            and self.routed_experts.token_dispatcher.sp_size == 1
-        ):
-            # Sync the combine operation before using routed_output.
-            # This inserts a CUDA stream wait, ensuring combine is complete before
-            # the subsequent addition or view operations read routed output.
-            from torchtitan.distributed.deepep.deepep import sync_combine
-
-            sync_combine()
 
         if seq_dim_pad_tokens:
             # Combine constructs a sequence-dim padded SP view for each batch
