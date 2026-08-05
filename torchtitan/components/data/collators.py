@@ -106,7 +106,20 @@ def shift_causal_labels(
     labels: torch.Tensor,
     positions: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Shift causal labels once and mask targets across position resets."""
+    """Shift labels left and mask targets that cross document boundaries.
+
+    Args:
+        input_ids: `[batch, seq]` unshifted model inputs.
+        labels: `[batch, seq]` token-aligned labels.
+        positions: `[batch, seq]` positions that reset to zero at each document.
+
+    Example:
+
+        input_ids = [10, 11, 20, 21]
+        positions = [ 0,  1,  0,  1]
+        labels    = [10, 11, 20, 21]
+        # shifted labels -> [11, IGNORE_INDEX, 21, IGNORE_INDEX]
+    """
     shifted_labels = torch.nn.functional.pad(
         labels[..., 1:],
         (0, 1),

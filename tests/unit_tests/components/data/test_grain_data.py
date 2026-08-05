@@ -544,7 +544,7 @@ def test_single_dataset_shuffle_shard_repeat_order():
     assert [row["value"] for row in rank_0] != [0, 2, 4, 6, 8, 10]
 
 
-def test_weighted_mix_keeps_weight_with_dataset():
+def test_weighted_map_mix_keeps_weight_with_dataset():
     left = SingleDatasetConfig(
         source=RowsSourceConfig(
             rows=tuple({"source": "left", "index": index} for index in range(20))
@@ -563,6 +563,9 @@ def test_weighted_mix_keeps_weight_with_dataset():
     ).build(
         context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(repeat=True)
     )
+
+    assert isinstance(dataset, grain.MapDataset)
+
     iterator = iter(dataset)
     values = [next(iterator)["source"] for _ in range(12)]
 
@@ -609,7 +612,7 @@ def test_mix_reaches_all_rows_of_larger_iterable_child():
     assert seen == set(range(100))
 
 
-def test_filtered_mix_weights_emitted_rows():
+def test_filtered_map_mix_weights_draw_attempts():
     sparse = SingleDatasetConfig(
         source=RowsSourceConfig(
             rows=tuple({"source": "sparse", "index": index} for index in range(100))
@@ -629,21 +632,27 @@ def test_filtered_mix_weights_emitted_rows():
     ).build(
         context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(repeat=True)
     )
+
+    assert isinstance(dataset, grain.MapDataset)
+
+    dataset = dataset.to_iter_dataset(read_options=CONTEXT.read_options)
     iterator = iter(dataset)
     sources = [next(iterator)["source"] for _ in range(2_000)]
 
-    assert 900 <= sources.count("sparse") <= 1_100
+    # Draw attempts are equal, but the sparse child accepts one row in ten.
+    assert 150 <= sources.count("sparse") <= 220
 
 
-def test_mix_composes_map_and_iterable_children():
+def test_mixed_map_and_iterable_weights_emitted_rows():
     map_child = SingleDatasetConfig(
         source=RowsSourceConfig(
-            rows=tuple({"source": "map", "index": index} for index in range(8))
-        )
+            rows=tuple({"source": "map", "index": index} for index in range(100))
+        ),
+        pre_filters=(lambda row: row["index"] % 10 == 0,),
     )
     stream_child = SingleDatasetConfig(
         source=StreamingRowsSourceConfig(
-            rows=tuple({"source": "stream", "index": index} for index in range(8))
+            rows=tuple({"source": "stream", "index": index} for index in range(100))
         )
     )
     dataset = DatasetMixConfig(
@@ -654,10 +663,14 @@ def test_mix_composes_map_and_iterable_children():
     ).build(
         context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(repeat=True)
     )
-    iterator = iter(dataset)
-    sources = {next(iterator)["source"] for _ in range(40)}
 
-    assert sources == {"map", "stream"}
+    assert isinstance(dataset, grain.IterDataset)
+
+    iterator = iter(dataset)
+    sources = [next(iterator)["source"] for _ in range(40)]
+
+    assert sources.count("map") == 20
+    assert sources.count("stream") == 20
 
 
 @pytest.mark.parametrize("lengths", [(3, 3), (2, 10)])
@@ -710,6 +723,39 @@ def test_iterable_mix_restores_exactly():
         datasets=tuple(
             WeightedDataset(
                 dataset=SingleDatasetConfig(
+                    source=StreamingRowsSourceConfig(
+                        rows=tuple(
+                            {"source": source, "index": index} for index in range(20)
+                        )
+                    )
+                ),
+                weight=source + 1,
+            )
+            for source in range(2)
+        )
+    )
+    policy = dataset_iteration_policy(repeat=True)
+    dataset = config.build(context=CONTEXT, dataset_iteration_policy=policy)
+
+    assert isinstance(dataset, grain.IterDataset)
+
+    iterator = iter(dataset)
+    for _ in range(17):
+        next(iterator)
+    state = iterator.get_state()
+    expected = [next(iterator) for _ in range(20)]
+
+    restored = iter(config.build(context=CONTEXT, dataset_iteration_policy=policy))
+    restored.set_state(state)
+
+    assert [next(restored) for _ in range(20)] == expected
+
+
+def test_map_mix_restores_exactly_after_root_conversion():
+    config = DatasetMixConfig(
+        datasets=tuple(
+            WeightedDataset(
+                dataset=SingleDatasetConfig(
                     source=RowsSourceConfig(
                         rows=tuple(
                             {"source": source, "index": index} for index in range(20)
@@ -722,13 +768,22 @@ def test_iterable_mix_restores_exactly():
         )
     )
     policy = dataset_iteration_policy(repeat=True)
-    iterator = iter(config.build(context=CONTEXT, dataset_iteration_policy=policy))
+    dataset = config.build(context=CONTEXT, dataset_iteration_policy=policy)
+
+    assert isinstance(dataset, grain.MapDataset)
+
+    iterator = iter(dataset.to_iter_dataset(read_options=CONTEXT.read_options))
     for _ in range(17):
         next(iterator)
     state = iterator.get_state()
     expected = [next(iterator) for _ in range(20)]
 
-    restored = iter(config.build(context=CONTEXT, dataset_iteration_policy=policy))
+    restored_dataset = config.build(
+        context=CONTEXT,
+        dataset_iteration_policy=policy,
+    )
+    assert isinstance(restored_dataset, grain.MapDataset)
+    restored = iter(restored_dataset.to_iter_dataset(read_options=CONTEXT.read_options))
     restored.set_state(state)
 
     assert [next(restored) for _ in range(20)] == expected
@@ -1231,6 +1286,74 @@ def test_loader_exact_restore_with_nonempty_packing_buffers():
     assert torch.equal(expected[1], actual[1])
 
 
+def test_loader_exact_restore_with_map_mix_before_first_fit():
+    def tokenized_documents(offset):
+        return SingleDatasetConfig(
+            source=RowsSourceConfig(
+                rows=tuple(
+                    {
+                        "tokens": [
+                            1,
+                            offset + index,
+                            offset + index + 1,
+                            2,
+                        ]
+                    }
+                    for index in range(20)
+                )
+            ),
+            processor=RowToTokens.Config(),
+        )
+
+    config = GrainDataLoader.Config(
+        dataset=FirstFitPackingConfig(
+            dataset=DatasetMixConfig(
+                datasets=(
+                    WeightedDataset(
+                        dataset=tokenized_documents(10),
+                        weight=0.67,
+                    ),
+                    WeightedDataset(
+                        dataset=tokenized_documents(100),
+                        weight=0.33,
+                    ),
+                ),
+            )
+        ),
+        collator=TextCollator.Config(),
+        repeat=True,
+        num_prefetch_batches=1,
+    )
+    loader = config.build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        seq_len=8,
+        local_batch_size=2,
+    )
+    iterator = iter(loader)
+    for _ in range(5):
+        next(iterator)
+    state = loader.state_dict()
+    expected = [next(iterator) for _ in range(8)]
+
+    restored = config.build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        seq_len=8,
+        local_batch_size=2,
+    )
+    restored.load_state_dict(state)
+    restored_iterator = iter(restored)
+    actual = [next(restored_iterator) for _ in range(8)]
+
+    for expected_batch, actual_batch in zip(expected, actual, strict=True):
+        assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
+        assert torch.equal(expected_batch[0]["positions"], actual_batch[0]["positions"])
+        assert torch.equal(expected_batch[1], actual_batch[1])
+
+
 def test_loader_exact_restore_with_nested_weighted_mix():
     def packed_rows(offset):
         return ConcatThenSplitPackingConfig(
@@ -1379,9 +1502,7 @@ def test_concat_then_split_normalizes_split_continuation_positions():
     assert rows[0].positions.tolist() == [0, 1, 2, 3, 4]
     assert rows[1].positions.tolist() == [0, 1, 2, 3, 4]
 
-    collator = TextCollator.Config().build(
-        context=replace(CONTEXT, seq_len=5)
-    )
+    collator = TextCollator.Config().build(context=replace(CONTEXT, seq_len=5))
     first_inputs, first_labels = collator([rows[0]])
     second_inputs, second_labels = collator([rows[1]])
 
@@ -1614,14 +1735,10 @@ def test_num_workers_emit_every_map_row_once(num_workers):
 
 
 def test_num_workers_reject_iterable_root_before_startup():
-    child = SingleDatasetConfig(
-        source=RowsSourceConfig(rows=tuple({"value": index} for index in range(4)))
-    )
     config = GrainDataLoader.Config(
-        dataset=DatasetMixConfig(
-            datasets=(
-                WeightedDataset(dataset=child),
-                WeightedDataset(dataset=child),
+        dataset=SingleDatasetConfig(
+            source=StreamingRowsSourceConfig(
+                rows=tuple({"value": index} for index in range(4))
             )
         ),
         num_workers=1,
@@ -1797,3 +1914,63 @@ def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):
                 actual_batch[0]["positions"],
             )
             assert torch.equal(expected_batch[1], actual_batch[1])
+
+
+def test_first_fit_oversized_row_does_not_discard_buffered_row():
+    recipe = FirstFitPackingConfig(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(
+                rows=(
+                    {"tokens": [1, 2, 3, 4, 5, 6]},
+                    {"tokens": list(range(20, 40))},
+                    {"tokens": [10, 11, 12]},
+                )
+            ),
+            processor=RowToTokens.Config(),
+        )
+    )
+
+    sequence = next(
+        iter(
+            recipe.build(
+                context=CONTEXT,
+                dataset_iteration_policy=dataset_iteration_policy(),
+            )
+        )
+    )
+
+    assert sequence.input_ids.tolist() == [1, 2, 3, 4, 5, 6, 10, 11, 12]
+
+
+def test_loader_passes_read_options_to_map_conversion(monkeypatch):
+    captured = []
+    to_iter_dataset = grain.MapDataset.to_iter_dataset
+
+    def capture_read_options(dataset, read_options=None, **kwargs):
+        captured.append(read_options)
+        return to_iter_dataset(dataset, read_options=read_options, **kwargs)
+
+    monkeypatch.setattr(
+        grain.MapDataset,
+        "to_iter_dataset",
+        capture_read_options,
+    )
+    read_options = grain.ReadOptions(num_threads=3, prefetch_buffer_size=7)
+    loader = GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(rows=({"value": 0},)),
+        ),
+        shuffle=False,
+        repeat=False,
+        read_options=read_options,
+        num_prefetch_batches=0,
+    ).build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        seq_len=1,
+        local_batch_size=1,
+    )
+    loader.close()
+
+    assert captured == [read_options]

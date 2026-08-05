@@ -43,23 +43,6 @@ class SourceConfig(Protocol):
         ...
 
 
-def _file_patterns_to_paths(patterns: tuple[str, ...]) -> tuple[str, ...]:
-    """Return sorted, unique absolute paths matched by file patterns.
-
-    Every pattern must match at least one file. Duplicate resolved paths are
-    rejected so one file cannot be indexed twice.
-    """
-    paths: list[str] = []
-    for pattern in patterns:
-        matches = sorted(glob.glob(pattern))
-        if not matches:
-            raise FileNotFoundError(f"pattern matched no files: {pattern!r}")
-        paths.extend(str(Path(match).resolve()) for match in matches)
-    if len(paths) != len(set(paths)):
-        raise ValueError("patterns resolve to the same file more than once")
-    return tuple(paths)
-
-
 class IndexedJsonlSource(Configurable):
     """Provides random access to JSONL rows through compact byte offsets."""
 
@@ -154,51 +137,6 @@ class HuggingFaceRandomAccessSource(Configurable):
         return self._dataset[index]
 
 
-class _HuggingFaceCursorIterator(grain.DatasetIterator):
-    """Exposes a Hugging Face streaming cursor to Grain checkpoint recursion."""
-
-    def __init__(
-        self,
-        dataset: datasets.IterableDataset,
-        *,
-        repeat: bool,
-        shuffle: bool,
-    ) -> None:
-        super().__init__()
-        self._dataset = dataset
-        self._repeat = repeat
-        self._shuffle = shuffle
-        self._epoch = 0
-        self._initial_state = dataset.state_dict()
-        self._iterator = iter(dataset)
-
-    def __next__(self) -> dict[str, Any]:
-        try:
-            return next(self._iterator)
-        except StopIteration:
-            if not self._repeat:
-                raise
-            self._epoch += 1
-            if self._shuffle:
-                self._dataset.set_epoch(self._epoch)
-            self._dataset.load_state_dict(self._initial_state)
-            self._iterator = iter(self._dataset)
-            return next(self._iterator)
-
-    def get_state(self) -> dict[str, Any]:
-        return {
-            "epoch": self._epoch,
-            "hf": self._dataset.state_dict(),
-        }
-
-    def set_state(self, state: dict[str, Any]) -> None:
-        self._epoch = state["epoch"]
-        if self._shuffle:
-            self._dataset.set_epoch(self._epoch)
-        self._dataset.load_state_dict(state["hf"])
-        self._iterator = iter(self._dataset)
-
-
 class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
     """Provides a DP-sharded Hugging Face stream with cursor checkpointing."""
 
@@ -260,3 +198,65 @@ class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
             repeat=self._repeat,
             shuffle=self._shuffle,
         )
+
+
+def _file_patterns_to_paths(patterns: tuple[str, ...]) -> tuple[str, ...]:
+    """Return sorted, unique absolute paths matched by file patterns.
+
+    Every pattern must match at least one file. Duplicate resolved paths are
+    rejected so one file cannot be indexed twice.
+    """
+    paths: list[str] = []
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern))
+        if not matches:
+            raise FileNotFoundError(f"pattern matched no files: {pattern!r}")
+        paths.extend(str(Path(match).resolve()) for match in matches)
+    if len(paths) != len(set(paths)):
+        raise ValueError("patterns resolve to the same file more than once")
+    return tuple(paths)
+
+
+class _HuggingFaceCursorIterator(grain.DatasetIterator):
+    """Exposes a Hugging Face streaming cursor to Grain checkpoint recursion."""
+
+    def __init__(
+        self,
+        dataset: datasets.IterableDataset,
+        *,
+        repeat: bool,
+        shuffle: bool,
+    ) -> None:
+        super().__init__()
+        self._dataset = dataset
+        self._repeat = repeat
+        self._shuffle = shuffle
+        self._epoch = 0
+        self._initial_state = dataset.state_dict()
+        self._iterator = iter(dataset)
+
+    def __next__(self) -> dict[str, Any]:
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            if not self._repeat:
+                raise
+            self._epoch += 1
+            if self._shuffle:
+                self._dataset.set_epoch(self._epoch)
+            self._dataset.load_state_dict(self._initial_state)
+            self._iterator = iter(self._dataset)
+            return next(self._iterator)
+
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "epoch": self._epoch,
+            "hf": self._dataset.state_dict(),
+        }
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self._epoch = state["epoch"]
+        if self._shuffle:
+            self._dataset.set_epoch(self._epoch)
+        self._dataset.load_state_dict(state["hf"])
+        self._iterator = iter(self._dataset)
