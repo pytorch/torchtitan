@@ -135,12 +135,15 @@ def _router_gate_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         )
     else:
         input_layout = dense_activation_placement(tp=spmd.R)
+        output_layout = dense_activation_placement(tp=spmd.I)
         return ShardingConfig(
             state_shardings=state,
             in_src_shardings={"input": input_layout},
             in_dst_shardings={"input": input_layout},
+            # Router values are identical across TP ranks. Keep that invariant
+            # type until a consumer explicitly enters replicated computation.
             out_src_shardings=input_layout,
-            out_dst_shardings=input_layout,
+            out_dst_shardings=output_layout,
         )
 
 
@@ -150,14 +153,14 @@ def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdLayout:
     Each DP/CP rank processes different data and accumulates partial token
     counts, so DP/CP axes are ``Partial``. TP is ``Partial`` when EP is
     enabled (MoE reuses the mesh axis named TP for sequence-token sharding, so
-    each rank sees different tokens) or ``Replicate`` when EP is disabled (all
+    each rank sees different tokens) or ``Invariant`` when EP is disabled (all
     TP ranks see the same tokens).
     """
     return SpmdLayout(
         {
             DP: spmd.P,
             CP: spmd.P,
-            TP: spmd.P if enable_ep else spmd.R,
+            TP: spmd.P if enable_ep else spmd.I,
         }
     )
 
@@ -181,7 +184,9 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
 
     return ShardingConfig(
         state_shardings={
-            "expert_bias_E": dense_param_placement(tp=spmd.R),
+            # Without EP, every TP rank sees the same tokens and applies the
+            # same load-balancing update, so the bias remains invariant.
+            "expert_bias_E": dense_param_placement(tp=spmd.R if enable_ep else spmd.I),
             "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
         in_src_shardings={"x_BLD": sp_layout},
@@ -278,8 +283,23 @@ def set_moe_sharding_config(
         }
         experts_in_layout = dense_sequence_parallel_placement()
         experts_in_grad_layout = dense_sequence_parallel_placement()
+        pre_experts_metadata_layout = experts_in_layout
+        pre_tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=True)
+        experts_tokens_per_expert_layout = pre_tokens_per_expert_layout
     else:
         pre_experts_in_layout = dense_activation_placement(tp=spmd.R)
+        pre_experts_metadata_layout = dense_activation_placement(tp=spmd.I)
+        pre_tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=False)
+        # Counts are invariant across TP before entering the local expert
+        # implementation. Replicate them explicitly for local grouped kernels,
+        # which consume replicated offsets alongside TP-sharded expert weights.
+        experts_tokens_per_expert_layout = SpmdLayout(
+            {
+                DP: spmd.P,
+                CP: spmd.P,
+                TP: spmd.R,
+            }
+        )
         state_shardings = {
             name: expert_param_placement_dense(tp_placement=placement)
             for name, placement in expert_param_layout.items()
@@ -291,34 +311,26 @@ def set_moe_sharding_config(
     moe_cfg.routed_experts.sharding_config = ShardingConfig(
         in_src_shardings={
             "x_BLD": pre_experts_in_layout,
-            "topk_scores_BLK": experts_in_layout,
-            "topk_expert_ids_BLK": experts_in_layout,
-            "num_local_tokens_per_expert_E": _tokens_per_expert_placement(
-                enable_ep=enable_ep
-            ),
+            "topk_scores_BLK": pre_experts_metadata_layout,
+            "topk_expert_ids_BLK": pre_experts_metadata_layout,
+            "num_local_tokens_per_expert_E": pre_tokens_per_expert_layout,
         },
         in_dst_shardings={
             "x_BLD": experts_in_layout,
             "topk_scores_BLK": experts_in_layout,
             "topk_expert_ids_BLK": experts_in_layout,
-            "num_local_tokens_per_expert_E": _tokens_per_expert_placement(
-                enable_ep=enable_ep
-            ),
+            "num_local_tokens_per_expert_E": experts_tokens_per_expert_layout,
         },
         out_src_shardings=experts_out_layout,
         out_dst_shardings=experts_out_layout,
         local_map=LocalMapConfig(
             in_grad_placements=(
-                (
-                    experts_in_grad_layout,
-                    experts_in_grad_layout,
-                    experts_in_grad_layout,
-                    # num_local_tokens_per_expert_E is routing metadata, but it is
-                    # still a DTensor input to local_map and must have placements.
-                    _tokens_per_expert_placement(enable_ep=enable_ep),
-                )
-                if enable_ep
-                else None
+                experts_in_grad_layout,
+                experts_in_grad_layout,
+                experts_in_grad_layout,
+                # num_local_tokens_per_expert_E is routing metadata, but it is
+                # still a DTensor input to local_map and must have placements.
+                experts_tokens_per_expert_layout,
             ),
         ),
     )

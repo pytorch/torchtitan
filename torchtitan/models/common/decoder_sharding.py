@@ -62,13 +62,21 @@ def dense_sequence_parallel_placement() -> SpmdLayout:
     )
 
 
-def colwise_config() -> ShardingConfig:
-    """ColwiseParallel: weight S(0), output S(-1)."""
+def colwise_config(*, input_layout: SpmdLayout | None = None) -> ShardingConfig:
+    """ColwiseParallel: optional input -> R, weight S(0), output S(-1)."""
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
+        in_src_shardings=(
+            {"input": input_layout} if input_layout is not None else None
+        ),
+        in_dst_shardings=(
+            {"input": dense_activation_placement(tp=spmd.R)}
+            if input_layout is not None
+            else None
+        ),
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
     )
 

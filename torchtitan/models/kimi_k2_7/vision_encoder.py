@@ -18,14 +18,17 @@ Shape suffixes:
 """
 
 from dataclasses import dataclass, field
+from typing import cast
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import _maybe_wrap_positions, ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     compiled_create_block_mask,
     get_vision_block_mask_mod,
@@ -86,6 +89,10 @@ def _compute_learned_pos_embeds(
     """
     height, width, dim = pos_embed.shape
     pos = pos_embed.new_zeros(len(grids), max_num_patch, dim)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        # The ragged batch varies across DP but is identical across TP ranks.
+        pos = spmd.mutate_type(pos, "dp", src=spmd.R, dst=spmd.V)
+        pos = spmd.mutate_type(pos, "tp", src=spmd.R, dst=spmd.I)
 
     # (dim, height, width) for F.interpolate; .float() for bicubic.
     grid_table = pos_embed.permute(2, 0, 1).unsqueeze(0).float()
@@ -155,9 +162,12 @@ def _compute_2d_rope_cache(
     """
     device = freq_table.device
 
-    angles = torch.zeros(
-        len(grids), max_num_patch, head_dim // 2, device=device, dtype=freq_table.dtype
-    )
+    angles = freq_table.new_zeros(len(grids), max_num_patch, head_dim // 2)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        # len(grids) and max_num_patch are rank-local shapes, derived from multimodal tensors,
+        # so the constructed cache varies across DP and is identical across TP.
+        angles = spmd.mutate_type(angles, "dp", src=spmd.R, dst=spmd.V)
+        angles = spmd.mutate_type(angles, "tp", src=spmd.R, dst=spmd.I)
 
     # Group by (h, w) so the per-resolution angle grid is built once.
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
@@ -168,6 +178,10 @@ def _compute_2d_rope_cache(
         # Raster order: position p -> (row = p // w, col = p % w). Gather each
         # axis's angles from the precomputed table (freq_table[pos] = pos*inv_freq).
         flat = torch.arange(h * w, device=device)
+        flat = cast(torch.Tensor, _maybe_wrap_positions(flat, freq_table))
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            # Every TP rank constructs the same non-gradient patch indices.
+            flat = spmd.mutate_type(flat, "tp", src=spmd.R, dst=spmd.I)
         x_ang = freq_table[flat % w]  # (h*w, head_dim/4) column
         y_ang = freq_table[flat // w]  # (h*w, head_dim/4) row
         # Interleave x/y so pair 2k uses x-position, pair 2k+1 uses y-position.
@@ -211,6 +225,11 @@ def _tpool_patch_merger(
 
     max_merged = max((h // kh) * (w // kw) for _, h, w in grids)
     merged = hidden_NPD.new_zeros(num_vision, max_merged, merged_dim)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        # num_vision and max_merged are rank-local shapes, derived from multimodal tensors,
+        # so the constructed output varies across DP and is identical across TP.
+        merged = spmd.mutate_type(merged, "dp", src=spmd.R, dst=spmd.V)
+        merged = spmd.mutate_type(merged, "tp", src=spmd.R, dst=spmd.I)
 
     for i, (t, h, w) in enumerate(grids):
         seq = hidden_NPD[i, : t * h * w]
@@ -271,7 +290,11 @@ class VisionRotaryEmbedding2D(Module):
         seq = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
-        return torch.outer(seq, self.inv_freq)
+        seq = cast(torch.Tensor, _maybe_wrap_positions(seq, self.inv_freq))
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            # vision rope interacts with tensors unsharded on TP (I@TP)
+            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
+        return torch.outer(seq, self.inv_freq)  # pyrefly: ignore
 
 
 class VisionProjector(Module):
@@ -442,14 +465,15 @@ class KimiK25VisionEncoder(Module):
         x = self.patch_embed(pixel_values) + learned_pos
 
         mask_mod = get_vision_block_mask_mod(num_patch)
-        attention_mask = compiled_create_block_mask(
-            mask_mod,
-            num_vision,
-            None,
-            max_num_patch,
-            max_num_patch,
-            device=x.device,
-        )
+        with spmd.no_typecheck():
+            attention_mask = compiled_create_block_mask(
+                mask_mod,
+                num_vision,
+                None,
+                max_num_patch,
+                max_num_patch,
+                device=x.device,
+            )
 
         for block in self.layers.values():
             x = block(
