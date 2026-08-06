@@ -644,7 +644,7 @@ class VLLMGenerator(Actor, Configurable):
 
     A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied
     between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
-    on the controller side, by blocking new requests until the engine is drained.
+    in the inter-generator router, by blocking new requests until the engine is drained.
 
     Args:
         config: Generator-specific configuration.
