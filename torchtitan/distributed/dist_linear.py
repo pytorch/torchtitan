@@ -102,10 +102,13 @@ class AllGatherLinear(torch.autograd.Function):
         w_shard_n  [N / W, K]   weight sharded over its output features
         y_shard_n  [M, N / W]   full sequence, features still sharded
 
-        forward   y  = all_gather(x) @ w.T
-        dgrad     dx = reduce_scatter(dy @ w)      the dual of the forward gather
-        wgrad     dw = (all_gather(x_k.T) @ dy).T  see below
-        dbias     dy.sum(0), already complete because dy holds the full sequence
+        forward   y  [M, N / W] = all_gather(x) [M, K] @ w.T [K, N / W]
+        dgrad     dx [M / W, K] = reduce_scatter(dy [M, N / W] @ w [N / W, K])
+                                  the dual of the forward gather
+        wgrad     dw [N / W, K] = (all_gather(x_k.T) [K, M] @ dy [M, N / W]).T
+                                  see below
+        dbias        [N / W]    = dy.sum(0), already complete because dy holds
+                                  the full sequence
 
     The weight gradient needs the gathered ``x``, but holding that until
     backward would cost ``W`` times the activation memory. Forward instead saves
@@ -182,11 +185,14 @@ class LinearReduceScatter(torch.autograd.Function):
         w_shard_k  [N, K / W]   weight sharded over its input features
         y_shard_m  [M / W, N]   sequence sharded again, features complete
 
-        forward   y  = reduce_scatter(x @ w.T)  every rank holds a partial sum
-        dgrad     dx = all_gather(dy) @ w       the dual of the forward scatter
-        wgrad     dw = all_gather(dy).T @ x     accumulated in fp32
-        dbias     dy.sum(0) then all-reduce, since each rank only sees its own
-                  slice of the sequence
+        forward   y  [M / W, N] = reduce_scatter(x [M, K / W] @ w.T [K / W, N])
+                                  every rank holds a partial sum
+        dgrad     dx [M, K / W] = all_gather(dy) [M, N] @ w [N, K / W]
+                                  the dual of the forward scatter
+        wgrad     dw [N, K / W] = all_gather(dy).T [N, M] @ x [M, K / W]
+                                  accumulated in fp32
+        dbias        [N]        = dy.sum(0) then all-reduce, since each rank
+                                  only sees its own slice of the sequence
 
     Callers flatten sequence-major, so scattering dim 0 splits the sequence
     instead of cutting across batches.
