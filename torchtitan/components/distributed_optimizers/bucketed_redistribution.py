@@ -31,8 +31,11 @@ __all__ = ["BucketConfig", "BucketSpec", "assign_balanced_owners"]
 class BucketConfig:
     """Static bucket configuration resolved after runtime meshes exist.
 
-    ``mesh_axes`` selects an ordered storage submesh. Multiple axes are
-    flattened into the one-dimensional communication mesh used by the bucket.
+    ``mesh_axes`` contains exactly one storage mesh axis name. When
+    ``owner_rank_by_fqn`` is nonempty, its redistributed parameters determine
+    the resolved mesh; otherwise all parameters matching ``patterns`` do. For
+    DistributedMuon, owner-assigned parameters use ``Owned`` while compute-ready
+    parameters in the same bucket may use a different storage mesh.
     """
 
     patterns: tuple[str, ...]
@@ -41,9 +44,14 @@ class BucketConfig:
     name: str = ""
 
     def __post_init__(self) -> None:
+        mesh_axes = tuple(self.mesh_axes)
+        if len(mesh_axes) != 1:
+            raise ValueError(
+                "BucketConfig mesh_axes must contain exactly one mesh axis"
+            )
         object.__setattr__(self, "patterns", tuple(self.patterns))
         object.__setattr__(self, "owner_rank_by_fqn", dict(self.owner_rank_by_fqn))
-        object.__setattr__(self, "mesh_axes", tuple(self.mesh_axes))
+        object.__setattr__(self, "mesh_axes", mesh_axes)
 
     def bind(self, mesh: DeviceMesh) -> BucketSpec:
         return BucketSpec(
@@ -95,12 +103,7 @@ def _bind_bucket_configs(
         meshes = []
         for fqn in candidates:
             storage_mesh = storage_by_fqn[fqn].device_mesh
-            selected_mesh = storage_mesh[config.mesh_axes]
-            meshes.append(
-                selected_mesh._flatten()
-                if selected_mesh.ndim > 1
-                else selected_mesh
-            )
+            meshes.append(storage_mesh[config.mesh_axes])
 
         mesh = meshes[0]
         if any(not torch.equal(candidate.mesh, mesh.mesh) for candidate in meshes[1:]):
@@ -131,9 +134,7 @@ def assign_balanced_owners(
         ):
             load, rank = heapq.heappop(rank_loads)
             bucket_owners[fqn] = rank
-            heapq.heappush(
-                rank_loads, (load + memory_estimate_by_fqn[fqn], rank)
-            )
+            heapq.heappush(rank_loads, (load + memory_estimate_by_fqn[fqn], rank))
         owners_by_bucket.append(bucket_owners)
     return tuple(owners_by_bucket)
 
@@ -156,9 +157,7 @@ def _resolve_buckets(
             if any(fnmatch.fnmatchcase(name, pattern) for pattern in spec.patterns)
         ]
         if len(matches) != 1:
-            raise ValueError(
-                f"optimizer parameter {name!r} must match one bucket"
-            )
+            raise ValueError(f"optimizer parameter {name!r} must match one bucket")
         resolved[matches[0]].append(item)
     return tuple(tuple(bucket) for bucket in resolved)
 
@@ -337,9 +336,7 @@ class _PackedAllToAllSchedule:
     def output_buffer_numel(self) -> int:
         return sum(self.output_split_sizes)
 
-    def execute(
-        self, output: Tensor, input: Tensor
-    ) -> None:
+    def execute(self, output: Tensor, input: Tensor) -> None:
         dist.all_to_all_single(
             output[: self.output_buffer_numel],
             input[: self.input_buffer_numel],
@@ -358,12 +355,8 @@ class _LocalSchedule:
     input_buffer_numel: int = 0
     output_buffer_numel: int = 0
 
-    def execute(
-        self, output: Tensor, input: Tensor
-    ) -> None:
-        output[: self.output_buffer_numel].copy_(
-            input[: self.input_buffer_numel]
-        )
+    def execute(self, output: Tensor, input: Tensor) -> None:
+        output[: self.output_buffer_numel].copy_(input[: self.input_buffer_numel])
 
 
 _CommunicationSchedule = _PackedAllToAllSchedule | _LocalSchedule
@@ -406,12 +399,12 @@ class _BucketWork(Generic[_ItemT]):
 
 @dataclass(slots=True)
 class _BufferSlot:
-    storage_exchange_storage: dict[
-        tuple[torch.device, torch.dtype], Tensor
-    ] = field(default_factory=dict)
-    compute_exchange_storage: dict[
-        tuple[torch.device, torch.dtype], Tensor
-    ] = field(default_factory=dict)
+    storage_exchange_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+        default_factory=dict
+    )
+    compute_exchange_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+        default_factory=dict
+    )
     compute_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
         default_factory=dict
     )
@@ -431,9 +424,7 @@ class _BufferSlot:
             storage[key] = buffer
         return buffer[:numel]
 
-    def communication_buffers(
-        self, plan: _BucketPlan[Any]
-    ) -> tuple[Tensor, Tensor]:
+    def communication_buffers(self, plan: _BucketPlan[Any]) -> tuple[Tensor, Tensor]:
         to_compute = plan.storage_to_compute_schedule
         to_storage = plan.compute_to_storage_schedule
         return (
@@ -497,6 +488,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     """
 
     def __init__(self, device: torch.device) -> None:
+        # pyrefly: ignore [read-only]
         self._device = device
         self._context: _CommunicationContext | None = None
 
@@ -580,9 +572,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         handle = context.device_handle
         transfer = context.transfer_stream
         with handle.stream(transfer):
-            storage_buffer, compute_fragment_buffer = slot.communication_buffers(
-                plan
-            )
+            storage_buffer, compute_fragment_buffer = slot.communication_buffers(plan)
             work = _BucketWork(plan, storage_buffer, compute_fragment_buffer)
             _prepare_redistributed(plan, storage_buffer, prepare=prepare)
             plan.storage_to_compute_schedule.execute(
@@ -633,9 +623,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             work.done.record(transfer)
 
     @staticmethod
-    def _release(
-        work: _BucketWork[_ItemT], caller_stream: torch.Stream
-    ) -> None:
+    def _release(work: _BucketWork[_ItemT], caller_stream: torch.Stream) -> None:
         assert work.done is not None
         caller_stream.wait_event(work.done)
 
@@ -670,9 +658,9 @@ def _prepare_redistributed(
         spans = schedule.input_spans_by_parameter[index]
         assert len(spans) == 1
         span = spans[0]
-        out = storage_buffer[
-            span.buffer_offset : span.buffer_offset + span.numel
-        ].view(span.block.shape)
+        out = storage_buffer[span.buffer_offset : span.buffer_offset + span.numel].view(
+            span.block.shape
+        )
         prepare(item, out)
 
 
@@ -789,9 +777,7 @@ def _lower_packed_all_to_all(
             for source, transfer_destination, block in transfers:
                 if source != local_participant or transfer_destination != destination:
                     continue
-                input_spans.append(
-                    (parameter_index, _PackedSpan(block, input_cursor))
-                )
+                input_spans.append((parameter_index, _PackedSpan(block, input_cursor)))
                 input_cursor += block.numel
         input_split_sizes.append(input_cursor - split_start)
 
@@ -965,8 +951,7 @@ def _build_owned_bucket_plans(
         dtype = local_tensors[0].dtype
         device = local_tensors[0].device
         if any(
-            tensor.dtype != dtype or tensor.device != device
-            for tensor in local_tensors
+            tensor.dtype != dtype or tensor.device != device for tensor in local_tensors
         ):
             raise ValueError(f"bucket {spec.name!r} mixes dtype or device")
 
@@ -976,9 +961,7 @@ def _build_owned_bucket_plans(
         )
         for tensor, blocks in zip(local_tensors, blocks_by_item, strict=True):
             local_blocks = [
-                block
-                for holders, block in blocks
-                if group.local_participant in holders
+                block for holders, block in blocks if group.local_participant in holders
             ]
             if len(local_blocks) != 1 or tuple(tensor.shape) != local_blocks[0].shape:
                 raise ValueError(

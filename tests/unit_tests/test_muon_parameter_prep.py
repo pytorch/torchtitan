@@ -22,15 +22,11 @@ class TestMuonParameterPrep(unittest.TestCase):
     def test_batched_matrix_view_validation(self):
         with self.assertRaisesRegex(ValueError, "positive integer"):
             BatchedMatrixComputeView(0)
-        with self.assertRaisesRegex(
-            ValueError, "only matrices_flattened_into_dim=0"
-        ):
+        with self.assertRaisesRegex(ValueError, "only matrices_flattened_into_dim=0"):
             BatchedMatrixComputeView(3, 1)
 
     def test_builder_compiles_layout_without_mutating_caller_group(self):
-        view = BatchedMatrixComputeView(
-            num_matrices=3, matrices_flattened_into_dim=0
-        )
+        view = BatchedMatrixComputeView(num_matrices=3, matrices_flattened_into_dim=0)
         compute_sharding = MuonComputeSharding(
             view_before_placement=view,
             placement=Shard(0),
@@ -135,9 +131,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                     {
                         "params": [torch.empty(6, 4)],
                         "param_names": [],
-                        "compute_sharding": MuonComputeSharding(
-                            placement=Shard(0)
-                        ),
+                        "compute_sharding": MuonComputeSharding(placement=Shard(0)),
                     }
                 ],
                 bucket_spec=(),
@@ -150,13 +144,38 @@ class TestMuonParameterPrep(unittest.TestCase):
                     {
                         "params": [torch.empty(2, 2)],
                         "param_names": ["weight"],
-                        "compute_sharding": MuonComputeSharding(
-                            placement=Owned()
-                        ),
+                        "compute_sharding": MuonComputeSharding(placement=Owned()),
                     }
                 ],
                 bucket_spec=(),
             )
+
+    def test_builder_validates_all_storage_shards_before_construction(self):
+        param = mock.Mock(spec=DTensor)
+        param.shape = torch.Size((15, 3))
+        param.ndim = 2
+        param.placements = (Shard(0),)
+        param.device_mesh = mock.Mock(shape=(4,))
+        param.to_local.return_value = torch.empty(3, 3)
+
+        with mock.patch.object(DistributedMuon, "__init__", return_value=None) as init:
+            with self.assertRaisesRegex(ValueError, "not aligned"):
+                build_distributed_muon(
+                    [
+                        {
+                            "params": [param],
+                            "param_names": ["layers.0.wq.weight"],
+                            "compute_sharding": MuonComputeSharding(
+                                view_before_placement=BatchedMatrixComputeView(5),
+                                placement=Shard(0),
+                            ),
+                        }
+                    ],
+                    bucket_spec=(),
+                )
+
+        param.to_local.assert_not_called()
+        init.assert_not_called()
 
     def test_builder_rejects_strided_storage_shard_for_batched_matrices(self):
         param = mock.Mock(spec=DTensor)

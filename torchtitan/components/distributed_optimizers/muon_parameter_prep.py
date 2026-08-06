@@ -10,21 +10,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from itertools import product
 from typing import Any
 
 import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
-from .bucketed_redistribution import (
-    _bind_bucket_configs,
-    BucketConfig,
-    BucketSpec,
-)
-from .muon import (
-    _PreparedParameterComputeView,
-    DistributedMuon,
-    Owned,
-)
+from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
+
+from .bucketed_redistribution import _bind_bucket_configs, BucketConfig, BucketSpec
+from .muon import _PreparedParameterComputeView, DistributedMuon, Owned
 
 
 __all__ = [
@@ -80,13 +75,14 @@ class MuonComputeSharding:
     def __post_init__(self) -> None:
         if not isinstance(self.placement, (Owned, Replicate, Shard)) or (
             self.view_before_placement is not None
-            and not isinstance(
-                self.view_before_placement, BatchedMatrixComputeView
-            )
+            and not isinstance(self.view_before_placement, BatchedMatrixComputeView)
         ):
             raise TypeError(
                 "MuonComputeSharding requires a supported view and placement"
             )
+
+    def to_dict(self) -> dict:
+        return {"repr": repr(self)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +109,44 @@ class _ResolvedBatchedMatrixView:
         )
 
 
+def _validate_batched_matrix_storage_shards(
+    fqn: str,
+    param: DTensor,
+    resolved_view: _ResolvedBatchedMatrixView,
+) -> None:
+    """Validate every storage shard from globally identical DTensor metadata."""
+    for placement in param.placements:
+        if type(placement) is Replicate:
+            continue
+        assert type(placement) is Shard
+        if placement.dim % param.ndim != 0:
+            raise ValueError(
+                f"batched-matrix Muon parameter {fqn!r} requires storage "
+                "shards along tensor dimension 0"
+            )
+
+    matrix_rows = resolved_view.matrix_rows
+    # Every rank must validate all coordinates before DistributedMuon performs
+    # collectives; checking only the local shard could strand its peers.
+    coordinates = product(
+        *(range(mesh_axis_size) for mesh_axis_size in param.device_mesh.shape)
+    )
+    for coordinate in coordinates:
+        local_shape, global_offset = _compute_local_shape_and_global_offset(
+            param.shape,
+            param.device_mesh.shape,
+            list(coordinate),
+            param.placements,
+        )
+        if local_shape[0] and (
+            local_shape[0] % matrix_rows or global_offset[0] % matrix_rows
+        ):
+            raise ValueError(
+                f"batched-matrix Muon parameter {fqn!r} storage shards are not "
+                f"aligned to matrix rows of size {matrix_rows}"
+            )
+
+
 def build_distributed_muon(
     params: Iterable[dict[str, Any]],
     *,
@@ -136,9 +170,7 @@ def build_distributed_muon(
             (raw_params,) if isinstance(raw_params, Tensor) else tuple(raw_params)
         )
         raw_param_names = group.get("param_names")
-        param_names = (
-            () if raw_param_names is None else tuple(raw_param_names)
-        )
+        param_names = () if raw_param_names is None else tuple(raw_param_names)
         if raw_param_names is None or len(group_params) != len(param_names):
             raise ValueError("params and param_names must be aligned")
         group["params"] = group_params
@@ -158,11 +190,13 @@ def build_distributed_muon(
             raise TypeError("bucket_configs require named DTensor parameters")
         bucket_spec = _bind_bucket_configs(bucket_configs, storage_by_fqn)
     else:
+        assert bucket_spec is not None
         bucket_spec = tuple(bucket_spec)
 
     prepared_compute_views = {}
     for param, fqn, compute_view in parameters_to_prepare:
         global_storage_shape = torch.Size(param.shape)
+        resolved_view = None
         if compute_view is not None and any(
             type(placement) not in (Shard, Replicate)
             for placement in getattr(param, "placements", ())
@@ -171,6 +205,14 @@ def build_distributed_muon(
                 f"batched-matrix Muon parameter {fqn!r} requires exact "
                 "Shard or Replicate storage placements"
             )
+        if compute_view is not None:
+            resolved_view = compute_view._resolve(global_storage_shape)
+            if isinstance(param, DTensor):
+                _validate_batched_matrix_storage_shards(
+                    fqn,
+                    param,
+                    resolved_view,
+                )
         local_storage = param.to_local() if isinstance(param, DTensor) else param
         compute_storage = (
             local_storage.detach() if isinstance(param, DTensor) else local_storage
@@ -186,7 +228,7 @@ def build_distributed_muon(
                 compute_view.num_matrices,
                 compute_view.matrices_flattened_into_dim,
             )
-            resolved_view = compute_view._resolve(global_storage_shape)
+            assert resolved_view is not None
             global_compute_shape = torch.Size(
                 (
                     compute_view.num_matrices,

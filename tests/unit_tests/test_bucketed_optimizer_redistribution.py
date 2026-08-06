@@ -6,12 +6,13 @@
 
 import unittest
 from dataclasses import dataclass
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
+    _bind_bucket_configs,
     _build_owned_bucket_plans,
     _lower_packed_all_to_all,
     _MatrixBlock,
@@ -41,10 +42,49 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
         config = BucketConfig(
             patterns=("a",),
             owner_rank_by_fqn=owners,
-            mesh_axes=("dp_shard",),
+            mesh_axes=("optimizer",),
         )
         owners["a"] = 1
         self.assertEqual(config.owner_rank_by_fqn, {"a": 0})
+
+    def test_bucket_config_requires_exactly_one_mesh_axis(self):
+        for mesh_axes in ((), ("optimizer", "replicate")):
+            with self.subTest(mesh_axes=mesh_axes), self.assertRaisesRegex(
+                ValueError, "exactly one mesh axis"
+            ):
+                BucketConfig(
+                    patterns=("*",),
+                    owner_rank_by_fqn={},
+                    mesh_axes=mesh_axes,
+                )
+
+    def test_bucket_config_uses_redistributed_parameters_to_resolve_mesh(self):
+        redistributed_mesh = Mock(spec=DeviceMesh)
+        redistributed_mesh.ndim = 1
+        redistributed_storage_mesh = MagicMock(spec=DeviceMesh)
+        redistributed_storage_mesh.__getitem__.return_value = redistributed_mesh
+        compute_ready_storage_mesh = MagicMock(spec=DeviceMesh)
+        redistributed = Mock(device_mesh=redistributed_storage_mesh)
+        compute_ready = Mock(device_mesh=compute_ready_storage_mesh)
+
+        specs = _bind_bucket_configs(
+            (
+                BucketConfig(
+                    patterns=("layers.*",),
+                    owner_rank_by_fqn={"layers.redistributed": 0},
+                    mesh_axes=("optimizer",),
+                ),
+            ),
+            {
+                "layers.redistributed": redistributed,
+                "layers.compute_ready": compute_ready,
+            },
+        )
+
+        self.assertEqual(len(specs), 1)
+        self.assertIs(specs[0].mesh, redistributed_mesh)
+        redistributed_storage_mesh.__getitem__.assert_called_once_with(("optimizer",))
+        compute_ready_storage_mesh.__getitem__.assert_not_called()
 
     def test_bucket_planner_preserves_empty_local_storage_block(self):
         @dataclass(frozen=True)
@@ -156,9 +196,7 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
 
     def test_routes_require_an_exact_nonoverlapping_partition(self):
         def plan(blocks):
-            routes = tuple(
-                _MatrixBlockRoute(block, (3,), (7,)) for block in blocks
-            )
+            routes = tuple(_MatrixBlockRoute(block, (3,), (7,)) for block in blocks)
             return _RedistributionPlan(
                 participants=(3, 7),
                 logical_shape=(2, 3),

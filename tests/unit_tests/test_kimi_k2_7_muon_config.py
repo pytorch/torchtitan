@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import unittest
 
 import torch
@@ -14,9 +15,7 @@ from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
     MuonComputeSharding,
 )
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.models.kimi_k2_7.config_registry import (
-    kimi_k2_5_muon,
-)
+from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_muon
 
 
 class TestKimiK25MuonConfig(unittest.TestCase):
@@ -63,9 +62,7 @@ class TestKimiK25MuonConfig(unittest.TestCase):
             expected_muon_names.update(names)
 
         muon_groups = groups_by_optimizer["DistributedMuon"]
-        muon_names = {
-            name for group in muon_groups for name in group["param_names"]
-        }
+        muon_names = {name for group in muon_groups for name in group["param_names"]}
         adamw_names = {
             name
             for group in groups_by_optimizer["AdamW"]
@@ -107,9 +104,7 @@ class TestKimiK25MuonConfig(unittest.TestCase):
             ".attention.wo.weight": MuonComputeSharding(placement=Owned()),
             ".feed_forward.w1.weight": MuonComputeSharding(placement=Owned()),
             ".moe.router.gate.weight": MuonComputeSharding(placement=Owned()),
-            ".moe.shared_experts.w1.weight": MuonComputeSharding(
-                placement=Owned()
-            ),
+            ".moe.shared_experts.w1.weight": MuonComputeSharding(placement=Owned()),
             ".moe.routed_experts.inner_experts.w1_EFD": MuonComputeSharding(
                 placement=Shard(0)
             ),
@@ -172,6 +167,9 @@ class TestKimiK25MuonConfig(unittest.TestCase):
         self.assertEqual(parallelism.pipeline_parallel_degree, 1)
         self.assertFalse(parallelism.enable_sequence_parallel)
         self.assertEqual(parallelism.spmd_backend, "spmd_types")
+
+    def test_config_is_json_serializable(self):
+        json.dumps(self.config.to_dict())
 
 
 if __name__ == "__main__":

@@ -68,7 +68,11 @@ def parallelize_kimi_k2_5(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+    if (
+        parallelism.spmd_backend == "spmd_types"
+        or parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+    ):
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]

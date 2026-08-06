@@ -12,16 +12,16 @@ import hashlib
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, cast, overload
 
 import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
+
 from .bucketed_redistribution import (
     _BucketedRedistributionRuntime,
-    _BucketPlan,
     _build_owned_bucket_plans,
     _device_mesh_ranks,
     _validate_bucket_plans_across_ranks,
@@ -57,9 +57,7 @@ class DistributedMuon(Optimizer):
         params: Iterable[dict[str, Any]],
         *,
         bucket_spec: Sequence[BucketSpec],
-        _prepared_compute_views: Mapping[
-            str, _PreparedParameterComputeView
-        ],
+        _prepared_compute_views: Mapping[str, _PreparedParameterComputeView],
         lr: float = 1e-3,
         weight_decay: float = 0.1,
         momentum: float = 0.95,
@@ -82,7 +80,7 @@ class DistributedMuon(Optimizer):
         self._first_step_validated = False
         self._prepared_compute_views = dict(_prepared_compute_views)
         super().__init__(params, defaults)
-        self._tensor_device = self._validate_parameter_storage()
+        tensor_device = self._validate_parameter_storage()
         group_compute_placements = []
         for group in self.param_groups:
             compute_placement = group.pop("_compute_placement", None)
@@ -95,13 +93,19 @@ class DistributedMuon(Optimizer):
         self._validate_plan_across_ranks()
         self._redistribution_runtime = _BucketedRedistributionRuntime[
             _ParameterComputeLayout
-        ](self._tensor_device)
+        ](tensor_device)
         self._set_checkpoint_layout_fingerprints()
 
+    @overload
+    def step(self, closure: None = None) -> None:
+        ...
+
+    @overload
+    def step(self, closure: Callable[[], float]) -> float:
+        ...
+
     @torch.no_grad()
-    def step(
-        self, closure: Callable[[], float] | None = None
-    ) -> float | None:
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -120,19 +124,14 @@ class DistributedMuon(Optimizer):
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
         if hasattr(self, "_plans"):
-            raise RuntimeError(
-                "DistributedMuon parameter groups are frozen"
-            )
+            raise RuntimeError("DistributedMuon parameter groups are frozen")
         super().add_param_group(param_group)
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         saved_groups = state_dict.get("param_groups", ())
         if any(
-            saved.get(_LAYOUT_FINGERPRINT_KEY)
-            != current[_LAYOUT_FINGERPRINT_KEY]
-            for saved, current in zip(
-                saved_groups, self.param_groups, strict=True
-            )
+            saved.get(_LAYOUT_FINGERPRINT_KEY) != current[_LAYOUT_FINGERPRINT_KEY]
+            for saved, current in zip(saved_groups, self.param_groups, strict=True)
         ):
             raise ValueError("checkpoint changed DistributedMuon's compute layout")
         super().load_state_dict(state_dict)
@@ -147,7 +146,7 @@ class DistributedMuon(Optimizer):
                 group.get("fused")
                 or group.get("foreach")
                 or any(
-                    group[name] < 0
+                    not 0 <= group[name]
                     for name in ("lr", "weight_decay", "momentum", "eps")
                 )
                 or not isinstance(ns_steps, int)
@@ -168,9 +167,7 @@ class DistributedMuon(Optimizer):
                 local_device = param.to_local().device
                 local_devices.add(local_device)
         if len(local_devices) != 1 or next(iter(local_devices)).type != "cuda":
-            raise ValueError(
-                "DistributedMuon requires one CUDA device per process"
-            )
+            raise ValueError("DistributedMuon requires one CUDA device per process")
         return local_devices.pop()
 
     def _build_parameter_compute_layouts(
@@ -210,9 +207,7 @@ class DistributedMuon(Optimizer):
                     compute_view_key=prepared.compute_view_key,
                     global_compute_shape=global_compute_shape,
                     local_compute_tensor=local_compute_tensor,
-                    local_storage_signature=_local_storage_signature(
-                        param.to_local()
-                    ),
+                    local_storage_signature=_local_storage_signature(param.to_local()),
                     compute_placement=compute_placement,
                     compute_locally=compute_locally,
                 )
@@ -477,6 +472,7 @@ class DistributedMuon(Optimizer):
     ) -> torch.Size:
         return compute_layout.global_compute_shape
 
+
 @dataclass(frozen=True, slots=True)
 class _ParameterComputeLayout:
     fqn: str
@@ -511,7 +507,8 @@ def _has_dim0_sharded_storage(param: DTensor) -> bool:
         # FSDP2 emits _StridedShard when a later TP/EP axis already shards
         # this dimension. Keep the allowlist exact so new placements fail closed.
         if type(placement) in (Shard, _StridedShard):
-            if getattr(placement, "dim") % param.ndim != 0:
+            shard = cast(Shard | _StridedShard, placement)
+            if shard.dim % param.ndim != 0:
                 return False
             has_shard = True
         elif type(placement) is not Replicate:
@@ -535,14 +532,8 @@ def _validate_muon_parameter(
     compute_placement: object,
 ) -> bool:
     local = param.to_local()
-    if (
-        torch.is_complex(param)
-        or param.ndim < 2
-        or not local.is_contiguous()
-    ):
-        raise ValueError(
-            f"Muon parameter {fqn!r} has unsupported shape or storage"
-        )
+    if torch.is_complex(param) or param.ndim < 2 or not local.is_contiguous():
+        raise ValueError(f"Muon parameter {fqn!r} has unsupported shape or storage")
 
     replicated_storage = _has_replicated_storage(param)
     if isinstance(compute_placement, Replicate) and replicated_storage:
@@ -624,7 +615,7 @@ def _adjust_learning_rate(
 ) -> float:
     rows, columns = compute_matrix_shape[-2:]
     if adjust_lr_fn is None or adjust_lr_fn == "original":
-        ratio = math.sqrt(max(1, rows / columns))
+        ratio = math.sqrt(max(1.0, rows / columns))
     elif adjust_lr_fn == "match_rms_adamw":
         ratio = 0.2 * math.sqrt(max(rows, columns))
     elif adjust_lr_fn == "spectral_unclamped":

@@ -39,9 +39,7 @@ class TestDistributedMuonMath(unittest.TestCase):
                 ]
 
                 reference_param = torch.nn.Parameter(initial.clone())
-                reference = torch.optim.Muon(
-                    [reference_param], **optimizer_kwargs
-                )
+                reference = torch.optim.Muon([reference_param], **optimizer_kwargs)
                 actual_param = initial.clone()
                 actual_momentum = torch.zeros_like(actual_param)
 
@@ -49,9 +47,7 @@ class TestDistributedMuonMath(unittest.TestCase):
                     reference_param.grad = gradient.clone()
                     reference.step()
 
-                    actual_momentum.lerp_(
-                        gradient, 1 - optimizer_kwargs["momentum"]
-                    )
+                    actual_momentum.lerp_(gradient, 1 - optimizer_kwargs["momentum"])
                     prepared = torch.lerp(
                         gradient,
                         actual_momentum,
@@ -70,9 +66,7 @@ class TestDistributedMuonMath(unittest.TestCase):
                         prepared.shape,
                     )
                     actual_param.mul_(
-                        1
-                        - optimizer_kwargs["lr"]
-                        * optimizer_kwargs["weight_decay"]
+                        1 - optimizer_kwargs["lr"] * optimizer_kwargs["weight_decay"]
                     )
                     actual_param.add_(update, alpha=-adjusted_lr)
 

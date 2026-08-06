@@ -229,7 +229,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     opt_param_groups,
                     **config.optimizer_init_kwargs.get(opt_name, {}),
                 )
-                self.optimizers.append(optimizer)
+                self.optimizers.append(cast(T, optimizer))
                 self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
                 for group in opt_param_groups:
                     all_params.extend(group["params"])

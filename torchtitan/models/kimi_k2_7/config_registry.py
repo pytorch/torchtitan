@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from torch.distributed.tensor import Shard
+
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
     assign_balanced_owners,
     BucketConfig,
@@ -14,7 +16,6 @@ from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
     BatchedMatrixComputeView,
     MuonComputeSharding,
 )
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -105,9 +106,7 @@ def _kimi_k2_5_distributed_muon_optimizer(
                 optimizer_name="DistributedMuon",
                 optimizer_kwargs={
                     **muon_kwargs,
-                    "compute_sharding": MuonComputeSharding(
-                        placement=Shard(0)
-                    ),
+                    "compute_sharding": MuonComputeSharding(placement=Shard(0)),
                 },
             )
         )
@@ -122,9 +121,7 @@ def _kimi_k2_5_distributed_muon_optimizer(
                 optimizer_name="DistributedMuon",
                 optimizer_kwargs={
                     **muon_kwargs,
-                    "compute_sharding": MuonComputeSharding(
-                        placement=Owned()
-                    ),
+                    "compute_sharding": MuonComputeSharding(placement=Owned()),
                 },
             )
         )
