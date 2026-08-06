@@ -617,10 +617,10 @@ class ParallelDims:
 
         Note:
             Axes that ``build_mesh`` created with the Fake backend are excluded,
-            because their process groups cannot carry collectives. Today the only
-            such axis with size > 1 is ``efsdp`` when EP is disabled: its size is
-            ``dp_shard * cp * tp``, but ``_mesh_exist`` marks it nonexistent so it
-            is unflattened with a fake backend.
+            because their process groups cannot carry collectives. For example,
+            ``efsdp`` when EP is disabled: its size is ``dp_shard * cp * tp``,
+            but ``_mesh_exist`` marks it nonexistent so it is unflattened with a
+            fake backend.
 
         Returns:
             dict[str, DeviceMesh]: A dictionary mapping mesh dimension names to their
