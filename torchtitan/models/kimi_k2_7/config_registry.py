@@ -66,6 +66,10 @@ def _kimi_k2_5_distributed_muon_optimizer(
         "lr": lr,
         "weight_decay": 0.1,
         "foreach": False,
+        # Kimi K2's MuonClip recipe uses 0.2 * sqrt(max(rows, columns))
+        # for shape-consistent AdamW-scale updates instead of Muon's original
+        # aspect-ratio scaling.
+        "adjust_lr_fn": "match_rms_adamw",
     }
     adamw_kwargs = {
         "lr": lr,
@@ -112,6 +116,9 @@ def _kimi_k2_5_distributed_muon_optimizer(
         )
     for pattern in (
         r"feed_forward\.w[123]\.weight$",
+        # Keep the 2D router gate on Muon: this follows the Kimi team's
+        # matrix-parameter rule, and Moonlight reports a larger SVD-entropy
+        # gain over AdamW for MoE router weights.
         r"moe\.router\.gate\.weight$",
         r"moe\.shared_experts\.w[123]\.weight$",
     ):

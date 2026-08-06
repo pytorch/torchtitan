@@ -70,6 +70,10 @@ class TestKimiK25MuonConfig(unittest.TestCase):
         }
         self.assertEqual(muon_names, expected_muon_names)
         self.assertEqual(adamw_names, model_names - expected_muon_names)
+        self.assertEqual(
+            {group["adjust_lr_fn"] for group in muon_groups},
+            {"match_rms_adamw"},
+        )
 
         group_by_suffix = {
             suffix: next(
