@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from renderers import Renderer
+from monarch.actor import ProcMesh, this_host
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
@@ -27,8 +27,13 @@ from torchtitan.experiments.rl.rubrics import Rubric, RubricOutput
 from torchtitan.experiments.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
+    from renderers import Renderer
+
+    from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
+
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
+
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +43,12 @@ class Rollouter(Configurable):
     `Rubric`) into scored rollouts — the RL training data.
 
     Like a `Dataloader` turns a `Dataset` into training batches, a `Rollouter`
-    turns a problem into rollouts: it builds the envs, drives them against the inference engine
+    turns a problem into rollouts: its worker builds the envs, drives them against the inference engine
     (via a `generate_fn` the controller provides), and scores the results with `score_group`.
 
-    Subclass only to override specific methods, such as `score_group` for cross-sibling scoring,
-    or `make_env_group` for custom logic, such as using a pool of envs instead of creating a new one.
+    Configure `worker_cls` to override specific methods, such as `score_group` for cross-sibling
+    scoring, or `make_env_group` for custom logic, such as using a pool of envs instead of creating
+    a new one.
 
     The flow for one prompt group: the controller passes a `generate_fn` callable; each rollout
     drives its own calls, so the generator runs a whole group's calls together in one continuous
@@ -54,7 +60,7 @@ class Rollouter(Configurable):
             group_id=group_index,  # assigned by the data input loop (a monotonic int)
             group_size=N, sampling=sampling, renderer=renderer)
 
-    `MessageEnv` works in messages; `TokenEnv` (what `make_env_group` returns)
+    `MessageEnv` works in messages; `TokenEnv` (what `RolloutWorker.make_env_group` returns)
     adds the message <-> token plumbing.
 
     Example:
@@ -77,13 +83,13 @@ class Rollouter(Configurable):
         """Dataset iterator for validation."""
 
         rubric: Rubric.Config
-        """Reward functions + weights used by `score_group`."""
+        """Reward functions + weights used by `RolloutWorker.score_group`."""
 
         message_env: MessageEnv.Config
-        """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
+        """The env to build per sample; `RolloutWorker.make_env_group` calls `build(env_input=sample)`."""
 
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
-        """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
+        """`TokenEnv` wraps the `MessageEnv` in `RolloutWorker.make_env_group`."""
 
         advantage: Configurable.Config = field(
             default_factory=AdvantageEstimator.Config
@@ -91,13 +97,34 @@ class Rollouter(Configurable):
         """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
         set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
 
+        worker_cls: type[RolloutWorker] = field(default_factory=lambda: RolloutWorker)
+        """Worker implementation constructed in each rollout worker actor."""
+
+        worker_pool_size: int = 4
+        """CPU rollout worker processes to spawn on the controller host."""
+
+        num_threads_per_worker: int = 4
+        """Renderer worker threads in each rollout worker process."""
+
+        def __post_init__(self) -> None:
+            if self.worker_pool_size < 1:
+                raise ValueError(
+                    "worker_pool_size must be at least 1, got "
+                    f"{self.worker_pool_size}"
+                )
+            if self.num_threads_per_worker < 1:
+                raise ValueError(
+                    "num_threads_per_worker must be at least 1, got "
+                    f"{self.num_threads_per_worker}"
+                )
+
     def __init__(self, config: Config) -> None:
+        self._config = config
         self._train_dataset = config.train_dataset.build()
         self._validation_dataset = config.validation_dataset.build()
-        self.rubric: Rubric = config.rubric.build()
-        self.advantage_estimator = config.advantage.build()
-        self._message_env_config = config.message_env
-        self._token_env_config = config.token_env
+
+        self._worker_actors: RolloutWorkerActor | None = None
+        self._worker_mesh: ProcMesh | None = None
 
     # TODO: revisit this abstraction: should it return a sample or a dataset or an iterator?
     def get_training_sample(self) -> object:
@@ -107,6 +134,89 @@ class Rollouter(Configurable):
     def get_validation_sample(self) -> object:
         """Get one validation sample (the env input) from the validation dataset."""
         return next(self._validation_dataset)
+
+    async def setup_async(self) -> None:
+        """Spawn the owned worker proc mesh and actor pool."""
+        # Import lazily to avoid a circular dependency through Rollouter.Config.
+        from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
+
+        if self._worker_mesh is not None or self._worker_actors is not None:
+            raise RuntimeError("rollout worker pool is already initialized")
+
+        self._worker_mesh = this_host().spawn_procs(
+            per_host={"cpus": self._config.worker_pool_size},
+        )
+        self._worker_actors = self._worker_mesh.spawn(
+            "rollout_worker",
+            RolloutWorkerActor,
+            rollouter_config=self._config,
+            num_threads=self._config.num_threads_per_worker,
+        )
+
+    async def close(self) -> None:
+        """Stop the owned rollout worker proc mesh."""
+        worker_mesh = self._worker_mesh
+        self._worker_actors = None
+        self._worker_mesh = None
+        if worker_mesh is not None:
+            await worker_mesh.stop()
+
+    async def sync_log_step(self, step: int) -> None:
+        """Propagate the controller log step to every rollout worker."""
+        if self._worker_actors is not None:
+            await self._worker_actors.sync_log_step.call(step)
+
+    async def run_group_rollouts(
+        self,
+        *,
+        generate_fn: GenerateFn,
+        sample: object,
+        group_id: int,
+        group_size: int,
+        sampling: SamplingConfig,
+        renderer: Renderer,
+    ) -> RolloutGroup:
+        """Roll out and score one prompt group.
+
+        Builds `group_size` sibling envs from one sample and drives them concurrently;
+        each sibling drives its own `generate_fn` calls, so the generator runs a whole
+        group's calls together in one continuous batch. Then `score_group` fills each reward.
+
+        Configure `worker_cls` to customize group execution, or override this method
+        to use a different execution strategy.
+
+        Args:
+            generate_fn: Async callable that returns a Completion given a prompt.
+            sample: Dataset sample shared by the group.
+            group_id: Stable group id; siblings share it for advantage centering.
+            group_size: Number of sibling rollouts.
+            sampling: Sampling config for every generate call in the group.
+            renderer: Renderer shared by the group's envs.
+
+        Returns:
+            One scored `RolloutGroup`.
+        """
+        if self._worker_actors is None:
+            raise RuntimeError("rollout worker pool is not initialized")
+
+        return await self._worker_actors.run_group.choose(
+            generate_fn=generate_fn,
+            sample=sample,
+            group_id=group_id,
+            group_size=group_size,
+            sampling=sampling,
+            renderer=renderer,
+        )
+
+
+class RolloutWorker:
+    """Builds, executes, scores, and advantages one rollout group."""
+
+    def __init__(self, config: Rollouter.Config) -> None:
+        self.rubric: Rubric = config.rubric.build()
+        self._message_env_config = config.message_env
+        self._token_env_config = config.token_env
+        self.advantage_estimator: AdvantageEstimator = config.advantage.build()
 
     # TODO: revisit the Renderer being injected into `make_env_group` once we
     # know whether Rollouter should own a Renderer (per-rollouter chat templates).
@@ -120,7 +230,7 @@ class Rollouter(Configurable):
         """Construct `group_size` single-use envs from one dataset sample.
 
         Args:
-            sample: the dataset sample (the env input) from `get_training_sample` / `get_validation_sample`.
+            sample: the dataset sample (the env input) from `Rollouter.get_training_sample` / `Rollouter.get_validation_sample`.
             group_size: number of sibling envs for this prompt group.
             renderer: Renderer shared by the rollout controller.
 
@@ -140,7 +250,7 @@ class Rollouter(Configurable):
         rollouts: list[Rollout],
         env_input: object,
     ) -> list[RubricOutput]:
-        """Score one group's rollouts; the controller applies the rewards.
+        """Score one group's rollouts; `run_group` applies the rewards.
 
         Default impl delegates to `self.rubric.score_group`. Override for
         cross-sibling scoring (judge, pairwise, diversity) or partial-credit
@@ -155,7 +265,7 @@ class Rollouter(Configurable):
         """
         return await self.rubric.score_group(rollouts, env_input)
 
-    async def run_group_rollouts(
+    async def run_group(
         self,
         *,
         generate_fn: GenerateFn,
@@ -186,11 +296,13 @@ class Rollouter(Configurable):
         """
         # One prompt becomes [env] * group_size.
         envs = self.make_env_group(
-            sample=sample, group_size=group_size, renderer=renderer
+            sample=sample,
+            group_size=group_size,
+            renderer=renderer,
         )
 
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
-        # reuse across the group_size rollouts (truest spot is the rollouter's first-turn render).
+        # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
         try:
             # produce the rollouts
             rollouts = await asyncio.gather(
@@ -242,18 +354,17 @@ class Rollouter(Configurable):
 
         For custom logic, users can override this method.
 
-
         Args:
-            generate_fn: Async callable that runs one generation; keeps the rollouter
+            generate_fn: Async callable that runs one generation; keeps the worker
                 decoupled from the generator actor.
-            env: The env for this rollout; `run_group_rollouts` closes it.
+            env: The env for this rollout; `run_group` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
             rollout_id: Sibling index within the group; combined with the turn index into the
                 per-turn `RolloutTurnID`, and stored as `Rollout.rollout_id`.
 
         Returns:
-            One unscored `Rollout` (reward filled later by the controller).
+            One unscored `Rollout`; `run_group` fills its reward later.
         """
         turns: list[RolloutTurn] = []
         status = RolloutStatus.ERROR
@@ -261,7 +372,9 @@ class Rollouter(Configurable):
             env_step = await env.init()
             while not env_step.status.is_terminal():
                 turn_rollout_id = RolloutTurnID(
-                    group_id=group_id, rollout_id=rollout_id, turn_id=len(turns)
+                    group_id=group_id,
+                    rollout_id=rollout_id,
+                    turn_id=len(turns),
                 )
 
                 # generator call
