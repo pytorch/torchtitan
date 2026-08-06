@@ -34,6 +34,9 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.utils import set_batch_invariance
+from torchtitan.experiments.rl.components.weight_sync import (
+    quiet_torchstore_transport_log,
+)
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
@@ -99,8 +102,7 @@ class PolicyTrainer(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
-        # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
-        logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
+        quiet_torchstore_transport_log()
         if not config.dump_folder:
             config.dump_folder = output_dir
         sl.init_structured_logger(
