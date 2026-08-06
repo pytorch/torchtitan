@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from torchtitan.experiments.rl.actors.generator import SamplingConfig
 from torchtitan.experiments.rl.environment.token import TokenEnvOutput
 from torchtitan.experiments.rl.rollout import RolloutStatus
-from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rubrics import RubricOutput
 from torchtitan.experiments.rl.types import Completion
 
@@ -106,7 +106,7 @@ class _GenerateFn:
         )
 
 
-def test_rollouter_executes_group_with_inline_worker() -> None:
+def test_worker_executes_group_without_actor_mesh() -> None:
     async def run() -> None:
         generate_fn = _GenerateFn()
         token_env_config = _TokenEnvConfig()
@@ -119,9 +119,7 @@ def test_rollouter_executes_group_with_inline_worker() -> None:
             advantage=_Config(_AdvantageEstimator()),
         )
         worker = rollouter_config.worker_cls(config=rollouter_config)
-        rollouter = object.__new__(Rollouter)
-        rollouter._worker = worker
-        group = await rollouter.run_group_rollouts(
+        group = await worker.run_group(
             generate_fn=generate_fn,
             sample="sample",
             group_id=7,
