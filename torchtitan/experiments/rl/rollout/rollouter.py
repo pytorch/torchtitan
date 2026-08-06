@@ -58,7 +58,7 @@ class Rollouter(Configurable):
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
             generate_fn=generate_fn, sample=sample,
             group_id=group_index,  # assigned by the data input loop (a monotonic int)
-            group_size=N, sampling=sampling, renderer=renderer)
+            group_size=N, sampling=sampling)
 
     `MessageEnv` works in messages; `TokenEnv` (what `RolloutWorker.make_env_group` returns)
     adds the message <-> token plumbing.
@@ -125,6 +125,7 @@ class Rollouter(Configurable):
 
         self._worker_actors: RolloutWorkerActor | None = None
         self._worker_mesh: ProcMesh | None = None
+        self._renderer: Renderer | None = None
 
     # TODO: revisit this abstraction: should it return a sample or a dataset or an iterator?
     def get_training_sample(self) -> object:
@@ -135,7 +136,7 @@ class Rollouter(Configurable):
         """Get one validation sample (the env input) from the validation dataset."""
         return next(self._validation_dataset)
 
-    async def setup_async(self) -> None:
+    async def setup_async(self, *, renderer: Renderer) -> None:
         """Spawn the owned worker proc mesh and actor pool."""
         # Import lazily to avoid a circular dependency through Rollouter.Config.
         from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
@@ -152,12 +153,14 @@ class Rollouter(Configurable):
             rollouter_config=self._config,
             num_threads=self._config.num_threads_per_worker,
         )
+        self._renderer = renderer
 
     async def close(self) -> None:
         """Stop the owned rollout worker proc mesh."""
         worker_mesh = self._worker_mesh
         self._worker_actors = None
         self._worker_mesh = None
+        self._renderer = None
         if worker_mesh is not None:
             await worker_mesh.stop()
 
@@ -174,7 +177,6 @@ class Rollouter(Configurable):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
-        renderer: Renderer,
     ) -> RolloutGroup:
         """Roll out and score one prompt group.
 
@@ -191,12 +193,11 @@ class Rollouter(Configurable):
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
-            renderer: Renderer shared by the group's envs.
 
         Returns:
             One scored `RolloutGroup`.
         """
-        if self._worker_actors is None:
+        if self._worker_actors is None or self._renderer is None:
             raise RuntimeError("rollout worker pool is not initialized")
 
         return await self._worker_actors.run_group.choose(
@@ -205,7 +206,7 @@ class Rollouter(Configurable):
             group_id=group_id,
             group_size=group_size,
             sampling=sampling,
-            renderer=renderer,
+            renderer=self._renderer,
         )
 
 

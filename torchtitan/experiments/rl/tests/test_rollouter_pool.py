@@ -74,6 +74,7 @@ def _rollouter_without_datasets() -> Rollouter:
     )
     rollouter._worker_actors = None
     rollouter._worker_mesh = None
+    rollouter._renderer = None
     return rollouter
 
 
@@ -85,7 +86,7 @@ async def _setup(
     worker_mesh = _WorkerMesh(actor_mesh)
     host = _ControllerHost(worker_mesh)
     monkeypatch.setattr(rollouter_module, "this_host", lambda: host)
-    await rollouter.setup_async()
+    await rollouter.setup_async(renderer="renderer")
     return worker_mesh
 
 
@@ -96,7 +97,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         monkeypatch.setattr(rollouter_module, "this_host", lambda: host)
         rollouter = _rollouter_without_datasets()
 
-        await rollouter.setup_async()
+        await rollouter.setup_async(renderer="renderer")
 
         assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
         args, kwargs = worker_mesh.spawn_args
@@ -126,7 +127,6 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
                 group_id=1,
                 group_size=2,
                 sampling="sampling",
-                renderer="renderer",
             )
         )
         await actor_mesh.run_group.started.wait()
