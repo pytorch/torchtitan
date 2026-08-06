@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
+from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
     _bind_bucket_configs,
     _BucketedRedistributionRuntime,
     _build_owned_bucket_plans,
@@ -28,7 +28,7 @@ from torchtitan.components.distributed_optimizers.bucketed_redistribution import
 )
 
 
-class TestBucketedOptimizerRedistribution(unittest.TestCase):
+class TestFlexOptimizerReshard(unittest.TestCase):
     def test_runtime_enqueues_return_before_next_compute(self):
         runtime = _BucketedRedistributionRuntime(torch.device("cuda"))
         caller_stream = Mock()
@@ -69,14 +69,14 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
 
         with patch(
             "torchtitan.components.distributed_optimizers."
-            "bucketed_redistribution._prepare_redistributed"
+            "flex_optimizer_reshard._prepare_redistributed"
         ), patch(
             "torchtitan.components.distributed_optimizers."
-            "bucketed_redistribution._compute_redistributed",
+            "flex_optimizer_reshard._compute_redistributed",
             side_effect=compute_redistributed,
         ), patch(
             "torchtitan.components.distributed_optimizers."
-            "bucketed_redistribution._finalize_redistributed"
+            "flex_optimizer_reshard._finalize_redistributed"
         ), patch.object(
             runtime,
             "_release",
@@ -193,15 +193,15 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
         mesh.ndim = 1
 
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "get_process_group_ranks",
             return_value=[3, 7],
         ), patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
             "_redistribution_group",
             return_value=group,
         ), patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
             "_dtensor_storage_blocks",
             return_value=blocks,
         ):
@@ -247,7 +247,7 @@ class TestBucketedOptimizerRedistribution(unittest.TestCase):
         )
 
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "get_process_group_ranks",
             return_value=[3, 7],
         ):

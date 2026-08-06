@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
+from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
     assign_balanced_owners,
     BucketConfig,
 )

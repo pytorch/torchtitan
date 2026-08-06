@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Standalone bucketed Distributed Muon optimizer."""
+"""Muon compute placement and the internal DistributedMuon runtime."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
 
-from .bucketed_redistribution import (
+from .flex_optimizer_reshard import (
     _BucketedRedistributionRuntime,
     _build_owned_bucket_plans,
     _device_mesh_ranks,
@@ -33,24 +33,23 @@ from .bucketed_redistribution import (
 __all__ = ["BucketSpec", "assign_balanced_owners", "Owned"]
 
 
-_LAYOUT_FINGERPRINT_KEY = "_distributed_muon_layout_fingerprint"
-_LAYOUT_FINGERPRINT_VERSION = 1
-
-
 @dataclass(frozen=True, slots=True)
 class Owned:
-    """Require a complete matrix; sharded storage uses a ``BucketSpec`` owner."""
+    """Require complete 2D matrix compute.
 
-
-@dataclass(frozen=True, slots=True)
-class _PreparedParameterComputeView:
-    compute_view_key: tuple[Any, ...]
-    global_compute_shape: torch.Size
-    local_compute_tensor: Tensor
+    This is a Muon compute placement, not a DTensor storage placement.
+    Replicated storage computes locally; sharded storage uses the parameter's
+    mesh-local owner from ``BucketSpec.owner_rank_by_fqn``.
+    """
 
 
 class DistributedMuon(Optimizer):
-    """Internal runtime constructed through ``build_distributed_muon``."""
+    """Internal runtime constructed through ``build_distributed_muon``.
+
+    Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
+    are frozen after construction. Every configured parameter must have a
+    layout-compatible DTensor gradient before each rank enters ``step()``.
+    """
 
     def __init__(
         self,
@@ -492,6 +491,17 @@ class DistributedMuon(Optimizer):
         return compute_layout.global_compute_shape
 
 
+_LAYOUT_FINGERPRINT_KEY = "_distributed_muon_layout_fingerprint"
+_LAYOUT_FINGERPRINT_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedParameterComputeView:
+    compute_view_key: tuple[Any, ...]
+    global_compute_shape: torch.Size
+    local_compute_tensor: Tensor
+
+
 @dataclass(frozen=True, slots=True)
 class _ParameterComputeLayout:
     fqn: str
@@ -511,44 +521,6 @@ class _ResolvedComputePlacement:
     compute_locally: bool
 
 
-def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:
-    return (
-        tensor.data_ptr(),
-        tensor.storage_offset(),
-        tuple(tensor.shape),
-        tuple(tensor.stride()),
-        tensor.dtype,
-        tensor.device,
-    )
-
-
-def _has_replicated_storage(param: DTensor) -> bool:
-    return all(type(placement) is Replicate for placement in param.placements)
-
-
-def _has_dim0_sharded_storage(param: DTensor) -> bool:
-    has_shard = False
-    for placement in param.placements:
-        # FSDP2 emits _StridedShard when a later TP/EP axis already shards
-        # this dimension. Keep the allowlist exact so new placements fail closed.
-        if type(placement) in (Shard, _StridedShard):
-            shard = cast(Shard | _StridedShard, placement)
-            if shard.dim % param.ndim != 0:
-                return False
-            has_shard = True
-        elif type(placement) is not Replicate:
-            return False
-    return has_shard
-
-
-def _has_owned_sharded_storage(param: DTensor) -> bool:
-    return (
-        param.device_mesh.ndim == 1
-        and len(param.placements) == 1
-        and type(param.placements[0]) is Shard
-    )
-
-
 def _resolve_compute_placement(
     fqn: str,
     param: DTensor,
@@ -556,6 +528,15 @@ def _resolve_compute_placement(
     local_compute_tensor: Tensor,
     compute_placement: object,
 ) -> _ResolvedComputePlacement:
+    """Validate and canonicalize one storage-to-compute transition.
+
+    ``Owned`` accepts a 2D matrix stored as exact ``Shard`` on a 1D mesh and
+    redistributes it to its configured owner. ``Shard(0)`` accepts matrix
+    batches whose storage shards keep each matrix whole. ``Replicate`` accepts
+    fully replicated storage. Replicated storage computes locally under every
+    compatible declaration, including when a size-one mesh axis has normalized
+    sharded storage to replication.
+    """
     local = param.to_local()
     if torch.is_complex(param) or param.ndim < 2 or not local.is_contiguous():
         raise ValueError(f"Muon parameter {fqn!r} has unsupported shape or storage")
@@ -603,6 +584,33 @@ def _resolve_compute_placement(
     raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
 
 
+def _has_replicated_storage(param: DTensor) -> bool:
+    return all(type(placement) is Replicate for placement in param.placements)
+
+
+def _has_dim0_sharded_storage(param: DTensor) -> bool:
+    has_shard = False
+    for placement in param.placements:
+        # FSDP2 emits _StridedShard when a later TP/EP axis already shards
+        # this dimension. Keep the allowlist exact so new placements fail closed.
+        if type(placement) in (Shard, _StridedShard):
+            shard = cast(Shard | _StridedShard, placement)
+            if shard.dim % param.ndim != 0:
+                return False
+            has_shard = True
+        elif type(placement) is not Replicate:
+            return False
+    return has_shard
+
+
+def _has_owned_sharded_storage(param: DTensor) -> bool:
+    return (
+        param.device_mesh.ndim == 1
+        and len(param.placements) == 1
+        and type(param.placements[0]) is Shard
+    )
+
+
 def _normalize_dim(dim: int, ndim: int) -> int:
     normalized = dim if dim >= 0 else dim + ndim
     if normalized < 0 or normalized >= ndim:
@@ -610,40 +618,19 @@ def _normalize_dim(dim: int, ndim: int) -> int:
     return normalized
 
 
+def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:
+    return (
+        tensor.data_ptr(),
+        tensor.storage_offset(),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.dtype,
+        tensor.device,
+    )
+
+
 # Keep the functional math aligned with torch.optim.Muon while owning the
 # implementation here so the distributed runtime has no Muon dependency.
-def _zeropower_via_newtonschulz(
-    update: Tensor,
-    *,
-    ns_coefficients: tuple[float, float, float],
-    ns_steps: int,
-    eps: float,
-) -> Tensor:
-    """Compute Muon's approximate polar factor without using torch.optim.Muon."""
-    a, b, c = ns_coefficients
-    result = update.to(dtype=torch.bfloat16, copy=True)
-    transposed = result.shape[-2] > result.shape[-1]
-    if transposed:
-        result = result.transpose(-2, -1)
-    result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
-
-    if result.ndim == 2:
-        for _ in range(ns_steps):
-            gram = result @ result.T
-            gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
-            result = torch.addmm(result, gram_update, result, beta=a)
-    else:
-        original_shape = result.shape
-        matrices = result.reshape(-1, *original_shape[-2:])
-        for _ in range(ns_steps):
-            gram = matrices @ matrices.transpose(-2, -1)
-            gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
-            matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
-        result = matrices.reshape(original_shape)
-
-    return result.transpose(-2, -1) if transposed else result
-
-
 def _adjust_learning_rate(
     lr: float,
     adjust_lr_fn: str | None,
@@ -677,3 +664,35 @@ def _compute_muon_update(
     )
     out.copy_(direction)
     return out
+
+
+def _zeropower_via_newtonschulz(
+    update: Tensor,
+    *,
+    ns_coefficients: tuple[float, float, float],
+    ns_steps: int,
+    eps: float,
+) -> Tensor:
+    """Compute Muon's approximate polar factor without using torch.optim.Muon."""
+    a, b, c = ns_coefficients
+    result = update.to(dtype=torch.bfloat16, copy=True)
+    transposed = result.shape[-2] > result.shape[-1]
+    if transposed:
+        result = result.transpose(-2, -1)
+    result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
+
+    if result.ndim == 2:
+        for _ in range(ns_steps):
+            gram = result @ result.T
+            gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+            result = torch.addmm(result, gram_update, result, beta=a)
+    else:
+        original_shape = result.shape
+        matrices = result.reshape(-1, *original_shape[-2:])
+        for _ in range(ns_steps):
+            gram = matrices @ matrices.transpose(-2, -1)
+            gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+            matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
+        result = matrices.reshape(original_shape)
+
+    return result.transpose(-2, -1) if transposed else result
