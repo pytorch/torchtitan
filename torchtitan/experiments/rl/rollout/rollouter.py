@@ -29,11 +29,11 @@ from torchtitan.experiments.rl.types import RolloutTurnID
 if TYPE_CHECKING:
     from renderers import Renderer
 
-    from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
-    from torchtitan.experiments.rl.renderer import RendererConfig
-
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
+
+    from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
+    from torchtitan.experiments.rl.renderer import RendererConfig
 
 
 logger = logging.getLogger(__name__)
