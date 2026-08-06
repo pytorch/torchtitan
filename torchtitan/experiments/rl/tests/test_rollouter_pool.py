@@ -9,8 +9,6 @@
 import asyncio
 from types import SimpleNamespace
 
-import pytest
-
 from torchtitan.experiments.rl.rollout import (
     rollouter as rollouter_module,
     RolloutGroup,
@@ -23,43 +21,23 @@ class _ChooseRunGroupEndpoint:
         self.calls: list[dict] = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
-        self.remote_done = asyncio.Event()
-        self.active: set[asyncio.Task[RolloutGroup]] = set()
 
     def choose(self, **kwargs) -> asyncio.Future[RolloutGroup]:
         self.calls.append(kwargs)
         self.started.set()
-        call = asyncio.create_task(self._execute(kwargs))
-        self.active.add(call)
-        call.add_done_callback(self.active.discard)
-        return asyncio.shield(call)
+        return asyncio.create_task(self._execute(kwargs))
 
     async def _execute(self, kwargs) -> RolloutGroup:
         await self.release.wait()
-        self.remote_done.set()
         return RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
-
-    async def drain(self) -> None:
-        if self.active:
-            await asyncio.gather(*self.active)
-
-
-class _ShutdownEndpoint:
-    def __init__(self) -> None:
-        self.called = False
-
-    async def call(self) -> None:
-        self.called = True
 
 
 class _WorkerActorMesh:
     def __init__(self) -> None:
         self.run_group = _ChooseRunGroupEndpoint()
-        self.shutdown = _ShutdownEndpoint()
         self.stopped = False
 
     async def stop(self) -> None:
-        await self.run_group.drain()
         self.stopped = True
 
 
@@ -74,6 +52,7 @@ class _WorkerMesh:
         return self.actor_mesh
 
     async def stop(self) -> None:
+        await self.actor_mesh.stop()
         self.stopped = True
 
 
@@ -110,7 +89,7 @@ async def _setup(
     return worker_mesh
 
 
-def test_worker_mesh_spawns_on_controller_host(monkeypatch) -> None:
+def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
     async def run() -> None:
         worker_mesh = _WorkerMesh(_WorkerActorMesh())
         host = _ControllerHost(worker_mesh)
@@ -120,16 +99,6 @@ def test_worker_mesh_spawns_on_controller_host(monkeypatch) -> None:
         await rollouter.setup_async()
 
         assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
-        await rollouter.close()
-
-    asyncio.run(run())
-
-
-def test_setup_passes_rollouter_config(monkeypatch) -> None:
-    async def run() -> None:
-        rollouter = _rollouter_without_datasets()
-        worker_mesh = await _setup(rollouter, _WorkerActorMesh(), monkeypatch)
-
         args, kwargs = worker_mesh.spawn_args
         assert args[0] == "rollout_worker"
         assert args[1].__name__ == "RolloutWorkerActor"
@@ -138,7 +107,6 @@ def test_setup_passes_rollouter_config(monkeypatch) -> None:
             "num_threads": 2,
         }
         await rollouter.close()
-        assert worker_mesh.actor_mesh.shutdown.called
         assert worker_mesh.actor_mesh.stopped
         assert worker_mesh.stopped
 
@@ -176,44 +144,6 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         actor_mesh.run_group.release.set()
         assert (await dispatch).group_id == 1
         await rollouter.close()
-        assert actor_mesh.shutdown.called
         assert actor_mesh.stopped
-
-    asyncio.run(run())
-
-
-def test_close_drains_rpc_after_dispatch_cancellation(monkeypatch) -> None:
-    async def run() -> None:
-        actor_mesh = _WorkerActorMesh()
-        rollouter = _rollouter_without_datasets()
-        await _setup(rollouter, actor_mesh, monkeypatch)
-
-        dispatch = asyncio.create_task(
-            rollouter.run_group_rollouts(
-                generate_fn="generate_fn",
-                sample="sample",
-                group_id=1,
-                group_size=1,
-                sampling="sampling",
-                renderer="renderer",
-            )
-        )
-        await actor_mesh.run_group.started.wait()
-        dispatch.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await dispatch
-        assert len(actor_mesh.run_group.active) == 1
-
-        close = asyncio.create_task(rollouter.close())
-        await asyncio.sleep(0)
-        assert not close.done()
-        assert actor_mesh.shutdown.called
-        assert not actor_mesh.stopped
-
-        actor_mesh.run_group.release.set()
-        await close
-        assert actor_mesh.run_group.remote_done.is_set()
-        assert actor_mesh.stopped
-        assert rollouter._worker_mesh is None
 
     asyncio.run(run())

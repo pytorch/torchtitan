@@ -519,6 +519,8 @@ class Controller(Configurable):
         generation metrics with `metrics_prefix` and pinning sticky routing on `routing_session_id` (a sample's
         turns reuse one generator's prefix KV)."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
+        # Capture only the Monarch actor reference, avoiding serialization of the entire controller in GenerateFn.
+        generator_router = self.generator_router
 
         @sl.log_trace_span("generate")
         async def generate(
@@ -528,7 +530,7 @@ class Controller(Configurable):
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            return await self.generator_router.generate.call_one(
+            return await generator_router.generate.call_one(
                 prompt_token_ids,
                 request_id=request_id,
                 routing_session_id=routing_session_id,
@@ -820,10 +822,11 @@ class Controller(Configurable):
             maxsize=1
         )
 
+        # rollout_loop
         generate_fn = self._make_generate_fn(metrics_prefix="generator")
 
-        # One controller dispatch task per active buffer slot lets generation fill
-        # the whole windowed FIFO range, including every slot during cold start.
+        # One rollout worker per active buffer slot: lets generation fill the whole windowed FIFO range,
+        # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
         # TODO: support warm start
         rollout_tasks = [
             asyncio.create_task(
@@ -963,7 +966,7 @@ class Controller(Configurable):
         while True:
             work = await group_buffer.claim_next()
             if work is None:  # group_buffer closed/shutdown signal
-                logger.info("Buffer closed; rollout dispatch loop stopping")
+                logger.info("Buffer closed; rollout worker stopping")
                 return
             try:
                 with sl.log_trace_span("rollout_group"):

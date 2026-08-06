@@ -12,10 +12,7 @@ from types import SimpleNamespace
 from torchtitan.experiments.rl.actors.generator import SamplingConfig
 from torchtitan.experiments.rl.environment.token import TokenEnvOutput
 from torchtitan.experiments.rl.rollout import RolloutStatus
-from torchtitan.experiments.rl.rollout.rollouter import (
-    RolloutWorker,
-    RolloutWorkerActor,
-)
+from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rubrics import RubricOutput
 from torchtitan.experiments.rl.types import Completion
 
@@ -121,29 +118,23 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             token_env=token_env_config,
             advantage=_Config(_AdvantageEstimator()),
         )
-        worker = RolloutWorkerActor(
-            rollouter_config=rollouter_config,
-            num_threads=1,
+        worker = rollouter_config.worker_cls(config=rollouter_config)
+        group = await worker.run_group(
+            generate_fn=generate_fn,
+            sample="sample",
+            group_id=7,
+            group_size=2,
+            sampling=SamplingConfig(seed=11),
+            renderer="renderer",
         )
-        try:
-            group = await worker._run_group(
-                generate_fn=generate_fn,
-                sample="sample",
-                group_id=7,
-                group_size=2,
-                sampling=SamplingConfig(seed=11),
-                renderer="renderer",
-            )
-        finally:
-            await worker._shutdown()
 
         assert group.group_id == 7
-        assert isinstance(worker._worker, _CustomWorker)
-        assert isinstance(worker._worker.rubric, _Rubric)
-        assert isinstance(worker._worker.advantage_estimator, _AdvantageEstimator)
-        assert worker._worker.custom_setting == "custom"
-        assert worker._worker.make_env_group_called
-        assert worker._worker.score_group_called
+        assert isinstance(worker, _CustomWorker)
+        assert isinstance(worker.rubric, _Rubric)
+        assert isinstance(worker.advantage_estimator, _AdvantageEstimator)
+        assert worker.custom_setting == "custom"
+        assert worker.make_env_group_called
+        assert worker.score_group_called
         assert [rollout.reward for rollout in group.rollouts] == [1.0, 2.0]
         assert [rollout.advantage for rollout in group.rollouts] == [10.0, 20.0]
         assert all(env.closed for env in token_env_config.envs)

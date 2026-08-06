@@ -41,8 +41,7 @@ class AlphabetSortRollouter(Rollouter):
                         MarcChardin
                         </combined_alphabetical_sorted>          # reward 1.0
 
-    This class supplies task configuration. ``Rollouter`` owns dataset iteration
-    and worker dispatch; each worker builds the configured env and rubric.
+    Pure config — `make_env_group`, `get_*_sample`, and `score_group` are inherited from `Rollouter`.
     """
 
     @dataclass(kw_only=True, slots=True)

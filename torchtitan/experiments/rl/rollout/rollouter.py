@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from monarch.actor import Actor, endpoint, ProcMesh, this_host
+from monarch.actor import ProcMesh, this_host
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
@@ -30,8 +29,11 @@ from torchtitan.experiments.rl.types import RolloutTurnID
 if TYPE_CHECKING:
     from renderers import Renderer
 
+    from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
+
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
+
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,9 @@ class Rollouter(Configurable):
 
     async def setup_async(self) -> None:
         """Spawn the owned worker proc mesh and actor pool."""
+        # Import lazily to avoid a circular dependency through Rollouter.Config.
+        from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
+
         if self._worker_mesh is not None or self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 
@@ -149,20 +154,12 @@ class Rollouter(Configurable):
         )
 
     async def close(self) -> None:
-        """Shut down worker resources and stop the owned actor and proc meshes."""
-        worker_actors = self._worker_actors
+        """Stop the owned rollout worker proc mesh."""
         worker_mesh = self._worker_mesh
         self._worker_actors = None
         self._worker_mesh = None
-        try:
-            if worker_actors is not None:
-                try:
-                    await worker_actors.shutdown.call()
-                finally:
-                    await worker_actors.stop()
-        finally:
-            if worker_mesh is not None:
-                await worker_mesh.stop()
+        if worker_mesh is not None:
+            await worker_mesh.stop()
 
     async def sync_log_step(self, step: int) -> None:
         """Propagate the controller log step to every rollout worker."""
@@ -187,9 +184,6 @@ class Rollouter(Configurable):
 
         Configure `worker_cls` to customize group execution, or override this method
         to use a different execution strategy.
-
-        The generate function and renderer are sent to the selected worker process
-        and must therefore be serializable by Monarch.
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
@@ -431,70 +425,3 @@ class RolloutWorker:
             status=status,
             turns=turns,
         )
-
-
-class RolloutWorkerActor(Actor):
-    """Hosts a rollout worker in one CPU process."""
-
-    def __init__(
-        self,
-        *,
-        rollouter_config: Rollouter.Config,
-        num_threads: int,
-    ) -> None:
-        self._thread_pool = ThreadPoolExecutor(max_workers=num_threads)
-        asyncio.get_running_loop().set_default_executor(self._thread_pool)
-        self._worker: RolloutWorker = rollouter_config.worker_cls(
-            config=rollouter_config
-        )
-
-    async def _run_group(
-        self,
-        *,
-        generate_fn: Any,
-        sample: object,
-        group_id: int,
-        group_size: int,
-        sampling: Any,
-        renderer: Renderer,
-    ) -> RolloutGroup:
-        return await self._worker.run_group(
-            generate_fn=generate_fn,
-            sample=sample,
-            group_id=group_id,
-            group_size=group_size,
-            sampling=sampling,
-            renderer=renderer,
-        )
-
-    @endpoint
-    async def run_group(
-        self,
-        *,
-        generate_fn: Any,
-        sample: object,
-        group_id: int,
-        group_size: int,
-        sampling: Any,
-        renderer: Any,
-    ) -> RolloutGroup:
-        return await self._run_group(
-            generate_fn=generate_fn,
-            sample=sample,
-            group_id=group_id,
-            group_size=group_size,
-            sampling=sampling,
-            renderer=renderer,
-        )
-
-    async def _shutdown(self) -> None:
-        self._thread_pool.shutdown(wait=True)
-
-    @endpoint
-    async def shutdown(self) -> None:
-        """Release the actor's thread pool before mesh teardown."""
-        await self._shutdown()
-
-    @endpoint
-    async def sync_log_step(self, step: int) -> None:
-        sl.set_step(step)
