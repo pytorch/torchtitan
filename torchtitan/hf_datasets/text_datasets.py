@@ -160,7 +160,10 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     ]
 
                     input = x[:-1]
-                    label = x[1:]
+                    label = x[1:].clone()
+                    # Mask EOS tokens in the label to avoid predicting from
+                    # next-document context.
+                    label[input == self._tokenizer.eos_id] = IGNORE_INDEX
                     positions = pos[:-1]
                     yield {"input": input, "positions": positions}, label
 
