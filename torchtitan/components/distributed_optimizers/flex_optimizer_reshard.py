@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Private bucketed storage-to-compute runtime for DistributedMuon."""
+"""Public bucket contracts and private resharding for distributed optimizers."""
 
 from __future__ import annotations
 
@@ -88,10 +88,44 @@ class BucketSpec:
         object.__setattr__(self, "owner_rank_by_fqn", dict(self.owner_rank_by_fqn))
 
 
+def assign_balanced_owners(
+    bucket_fqns: Sequence[Sequence[str]],
+    memory_estimate_by_fqn: Mapping[str, int],
+    *,
+    num_ranks: int,
+    initial_memory_by_rank: Sequence[int] | None = None,
+) -> tuple[dict[str, int], ...]:
+    """Greedily balance selected FQNs across group-local rank indices.
+
+    Only FQNs present in ``memory_estimate_by_fqn`` receive owners. One running
+    load vector balances cumulatively across buckets; FQN and rank ordering
+    make equal-load assignments deterministic.
+    """
+    initial_memory_by_rank = initial_memory_by_rank or (0,) * num_ranks
+    rank_loads = list(zip(initial_memory_by_rank, range(num_ranks), strict=True))
+    heapq.heapify(rank_loads)
+    owners_by_bucket = []
+    for bucket in bucket_fqns:
+        bucket_owners = {}
+        candidates = (fqn for fqn in bucket if fqn in memory_estimate_by_fqn)
+        for fqn in sorted(
+            candidates, key=lambda name: (-memory_estimate_by_fqn[name], name)
+        ):
+            load, rank = heapq.heappop(rank_loads)
+            bucket_owners[fqn] = rank
+            heapq.heappush(rank_loads, (load + memory_estimate_by_fqn[fqn], rank))
+        owners_by_bucket.append(bucket_owners)
+    return tuple(owners_by_bucket)
+
+
+_ItemT = TypeVar("_ItemT")
+
+
 def _bind_bucket_configs(
     configs: Sequence[BucketConfig],
     storage_by_fqn: Mapping[str, DTensor],
 ) -> tuple[BucketSpec, ...]:
+    """Bind static configs to storage meshes after model parallelization."""
     specs = []
     for config in configs:
         candidates = tuple(config.owner_rank_by_fqn) or tuple(
@@ -114,34 +148,6 @@ def _bind_bucket_configs(
             )
         specs.append(config.bind(mesh))
     return tuple(specs)
-
-
-def assign_balanced_owners(
-    bucket_fqns: Sequence[Sequence[str]],
-    memory_estimate_by_fqn: Mapping[str, int],
-    *,
-    num_ranks: int,
-    initial_memory_by_rank: Sequence[int] | None = None,
-) -> tuple[dict[str, int], ...]:
-    """Greedily balance selected parameters across group-local ranks."""
-    initial_memory_by_rank = initial_memory_by_rank or (0,) * num_ranks
-    rank_loads = list(zip(initial_memory_by_rank, range(num_ranks), strict=True))
-    heapq.heapify(rank_loads)
-    owners_by_bucket = []
-    for bucket in bucket_fqns:
-        bucket_owners = {}
-        candidates = (fqn for fqn in bucket if fqn in memory_estimate_by_fqn)
-        for fqn in sorted(
-            candidates, key=lambda name: (-memory_estimate_by_fqn[name], name)
-        ):
-            load, rank = heapq.heappop(rank_loads)
-            bucket_owners[fqn] = rank
-            heapq.heappush(rank_loads, (load + memory_estimate_by_fqn[fqn], rank))
-        owners_by_bucket.append(bucket_owners)
-    return tuple(owners_by_bucket)
-
-
-_ItemT = TypeVar("_ItemT")
 
 
 def _resolve_buckets(
@@ -364,6 +370,13 @@ class _LocalSchedule:
 _CommunicationSchedule = _PackedAllToAllSchedule | _LocalSchedule
 
 
+@dataclass(frozen=True, slots=True)
+class _RedistributionGroup:
+    process_group: dist.ProcessGroup
+    participants: tuple[int, ...]
+    local_participant: int
+
+
 @dataclass(slots=True)
 class _BucketPlan(Generic[_ItemT]):
     local_items: tuple[_ItemT, ...]
@@ -374,13 +387,6 @@ class _BucketPlan(Generic[_ItemT]):
     compute_to_storage_schedule: _CommunicationSchedule
     dtype: torch.dtype
     device: torch.device
-
-
-@dataclass(frozen=True, slots=True)
-class _RedistributionGroup:
-    process_group: dist.ProcessGroup
-    participants: tuple[int, ...]
-    local_participant: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,8 +491,11 @@ class _CommunicationContext:
 class _BucketedRedistributionRuntime(Generic[_ItemT]):
     """Execute bucket plans with one-bucket-ahead communication prefetch.
 
-    Callbacks run under the stream selected by the runtime. They must enqueue
-    work without synchronizing or calling ``Tensor.record_stream()``.
+    ``prepare`` writes a Muon input into runtime-owned scratch, ``compute``
+    updates its runtime-owned input in place, and ``finalize`` consumes a
+    runtime-owned result before reuse. Callbacks run under the stream selected
+    by the runtime and must not retain tensors, synchronize, or call
+    ``Tensor.record_stream()``.
     """
 
     def __init__(self, device: torch.device) -> None:
@@ -778,6 +787,7 @@ def _lower_packed_all_to_all(
     process_group: dist.ProcessGroup,
     local_participant: int,
 ) -> _PackedAllToAllSchedule:
+    """Lower nonempty plans with one shared participant order to packed A2A."""
     participants = redistribution_plans[0].participants
     if storage_to_compute:
         routes_by_parameter = tuple(
@@ -1045,6 +1055,11 @@ def _validate_bucket_plans_across_ranks(
     *,
     item_signature: Callable[[_ItemT], tuple[Any, ...]],
 ) -> None:
+    """Collectively verify rank-stable plans before runtime communication.
+
+    Every rank must provide the same plan count and process-group order so all
+    workers enter these validation collectives in the same sequence.
+    """
     for plan in plans:
         description = (
             str(plan.dtype),
