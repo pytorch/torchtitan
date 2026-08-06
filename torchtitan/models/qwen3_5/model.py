@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -737,6 +738,12 @@ class Qwen35Model(Decoder):
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
+    def multimodal_context(self) -> contextlib.AbstractContextManager[None]:
+        """Use local DP typechecking while preparing multimodal inputs."""
+        if get_spmd_backend() == "spmd_types":
+            return spmd.set_current_mesh(local_axes=("dp",))
+        return contextlib.nullcontext()
+
     def get_attention_masks(
         self,
         positions: torch.Tensor,
@@ -814,10 +821,6 @@ class Qwen35Model(Decoder):
 
         return vision_embeds, num_tokens_per_item
 
-    @spmd.local_map(
-        in_types=(None, {"dp": spmd.S(0), "tp": spmd.R}),
-        out_types={"dp": spmd.S(0), "tp": spmd.R},
-    )
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -887,26 +890,32 @@ class Qwen35Model(Decoder):
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        if get_spmd_backend() == "spmd_types":
-            annotate_multimodal_input_spmd_types(
-                mrope_positions=mrope_positions,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                grid_thw=grid_thw,
-                grid_thw_videos=grid_thw_videos,
-            )
+        with self.multimodal_context():
+            if get_spmd_backend() == "spmd_types":
+                annotate_multimodal_input_spmd_types(
+                    mrope_positions=mrope_positions,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                )
 
-        if self.tok_embeddings is not None:
-            x = self._prepare_multimodal_embeds(
-                tokens,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                grid_thw=grid_thw,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
-            )
-        else:
-            x = tokens
+            if self.tok_embeddings is not None:
+                x = self._prepare_multimodal_embeds(
+                    tokens,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                )
+            else:
+                x = tokens
+
+        if get_spmd_backend() == "spmd_types":
+            # The scatter restores a token-aligned tensor, so text-model DP
+            # resumes as global batch sharding after the multimodal region.
+            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions

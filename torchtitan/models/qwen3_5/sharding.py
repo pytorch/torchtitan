@@ -22,7 +22,6 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_dense_mesh
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -69,17 +68,16 @@ def annotate_multimodal_input_spmd_types(
         MeshAxisName.TP: spmd.I,
     }
 
-    with set_current_spmd_mesh(spmd_dense_mesh()):
-        if mrope_positions is not None:
-            spmd.assert_type(mrope_positions, token_type)
-        for tensor in (
-            pixel_values,
-            pixel_values_videos,
-            grid_thw,
-            grid_thw_videos,
-        ):
-            if tensor is not None:
-                spmd.assert_type(tensor, multimodal_type)
+    if mrope_positions is not None:
+        spmd.assert_type(mrope_positions, token_type)
+    for tensor in (
+        pixel_values,
+        pixel_values_videos,
+        grid_thw,
+        grid_thw_videos,
+    ):
+        if tensor is not None:
+            spmd.assert_type(tensor, multimodal_type)
 
 
 def _replicate_norm() -> ShardingConfig:
