@@ -121,37 +121,47 @@ class TestKimiK25MuonConfig(unittest.TestCase):
         bucket_configs = optimizer_config.optimizer_init_kwargs["DistributedMuon"][
             "bucket_configs"
         ]
-        self.assertEqual(len(bucket_configs), 61)
-        for layer_id, bucket in enumerate(bucket_configs):
-            prefix = f"layers.{layer_id}"
-            expected = tuple(
-                f"{prefix}.attention.{projection}.weight"
-                for projection in ("wq_a", "wq_b", "wkv_a", "wkv_b", "wo")
+        bucket_layer_ids = ((0,),) + tuple(
+            (first_layer_id, first_layer_id + 1) for first_layer_id in range(1, 61, 2)
+        )
+        self.assertEqual(len(bucket_configs), 31)
+        for layer_ids, bucket in zip(bucket_layer_ids, bucket_configs, strict=True):
+            expected = ()
+            expected_owners = set()
+            for layer_id in layer_ids:
+                prefix = f"layers.{layer_id}"
+                attention_fqns = tuple(
+                    f"{prefix}.attention.{projection}.weight"
+                    for projection in ("wq_a", "wq_b", "wkv_a", "wkv_b", "wo")
+                )
+                expected += attention_fqns
+                expected_owners.update(
+                    f"{prefix}.attention.{projection}.weight"
+                    for projection in ("wq_a", "wkv_a", "wo")
+                )
+                if not layer_id:
+                    dense_fqns = tuple(
+                        f"{prefix}.feed_forward.{projection}.weight"
+                        for projection in ("w1", "w2", "w3")
+                    )
+                    expected += dense_fqns
+                    expected_owners.update(dense_fqns)
+                else:
+                    expert_fqns = tuple(
+                        f"{prefix}.moe.routed_experts.inner_experts.{projection}"
+                        for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
+                    )
+                    router_fqn = f"{prefix}.moe.router.gate.weight"
+                    shared_fqns = tuple(
+                        f"{prefix}.moe.shared_experts.{projection}.weight"
+                        for projection in ("w1", "w2", "w3")
+                    )
+                    expected += expert_fqns + (router_fqn,) + shared_fqns
+                    expected_owners.update((router_fqn, *shared_fqns))
+            self.assertEqual(
+                bucket.name,
+                "layers." + "-".join(map(str, layer_ids)),
             )
-            expected_owners = {
-                f"{prefix}.attention.{projection}.weight"
-                for projection in ("wq_a", "wkv_a", "wo")
-            }
-            if not layer_id:
-                dense_fqns = tuple(
-                    f"{prefix}.feed_forward.{projection}.weight"
-                    for projection in ("w1", "w2", "w3")
-                )
-                expected += dense_fqns
-                expected_owners.update(dense_fqns)
-            else:
-                expected += tuple(
-                    f"{prefix}.moe.routed_experts.inner_experts.{projection}"
-                    for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
-                )
-                router_fqn = f"{prefix}.moe.router.gate.weight"
-                shared_fqns = tuple(
-                    f"{prefix}.moe.shared_experts.{projection}.weight"
-                    for projection in ("w1", "w2", "w3")
-                )
-                expected += (router_fqn,) + shared_fqns
-                expected_owners.update((router_fqn, *shared_fqns))
-            self.assertEqual(bucket.name, prefix)
             self.assertEqual(bucket.patterns, expected)
             self.assertEqual(bucket.mesh_axes, ("dp_shard",))
             self.assertEqual(

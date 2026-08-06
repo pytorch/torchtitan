@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass
 from unittest.mock import MagicMock, Mock, patch
 
@@ -13,6 +14,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
     _bind_bucket_configs,
+    _BucketedRedistributionRuntime,
     _build_owned_bucket_plans,
     _lower_packed_all_to_all,
     _MatrixBlock,
@@ -27,6 +29,88 @@ from torchtitan.components.distributed_optimizers.bucketed_redistribution import
 
 
 class TestBucketedOptimizerRedistribution(unittest.TestCase):
+    def test_runtime_enqueues_return_before_next_compute(self):
+        runtime = _BucketedRedistributionRuntime(torch.device("cuda"))
+        caller_stream = Mock()
+        context = Mock()
+        context.device_handle.current_stream.return_value = caller_stream
+        context.device_handle.stream.side_effect = lambda _stream: nullcontext()
+        context.device_handle.Event.side_effect = Mock
+        context.slots = (Mock(), Mock())
+        for slot in context.slots:
+            slot.communication_buffers.return_value = (object(), object())
+        runtime._context = context
+
+        plans = tuple(
+            Mock(redistributed_items=(object(),), local_items=()) for _ in range(3)
+        )
+        plan_names = {plan: f"bucket_{index}" for index, plan in enumerate(plans)}
+        events = []
+        for plan in plans:
+            plan.storage_to_compute_schedule.execute.side_effect = (
+                lambda *, _plan=plan, **_kwargs: events.append(
+                    ("gather", plan_names[_plan])
+                )
+            )
+            plan.compute_to_storage_schedule.execute.side_effect = (
+                lambda *, _plan=plan, **_kwargs: events.append(
+                    ("return", plan_names[_plan])
+                )
+            )
+
+        def compute_redistributed(work, *_args, **_kwargs):
+            events.append(("compute", plan_names[work.plan]))
+
+        original_release = runtime._release
+
+        def release(work, caller):
+            events.append(("release", plan_names[work.plan]))
+            original_release(work, caller)
+
+        with patch(
+            "torchtitan.components.distributed_optimizers."
+            "bucketed_redistribution._prepare_redistributed"
+        ), patch(
+            "torchtitan.components.distributed_optimizers."
+            "bucketed_redistribution._compute_redistributed",
+            side_effect=compute_redistributed,
+        ), patch(
+            "torchtitan.components.distributed_optimizers."
+            "bucketed_redistribution._finalize_redistributed"
+        ), patch.object(
+            runtime,
+            "_release",
+            side_effect=release,
+        ):
+            runtime.run(
+                plans,
+                local_tensor_spec=Mock(),
+                compute_shape=Mock(),
+                prepare=Mock(),
+                compute=Mock(),
+                finalize=Mock(),
+            )
+
+        self.assertEqual(
+            events,
+            [
+                ("gather", "bucket_0"),
+                ("compute", "bucket_0"),
+                ("gather", "bucket_1"),
+                ("return", "bucket_0"),
+                ("compute", "bucket_1"),
+                ("release", "bucket_0"),
+                ("gather", "bucket_2"),
+                ("return", "bucket_1"),
+                ("compute", "bucket_2"),
+                ("release", "bucket_1"),
+                ("return", "bucket_2"),
+                ("release", "bucket_2"),
+            ],
+        )
+        self.assertEqual(context.slots[0].communication_buffers.call_count, 2)
+        self.assertEqual(context.slots[1].communication_buffers.call_count, 1)
+
     def test_balanced_owner_assignment(self):
         self.assertEqual(
             assign_balanced_owners(

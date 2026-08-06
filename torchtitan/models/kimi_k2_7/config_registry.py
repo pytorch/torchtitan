@@ -164,6 +164,16 @@ def _kimi_k2_5_distributed_muon_optimizer(
         return fqns
 
     layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(n_layers))
+    # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
+    # collective launch overhead across pairs of MoE layers.
+    bucket_layer_ids = ((0,),) + tuple(
+        tuple(range(first_layer_id, min(first_layer_id + 2, n_layers)))
+        for first_layer_id in range(1, n_layers, 2)
+    )
+    bucket_fqns = tuple(
+        tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
+        for layer_ids in bucket_layer_ids
+    )
     owned_parameter_numel_by_suffix = {
         "attention.wq_a.weight": 1536 * 7168,
         "attention.wkv_a.weight": 576 * 7168,
@@ -177,7 +187,7 @@ def _kimi_k2_5_distributed_muon_optimizer(
         "moe.shared_experts.w3.weight": 2048 * 7168,
     }
     owner_rank_by_bucket = assign_balanced_owners(
-        layer_bucket_fqns,
+        bucket_fqns,
         {
             f"layers.{layer_id}.{suffix}": numel
             for layer_id, fqns in enumerate(layer_bucket_fqns)
@@ -188,13 +198,16 @@ def _kimi_k2_5_distributed_muon_optimizer(
     )
     bucket_configs = tuple(
         BucketConfig(
-            name=f"layers.{layer_id}",
+            name="layers." + "-".join(map(str, layer_ids)),
             patterns=fqns,
             owner_rank_by_fqn=owners,
             mesh_axes=("dp_shard",),
         )
-        for layer_id, (fqns, owners) in enumerate(
-            zip(layer_bucket_fqns, owner_rank_by_bucket, strict=True)
+        for layer_ids, fqns, owners in zip(
+            bucket_layer_ids,
+            bucket_fqns,
+            owner_rank_by_bucket,
+            strict=True,
         )
     )
     return OptimizersContainer.Config(

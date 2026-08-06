@@ -511,7 +511,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         caller = handle.current_stream(self._device)
         context.transfer_stream.wait_stream(caller)
 
-        pending: list[_BucketWork[_ItemT]] = []
+        previous: _BucketWork[_ItemT] | None = None
         redistributed_index = 0
         try:
             for plan in plans:
@@ -527,8 +527,21 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                             finalize=finalize,
                         )
                     continue
-                work = self._begin(
+
+                work = self._begin_communication(
                     plan,
+                    slot,
+                    context,
+                    prepare=prepare,
+                )
+                redistributed_index += 1
+                # Keep collective launches ahead of owner-dependent work:
+                # gather(current) -> return(previous) -> compute(current).
+                if previous is not None:
+                    self._complete(previous, context, finalize=finalize)
+
+                self._compute_bucket(
+                    work,
                     slot,
                     caller,
                     context,
@@ -538,15 +551,13 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                     compute=compute,
                     finalize=finalize,
                 )
-                redistributed_index += 1
-                pending.append(work)
-                if len(pending) == 2:
-                    oldest = pending.pop(0)
-                    self._complete(oldest, context, finalize=finalize)
-                    self._release(oldest, caller)
-            for work in pending:
-                self._complete(work, context, finalize=finalize)
-                self._release(work, caller)
+                if previous is not None:
+                    self._release(previous, caller)
+                previous = work
+
+            if previous is not None:
+                self._complete(previous, context, finalize=finalize)
+                self._release(previous, caller)
         except Exception:
             # Preserve allocator lifetime ordering for work already enqueued on
             # either stream. This is an error-path drain, not synchronization.
@@ -555,19 +566,12 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             raise
 
     @staticmethod
-    def _begin(
+    def _begin_communication(
         plan: _BucketPlan[_ItemT],
         slot: _BufferSlot,
-        caller_stream: torch.Stream,
         context: _CommunicationContext,
         *,
-        local_tensor_spec: Callable[
-            [_ItemT], tuple[torch.Size, torch.dtype, torch.device]
-        ],
-        compute_shape: Callable[[_ItemT], torch.Size],
         prepare: Callable[[_ItemT, Tensor], None],
-        compute: Callable[[_ItemT, Tensor], None],
-        finalize: Callable[[_ItemT, Tensor], None],
     ) -> _BucketWork[_ItemT]:
         handle = context.device_handle
         transfer = context.transfer_stream
@@ -581,10 +585,28 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             )
             work.forward_ready = handle.Event()
             work.forward_ready.record(transfer)
+        return work
 
+    @staticmethod
+    def _compute_bucket(
+        work: _BucketWork[_ItemT],
+        slot: _BufferSlot,
+        caller_stream: torch.Stream,
+        context: _CommunicationContext,
+        *,
+        local_tensor_spec: Callable[
+            [_ItemT], tuple[torch.Size, torch.dtype, torch.device]
+        ],
+        compute_shape: Callable[[_ItemT], torch.Size],
+        prepare: Callable[[_ItemT, Tensor], None],
+        compute: Callable[[_ItemT, Tensor], None],
+        finalize: Callable[[_ItemT, Tensor], None],
+    ) -> None:
+        assert work.forward_ready is not None
+        handle = context.device_handle
         with handle.stream(caller_stream):
             _BucketedRedistributionRuntime._compute_local(
-                plan,
+                work.plan,
                 slot,
                 local_tensor_spec=local_tensor_spec,
                 prepare=prepare,
@@ -600,7 +622,6 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             )
             work.compute_done = handle.Event()
             work.compute_done.record(caller_stream)
-        return work
 
     @staticmethod
     def _complete(
