@@ -812,8 +812,8 @@ def _lower_packed_all_to_all(
 
 
 def _device_mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
-    if mesh.ndim == 1:
-        return tuple(dist.get_process_group_ranks(mesh.get_group()))
+    # Process groups can canonicalize rank order, but DeviceMesh order defines
+    # which logical shard each global rank holds.
     return tuple(mesh.mesh.flatten().tolist())
 
 

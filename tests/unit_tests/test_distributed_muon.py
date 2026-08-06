@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -412,6 +412,80 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         self.assertIn("state.layers.0.local_blocks.momentum_buffer", flat_state)
 
     @with_comms
+    def test_flat_state_dict_loads_after_group_membership_changes(self):
+        values = {
+            "layers.0.a": torch.arange(12, device=self.device).reshape(4, 3).float(),
+            "layers.0.b": torch.arange(12, 24, device=self.device)
+            .reshape(4, 3)
+            .float(),
+        }
+
+        def build(names, compute_view=None):
+            parameters = [
+                torch.nn.Parameter(
+                    distribute_tensor(values[name].clone(), self.mesh, (Replicate(),))
+                )
+                for name in names
+            ]
+            optimizer = build_distributed_muon(
+                [
+                    {
+                        "params": parameters,
+                        "param_names": names,
+                        "compute_sharding": MuonComputeSharding(
+                            view_before_placement=compute_view,
+                            placement=Replicate(),
+                        ),
+                    }
+                ],
+                bucket_spec=[
+                    BucketSpec(
+                        patterns=("layers.0.*",),
+                        owner_rank_by_fqn={},
+                        mesh=self.mesh,
+                    )
+                ],
+                ns_steps=2,
+            )
+            return parameters, optimizer
+
+        source_parameters, source_optimizer = build(("layers.0.a", "layers.0.b"))
+        for parameter in source_parameters:
+            parameter.grad = distribute_tensor(
+                torch.ones_like(parameter.to_local()),
+                self.mesh,
+                (Replicate(),),
+            )
+        source_optimizer.step()
+        flat_state_dict = get_flat_optim_state_dict(source_optimizer)
+        self.assertIn(
+            "state.layers.0.a._distributed_muon_layout_fingerprint",
+            flat_state_dict,
+        )
+
+        target_parameters, target_optimizer = build(("layers.0.a",))
+        init_optim_state(target_optimizer)
+        load_flat_optim_state_dict(target_optimizer, flat_state_dict)
+        torch.testing.assert_close(
+            target_optimizer.state[target_parameters[0]]["momentum_buffer"].to_local(),
+            source_optimizer.state[source_parameters[0]]["momentum_buffer"].to_local(),
+        )
+
+        _, changed_layout_optimizer = build(
+            ("layers.0.a",),
+            BatchedMatrixComputeView(
+                num_matrices=2,
+                matrices_flattened_into_dim=0,
+            ),
+        )
+        init_optim_state(changed_layout_optimizer)
+        with self.assertRaisesRegex(ValueError, "compute layout"):
+            load_flat_optim_state_dict(
+                changed_layout_optimizer,
+                flat_state_dict,
+            )
+
+    @with_comms
     def test_constructor_rejects_storage_shards_that_split_matrices(self):
         parameter = self._parameter(
             torch.arange(36, device=self.device).reshape(12, 3).float()
@@ -732,6 +806,58 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                             )
                         ],
                     )
+
+    @with_comms
+    def test_step_rejects_gradient_with_reordered_mesh(self):
+        value = torch.arange(12, device=self.device).reshape(4, 3).float()
+        parameter = self._parameter(value)
+        optimizer = build_distributed_muon(
+            [
+                {
+                    "params": [parameter],
+                    "param_names": ["layers.0.weight"],
+                    "compute_sharding": MuonComputeSharding(placement=Owned()),
+                }
+            ],
+            bucket_spec=[
+                BucketSpec(
+                    patterns=("layers.0.*",),
+                    owner_rank_by_fqn={"layers.0.weight": 0},
+                    mesh=self.mesh,
+                )
+            ],
+            ns_steps=1,
+        )
+        reversed_mesh = DeviceMesh(
+            self.device_type,
+            torch.arange(self.world_size - 1, -1, -1),
+            mesh_dim_names=("dp_shard",),
+        )
+        self.assertEqual(
+            tuple(dist.get_process_group_ranks(reversed_mesh.get_group())),
+            tuple(dist.get_process_group_ranks(self.mesh.get_group())),
+        )
+        self.assertNotEqual(
+            tuple(reversed_mesh.mesh.flatten().tolist()),
+            tuple(self.mesh.mesh.flatten().tolist()),
+        )
+        parameter.grad = distribute_tensor(
+            value.flip(0).contiguous(), reversed_mesh, (Shard(0),)
+        )
+        parameter_before = parameter.to_local().clone()
+
+        with patch(
+            "torchtitan.components.distributed_optimizers.bucketed_redistribution."
+            "dist.all_to_all_single"
+        ) as collective:
+            with self.assertRaisesRegex(
+                RuntimeError, "gradient storage layout changed"
+            ):
+                optimizer.step()
+
+        collective.assert_not_called()
+        self.assertEqual(len(optimizer.state), 0)
+        torch.testing.assert_close(parameter.to_local(), parameter_before)
 
     @with_comms
     def test_step_matches_plain_muon_and_continues_from_state_dict(self):

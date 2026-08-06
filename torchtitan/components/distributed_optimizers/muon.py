@@ -127,13 +127,33 @@ class DistributedMuon(Optimizer):
             raise RuntimeError("DistributedMuon parameter groups are frozen")
         super().add_param_group(param_group)
 
+    def state_dict(self) -> dict[str, Any]:
+        state_dict = super().state_dict()
+        for saved_group, current_group in zip(
+            state_dict["param_groups"], self.param_groups, strict=True
+        ):
+            for param_id, fqn in zip(
+                saved_group["params"], current_group["param_names"], strict=True
+            ):
+                state_dict["state"].setdefault(param_id, {})[
+                    _LAYOUT_FINGERPRINT_KEY
+                ] = self._layout_fingerprints_by_fqn[fqn]
+        return state_dict
+
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         saved_groups = state_dict.get("param_groups", ())
-        if any(
-            saved.get(_LAYOUT_FINGERPRINT_KEY) != current[_LAYOUT_FINGERPRINT_KEY]
-            for saved, current in zip(saved_groups, self.param_groups, strict=True)
+        saved_state = state_dict.get("state", {})
+        for saved_group, current_group in zip(
+            saved_groups, self.param_groups, strict=True
         ):
-            raise ValueError("checkpoint changed DistributedMuon's compute layout")
+            for param_id, fqn in zip(
+                saved_group["params"], current_group["param_names"], strict=True
+            ):
+                fingerprint = saved_state.get(param_id, {}).get(_LAYOUT_FINGERPRINT_KEY)
+                if fingerprint != self._layout_fingerprints_by_fqn[fqn]:
+                    raise ValueError(
+                        "checkpoint changed DistributedMuon's compute layout"
+                    )
         super().load_state_dict(state_dict)
         self._validate_plan_across_ranks()
         self._first_step_validated = False
@@ -227,30 +247,23 @@ class DistributedMuon(Optimizer):
         self._parameter_compute_layouts = result.ordered_items
 
     def _set_checkpoint_layout_fingerprints(self) -> None:
-        layouts_by_fqn = {
-            layout.fqn: layout for layout in self._parameter_compute_layouts
-        }
-        for group in self.param_groups:
-            entries = []
-            for fqn in group["param_names"]:
-                layout = layouts_by_fqn[fqn]
-                entries.append(
-                    (
-                        fqn,
-                        tuple(layout.param.shape),
-                        layout.compute_view_key,
-                        tuple(layout.global_compute_shape),
-                        _compute_placement_key(
-                            layout.compute_placement,
-                            len(layout.global_compute_shape),
-                        ),
-                    )
-                )
-            # Flat optimizer checkpoints repeat group fields for every FQN, so
-            # store a fixed-size digest rather than the full group descriptor.
-            group[_LAYOUT_FINGERPRINT_KEY] = (
+        self._layout_fingerprints_by_fqn = {}
+        for layout in self._parameter_compute_layouts:
+            descriptor = (
+                layout.fqn,
+                tuple(layout.param.shape),
+                layout.compute_view_key,
+                tuple(layout.global_compute_shape),
+                _compute_placement_key(
+                    layout.compute_placement,
+                    len(layout.global_compute_shape),
+                ),
+            )
+            self._layout_fingerprints_by_fqn[layout.fqn] = (
                 _LAYOUT_FINGERPRINT_VERSION,
-                hashlib.sha256(repr(tuple(entries)).encode()).hexdigest(),
+                # Optimizer.load_state_dict rebuilds iterable state values via
+                # type(value)(generator), which round-trips bytes but not strings.
+                hashlib.sha256(repr(descriptor).encode()).digest(),
             )
 
     def _validate_plan_across_ranks(self) -> None:
@@ -375,7 +388,16 @@ class DistributedMuon(Optimizer):
         return grad
 
     def _validate_momentum(self, compute_layout: _ParameterComputeLayout) -> None:
-        momentum = self.state.get(compute_layout.param, {}).get("momentum_buffer")
+        state = self.state.get(compute_layout.param, {})
+        fingerprint = state.get(_LAYOUT_FINGERPRINT_KEY)
+        if (
+            fingerprint is not None
+            and fingerprint != self._layout_fingerprints_by_fqn[compute_layout.fqn]
+        ):
+            raise RuntimeError(
+                f"optimizer state layout changed for {compute_layout.fqn!r}"
+            )
+        momentum = state.get("momentum_buffer")
         if momentum is None:
             return
         if not isinstance(momentum, DTensor) or not self._has_storage_layout(
@@ -389,6 +411,9 @@ class DistributedMuon(Optimizer):
         self, compute_layout: _ParameterComputeLayout, grad: DTensor
     ) -> DTensor:
         state = self.state[compute_layout.param]
+        state[_LAYOUT_FINGERPRINT_KEY] = self._layout_fingerprints_by_fqn[
+            compute_layout.fqn
+        ]
         if "momentum_buffer" not in state:
             state["momentum_buffer"] = torch.zeros_like(
                 grad, memory_format=torch.preserve_format
