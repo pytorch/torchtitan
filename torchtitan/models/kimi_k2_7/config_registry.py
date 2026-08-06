@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Mapping
+
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
@@ -55,12 +57,23 @@ def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
     )
 
 
-def _kimi_k2_5_distributed_muon_optimizer(
+def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
+    return MuonComputeSharding(
+        view_before_placement=BatchedMatrixComputeView(
+            num_matrices=num_heads,
+            matrices_flattened_into_dim=0,
+        ),
+        placement=Shard(0),
+    )
+
+
+def _kimi_text_distributed_muon_optimizer(
     *,
-    n_layers: int,
-    num_heads: int,
-    owner_group_size: int,
+    num_layers: int,
+    num_owner_ranks: int,
     lr: float,
+    attention_shardings: Mapping[str, MuonComputeSharding],
+    owned_parameter_numel_by_suffix: Mapping[str, int],
 ) -> OptimizersContainer.Config:
     muon_kwargs = {
         "lr": lr,
@@ -76,20 +89,6 @@ def _kimi_k2_5_distributed_muon_optimizer(
         "betas": (0.9, 0.95),
         "eps": 1e-8,
         "weight_decay": 0.1,
-    }
-    per_head = MuonComputeSharding(
-        view_before_placement=BatchedMatrixComputeView(
-            num_matrices=num_heads,
-            matrices_flattened_into_dim=0,
-        ),
-        placement=Shard(0),
-    )
-    attention_shardings = {
-        "wq_a": MuonComputeSharding(placement=Owned()),
-        "wq_b": per_head,
-        "wkv_a": MuonComputeSharding(placement=Owned()),
-        "wkv_b": per_head,
-        "wo": MuonComputeSharding(placement=Owned()),
     }
     expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
     param_groups = [
@@ -163,29 +162,17 @@ def _kimi_k2_5_distributed_muon_optimizer(
             )
         return fqns
 
-    layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(n_layers))
+    layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(num_layers))
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
     # collective launch overhead across pairs of MoE layers.
     bucket_layer_ids = ((0,),) + tuple(
-        tuple(range(first_layer_id, min(first_layer_id + 2, n_layers)))
-        for first_layer_id in range(1, n_layers, 2)
+        tuple(range(first_layer_id, min(first_layer_id + 2, num_layers)))
+        for first_layer_id in range(1, num_layers, 2)
     )
     bucket_fqns = tuple(
         tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
         for layer_ids in bucket_layer_ids
     )
-    owned_parameter_numel_by_suffix = {
-        "attention.wq_a.weight": 1536 * 7168,
-        "attention.wkv_a.weight": 576 * 7168,
-        "attention.wo.weight": 7168 * 8192,
-        "feed_forward.w1.weight": 18432 * 7168,
-        "feed_forward.w2.weight": 7168 * 18432,
-        "feed_forward.w3.weight": 18432 * 7168,
-        "moe.router.gate.weight": 384 * 7168,
-        "moe.shared_experts.w1.weight": 2048 * 7168,
-        "moe.shared_experts.w2.weight": 7168 * 2048,
-        "moe.shared_experts.w3.weight": 2048 * 7168,
-    }
     owner_rank_by_bucket = assign_balanced_owners(
         bucket_fqns,
         {
@@ -194,7 +181,7 @@ def _kimi_k2_5_distributed_muon_optimizer(
             for suffix, numel in owned_parameter_numel_by_suffix.items()
             if f"layers.{layer_id}.{suffix}" in fqns
         },
-        num_ranks=owner_group_size,
+        num_ranks=num_owner_ranks,
     )
     bucket_configs = tuple(
         BucketConfig(
@@ -217,6 +204,64 @@ def _kimi_k2_5_distributed_muon_optimizer(
             "DistributedMuon": {
                 "bucket_configs": bucket_configs,
             }
+        },
+    )
+
+
+def _moonlight_distributed_muon_optimizer(
+    *, num_owner_ranks: int
+) -> OptimizersContainer.Config:
+    per_head = _per_head_muon_sharding(num_heads=16)
+    return _kimi_text_distributed_muon_optimizer(
+        num_layers=27,
+        num_owner_ranks=num_owner_ranks,
+        lr=3e-4,
+        attention_shardings={
+            "wq": per_head,
+            "wkv_a": MuonComputeSharding(placement=Owned()),
+            "wkv_b": per_head,
+            "wo": MuonComputeSharding(placement=Owned()),
+        },
+        owned_parameter_numel_by_suffix={
+            "attention.wkv_a.weight": 576 * 2048,
+            "attention.wo.weight": 2048 * 2048,
+            "feed_forward.w1.weight": 11264 * 2048,
+            "feed_forward.w2.weight": 2048 * 11264,
+            "feed_forward.w3.weight": 11264 * 2048,
+            "moe.router.gate.weight": 64 * 2048,
+            "moe.shared_experts.w1.weight": 2816 * 2048,
+            "moe.shared_experts.w2.weight": 2048 * 2816,
+            "moe.shared_experts.w3.weight": 2816 * 2048,
+        },
+    )
+
+
+def _kimi_k2_5_distributed_muon_optimizer(
+    *, num_owner_ranks: int
+) -> OptimizersContainer.Config:
+    per_head = _per_head_muon_sharding(num_heads=64)
+    return _kimi_text_distributed_muon_optimizer(
+        num_layers=61,
+        num_owner_ranks=num_owner_ranks,
+        lr=2.2e-4,
+        attention_shardings={
+            "wq_a": MuonComputeSharding(placement=Owned()),
+            "wq_b": per_head,
+            "wkv_a": MuonComputeSharding(placement=Owned()),
+            "wkv_b": per_head,
+            "wo": MuonComputeSharding(placement=Owned()),
+        },
+        owned_parameter_numel_by_suffix={
+            "attention.wq_a.weight": 1536 * 7168,
+            "attention.wkv_a.weight": 576 * 7168,
+            "attention.wo.weight": 7168 * 8192,
+            "feed_forward.w1.weight": 18432 * 7168,
+            "feed_forward.w2.weight": 7168 * 18432,
+            "feed_forward.w3.weight": 18432 * 7168,
+            "moe.router.gate.weight": 384 * 7168,
+            "moe.shared_experts.w1.weight": 2048 * 7168,
+            "moe.shared_experts.w2.weight": 7168 * 2048,
+            "moe.shared_experts.w3.weight": 2048 * 7168,
         },
     )
 
@@ -287,6 +332,26 @@ def moonlight_16b_a3b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
     )
+
+
+def moonlight_16b_a3b_muon() -> Trainer.Config:
+    """Moonlight 16B-A3B with DistributedMuon for matrix parameters."""
+    config = moonlight_16b_a3b()
+    num_owner_ranks = 8
+    config.optimizer = _moonlight_distributed_muon_optimizer(
+        num_owner_ranks=num_owner_ranks
+    )
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=num_owner_ranks,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=4,
+        enable_sequence_parallel=False,
+        spmd_backend="spmd_types",
+    )
+    return config
 
 
 def kimi_vl_a3b() -> Trainer.Config:
@@ -367,16 +432,13 @@ def kimi_k2_5() -> Trainer.Config:
 def kimi_k2_5_muon() -> Trainer.Config:
     """Full Kimi K2.5 with DistributedMuon for text-tower matrices."""
     config = kimi_k2_5()
-    owner_group_size = 64
+    num_owner_ranks = 64
     config.optimizer = _kimi_k2_5_distributed_muon_optimizer(
-        n_layers=61,
-        num_heads=64,
-        owner_group_size=owner_group_size,
-        lr=2.2e-4,
+        num_owner_ranks=num_owner_ranks,
     )
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=owner_group_size,
+        data_parallel_shard_degree=num_owner_ranks,
         tensor_parallel_degree=1,
         context_parallel_degree=1,
         pipeline_parallel_degree=1,
