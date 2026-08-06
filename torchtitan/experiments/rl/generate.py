@@ -108,7 +108,9 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    inner_attn = model_spec.model.layers[0].attention.inner_attention
+    inner_attn = model_spec.model.first_inner_attention
+    if inner_attn is None:
+        raise ValueError("No full-attention layer found in the model spec.")
     if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
@@ -148,6 +150,8 @@ def generate() -> None:
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=not gen_config.cudagraph.enable,
+        enable_prefix_caching=gen_config.enable_prefix_caching,
+        enable_chunked_prefill=gen_config.enable_chunked_prefill,
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION

@@ -30,6 +30,7 @@ Run each backend in a separate torchrun invocation:
         torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
+import dataclasses
 import gc
 import logging
 import os
@@ -66,6 +67,8 @@ from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
+    rl_grpo_qwen3_5_9b_varlen_batch_invariant,
+    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
@@ -192,11 +195,21 @@ def _set_generator_determinism(debug) -> None:
         torch.manual_seed(debug.seed)
 
 
-def build_inference_engine(config: Controller.Config) -> LLMEngine:
-    """Create a vLLM LLMEngine with torchtitan model from the RL config."""
+def build_inference_engine(
+    config: Controller.Config, *, enable_prefix_caching: bool = False
+) -> LLMEngine:
+    """Create a vLLM LLMEngine with torchtitan model from the RL config.
+
+    ``enable_prefix_caching`` turns on vLLM prefix caching. For hybrid GDN models
+    this selects the "align" mamba cache mode (framework-managed block-boundary
+    state snapshots) and lets vLLM auto-align ``mamba_block_size`` to the
+    attention block size; otherwise ``mamba_block_size`` is pinned to
+    ``max_model_len`` (one block per sequence, prefix caching inert), which is the
+    layout the default parity checks use.
+    """
     gen_config = config.generator
 
-    inner_attn = config.model_spec.model.layers[0].attention.inner_attention
+    inner_attn = config.model_spec.model.first_inner_attention
     use_flex = isinstance(inner_attn, FlexAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
@@ -241,6 +254,8 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
+        # GDN preserves its accumulated paged SSM state in fp32 under
+        # batch-invariant mode inside VLLMGatedDeltaNetCore.
     )
 
     from torchtitan.tools.utils import has_cuda_capability
@@ -249,6 +264,22 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
+    if enable_prefix_caching:
+        # Prefix caching on: for hybrid GDN this needs the "align" mamba cache
+        # mode, which requires chunked prefill and derives mamba_block_size from
+        # the attention block size. Leave mamba_block_size unset so vLLM aligns it
+        # (models/config.py MambaModelConfig); pinning it to max_model_len would
+        # keep one block per sequence and make prefix caching inert.
+        engine_kwargs["enable_prefix_caching"] = True
+        engine_kwargs["enable_chunked_prefill"] = True
+    else:
+        # Hybrid (attention + GDN/mamba) models: vLLM only auto-derives
+        # mamba_block_size for HF-recognized hybrid architectures, which the
+        # torchtitan custom config bypasses. Set it explicitly, mirroring vLLM's
+        # default (models/config.py): one block per sequence (max_model_len).
+        # (Leaving enable_prefix_caching at the vLLM default keeps this path
+        # byte-identical to the previously validated one-block parity run.)
+        engine_kwargs["mamba_block_size"] = config.model_spec.model.max_seq_len
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop
@@ -318,7 +349,11 @@ def _build_padded_varlen_metadata(batch_size, max_len, device):
         0, (batch_size + 1) * max_len, max_len, dtype=torch.int32, device=device
     )
     return VarlenMetadata(
-        cu_seq_q=cu_seqs, cu_seq_k=cu_seqs, max_q=max_len, max_k=max_len
+        cu_seq_q=cu_seqs,
+        cu_seq_k=cu_seqs,
+        max_q=max_len,
+        max_k=max_len,
+        cu_seq_q_host=tuple(range(0, (batch_size + 1) * max_len, max_len)),
     )
 
 
@@ -653,6 +688,12 @@ class BitwiseParityTestBase(unittest.TestCase):
                 initial_load_path=config.hf_assets_path,
             )
 
+        # The graph-break decorator reads this env var at import time, and
+        # register_to_vllm below triggers that import, so set it first.
+        gen_cudagraph = config.generator.cudagraph
+        if gen_cudagraph.enable and gen_cudagraph.mode == "FULL_AND_PIECEWISE":
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+
         register_to_vllm(
             config.model_spec,
             parallelism=config.generator.parallelism,
@@ -703,8 +744,12 @@ class BitwiseParityTestBase(unittest.TestCase):
             b = torch.tensor(b, dtype=torch.float32)
         else:
             b = b.detach().cpu().float()
-        n = min(len(a), len(b))
-        a, b = a[:n], b[:n]
+        self.assertEqual(
+            len(a),
+            len(b),
+            f"{name}: length mismatch ({label_a}={len(a)}, {label_b}={len(b)})",
+        )
+        n = len(a)
 
         max_delta = (a - b).abs().max().item() if n > 0 else 0.0
         num_diff = (a != b).sum().item()
@@ -820,6 +865,76 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant)
     attn_backend = "flex"
+
+
+class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
+    """Test Qwen3.5 trainer/generator parity with head-sharded GDN at TP=2."""
+
+    __test__ = True
+    config_fn = staticmethod(rl_grpo_qwen3_5_9b_varlen_batch_invariant)
+    attn_backend = "varlen"
+    min_world_size = 2
+
+
+def _qwen3_5_debug_bitwise_config() -> Controller.Config:
+    """Build a two-GPU random-weight Qwen3.5 parity configuration."""
+    config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=1,
+        ),
+    )
+    return config
+
+
+class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
+    """Qwen3.5 GDN parity with random weights and matched TP=2."""
+
+    __test__ = True
+    config_fn = staticmethod(_qwen3_5_debug_bitwise_config)
+    attn_backend = "varlen"
+    min_world_size = 2
+    sync_weights_from_trainer = True
+    BATCH_SIZE = 3
+    PROMPT_LENGTH = 64
+    MAX_GEN_TOKENS = 16
+
+    def test_vllm_prefill_and_decode_batch_invariance(self):
+        """vLLM prefill and decode must not depend on batch composition."""
+        single_prompt = self.prompt_ids[:1]
+
+        single_prefill_lps = vllm_prefill(self.engine, single_prompt)
+        batched_prefill_lps = vllm_prefill(self.engine, self.prompt_ids)
+
+        single_gen_ids, single_decode_lps = vllm_generate(
+            self.engine, single_prompt, self.MAX_GEN_TOKENS
+        )
+        batched_gen_ids, batched_decode_lps = vllm_generate(
+            self.engine, self.prompt_ids, self.MAX_GEN_TOKENS
+        )
+
+        if dist.get_rank() == 0:
+            self._assert_logprobs_equal(
+                "seq 0: vLLM prefill(bsz=1) vs prefill(bsz=3)",
+                single_prefill_lps[0],
+                batched_prefill_lps[0],
+                "bsz=1",
+                "bsz=3",
+            )
+            self.assertEqual(
+                single_gen_ids[0],
+                batched_gen_ids[0],
+                "seq 0: greedy decode token IDs differ by batch composition",
+            )
+            self._assert_logprobs_equal(
+                "seq 0: vLLM decode(bsz=1) vs decode(bsz=3)",
+                single_decode_lps[0],
+                batched_decode_lps[0],
+                "bsz=1",
+                "bsz=3",
+            )
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):

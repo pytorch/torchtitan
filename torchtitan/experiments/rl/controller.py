@@ -420,7 +420,7 @@ class Controller(Configurable):
             ):
                 from torchtitan.models.common.attention import FlexAttention
 
-                inner_attn = self.model_spec.model.layers[0].attention.inner_attention
+                inner_attn = self.model_spec.model.first_inner_attention
                 if not isinstance(inner_attn, FlexAttention.Config):
                     raise ValueError(
                         "cudagraph mode 'FULL' is only supported with the flex "
