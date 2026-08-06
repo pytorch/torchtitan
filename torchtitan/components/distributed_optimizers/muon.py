@@ -561,7 +561,12 @@ def _resolve_compute_placement(
         raise ValueError(f"Muon parameter {fqn!r} has unsupported shape or storage")
 
     replicated_storage = _has_replicated_storage(param)
-    if isinstance(compute_placement, Shard):
+    if isinstance(compute_placement, Replicate) and replicated_storage:
+        return _ResolvedComputePlacement(
+            fingerprint_key=("replicate",),
+            compute_locally=True,
+        )
+    elif isinstance(compute_placement, Shard):
         if (
             len(global_compute_shape) >= 3
             and _normalize_dim(compute_placement.dim, len(global_compute_shape)) == 0

@@ -861,6 +861,92 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             )
 
     @with_comms
+    def test_explicit_replicated_compute_matches_plain_muon(self):
+        value = torch.arange(1, 13, device=self.device).reshape(4, 3).float().div_(10)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), self.mesh, (Replicate(),))
+        )
+        optimizer = build_distributed_muon(
+            [
+                {
+                    "params": [parameter],
+                    "param_names": ["layers.0.matrix"],
+                    "compute_sharding": MuonComputeSharding(placement=Replicate()),
+                }
+            ],
+            bucket_spec=[
+                BucketSpec(
+                    patterns=("layers.0.*",),
+                    owner_rank_by_fqn={},
+                    mesh=self.mesh,
+                )
+            ],
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+
+        grad = value.flip(0).contiguous()
+        parameter.grad = distribute_tensor(grad, self.mesh, (Replicate(),))
+        reference = torch.nn.Parameter(value.clone())
+        reference.grad = grad.clone()
+        reference_optimizer = torch.optim.Muon(
+            [reference],
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+
+        all_to_all_single = dist.all_to_all_single
+        with patch(
+            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            optimizer.step()
+        reference_optimizer.step()
+
+        collective.assert_not_called()
+        self.assertEqual(parameter.placements, (Replicate(),))
+        self.assertEqual(parameter.grad.placements, (Replicate(),))
+        momentum = optimizer.state[parameter]["momentum_buffer"]
+        self.assertEqual(momentum.placements, (Replicate(),))
+        torch.testing.assert_close(parameter.to_local(), reference)
+        torch.testing.assert_close(
+            momentum.to_local(),
+            reference_optimizer.state[reference]["momentum_buffer"],
+        )
+
+    @with_comms
+    def test_constructor_rejects_replicated_compute_for_sharded_storage(self):
+        value = torch.arange(12, device=self.device).reshape(4, 3).float()
+        parameter = self._parameter(value)
+
+        with self.assertRaisesRegex(ValueError, "storage-to-compute layout"):
+            build_distributed_muon(
+                [
+                    {
+                        "params": [parameter],
+                        "param_names": ["layers.0.weight"],
+                        "compute_sharding": MuonComputeSharding(
+                            placement=Replicate(),
+                        ),
+                    }
+                ],
+                bucket_spec=[
+                    BucketSpec(
+                        patterns=("layers.0.*",),
+                        owner_rank_by_fqn={},
+                        mesh=self.mesh,
+                    )
+                ],
+            )
+
+    @with_comms
     def test_step_rejects_gradient_with_reordered_mesh(self):
         value = torch.arange(12, device=self.device).reshape(4, 3).float()
         parameter = self._parameter(value)

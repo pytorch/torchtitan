@@ -70,10 +70,10 @@ class MuonComputeSharding:
     # viewed tensor. A future view_after_placement mode can apply a local view
     # after redistribution; that ordering is not supported yet.
     view_before_placement: BatchedMatrixComputeView | None = None
-    placement: Owned | Shard
+    placement: Owned | Replicate | Shard
 
     def __post_init__(self) -> None:
-        if not isinstance(self.placement, (Owned, Shard)) or (
+        if not isinstance(self.placement, (Owned, Replicate, Shard)) or (
             self.view_before_placement is not None
             and not isinstance(self.view_before_placement, BatchedMatrixComputeView)
         ):
