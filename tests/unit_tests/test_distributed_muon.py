@@ -21,7 +21,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.distributed_optimizers.bucketed_redistribution import (
+from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
     BucketConfig,
     BucketSpec,
 )
@@ -241,7 +241,7 @@ class TestDistributedMuonSingleRank(_DistributedMuonTestBase):
 
         all_to_all_single = dist.all_to_all_single
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "all_to_all_single",
             wraps=all_to_all_single,
         ) as collective:
@@ -298,7 +298,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             local_blocks.placements,
         )
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "all_to_all_single"
         ) as collective:
             optimizer.step()
@@ -727,7 +727,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
 
         all_to_all_single = dist.all_to_all_single
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
             "dist.all_to_all_single",
             wraps=all_to_all_single,
         ) as collective:
@@ -823,7 +823,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
 
         all_to_all_single = dist.all_to_all_single
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "all_to_all_single",
             wraps=all_to_all_single,
         ) as collective:
@@ -900,7 +900,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         parameter_before = parameter.to_local().clone()
 
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
             "dist.all_to_all_single"
         ) as collective:
             with self.assertRaisesRegex(
@@ -960,7 +960,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
 
         all_to_all_single = dist.all_to_all_single
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "all_to_all_single",
             wraps=all_to_all_single,
         ) as collective:
@@ -1026,7 +1026,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             parameter.grad = grad.clone()
 
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "all_to_all_single",
             wraps=all_to_all_single,
         ) as collective:
@@ -1252,7 +1252,7 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
 
         all_to_all_single = dist.all_to_all_single
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "all_to_all_single",
             wraps=all_to_all_single,
         ) as collective:
@@ -1346,7 +1346,7 @@ class TestDistributedMuonPipeline(_DistributedMuonTestBase):
 
         all_to_all_single = dist.all_to_all_single
         with patch(
-            "torchtitan.components.distributed_optimizers.bucketed_redistribution.dist."
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
             "all_to_all_single",
             wraps=all_to_all_single,
         ) as collective:
