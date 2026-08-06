@@ -13,6 +13,12 @@ dial, not an env ritual:
 `--weight-sync-transport {auto,gloo,monarch_rdma,monarch_rpc,torchcomms}`
 (`Controller.Config.weight_sync_transport`).
 
+The standalone benchmark (`torchtitan/experiments/rl/scripts/bench_weight_sync.py
+--mode transport`, submitted by the `bench_weight_sync.sbatch` beside it with
+`DATA_TRANSPORT=...`) takes the same five values as `--data-transport`. Not to be
+confused with the bench's `--transport`, which selects monarch's SPMD *control*
+plane -- a different axis.
+
 `auto` leaves torchstore's per-transfer availability cascade in place: SharedMemory
 for same-host, then TorchComms, MonarchRDMA, Gloo cross-host. Any other value pins
 every transfer to that transport, same-host ones included, which is what lets you
@@ -64,7 +70,14 @@ grep -ho 'resolved=[A-Za-z]*' slurm_<jobid>_*.out | sort -u
 A pinned `torchcomms` raises `RuntimeError("TorchComms transport is not available.")`
 when torchcomms is missing rather than sliding to MonarchRDMA, so it cannot yield a
 mislabeled data point -- but it can also fail at init rather than at transfer, which
-kills the run before any weight sync happens.
+kills the run before any weight sync happens. That is the case for running the bench
+row first: no vLLM, no RL loop, an answer in minutes.
+
+```bash
+DATA_TRANSPORT=torchcomms sbatch --partition=g3 \
+    torchtitan/experiments/rl/scripts/bench_weight_sync.sbatch
+grep '\[ts-transport\]' slurm_*_bench_weight_sync.out
+```
 
 ## GB300/CoreWeave
 
