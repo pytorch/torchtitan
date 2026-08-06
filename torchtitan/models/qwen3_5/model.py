@@ -242,7 +242,10 @@ def _chunk_gdn_bwd(
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )[0]
-        return torch.autograd.grad(output, inputs, grad_output)
+        grad_q, grad_k, grad_v, grad_g, grad_beta = torch.autograd.grad(
+            output, inputs, grad_output
+        )
+        return grad_q, grad_k, grad_v, grad_g, grad_beta
 
 
 @_chunk_gdn_bwd.register_fake
@@ -603,7 +606,7 @@ class GatedDeltaNet(Module):
 
         biases = [self.conv_q.bias, self.conv_k.bias, self.conv_v.bias]
         bias_C = (
-            torch.cat(biases, dim=0)  # pyrefly: ignore[bad-argument-type]
+            torch.cat(biases, dim=0)
             if all(bias is not None for bias in biases)
             else None
         )
