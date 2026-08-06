@@ -212,7 +212,7 @@ class DistributedMuon(Optimizer):
             prepared = self._prepared_compute_views[fqn]
             global_compute_shape = torch.Size(prepared.global_compute_shape)
             local_compute_tensor = prepared.local_compute_tensor
-            compute_locally = _validate_muon_parameter(
+            resolved_compute_placement = _resolve_compute_placement(
                 fqn,
                 param,
                 global_compute_shape,
@@ -228,8 +228,8 @@ class DistributedMuon(Optimizer):
                     global_compute_shape=global_compute_shape,
                     local_compute_tensor=local_compute_tensor,
                     local_storage_signature=_local_storage_signature(param.to_local()),
-                    compute_placement=compute_placement,
-                    compute_locally=compute_locally,
+                    compute_placement_key=resolved_compute_placement.fingerprint_key,
+                    compute_locally=resolved_compute_placement.compute_locally,
                 )
             )
         return tuple(compute_layouts)
@@ -254,10 +254,7 @@ class DistributedMuon(Optimizer):
                 tuple(layout.param.shape),
                 layout.compute_view_key,
                 tuple(layout.global_compute_shape),
-                _compute_placement_key(
-                    layout.compute_placement,
-                    len(layout.global_compute_shape),
-                ),
+                layout.compute_placement_key,
             )
             self._layout_fingerprints_by_fqn[layout.fqn] = (
                 _LAYOUT_FINGERPRINT_VERSION,
@@ -285,10 +282,7 @@ class DistributedMuon(Optimizer):
             tuple(compute_layout.global_compute_shape),
             compute_layout.compute_locally,
             compute_layout.compute_view_key,
-            _compute_placement_key(
-                compute_layout.compute_placement,
-                len(compute_layout.global_compute_shape),
-            ),
+            compute_layout.compute_placement_key,
             _device_mesh_ranks(compute_layout.param.device_mesh),
             tuple(map(str, compute_layout.param.placements)),
             self._group_signature(compute_layout),
@@ -507,7 +501,13 @@ class _ParameterComputeLayout:
     global_compute_shape: torch.Size
     local_compute_tensor: Tensor
     local_storage_signature: tuple[Any, ...]
-    compute_placement: Owned | Replicate | Shard
+    compute_placement_key: tuple[Any, ...]
+    compute_locally: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedComputePlacement:
+    fingerprint_key: tuple[Any, ...]
     compute_locally: bool
 
 
@@ -549,35 +549,52 @@ def _has_owned_sharded_storage(param: DTensor) -> bool:
     )
 
 
-def _validate_muon_parameter(
+def _resolve_compute_placement(
     fqn: str,
     param: DTensor,
     global_compute_shape: torch.Size,
     local_compute_tensor: Tensor,
     compute_placement: object,
-) -> bool:
+) -> _ResolvedComputePlacement:
     local = param.to_local()
     if torch.is_complex(param) or param.ndim < 2 or not local.is_contiguous():
         raise ValueError(f"Muon parameter {fqn!r} has unsupported shape or storage")
 
     replicated_storage = _has_replicated_storage(param)
-    if isinstance(compute_placement, Replicate) and replicated_storage:
-        return True
-    elif isinstance(compute_placement, Shard):
+    if isinstance(compute_placement, Shard):
         if (
             len(global_compute_shape) >= 3
             and _normalize_dim(compute_placement.dim, len(global_compute_shape)) == 0
-            and local_compute_tensor.shape[1:] == global_compute_shape[1:]
-            and _has_dim0_sharded_storage(param)
+            and (
+                (
+                    replicated_storage
+                    and local_compute_tensor.shape == global_compute_shape
+                )
+                or (
+                    local_compute_tensor.shape[1:] == global_compute_shape[1:]
+                    and _has_dim0_sharded_storage(param)
+                )
+            )
         ):
-            return True
+            return _ResolvedComputePlacement(
+                fingerprint_key=("shard", 0),
+                compute_locally=True,
+            )
     elif (
         isinstance(compute_placement, Owned)
         and len(global_compute_shape) == 2
         and param.ndim == 2
-        and _has_owned_sharded_storage(param)
     ):
-        return False
+        if replicated_storage:
+            return _ResolvedComputePlacement(
+                fingerprint_key=("owned",),
+                compute_locally=True,
+            )
+        if _has_owned_sharded_storage(param):
+            return _ResolvedComputePlacement(
+                fingerprint_key=("owned",),
+                compute_locally=False,
+            )
     raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
 
 
@@ -586,17 +603,6 @@ def _normalize_dim(dim: int, ndim: int) -> int:
     if normalized < 0 or normalized >= ndim:
         raise ValueError(f"dimension {dim} is invalid for a rank-{ndim} tensor")
     return normalized
-
-
-def _compute_placement_key(
-    placement: Owned | Replicate | Shard,
-    ndim: int,
-) -> tuple[Any, ...]:
-    if isinstance(placement, Owned):
-        return ("owned",)
-    if isinstance(placement, Replicate):
-        return ("replicate",)
-    return ("shard", _normalize_dim(placement.dim, ndim))
 
 
 # Keep the functional math aligned with torch.optim.Muon while owning the

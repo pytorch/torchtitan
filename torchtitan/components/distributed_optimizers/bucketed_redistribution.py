@@ -71,7 +71,9 @@ class BucketSpec:
     ``mesh`` is the bucket's exact one-dimensional communication mesh.
     ``owner_rank_by_fqn`` must exactly cover parameters requiring whole-tensor
     redistribution and uses mesh-local ranks. Compute-ready parameters have no
-    owner entry. ``name`` is diagnostic metadata only.
+    owner entry. A rank-0 entry is also accepted for compute-ready parameters
+    on a one-rank mesh, where sharded storage may normalize to replication.
+    ``name`` is diagnostic metadata only.
     """
 
     patterns: tuple[str, ...]
@@ -907,8 +909,8 @@ def _build_owned_bucket_plans(
 ) -> _BucketPlanningResult[_ItemT]:
     """Build the local and whole-matrix-owned DistributedMuon plans.
 
-    The active planner supports Replicate -> Replicate and Shard(0) matrix
-    batches as local compute, plus Shard(...) -> Owned through packed
+    The active planner supports replicated storage and dimension-0-sharded
+    matrix batches as local compute, plus Shard(...) -> Owned through packed
     all-to-all and Owned -> Shard(...) through reverse packed all-to-all.
     Other placement transitions are intentionally unsupported.
     """
@@ -933,12 +935,21 @@ def _build_owned_bucket_plans(
         )
         expected_owners = {fqn(item) for item in redistributed_items}
         provided_owners = set(spec.owner_rank_by_fqn)
-        if provided_owners != expected_owners:
+        # Size-one sharded storage may normalize to Replicate. In that case a
+        # static rank-0 owner entry is equivalent to the resolved local compute.
+        redundant_owners = {
+            fqn(item)
+            for item in local_items
+            if len(group.participants) == 1
+            and spec.owner_rank_by_fqn.get(fqn(item)) == 0
+        }
+        effective_provided_owners = provided_owners - redundant_owners
+        if effective_provided_owners != expected_owners:
             raise ValueError(
                 f"bucket {spec.name!r} owner assignment must exactly cover "
                 "whole-tensor-owned parameters; "
-                f"missing={sorted(expected_owners - provided_owners)}, "
-                f"extra={sorted(provided_owners - expected_owners)}"
+                f"missing={sorted(expected_owners - effective_provided_owners)}, "
+                f"extra={sorted(effective_provided_owners - expected_owners)}"
             )
         ordered_items.extend(local_items)
         ordered_items.extend(redistributed_items)
