@@ -72,7 +72,6 @@ from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
-    get_first_inner_attention_config,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
@@ -211,7 +210,7 @@ def build_inference_engine(
     """
     gen_config = config.generator
 
-    inner_attn = get_first_inner_attention_config(config.model_spec.model)
+    inner_attn = config.model_spec.model.first_inner_attention
     use_flex = isinstance(inner_attn, FlexAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same

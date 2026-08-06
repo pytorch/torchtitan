@@ -37,7 +37,6 @@ from torchtitan.experiments.rl.batch_invariance import (
     patch_bmm_for_batch_invariance,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
-    get_first_inner_attention_config,
     InferenceParallelismConfig,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -859,7 +858,7 @@ class VLLMGenerator(Actor, Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        inner_attn = get_first_inner_attention_config(model_spec.model)
+        inner_attn = model_spec.model.first_inner_attention
         assert isinstance(
             inner_attn,
             (VarlenAttention.Config, FlexAttention.Config),

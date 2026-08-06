@@ -34,9 +34,6 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
-from torchtitan.experiments.rl.models.vllm_registry import (
-    get_first_inner_attention_config,
-)
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
@@ -264,7 +261,7 @@ class PolicyTrainer(Actor, Configurable):
 
         from torchtitan.models.common.attention import VarlenAttention
 
-        inner_attn = get_first_inner_attention_config(model_spec.model)
+        inner_attn = model_spec.model.first_inner_attention
         assert isinstance(
             inner_attn,
             (VarlenAttention.Config, FlexAttention.Config),

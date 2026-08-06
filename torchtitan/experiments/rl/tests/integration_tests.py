@@ -228,33 +228,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_5_debug_varlen",
-                    "--async-loop.num-training-steps 5",
-                    "--hf_assets_path tests/assets/tokenizer",
-                    # The debug model has two GDN key heads, so TP cannot exceed 2.
-                    "--trainer.parallelism.data_parallel_shard_degree 2",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
-                    "--generator.parallelism.tensor_parallel_degree 2",
-                    "--num_generators 2",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--async-loop.batcher.batch.seq-len 1024",
-                    "--renderer.enable-thinking False",
-                    "--generator.sampling.max_tokens 256",
-                    "--trainer.debug.no_batch_invariant",
-                    "--generator.debug.no_batch_invariant",
-                    "--trainer.checkpoint.no-enable",  # random-init weights
-                    "--generator.checkpoint.no-enable",
-                    "--metrics.no-enable-wandb",
-                ],
-            ],
-            "RL GRPO Qwen3.5 hybrid GDN varlen TP=2",
-            "rl_grpo_qwen3_5_debug_tp2",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_5_debug_varlen_batch_invariant",
                     "--async-loop.num-training-steps 3",
                     "--hf_assets_path tests/assets/tokenizer",

@@ -161,25 +161,118 @@ class RMSNormGated(Module):
         return x.to(input_dtype)
 
 
-class _RecurrentFwdChunkBwd(torch.autograd.Function):
-    """Batch-invariant GDN: fla RECURRENT kernel for the forward, fla CHUNK for backward.
+@torch.library.custom_op(
+    "torchtitan::recurrent_gdn_fwd", mutates_args=(), device_types="cuda"
+)
+def _recurrent_gdn_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_cpu: torch.Tensor,
+) -> torch.Tensor:
+    """Run the batch-invariant GDN recurrent forward kernel.
 
-    The vLLM generator must use the recurrent kernel for decode (decode is inherently a
-    per-token recurrence). For the trainer forward to be bitwise-identical to the
-    generator it must use that SAME recurrent kernel with a materialized float32 zero
-    initial state and cu_seqlens (varlen) -- so the USE_INITIAL_STATE and IS_VARLEN
-    triton constexprs select the exact compiled kernel + fp reduction the generator
-    hits. A pure-recurrent backward is O(seqlen) sequential and slow, so the backward
-    recomputes the fla CHUNK kernel for efficient parallel gradients (chunk and recurrent
-    compute the same function; only the forward value is swapped to recurrent).
-
-    Inputs are the flattened [1, T, ...] varlen layout; cu_seqlens marks the packed
-    per-sample boundaries so the recurrence resets per sample.
+    The vLLM generator must use the recurrent kernel for per-token decode. The
+    trainer uses the same kernel with a materialized float32 initial state and
+    varlen metadata so its forward is bitwise identical to generation.
     """
+    num_sequences = int(cu_seqlens.numel()) - 1
+    initial_state = q.new_zeros(
+        num_sequences,
+        q.shape[2],
+        q.shape[3],
+        v.shape[3],
+        dtype=torch.float32,
+    )
+    output, _ = _fla_fused_recurrent_gated_delta_rule(
+        q,
+        k,
+        v,
+        g,
+        beta=beta,
+        initial_state=initial_state,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=cu_seqlens,
+    )
+    return output.to(q.dtype)
 
-    @staticmethod
-    def forward(  # pyrefly: ignore[bad-override]
-        ctx,
+
+@_recurrent_gdn_fwd.register_fake
+def _recurrent_gdn_fwd_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_cpu: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty_like(v, dtype=q.dtype)
+
+
+@torch.library.custom_op(
+    "torchtitan::chunk_gdn_bwd", mutates_args=(), device_types="cuda"
+)
+def _chunk_gdn_bwd(
+    grad_output: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_cpu: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Recompute the parallel GDN chunk kernel and return its gradients."""
+    with torch.enable_grad():
+        inputs = tuple(
+            tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
+        )
+        output = _fla_chunk_gated_delta_rule(
+            inputs[0],
+            inputs[1],
+            inputs[2],
+            inputs[3],
+            inputs[4],
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        )[0]
+        return torch.autograd.grad(output, inputs, grad_output)
+
+
+@_chunk_gdn_bwd.register_fake
+def _chunk_gdn_bwd_fake(
+    grad_output: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_cpu: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty_like(q),
+        torch.empty_like(k),
+        torch.empty_like(v),
+        torch.empty_like(g),
+        torch.empty_like(beta),
+    )
+
+
+def _recurrent_gdn_setup_context(ctx, inputs, output) -> None:
+    ctx.save_for_backward(*inputs)
+
+
+def _recurrent_gdn_backward(ctx, grad_output):
+    q, k, v, g, beta, cu_seqlens, cu_seqlens_cpu = ctx.saved_tensors
+    grads = _chunk_gdn_bwd(
+        grad_output,
         q,
         k,
         v,
@@ -187,51 +280,13 @@ class _RecurrentFwdChunkBwd(torch.autograd.Function):
         beta,
         cu_seqlens,
         cu_seqlens_cpu,
-    ):
-        ctx.save_for_backward(q, k, v, g, beta)
-        ctx.cu_seqlens = cu_seqlens
-        ctx.cu_seqlens_cpu = cu_seqlens_cpu
-        num_sequences = int(cu_seqlens.numel()) - 1
-        initial_state = q.new_zeros(
-            num_sequences,
-            q.shape[2],
-            q.shape[3],
-            v.shape[3],
-            dtype=torch.float32,
-        )
-        with torch.no_grad():
-            output, _ = _fla_fused_recurrent_gated_delta_rule(
-                q,
-                k,
-                v,
-                g,
-                beta=beta,
-                initial_state=initial_state,
-                output_final_state=True,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=cu_seqlens,
-            )
-        return output.to(q.dtype)
+    )
+    return (*grads, None, None)
 
-    @staticmethod
-    def backward(ctx, grad_output):  # pyrefly: ignore[bad-override]
-        q, k, v, g, beta = ctx.saved_tensors
-        with torch.enable_grad():
-            inputs = [
-                tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
-            ]
-            output = _fla_chunk_gated_delta_rule(
-                inputs[0],
-                inputs[1],
-                inputs[2],
-                inputs[3],
-                inputs[4],
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=ctx.cu_seqlens,
-                cu_seqlens_cpu=ctx.cu_seqlens_cpu,
-            )[0]
-            grads = torch.autograd.grad(output, inputs, grad_output)
-        return (*grads, None, None)
+
+_recurrent_gdn_fwd.register_autograd(
+    _recurrent_gdn_backward, setup_context=_recurrent_gdn_setup_context
+)
 
 
 class GatedDeltaKernel(Module):
@@ -284,7 +339,7 @@ class GatedDeltaKernel(Module):
                 raise ValueError(
                     "Batch-invariant Gated DeltaNet requires CPU cu_seqlens."
                 )
-            return _RecurrentFwdChunkBwd.apply(
+            return _recurrent_gdn_fwd(
                 xq_BLNK,
                 xk_BLNK,
                 xv_BLNV,

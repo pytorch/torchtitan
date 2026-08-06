@@ -88,7 +88,7 @@ jobs:
         # 4. Install the pinned GDN kernels without replacing nightly PyTorch.
         uv pip install einops
         uv pip install --no-deps \
-          "git+https://github.com/fla-org/flash-linear-attention.git@ebf3a0cff2be3e6f2b2f99820b8fe4e28855ced0"
+          "git+https://github.com/fla-org/flash-linear-attention.git@v0.5.2"
 
         # 5. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"

@@ -20,6 +20,7 @@ from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
@@ -80,6 +81,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         self.out_transform = None
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
+        self.is_hybrid_model = get_current_vllm_config().model_config.is_hybrid
 
         flash_attention_impl = get_cuda_flash_attention_impl()
         if flash_attention_impl is not None:
@@ -120,8 +122,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [num_blocks, num_kv_heads, block_size, 2 * head_size]
+            kv_cache: shape is ``[num_blocks, 2, block_size, num_kv_heads,
+                head_size]`` for hybrid models and ``[num_blocks, num_kv_heads,
+                block_size, 2 * head_size]`` for attention-only models.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -165,12 +168,21 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             AttentionType.ENCODER,
         ), "Encoder-only attention not supported yet."
 
-        if kv_cache.dim() == 5 and kv_cache.shape[1] == 2:
-            # vLLM's hybrid KV-cache allocator stores K and V separately on dim 1.
-            key_cache, value_cache = kv_cache[:, 0], kv_cache[:, 1]
+        if self.is_hybrid_model:
+            # Hybrid models combine linear-attention state caches with full-attention
+            # KV caches, so vLLM stores K and V on a dedicated cache axis.
+            assert (
+                kv_cache.ndim == 5
+                and kv_cache.shape[1] == 2
+                and kv_cache.shape[-1] == self.head_size
+            ), f"Unexpected hybrid KV-cache shape: {tuple(kv_cache.shape)}"
+            key_cache, value_cache = kv_cache.unbind(dim=1)
         else:
             # vLLM #44455 packs K and V into the content dimension. Restore the
             # layout expected by varlen attention before splitting them.
+            assert (
+                kv_cache.ndim == 4 and kv_cache.shape[-1] == 2 * self.head_size
+            ), f"Unexpected full-attention KV-cache shape: {tuple(kv_cache.shape)}"
             key_cache, value_cache = kv_cache.transpose(1, 2).split(
                 self.head_size, dim=-1
             )

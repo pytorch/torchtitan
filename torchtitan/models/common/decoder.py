@@ -101,6 +101,32 @@ class Decoder(BaseModel):
             )
 
         @property
+        def first_inner_attention(self) -> Module.Config | None:
+            """Backend config of the first full-attention layer, else None."""
+            attention = self.first_attention
+            return attention.inner_attention if attention is not None else None
+
+        @property
+        def first_feed_forward(self) -> FeedForward.Config | None:
+            """First dense feed-forward config, else None."""
+            return next(
+                (
+                    layer.feed_forward
+                    for layer in self.layers
+                    if layer.feed_forward is not None
+                ),
+                None,
+            )
+
+        @property
+        def first_moe(self) -> MoE.Config | None:
+            """First mixture-of-experts config, else None."""
+            return next(
+                (layer.moe for layer in self.layers if layer.moe is not None),
+                None,
+            )
+
+        @property
         def max_seq_len(self) -> int:
             # The first full-attention layer's RoPE defines the context length.
             rope_cfg = getattr(self.first_attention, "rope", None)

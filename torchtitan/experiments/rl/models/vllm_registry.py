@@ -48,19 +48,6 @@ TORCHTITAN_WORKER_CLS = (
 )
 
 
-def get_first_inner_attention_config(model_config) -> Any | None:
-    """Return the first full-attention backend config in a hybrid model."""
-    attention_config = next(
-        (
-            attention
-            for layer in model_config.layers
-            if (attention := getattr(layer, "attention", None)) is not None
-        ),
-        None,
-    )
-    return attention_config.inner_attention if attention_config is not None else None
-
-
 @dataclass(kw_only=True, slots=True)
 class InferenceParallelismConfig:
     """Parallelism for vLLM inference — a focused subset of the training
@@ -144,29 +131,9 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     cfg = spec.model
     if not cfg.layers:
         raise ValueError(f"ModelSpec {spec.name!r} has no layers")
-    # Some models mix dense and MoE layers (e.g. deepseek_v3 has dense
-    # first layers, MoE later); scan the layer list for a representative
-    # of each component rather than relying on layer 0.
-    attn = next(
-        (
-            attention
-            for layer in cfg.layers
-            if (attention := getattr(layer, "attention", None)) is not None
-        ),
-        None,
-    )
-    ffn = next(
-        (
-            ff
-            for layer in cfg.layers
-            if (ff := getattr(layer, "feed_forward", None)) is not None
-        ),
-        None,
-    )
-    moe = next(
-        (m for layer in cfg.layers if (m := getattr(layer, "moe", None)) is not None),
-        None,
-    )
+    attn = cfg.first_attention
+    ffn = cfg.first_feed_forward
+    moe = cfg.first_moe
 
     n_heads = attn.n_heads
     n_kv_heads = attn.n_kv_heads or n_heads
@@ -204,9 +171,7 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         # Presence required: >0 toggles MoE/EP branches.
         hf["num_experts"] = moe.routed_experts.inner_experts.num_experts
         # Unused: only per-model loaders (qwen3_moe, deepseek_v2, ...) and v1/metrics/perf.py (off) read these.
-        hf[
-            "num_experts_per_tok"
-        ] = moe.router.top_k  # top_k is on the router, not experts
+        hf["num_experts_per_tok"] = moe.router.top_k
         hf["moe_intermediate_size"] = moe.routed_experts.inner_experts.hidden_dim
         hf["decoder_sparse_step"] = 1
         hf.setdefault("norm_topk_prob", True)
@@ -215,7 +180,11 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
 
 
 def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
-    """Attach vLLM's hybrid-state interface when the model contains GDN layers."""
+    """Attach vLLM's hybrid-state interface when the model contains GDN layers.
+
+    vLLM exposes one model-level recurrent-state shape. GDN layers may differ
+    otherwise, but every field that determines that state shape must match.
+    """
     gdn_configs = [
         layer.delta_net
         for layer in model_spec.model.layers
@@ -224,7 +193,7 @@ def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
     if not gdn_configs:
         return
 
-    state_shapes = [
+    state_shapes = {
         (
             gdn_config.in_proj_q.out_features // gdn_config.key_head_dim,
             gdn_config.in_proj_v.out_features // gdn_config.value_head_dim,
@@ -233,10 +202,12 @@ def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
             gdn_config.conv_kernel_size,
         )
         for gdn_config in gdn_configs
-    ]
-    state_shape = state_shapes[0]
-    if any(shape != state_shape for shape in state_shapes[1:]):
-        raise ValueError("All GDN layers must use the same state shape")
+    }
+    if len(state_shapes) != 1:
+        raise ValueError(
+            f"All GDN layers must use the same state shape, got {state_shapes}"
+        )
+    (state_shape,) = state_shapes
 
     from vllm.model_executor.layers.mamba.mamba_utils import (
         MambaStateCopyFuncCalculator,

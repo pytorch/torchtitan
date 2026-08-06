@@ -729,9 +729,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # tests) still receives positions for RoPE but no masks — it relies on
         # is_causal instead.
         if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            inner_attention = getattr(
-                self.model_config.first_attention, "inner_attention", None
-            )
+            inner_attention = self.model_config.first_inner_attention
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
