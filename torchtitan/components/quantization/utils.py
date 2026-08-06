@@ -69,12 +69,15 @@ def has_quantization(model_config) -> bool:
         Float8Linear,
     )
     from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
+    from torchtitan.components.quantization.nvfp4 import NVFP4Linear
 
     quant_linear_types: list[type] = []
     if Float8Linear is not None:
         quant_linear_types.append(Float8Linear.Config)
     if MXFP8Linear is not None:
         quant_linear_types.append(MXFP8Linear.Config)
+    if NVFP4Linear is not None:
+        quant_linear_types.append(NVFP4Linear.Config)
 
     has_quant_linear = bool(quant_linear_types) and any(
         isinstance(config, tuple(quant_linear_types))
