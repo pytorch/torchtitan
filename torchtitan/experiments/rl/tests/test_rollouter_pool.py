@@ -32,8 +32,17 @@ class _ChooseRunGroupEndpoint:
         return RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
 
 
+class _SetupEndpoint:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def call(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+
+
 class _WorkerActorMesh:
     def __init__(self) -> None:
+        self.setup_async = _SetupEndpoint()
         self.run_group = _ChooseRunGroupEndpoint()
         self.stopped = False
 
@@ -74,7 +83,6 @@ def _rollouter_without_datasets() -> Rollouter:
     )
     rollouter._worker_actors = None
     rollouter._worker_mesh = None
-    rollouter._renderer = None
     return rollouter
 
 
@@ -86,7 +94,10 @@ async def _setup(
     worker_mesh = _WorkerMesh(actor_mesh)
     host = _ControllerHost(worker_mesh)
     monkeypatch.setattr(rollouter_module, "this_host", lambda: host)
-    await rollouter.setup_async(renderer="renderer")
+    await rollouter.setup_async(
+        renderer_config="renderer_config",
+        hf_assets_path="hf_assets_path",
+    )
     return worker_mesh
 
 
@@ -97,7 +108,10 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         monkeypatch.setattr(rollouter_module, "this_host", lambda: host)
         rollouter = _rollouter_without_datasets()
 
-        await rollouter.setup_async(renderer="renderer")
+        await rollouter.setup_async(
+            renderer_config="renderer_config",
+            hf_assets_path="hf_assets_path",
+        )
 
         assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
         args, kwargs = worker_mesh.spawn_args
@@ -107,6 +121,12 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
             "rollouter_config": rollouter._config,
             "num_threads": 2,
         }
+        assert worker_mesh.actor_mesh.setup_async.calls == [
+            {
+                "renderer_config": "renderer_config",
+                "hf_assets_path": "hf_assets_path",
+            }
+        ]
         await rollouter.close()
         assert worker_mesh.actor_mesh.stopped
         assert worker_mesh.stopped
@@ -137,7 +157,6 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
                 "group_id": 1,
                 "group_size": 2,
                 "sampling": "sampling",
-                "renderer": "renderer",
             }
         ]
 

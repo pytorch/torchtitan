@@ -646,7 +646,10 @@ class Controller(Configurable):
                 generators=generators,
             )
 
-            await self._rollouter.setup_async(renderer=self.renderer)
+            await self._rollouter.setup_async(
+                renderer_config=config.renderer,
+                hf_assets_path=config.hf_assets_path,
+            )
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
