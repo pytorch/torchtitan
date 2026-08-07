@@ -418,9 +418,7 @@ class MoE(Module):
         # local token count and combine can derive its output shape from its input.
         original_L = x_BLD.shape[1]
         if self.seq_dim_tp_sharded or self.expert_sequence_parallel_size == 1:
-            # Dense SP keeps the routed-expert output sequence-sharded, so no
-            # S(1) -> P conversion requires equal local sequence shards here.
-            # EP=1 does not sequence-shard routed tokens over the TP axis.
+            # Dense SP preserves S(1); EP=1 does not sequence-shard routed tokens.
             seq_pad = 0
         else:
             # This input has not yet been sequence-sharded for the MoE region.
