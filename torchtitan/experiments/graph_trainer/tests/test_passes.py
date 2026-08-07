@@ -253,6 +253,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
     def _make_fsdp_model(self, dim=16, n_layers=3):
@@ -1215,6 +1216,7 @@ class TestOverlapPgIsolationPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
     def _get_fsdp_pg_name(self):
@@ -1811,6 +1813,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
         model_spec = llama3_model_registry("debugmodel")
