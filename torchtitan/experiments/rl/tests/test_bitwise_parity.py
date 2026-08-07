@@ -497,12 +497,13 @@ def vllm_prefill(engine, all_prompt_ids):
     ]
 
 
-def vllm_generate(engine, all_prompt_ids, max_tokens):
+def vllm_generate(engine, all_prompt_ids, max_tokens, *, ignore_eos=False):
     """Generate tokens and return (generated_ids, decode_logprobs) per sequence."""
     params = SamplingParams(
         temperature=0.0,
         top_p=1.0,
         max_tokens=max_tokens,
+        ignore_eos=ignore_eos,
         logprobs=1,
         output_kind=RequestOutputKind.FINAL_ONLY,
     )
@@ -822,11 +823,20 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
     attn_backend = "flex"
 
 
+def _moe_tp4_varlen_batch_invariant_config() -> Controller.Config:
+    config = rl_grpo_qwen3_moe_debug_varlen_batch_invariant()
+    config.trainer.parallelism.data_parallel_shard_degree = 1
+    config.trainer.parallelism.tensor_parallel_degree = 4
+    config.generator.parallelism.data_parallel_degree = 1
+    config.generator.parallelism.tensor_parallel_degree = 4
+    return config
+
+
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     """Test bitwise parity between trainer and vLLM generator with MoE EP.
 
-    On 4 GPUs: trainer uses dp_shard=2, TP=2, EP=4; the generator maps
-    dp_shard=2 to vLLM data parallelism with TP=2, EP=4.
+    On 4 GPUs, both trainer and generator use TP=4 and EP=4. This makes an
+    odd three-request decode batch exercise MoE padding from 3 to 4 tokens.
 
     Uses the bundled debug MoE assets by default. Override with
     MOE_HF_ASSETS_PATH if needed.
@@ -838,10 +848,35 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     PROMPT_LENGTH = 100
     MAX_GEN_TOKENS = 30
 
-    config_fn = staticmethod(rl_grpo_qwen3_moe_debug_varlen_batch_invariant)
+    config_fn = staticmethod(_moe_tp4_varlen_batch_invariant_config)
     attn_backend = "varlen"
     min_world_size = 4
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
+    sync_weights_from_trainer = True
+
+    def test_vllm_uneven_decode_tp_padding(self):
+        """Three decode tokens must run correctly with TP=4 MoE sharding."""
+        generated_ids, decode_logprobs = vllm_generate(
+            self.engine,
+            self.prompt_ids,
+            max_tokens=2,
+            ignore_eos=True,
+        )
+        prefill_logprobs = vllm_2nd_pass_prefill(
+            self.engine,
+            self.prompt_ids,
+            generated_ids,
+        )
+
+        for i, generated in enumerate(generated_ids):
+            self.assertEqual(len(generated), 2)
+            self._assert_logprobs_equal(
+                f"request {i} decode vs prefill",
+                decode_logprobs[i],
+                prefill_logprobs[i],
+                "Decode",
+                "2ndPrefill",
+            )
 
 
 class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):
