@@ -64,12 +64,17 @@ class EpOverlapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
+
+    enable_xpugraph: bool = False
+    """Whether to apply XPUGraph capture on XPU"""
+
     mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
         jit: standard torch.compile() with custom backend (deprecated)
     """
+
 
     backend: str = "aot_eager"
 
@@ -78,6 +83,8 @@ class GraphTrainerCompileConfig(CompileConfig):
     Additional compiler pass names to apply.
     In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
     """
+
+
 
     enable_passes: bool = True
     """When False, skip optional graph passes (both default and user-configured).
@@ -106,6 +113,9 @@ class GraphTrainerCompileConfig(CompileConfig):
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
     """
+
+    enable_inductor_overlap_scheduling: bool = False
+    """Enable Inductor analytical compute/communication overlap scheduling."""
 
     pass_pipeline: str = "default"
     """Pass pipeline selection. Controls which graph pass pipeline, post-init
