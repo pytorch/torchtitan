@@ -361,13 +361,13 @@ class MoE(Module):
         shared_experts: FeedForward.Config | None = None
         # TODO(pianpwk): Remove this once MoE combine can derive the local
         # sequence shape directly from the input layout.
-        seq_dim_tp_sharded: bool = False
+        input_seq_tp_sharded: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
-        self.seq_dim_tp_sharded = config.seq_dim_tp_sharded
+        self.input_seq_tp_sharded = config.input_seq_tp_sharded
         # Sequence-shard count used by EP padding/combine. Set in
         # parallelize(); stays 1 unless both EP and TP/SP are active.
         self.expert_sequence_parallel_size = 1
@@ -413,11 +413,11 @@ class MoE(Module):
         DTensors; the DTensor->local conversion happens at the GroupedExperts
         boundary. GroupedExperts operates on local tensors.
         """
-        # TODO: Remove this padding once the S(1) -> P conversion supports uneven
-        # sequence shards. Pad before routing so every TP rank receives the same
-        # local token count and combine can derive its output shape from its input.
+        # TODO: Remove this once S(1) -> P supports uneven sequence shards.
+        # For MoE-internal sequence sharding, physically pad L to a TP multiple
+        # so each TP rank gets the same local token count and combine output shape.
         original_L = x_BLD.shape[1]
-        if self.seq_dim_tp_sharded or self.expert_sequence_parallel_size == 1:
+        if self.input_seq_tp_sharded or self.expert_sequence_parallel_size == 1:
             # Dense SP preserves S(1); EP=1 does not sequence-shard routed tokens.
             seq_pad = 0
         else:
