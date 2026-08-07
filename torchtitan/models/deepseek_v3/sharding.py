@@ -106,15 +106,9 @@ def _set_deepseek_v3_layer_sharding(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
     attention.wkv_a.sharding_config = replicate_weight
-    attention.kv_norm.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        out_src_shardings=dense_activation_placement(tp=spmd.R),
-        out_dst_shardings=dense_activation_placement(tp=spmd.I),
-    )
+    attention.kv_norm.sharding_config = replicate_weight
 
-    attention.wkv_b.sharding_config = colwise_config(
-        input_layout=dense_activation_placement(tp=spmd.I)
-    )
+    attention.wkv_b.sharding_config = colwise_config()
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
     set_gqa_inner_attention_local_map(attention.inner_attention)

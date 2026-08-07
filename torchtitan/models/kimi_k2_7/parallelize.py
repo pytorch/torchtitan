@@ -99,7 +99,9 @@ def parallelize_kimi_k2_5(
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:
         dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+            ["dp_replicate", "fsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["fsdp"]
         )
         dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
         dp_mesh_dims = None

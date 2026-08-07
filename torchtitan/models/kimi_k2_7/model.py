@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 
+from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
@@ -84,7 +85,7 @@ class KimiK25Model(DeepSeekV3Model):
 
     def multimodal_context(self) -> contextlib.AbstractContextManager[None]:
         """Use local DP typechecking while preparing multimodal inputs."""
-        if get_spmd_backend() == "spmd_types":
+        if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
             return spmd.set_current_mesh(local_axes=("dp",))
         return contextlib.nullcontext()
 
@@ -194,7 +195,7 @@ class KimiK25Model(DeepSeekV3Model):
                     grid_thw=grid_thw,
                     pixel_values_videos=pixel_values_videos,
                     grid_thw_videos=grid_thw_videos,
-                    special_tokens=special_tokens,
+                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
                 )
             else:
                 x = tokens
