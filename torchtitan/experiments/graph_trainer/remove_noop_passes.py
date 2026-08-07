@@ -331,6 +331,61 @@ def normalize_view_ops_as_reshape(
     return gm
 
 
+def _is_mutated(node: torch.fx.Node) -> bool:
+    """True if any user mutates ``node`` in place (a write-aliased arg position)."""
+    for user in node.users:
+        schema = getattr(user.target, "_schema", None)
+        if schema is None:
+            continue
+        for i, arg in enumerate(user.args):
+            if arg is node and i < len(schema.arguments):
+                alias = schema.arguments[i].alias_info
+                if alias is not None and alias.is_write:
+                    return True
+    return False
+
+
+def remove_lift_fresh_copy_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Drop ``aten.lift_fresh_copy`` clones of a baked tensor constant.
+
+    ``lift_fresh_copy`` clones a freshly-lifted constant so a downstream in-place op
+    can mutate the copy without touching the constant. When the input is a baked
+    tensor constant (a ``get_attr``) and the copy is never mutated -- e.g. it is only
+    read as the value of an ``index_put_`` (a masked ``tensor[mask] = const``) -- the
+    clone does nothing, so consumers can read the constant directly. The
+    ``_is_mutated`` guard keeps this numerics-preserving (removing a mutated copy
+    would clobber the shared constant).
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with redundant lift_fresh_copy nodes removed.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.target is not torch.ops.aten.lift_fresh_copy.default:
+            continue
+        inp = node.args[0]
+        if not (isinstance(inp, torch.fx.Node) and inp.op == "get_attr"):
+            continue
+        if _is_mutated(node):
+            continue
+        node.replace_all_uses_with(inp)
+        gm.graph.erase_node(node)
+        count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} lift_fresh_copy node(s) on tensor constants")
+
+    return gm
+
+
 def canonicalize_graph_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:
@@ -344,7 +399,9 @@ def canonicalize_graph_pass(
        ``_unsafe_view`` nodes whose output shape equals their input.
     3. ``remove_b2b_transpose_pass`` — collapse back-to-back ``t(t(x))`` pairs.
     4. ``remove_identity_slice_pass`` — drop full-dimension slices.
-    5. ``normalize_view_ops_as_reshape`` — canonicalize remaining
+    5. ``remove_lift_fresh_copy_pass`` — drop ``lift_fresh_copy`` clones of an
+       unmutated tensor constant.
+    6. ``normalize_view_ops_as_reshape`` — canonicalize remaining
        ``view``/``_unsafe_view`` nodes to ``reshape``.
 
     Each sub-pass lints and recompiles internally, so no extra work is
@@ -356,5 +413,6 @@ def canonicalize_graph_pass(
     gm = remove_identity_view_pass(gm, example_inputs)
     gm = remove_b2b_transpose_pass(gm, example_inputs)
     gm = remove_identity_slice_pass(gm, example_inputs)
+    gm = remove_lift_fresh_copy_pass(gm, example_inputs)
     gm = normalize_view_ops_as_reshape(gm, example_inputs)
     return gm
