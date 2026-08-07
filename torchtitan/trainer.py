@@ -19,6 +19,7 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
@@ -45,6 +46,10 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.distributed.metrics import (
+    collect_dtensor_metrics,
+    distribute_rank_local_metric,
+)
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
@@ -825,13 +830,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             microbatch_groups.append(microbatches)
         sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
 
-        # All-reduce to get global token count across DP ranks
-        # Move to GPU for distributed communication
+        # Materialize the global token count before loss normalization.
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(
+            global_valid_tokens_dt = distribute_rank_local_metric(
                 local_valid_tokens.to(self.device), batch_mesh
-            )
+            ).sum()
+            assert isinstance(global_valid_tokens_dt, DTensor)
+            global_valid_tokens = collect_dtensor_metrics(
+                {"global_valid_tokens": global_valid_tokens_dt}
+            )["global_valid_tokens"]
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
@@ -888,6 +896,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if parallel_dims.dp_cp_enabled:
                 loss = loss.detach()
                 loss_mesh = parallel_dims.get_optional_mesh("loss")
+                assert loss_mesh is not None
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # loss = local_loss_sum / global_valid_tokens
@@ -899,16 +908,38 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 #                = (loss * global_valid_tokens) / local_valid_tokens
                 # global_max_loss = max(local_avg_loss)
                 local_avg_loss = loss * global_valid_tokens / local_valid_tokens
-                global_avg_loss, global_max_loss, global_ntokens_seen = (
-                    dist_utils.dist_sum(loss, loss_mesh),
-                    dist_utils.dist_max(local_avg_loss, loss_mesh),
-                    dist_utils.dist_sum(
-                        torch.tensor(
-                            self.ntokens_seen, dtype=torch.int64, device=self.device
-                        ),
-                        loss_mesh,
-                    ),
+                local_loss = loss.to_local() if isinstance(loss, DTensor) else loss
+                local_max_loss = (
+                    local_avg_loss.to_local()
+                    if isinstance(local_avg_loss, DTensor)
+                    else local_avg_loss
                 )
+                local_ntokens_seen = torch.tensor(
+                    self.ntokens_seen, dtype=torch.int64, device=self.device
+                )
+
+                global_avg_loss_dt = distribute_rank_local_metric(
+                    local_loss, loss_mesh
+                ).sum()
+                global_max_loss_dt = distribute_rank_local_metric(
+                    local_max_loss, loss_mesh
+                ).amax()
+                global_ntokens_seen_dt = distribute_rank_local_metric(
+                    local_ntokens_seen, loss_mesh
+                ).sum()
+                assert isinstance(global_avg_loss_dt, DTensor)
+                assert isinstance(global_max_loss_dt, DTensor)
+                assert isinstance(global_ntokens_seen_dt, DTensor)
+                collected_metrics = collect_dtensor_metrics(
+                    {
+                        "loss_metrics/global_avg_loss": global_avg_loss_dt,
+                        "loss_metrics/global_max_loss": global_max_loss_dt,
+                        "n_tokens_seen": global_ntokens_seen_dt,
+                    }
+                )
+                global_avg_loss = collected_metrics["loss_metrics/global_avg_loss"]
+                global_max_loss = collected_metrics["loss_metrics/global_max_loss"]
+                global_ntokens_seen = collected_metrics["n_tokens_seen"]
             else:
                 global_avg_loss = global_max_loss = float(loss.detach().item())
                 global_ntokens_seen = self.ntokens_seen

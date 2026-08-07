@@ -13,12 +13,18 @@ from datetime import timedelta
 from typing import cast
 
 import torch
+import torch.distributed._functional_collectives as funcol
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.metrics import (
+    collect_dtensor_metrics,
+    distribute_rank_local_metric,
+)
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import (
     maybe_semi_sync_training,
@@ -400,13 +406,15 @@ class FaultTolerantTrainer(Trainer):
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
 
-        # All-reduce to get global token count across DP ranks
-        # Move to GPU for distributed communication
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(
+            global_valid_tokens_dt = distribute_rank_local_metric(
                 local_valid_tokens.to(self.device), batch_mesh
-            )
+            ).sum()
+            assert isinstance(global_valid_tokens_dt, DTensor)
+            global_valid_tokens = collect_dtensor_metrics(
+                {"global_valid_tokens": global_valid_tokens_dt}
+            )["global_valid_tokens"]
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
@@ -470,17 +478,51 @@ class FaultTolerantTrainer(Trainer):
             #                = (loss * global_valid_tokens) / local_valid_tokens
             # global_max_loss = max(local_avg_loss)
             local_avg_loss = loss * global_valid_tokens / local_valid_tokens
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_sum(loss, loss_mesh, ft_pg),
-                dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
-                dist_utils.dist_sum(
-                    torch.tensor(
-                        self.ntokens_seen, dtype=torch.int64, device=self.device
-                    ),
-                    loss_mesh,
-                    ft_pg,
-                ),
+            assert loss_mesh is not None
+            local_loss = loss.to_local() if isinstance(loss, DTensor) else loss
+            local_max_loss = (
+                local_avg_loss.to_local()
+                if isinstance(local_avg_loss, DTensor)
+                else local_avg_loss
             )
+            local_ntokens_seen = torch.tensor(
+                self.ntokens_seen, dtype=torch.int64, device=self.device
+            )
+            if ft_pg is not None:
+                local_loss = funcol.all_reduce(
+                    local_loss, torch.distributed.ReduceOp.SUM.name, group=ft_pg
+                )
+                local_max_loss = funcol.all_reduce(
+                    local_max_loss, torch.distributed.ReduceOp.MAX.name, group=ft_pg
+                )
+                local_ntokens_seen = funcol.all_reduce(
+                    local_ntokens_seen,
+                    torch.distributed.ReduceOp.SUM.name,
+                    group=ft_pg,
+                )
+
+            global_avg_loss_dt = distribute_rank_local_metric(
+                local_loss, loss_mesh
+            ).sum()
+            global_max_loss_dt = distribute_rank_local_metric(
+                local_max_loss, loss_mesh
+            ).amax()
+            global_ntokens_seen_dt = distribute_rank_local_metric(
+                local_ntokens_seen, loss_mesh
+            ).sum()
+            assert isinstance(global_avg_loss_dt, DTensor)
+            assert isinstance(global_max_loss_dt, DTensor)
+            assert isinstance(global_ntokens_seen_dt, DTensor)
+            collected_metrics = collect_dtensor_metrics(
+                {
+                    "loss_metrics/global_avg_loss": global_avg_loss_dt,
+                    "loss_metrics/global_max_loss": global_max_loss_dt,
+                    "n_tokens_seen": global_ntokens_seen_dt,
+                }
+            )
+            global_avg_loss = collected_metrics["loss_metrics/global_avg_loss"]
+            global_max_loss = collected_metrics["loss_metrics/global_max_loss"]
+            global_ntokens_seen = collected_metrics["n_tokens_seen"]
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
             global_ntokens_seen = self.ntokens_seen

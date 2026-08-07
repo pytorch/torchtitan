@@ -19,6 +19,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.distributed.metrics import merge_dtensor_metrics
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
@@ -320,7 +321,7 @@ class BaseLoss(ABC, Configurable):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, dict[str, DTensor]]:
         """Return the scaled loss and any metrics computed by the loss."""
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
@@ -350,7 +351,7 @@ class CrossEntropyLoss(BaseLoss):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, dict[str, DTensor]]:
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
@@ -627,7 +628,7 @@ class ChunkedLossWrapper(BaseLoss):
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
         **loss_inputs: Any,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, dict[str, DTensor]]:
         """Compute chunked loss.
 
         ``pred`` should come from model forward with ``_skip_lm_head=True``.
@@ -713,7 +714,7 @@ class ChunkedLossWrapper(BaseLoss):
                     total_loss = spmd.mutate_type(
                         total_loss, axis_name, src=spmd.R, dst=dst
                     )
-            metrics: dict[str, torch.Tensor] = {}
+            metrics: dict[str, DTensor] = {}
 
             # Disable FSDP reshard on lm_head to keep weight unsharded across
             # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
@@ -774,32 +775,11 @@ class ChunkedLossWrapper(BaseLoss):
 
     @staticmethod
     def _combine_chunk_metrics(
-        current: dict[str, torch.Tensor],
-        values: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        """Combine metrics from one sequence chunk into the local accumulator.
-
-        Mean/fraction metrics are expected to already be normalized by the
-        global valid-token count, so summing chunk contributions gives the
-        global mean for this rank's microbatch contribution. The trainer still
-        performs the cross-rank loss-mesh reduction on the returned metrics.
-        """
-        for key, value in values.items():
-            previous = current.get(key)
-            if previous is None:
-                current[key] = value
-            elif key.endswith(("/mean", "/frac", "_mean", "_frac")):
-                current[key] = previous + value
-            elif key.endswith("/max"):
-                current[key] = torch.maximum(previous, value)
-            elif key.endswith("/min"):
-                current[key] = torch.minimum(previous, value)
-            else:
-                raise ValueError(
-                    f"Do not know how to reduce metric '{key}'. "
-                    "Use a /mean, /frac, _mean, _frac, /max, or /min suffix."
-                )
-        return current
+        current: dict[str, DTensor],
+        values: dict[str, DTensor],
+    ) -> dict[str, DTensor]:
+        """Combine chunk metrics according to their propagated placements."""
+        return merge_dtensor_metrics(current, values)
 
     @staticmethod
     def _gradient_backprop(

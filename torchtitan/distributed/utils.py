@@ -15,7 +15,6 @@ from datetime import timedelta
 from typing import Protocol, TYPE_CHECKING
 
 import torch
-import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 import torch.distributed.tensor._random
 import torch.distributed.tensor.parallel
@@ -73,81 +72,6 @@ def check_dtensor_placements_match(
             return False
 
     return True
-
-
-def _dist_reduce(
-    x: torch.Tensor,
-    reduceOp: str,
-    mesh: DeviceMesh | None,
-    extra_pg: dist.ProcessGroup | None,
-) -> float:
-    """Perform distributed reduction on a tensor.
-
-    Args:
-        x (torch.Tensor): Input tensor.
-        reduceOp (str): Reduce operation to perform.
-        mesh (DeviceMesh | None): Device mesh to use for reduction.
-            If None, no reduction is performed but simply convert the tensor to a float.
-        extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
-            Defaults to None. If provided, this all_reduce will be called for the extra
-            process group, and then the result will be all_reduced for the mesh.
-    """
-    if isinstance(x, DTensor):
-        # loss being a DTensor can be 1) full dtensor or 2) non-full dtensor but
-        # TP is enabled. For the former one, a single `full_tensor()` call is enough
-        # but for the later one, we need to treat it as a plain tensor. Since there
-        # is no robust way to distinguish the two and `full_tensor()` may result in
-        # multiple all_reduce() (one for dp_shard and one for CP), we always use
-        # `to_local()` to ensure loss parity in both cases.
-        assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
-            f"_dist_reduce received a DTensor with unsupported placements "
-            f"{x.placements}; only Replicate/Partial are supported."
-        )
-        if extra_pg is not None:
-            raise ValueError(
-                "_dist_reduce does not support DTensor input combined with "
-                "extra_pg: pass a plain tensor when using extra_pg."
-            )
-        x = x.to_local()
-
-    # Plain tensor path.
-    if extra_pg is not None:
-        x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
-    if mesh is None:
-        return float(x.item())
-    assert x.numel() == 1  # required by `.item()`
-    return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
-
-
-# TODO: rename this to maybe_dist_max
-def dist_max(
-    x: torch.Tensor,
-    mesh: DeviceMesh | None = None,
-    extra_pg: dist.ProcessGroup | None = None,
-) -> float:
-    return _dist_reduce(
-        x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, extra_pg=extra_pg
-    )
-
-
-def dist_sum(
-    x: torch.Tensor,
-    mesh: DeviceMesh | None = None,
-    extra_pg: dist.ProcessGroup | None = None,
-) -> float:
-    return _dist_reduce(
-        x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
-    )
-
-
-def dist_mean(
-    x: torch.Tensor,
-    mesh: DeviceMesh | None = None,
-    extra_pg: dist.ProcessGroup | None = None,
-) -> float:
-    return _dist_reduce(
-        x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=extra_pg
-    )
 
 
 def set_determinism(
