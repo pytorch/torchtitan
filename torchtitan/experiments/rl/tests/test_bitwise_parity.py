@@ -61,7 +61,6 @@ from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.experiments.rl.actors.generator import _get_spmd_state_dict_layouts
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
@@ -81,7 +80,6 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     VarlenMetadata,
 )
-from torchtitan.protocols.sharding import resolve_placements
 from torchtitan.tools import utils
 
 logging.basicConfig(level=logging.INFO)
@@ -264,7 +262,6 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
-        enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -280,45 +277,21 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     wrapper = engine.model_executor.driver_worker.get_model()
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
-    vllm_sd = vllm_model.state_dict()
-    spmd_layouts = (
-        _get_spmd_state_dict_layouts(vllm_model)
-        if wrapper.parallel_dims.spmd_backend == "spmd_types"
-        else {}
-    )
 
     missing = []
-    for name, vparam in vllm_sd.items():
+    for name, vparam in vllm_model.state_dict().items():
         tparam = trainer_sd.get(name)
         if tparam is None:
             missing.append(name)
             continue
+        full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
-                full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
                 vparam.copy_(
                     distribute_tensor(full, vparam.device_mesh, vparam.placements)
                 )
-            elif (layout := spmd_layouts.get(name)) is not None:
-                full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
-                mesh = wrapper.parallel_dims.resolve_mesh(layout.axes())
-                if mesh is not None:
-                    full = distribute_tensor(
-                        full,
-                        mesh,
-                        resolve_placements(layout, mesh),
-                    ).to_local()
-                assert full.shape == vparam.shape, (
-                    f"SPMD shard shape mismatch for {name}: source "
-                    f"{tuple(full.shape)} vs destination {tuple(vparam.shape)}"
-                )
-                vparam.copy_(full)
             else:
-                vparam.copy_(tparam)
-
-    # Run state-dict load hooks that merge split state such as wq/wk/wv back
-    # into the generator's fused QKV parameter.
-    vllm_model.load_state_dict(vllm_sd, strict=False)
+                vparam.copy_(full)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -524,13 +497,12 @@ def vllm_prefill(engine, all_prompt_ids):
     ]
 
 
-def vllm_generate(engine, all_prompt_ids, max_tokens, *, ignore_eos=False):
+def vllm_generate(engine, all_prompt_ids, max_tokens):
     """Generate tokens and return (generated_ids, decode_logprobs) per sequence."""
     params = SamplingParams(
         temperature=0.0,
         top_p=1.0,
         max_tokens=max_tokens,
-        ignore_eos=ignore_eos,
         logprobs=1,
         output_kind=RequestOutputKind.FINAL_ONLY,
     )
@@ -850,19 +822,11 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
     attn_backend = "flex"
 
 
-def _moe_tp4_varlen_batch_invariant_config() -> Controller.Config:
-    config = rl_grpo_qwen3_moe_debug_varlen_batch_invariant()
-    config.trainer.parallelism.data_parallel_shard_degree = 1
-    config.trainer.parallelism.tensor_parallel_degree = 4
-    config.generator.parallelism.data_parallel_degree = 1
-    config.generator.parallelism.tensor_parallel_degree = 4
-    return config
-
-
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     """Test bitwise parity between trainer and vLLM generator with MoE EP.
 
-    On 4 GPUs, both trainer and generator use TP=4 and EP=4.
+    On 4 GPUs: trainer uses dp_shard=2, TP=2, EP=4; the generator maps
+    dp_shard=2 to vLLM data parallelism with TP=2, EP=4.
 
     Uses the bundled debug MoE assets by default. Override with
     MOE_HF_ASSETS_PATH if needed.
@@ -874,11 +838,10 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     PROMPT_LENGTH = 100
     MAX_GEN_TOKENS = 30
 
-    config_fn = staticmethod(_moe_tp4_varlen_batch_invariant_config)
+    config_fn = staticmethod(rl_grpo_qwen3_moe_debug_varlen_batch_invariant)
     attn_backend = "varlen"
     min_world_size = 4
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
-    sync_weights_from_trainer = True
 
 
 class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):

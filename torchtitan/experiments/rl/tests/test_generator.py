@@ -26,6 +26,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed as dist
+from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.components.checkpoint import CheckpointManager
@@ -392,7 +393,7 @@ def test_inference_sequence_parallelism_configures_model_and_vllm_padding():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_vllm_uneven_decode_tp_padding():
+def test_vllm_uneven_decode_tp_padding(monkeypatch):
     """Three decode tokens run with dense SP over four TP ranks."""
     world_size = (
         dist.get_world_size()
@@ -407,15 +408,14 @@ def test_vllm_uneven_decode_tp_padding():
     )
     from torchtitan.experiments.rl.tests.test_bitwise_parity import (
         _make_prompt_tokens,
+        _run_engine,
         build_inference_engine,
-        vllm_generate,
     )
 
     config = rl_grpo_qwen3_moe_debug_varlen()
     config.generator.parallelism.data_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 4
     config.generator.parallelism.enable_sequence_parallel = True
-    config.generator.parallelism.spmd_backend = "spmd_types"
     config.generator.gpu_memory_limit = 0.5
 
     temporary_dump_folder = None
@@ -434,22 +434,45 @@ def test_vllm_uneven_decode_tp_padding():
         override=config.generator.override,
     )
 
+    get_compilation_config = VLLMCudagraphConfig.get_vllm_compilation_config
+
+    def _get_sequence_parallel_compilation_config(self, **kwargs):
+        return get_compilation_config(
+            self,
+            enable_sequence_parallel=True,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        VLLMCudagraphConfig,
+        "get_vllm_compilation_config",
+        _get_sequence_parallel_compilation_config,
+    )
     engine = build_inference_engine(config)
     try:
         prompt_ids = _make_prompt_tokens(3, 100, engine.get_tokenizer())
-        generated_ids, decode_logprobs = vllm_generate(
+        outputs = _run_engine(
             engine,
+            "uneven_decode",
             prompt_ids,
-            max_tokens=2,
-            ignore_eos=True,
+            SamplingParams(
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=2,
+                ignore_eos=True,
+                logprobs=1,
+                output_kind=RequestOutputKind.FINAL_ONLY,
+            ),
         )
 
-        for generated, logprobs in zip(
-            generated_ids, decode_logprobs, strict=True
-        ):
-            assert len(generated) == 2
-            assert len(logprobs) == 2
-            assert all(math.isfinite(logprob) for logprob in logprobs)
+        for output in outputs:
+            sample = output.outputs[0]
+            assert len(sample.token_ids) == 2
+            assert len(sample.logprobs) == 2
+            assert all(
+                math.isfinite(list(logprobs.values())[0].logprob)
+                for logprobs in sample.logprobs
+            )
     finally:
         if dist.is_initialized():
             dist.barrier()
