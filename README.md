@@ -42,6 +42,8 @@ The Guiding Principles when building `torchtitan`
 
 `torchtitan` has been showcasing PyTorch's latest distributed training features, via support for pretraining Llama 3.1 LLMs of various sizes.
 
+[TitanRL](torchtitan/experiments/rl) is a hackable stack focused on scaling and debugging. It reuses TorchTitan model definitions and kernels across training and vLLM generation and supports batch-invariant mode.
+
 ## Contributing
 
 We look forward to your contributions!
