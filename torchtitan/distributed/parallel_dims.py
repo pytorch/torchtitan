@@ -19,7 +19,13 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
 
-__all__ = ["MeshAxisName", "ParallelDims", "SpmdLayout", "unfold_dp_axes"]
+__all__ = [
+    "MeshAxisName",
+    "ParallelDims",
+    "SpmdLayout",
+    "unfold_dp_axis",
+    "unfold_dp_axes",
+]
 
 
 class StrEnum(str, Enum):
@@ -115,16 +121,21 @@ class SpmdLayout:
         return result
 
 
+def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
+    """Expand logical ``dp`` into concrete dense storage mesh axes."""
+    axis_name = MeshAxisName(axis)
+    if axis_name == MeshAxisName.DP:
+        return (MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD)
+    return (axis_name,)
+
+
 def unfold_dp_axes(axes: Iterable[MeshAxisName | str]) -> list[str]:
     """Expand logical ``dp`` into concrete dense storage mesh axes."""
-    result: list[str] = []
-    for axis in axes:
-        axis_value = axis.value if isinstance(axis, MeshAxisName) else axis
-        if axis_value == "dp":
-            result.extend(("dp_replicate", "dp_shard"))
-        else:
-            result.append(axis_value)
-    return result
+    return [
+        concrete_axis.value
+        for axis in axes
+        for concrete_axis in unfold_dp_axis(axis)
+    ]
 
 
 @dataclass
