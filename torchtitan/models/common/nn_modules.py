@@ -18,6 +18,7 @@ add more if a new callsite needs them.
 
 from dataclasses import dataclass
 
+import torch
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
@@ -73,6 +74,35 @@ class Conv2d(nn.Conv2d, Module):
             padding=config.padding,
             bias=config.bias,
         )
+
+
+class BatchedLinear(Module):
+    """Per-head linear: y = x @ W^T, where W is (n_heads, out, in).
+
+    Unlike ``Linear`` which has a 2D weight shared across all batch
+    dimensions, ``BatchedLinear`` has a 3D weight where dim 0 indexes
+    independent per-head weight matrices.  Forward computes a batched
+    matmul: ``(*, H, D_in) -> (*, H, D_out)``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        n_heads: int
+        in_features: int
+        out_features: int
+        param_init: dict | None = None
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.weight = nn.Parameter(
+            torch.empty(config.n_heads, config.out_features, config.in_features)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        *prefix, H, D_in = x.shape
+        x_h = x.reshape(-1, H, D_in).transpose(0, 1)  # (H, T, D_in)
+        out = torch.bmm(x_h, self.weight.transpose(-2, -1))  # (H, T, D_out)
+        return out.transpose(0, 1).reshape(*prefix, H, -1)
 
 
 class GELU(nn.GELU, Module):
@@ -160,6 +190,7 @@ class SiLU(nn.SiLU, Module):
 
 
 __all__ = [
+    "BatchedLinear",
     "Conv1d",
     "Conv2d",
     "GELU",
