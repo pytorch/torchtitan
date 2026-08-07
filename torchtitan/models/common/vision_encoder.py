@@ -24,6 +24,7 @@ Shape suffixes:
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
@@ -38,6 +39,15 @@ compiled_create_block_mask = torch.compile(create_block_mask)
 RopeApply = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
 ]
+
+
+@spmd.local_map(
+    in_types=(spmd.PartitionSpec("dp", None, "tp"), None),
+    out_types=spmd.PartitionSpec("dp", None, "tp", None),
+)
+def _local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
+    # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
+    return t.view(t.shape[0], t.shape[1], -1, head_dim)
 
 
 def get_vision_block_mask_mod(num_patches: torch.Tensor) -> Callable:
@@ -122,9 +132,9 @@ class VisionAttention(Module):
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_NPHDh = self.wq(x).view(N, P, -1, self.head_dim)
-        k_NPHDh = self.wk(x).view(N, P, -1, self.head_dim)
-        v_NPHDh = self.wv(x).view(N, P, -1, self.head_dim)
+        q_NPHDh = _local_head_split(self.wq(x), self.head_dim)
+        k_NPHDh = _local_head_split(self.wk(x), self.head_dim)
+        v_NPHDh = _local_head_split(self.wv(x), self.head_dim)
 
         q_NPHDh, k_NPHDh = rope_apply(q_NPHDh, k_NPHDh, rope_cache)
 
