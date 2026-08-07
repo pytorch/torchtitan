@@ -40,7 +40,7 @@ def cross_entropy_loss(
         return _cross_entropy_via_local_map(pred, labels)
 
     if isinstance(pred, DTensor):
-        assert get_spmd_backend() == "default"
+        assert get_spmd_backend() == "partial_dtensor"
         if pred.placements == (Shard(pred.ndim - 1),):
             return _LossParallelCrossEntropy.apply(
                 pred.to_local().flatten(0, 1).float(),

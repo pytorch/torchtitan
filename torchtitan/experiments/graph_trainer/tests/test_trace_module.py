@@ -1842,6 +1842,7 @@ class TestTraceFSDP(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
     def _run_fsdp_model_test(
@@ -2197,6 +2198,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 pp=1,
                 ep=1,
                 world_size=self.world_size,
+                spmd_backend="partial_dtensor",
             )
             fsdp_mesh = parallel_dims.get_mesh("fsdp")
 
