@@ -259,6 +259,20 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    # Do not enable --debug.spmd_typechecking: multimodal pixel
+                    # tensors from the dataloader are not SPMD-annotated yet.
+                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
+                    "--parallelism.spmd_backend spmd_types",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "Kimi K2.7 multimodal spmd_types FSDP",
+            "kimi_k2_5_mm_fsdp_spmd_types",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--training.local_batch_size 2",
                     "--parallelism.data_parallel_shard_degree 2",
