@@ -482,7 +482,6 @@ def get_moe_model_nparams_and_flops(
     nparams_shared_experts = 0
     nparams_experts = 0
     nparams_dense = 0
-    # TODO: add a per-batch vision encoder FLOP term for accurate VLM MFU.
     nparams_vision = 0
 
     for name, p in model.named_parameters():

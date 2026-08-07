@@ -149,7 +149,6 @@ class Trainer(ForgeEngine):
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         """Returns an iterator that processes batches from the data iterator."""
-        device_type = utils.device_type
         data_iterator = iter(data_iterable)
 
         while True:
@@ -162,6 +161,9 @@ class Trainer(ForgeEngine):
             data_load_start = time.perf_counter()
             input_dict, labels = batch
             self.metrics_processor.ntokens_since_last_log += labels.numel()
+            self.metrics_processor.num_extra_flops_since_last_log += (
+                self.model_config.get_num_extra_flops_per_batch(input_dict)
+            )
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
