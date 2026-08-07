@@ -100,6 +100,8 @@ class GptOssGroupedExperts(GroupedExperts):
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine.
 
@@ -173,6 +175,8 @@ class GptOssGroupedExperts(GroupedExperts):
         h_RG = h_RG + b1_RG.to(h_RG.dtype)
 
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
+        if routed_scores_R is not None:
+            h_RF = h_RF * routed_scores_R.to(h_RF.dtype).reshape(-1, 1)
         h_RD = self._grouped_mm(
             A=h_RF, B_t=mlp2_weight_EDF.transpose(-2, -1).bfloat16(), offs=offsets_E
         )
@@ -185,6 +189,8 @@ class GptOssGroupedExperts(GroupedExperts):
             num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
         )
         b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree, h_RD.dtype)
+        if routed_scores_R is not None:
+            b2_RD = b2_RD * routed_scores_R.to(b2_RD.dtype).reshape(-1, 1)
         return h_RD + b2_RD
 
 

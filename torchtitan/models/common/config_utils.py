@@ -384,8 +384,9 @@ def make_routed_experts_config(
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
+    absorb_router_scores: bool = False,
 ) -> RoutedExperts.Config:
-    """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
+    """Build a fully-specified RoutedExperts.Config."""
     return RoutedExperts.Config(
         inner_experts=GroupedExperts.Config(
             dim=dim,
@@ -402,4 +403,5 @@ def make_routed_experts_config(
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             cudagraphable=cudagraphable,
         ),
+        absorb_router_scores=absorb_router_scores,
     )
