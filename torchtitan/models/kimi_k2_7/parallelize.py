@@ -75,7 +75,7 @@ def parallelize_kimi_k2_5(
 
     if parallelism.spmd_backend == "spmd_types":
         validate_config(parallel_dims, model)
-        model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
+        model.parallelize(parallel_dims)
     elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
 
@@ -99,9 +99,7 @@ def parallelize_kimi_k2_5(
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:
         dp_mesh_names = (
-            ["dp_replicate", "fsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["fsdp"]
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
         dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
         dp_mesh_dims = None
@@ -146,7 +144,6 @@ def parallelize_kimi_k2_5(
         edp_mesh=edp_mesh,
         dp_mesh_dims=dp_mesh_dims,
         edp_mesh_dims=edp_mesh_dims,
-        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
     return model

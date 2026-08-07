@@ -72,7 +72,6 @@ def parallelize_qwen3_5(
 
     if parallelism.spmd_backend == "spmd_types":
         validate_config(parallel_dims, model)
-        # pyrefly: ignore [not-callable]
         model.parallelize(parallel_dims)
     elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         # pyrefly: ignore [not-callable]
@@ -135,7 +134,6 @@ def parallelize_qwen3_5(
         edp_mesh=edp_mesh,
         dp_mesh_dims=dp_mesh_dims,
         edp_mesh_dims=edp_mesh_dims,
-        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
     return model

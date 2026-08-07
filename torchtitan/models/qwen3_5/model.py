@@ -908,7 +908,7 @@ class Qwen35Model(Decoder):
                     pixel_values_videos=pixel_values_videos,
                     grid_thw=grid_thw,
                     grid_thw_videos=grid_thw_videos,
-                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                    special_tokens=special_tokens,
                 )
             else:
                 x = tokens
