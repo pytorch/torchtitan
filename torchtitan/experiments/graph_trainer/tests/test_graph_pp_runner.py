@@ -31,7 +31,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     ensure_boxed_graph_module,
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    FP8GraphConfig,
+    GraphTrainerCompileConfig,
+)
 from torchtitan.experiments.graph_trainer.graph_pp import multiplex_fw_bw_graph
 from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
     _build_graph_pp_overlap_graphs,
@@ -475,39 +478,45 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
     def test_graph_pp_compile_uses_inductor_compilation_with_default_backend(
         self,
     ) -> None:
-        gm = torch.fx.symbolic_trace(lambda x: x + 1)
-        for node in gm.graph.find_nodes(op="placeholder"):
-            node.meta["val"] = torch.randn(2)
-        compile_config = GraphTrainerCompileConfig(enable=True)
-
         def boxed_apply_graph_passes(gm, example_inputs, passes, compile_config):
             return ensure_boxed_graph_module(gm)
 
-        with (
-            mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_pp.graph_builder."
-                "final_inductor_compile_passes",
-                return_value=[],
-            ) as final_inductor_passes,
-            mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_pp.graph_builder."
-                "apply_graph_passes",
-                side_effect=boxed_apply_graph_passes,
-            ) as apply_graph_passes,
-        ):
-            compiled = _compile_graph_pp_module(
-                gm,
-                compile_config=compile_config,
-                graph_name="test_graph",
-            )
+        for fp8_enabled in (False, True):
+            with self.subTest(fp8_enabled=fp8_enabled):
+                gm = torch.fx.symbolic_trace(lambda x: x + 1)
+                for node in gm.graph.find_nodes(op="placeholder"):
+                    node.meta["val"] = torch.randn(2)
+                compile_config = GraphTrainerCompileConfig(
+                    enable=True,
+                    fp8=FP8GraphConfig(enabled=fp8_enabled),
+                )
 
-        self.assertIs(compiled, gm)
-        final_inductor_passes.assert_called_once_with(
-            compile_config,
-            use_cudagraph=False,
-            boxed_codegen=True,
-        )
-        apply_graph_passes.assert_called_once()
+                with (
+                    mock.patch(
+                        "torchtitan.experiments.graph_trainer.graph_pp.graph_builder."
+                        "final_inductor_compile_passes",
+                        return_value=[],
+                    ) as final_inductor_passes,
+                    mock.patch(
+                        "torchtitan.experiments.graph_trainer.graph_pp.graph_builder."
+                        "apply_graph_passes",
+                        side_effect=boxed_apply_graph_passes,
+                    ) as apply_graph_passes,
+                ):
+                    compiled = _compile_graph_pp_module(
+                        gm,
+                        compile_config=compile_config,
+                        graph_name="test_graph",
+                    )
+
+                self.assertIs(compiled, gm)
+                final_inductor_passes.assert_called_once_with(
+                    compile_config,
+                    use_cudagraph=False,
+                    boxed_codegen=True,
+                    fp8_strict_validation=False,
+                )
+                apply_graph_passes.assert_called_once()
 
     def test_graph_pp_graph_execution_uses_mutable_boxed_args(self) -> None:
         gm = torch.fx.symbolic_trace(lambda x, y: x + y)

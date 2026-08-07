@@ -82,6 +82,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     deduplicate_fsdp_unshard_chains_pass,
     eliminate_dead_code_pass,
     final_inductor_compile_passes,
+    graph_pp_pre_partition_fp8_passes,
 )
 from torchtitan.protocols.model import BaseModel
 from torchtitan.tools.logging import logger
@@ -675,6 +676,9 @@ def _compile_graph_pp_module(
             compile_config,
             use_cudagraph=False,
             boxed_codegen=True,
+            # The complete stage joint graph was validated before partitioning.
+            # Extracted helper callables may legitimately contain no FP8 nodes.
+            fp8_strict_validation=False,
         ),
         compile_config=compile_config,
     )
@@ -823,6 +827,11 @@ def _apply_graph_pp_pre_partition_passes(
         use_cudagraph=False,
         include_inductor=False,
         include_mandatory_normalization=False,
+    )
+    passes.extend(
+        graph_pp_pre_partition_fp8_passes(
+            compile_config,
+        )
     )
     traced.gm = apply_graph_passes(
         traced.gm,
