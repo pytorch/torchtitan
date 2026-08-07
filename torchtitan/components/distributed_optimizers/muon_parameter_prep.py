@@ -70,6 +70,8 @@ class MuonComputeSharding:
     is sharded. ``Shard(0)`` partitions rank-3-or-higher matrix batches along
     the matrix-batch dimension. Aligned storage computes locally; otherwise an
     exact one-dimensional ``Shard(0)`` storage layout is repartitioned.
+    ``Shard(0)`` is owner-free in either case and must not have an entry in
+    ``BucketSpec.owner_rank_by_fqn``.
     """
 
     # Applied before compute placement, so placement dimensions refer to the

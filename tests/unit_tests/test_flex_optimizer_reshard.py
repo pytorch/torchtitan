@@ -18,6 +18,7 @@ from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import 
     _BucketPlan,
     _BucketWork,
     _BufferSlot,
+    _build_bucket_plans,
     _build_owned_bucket_plans,
     _compute_redistributed,
     _finalize_redistributed,
@@ -36,17 +37,17 @@ from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import 
 )
 
 
-def _head_redistribution_plan(
+def _fragmented_partition_plan(
     participants: tuple[int, ...],
     *,
-    num_heads: int = 5,
-    matrix_rows: int = 3,
-    matrix_columns: int = 2,
+    num_compute_units: int = 5,
+    compute_unit_rows: int = 3,
+    num_columns: int = 2,
 ) -> _RedistributionPlan:
     num_participants = len(participants)
     compute_ranges = tuple(
         Shard.local_shard_size_and_offset(
-            num_heads,
+            num_compute_units,
             num_participants,
             rank,
         )
@@ -55,17 +56,17 @@ def _head_redistribution_plan(
     compute_partitions = tuple(
         _ParticipantPartition(
             participant=participant,
-            tensor_shape=(num_local_heads, matrix_rows, matrix_columns),
+            tensor_shape=(num_local_units, compute_unit_rows, num_columns),
             logical_blocks=(
                 _MatrixBlock(
-                    offsets=(head_offset, 0, 0),
-                    shape=(num_local_heads, matrix_rows, matrix_columns),
+                    offsets=(unit_offset, 0, 0),
+                    shape=(num_local_units, compute_unit_rows, num_columns),
                 ),
             )
-            if num_local_heads
+            if num_local_units
             else (),
         )
-        for participant, (num_local_heads, head_offset) in zip(
+        for participant, (num_local_units, unit_offset) in zip(
             participants,
             compute_ranges,
             strict=True,
@@ -77,7 +78,7 @@ def _head_redistribution_plan(
     reverse_routes = []
     for storage_rank, participant in enumerate(participants):
         num_local_rows, storage_offset = Shard.local_shard_size_and_offset(
-            num_heads * matrix_rows,
+            num_compute_units * compute_unit_rows,
             num_participants,
             storage_rank,
         )
@@ -85,26 +86,26 @@ def _head_redistribution_plan(
         fragment_start = storage_offset
         storage_end = storage_offset + num_local_rows
         while fragment_start < storage_end:
-            head = fragment_start // matrix_rows
-            row = fragment_start % matrix_rows
-            num_rows = min(matrix_rows - row, storage_end - fragment_start)
+            compute_unit = fragment_start // compute_unit_rows
+            row = fragment_start % compute_unit_rows
+            num_rows = min(compute_unit_rows - row, storage_end - fragment_start)
             logical_block = _MatrixBlock(
-                offsets=(head, row, 0),
-                shape=(1, num_rows, matrix_columns),
+                offsets=(compute_unit, row, 0),
+                shape=(1, num_rows, num_columns),
             )
             storage_block = _MatrixBlock(
                 offsets=(fragment_start - storage_offset, 0),
-                shape=(num_rows, matrix_columns),
+                shape=(num_rows, num_columns),
             )
             compute_rank = next(
                 rank
-                for rank, (num_local_heads, head_offset) in enumerate(compute_ranges)
-                if head_offset <= head < head_offset + num_local_heads
+                for rank, (num_local_units, unit_offset) in enumerate(compute_ranges)
+                if unit_offset <= compute_unit < unit_offset + num_local_units
             )
-            compute_head_offset = compute_ranges[compute_rank][1]
+            compute_unit_offset = compute_ranges[compute_rank][1]
             compute_block = _MatrixBlock(
-                offsets=(head - compute_head_offset, row, 0),
-                shape=(1, num_rows, matrix_columns),
+                offsets=(compute_unit - compute_unit_offset, row, 0),
+                shape=(1, num_rows, num_columns),
             )
             compute_participant = participants[compute_rank]
             logical_blocks.append(logical_block)
@@ -130,14 +131,14 @@ def _head_redistribution_plan(
         storage_partitions.append(
             _ParticipantPartition(
                 participant=participant,
-                tensor_shape=(num_local_rows, matrix_columns),
+                tensor_shape=(num_local_rows, num_columns),
                 logical_blocks=tuple(logical_blocks),
             )
         )
 
     return _RedistributionPlan(
         participants=participants,
-        logical_shape=(num_heads, matrix_rows, matrix_columns),
+        logical_shape=(num_compute_units, compute_unit_rows, num_columns),
         storage_partitions=tuple(storage_partitions),
         compute_partitions=compute_partitions,
         storage_to_compute_routes=tuple(forward_routes),
@@ -346,6 +347,93 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             0,
         )
 
+    def test_bucket_planner_accepts_owner_free_redistribution(self):
+        @dataclass(frozen=True)
+        class Item:
+            fqn: str
+            tensor: DTensor
+
+        participants = (3, 7)
+        first = _MatrixBlock(offsets=(0, 0), shape=(1, 2))
+        second = _MatrixBlock(offsets=(1, 0), shape=(1, 2))
+        local = _MatrixBlock(offsets=(0, 0), shape=(1, 2))
+        redistribution_plan = _RedistributionPlan(
+            participants=participants,
+            logical_shape=(2, 2),
+            storage_partitions=(
+                _ParticipantPartition(3, (1, 2), (first,)),
+                _ParticipantPartition(7, (1, 2), (second,)),
+            ),
+            compute_partitions=(
+                _ParticipantPartition(3, (1, 2), (second,)),
+                _ParticipantPartition(7, (1, 2), (first,)),
+            ),
+            storage_to_compute_routes=(
+                _MatrixBlockRoute(first, local, local, (3,), (7,)),
+                _MatrixBlockRoute(second, local, local, (7,), (3,)),
+            ),
+            compute_to_storage_routes=(
+                _MatrixBlockRoute(first, local, local, (7,), (3,)),
+                _MatrixBlockRoute(second, local, local, (3,), (7,)),
+            ),
+        )
+        tensor = Mock(spec=DTensor)
+        tensor.to_local.return_value = torch.empty(1, 2)
+        item = Item("layers.0.weight", tensor)
+        group = _RedistributionGroup(
+            process_group=object(),
+            participants=participants,
+            local_participant=3,
+        )
+        mesh = Mock(spec=DeviceMesh)
+        mesh.ndim = 1
+        received_owner_ranks = []
+
+        def build_plan(_item, received_group, owner_rank):
+            self.assertIs(_item, item)
+            self.assertIs(received_group, group)
+            received_owner_ranks.append(owner_rank)
+            return redistribution_plan
+
+        with patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "_redistribution_group",
+            return_value=group,
+        ), patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
+            "get_process_group_ranks",
+            return_value=list(participants),
+        ):
+            result = _build_bucket_plans(
+                (item,),
+                (
+                    BucketSpec(
+                        patterns=("layers.0.*",),
+                        owner_rank_by_fqn={},
+                        mesh=mesh,
+                    ),
+                ),
+                fqn=lambda value: value.fqn,
+                requires_owner=lambda _value: False,
+                storage_dtensor=lambda value: value.tensor,
+                redistribution_plan=build_plan,
+            )
+
+        self.assertEqual(received_owner_ranks, [None])
+        self.assertEqual(result.ordered_items, (item,))
+        plan = result.plans[0]
+        self.assertEqual(plan.local_items, ())
+        self.assertEqual(plan.redistributed_items, (item,))
+        self.assertIs(plan.redistribution_plans[0], redistribution_plan)
+        self.assertEqual(
+            plan.storage_to_compute_schedule.input_split_sizes,
+            (0, 2),
+        )
+        self.assertEqual(
+            plan.storage_to_compute_schedule.output_split_sizes,
+            (0, 2),
+        )
+
     def test_transport_neutral_routes_lower_to_packed_all_to_all(self):
         first = _MatrixBlock(offsets=(0, 0), shape=(2, 3))
         second = _MatrixBlock(offsets=(2, 0), shape=(2, 3))
@@ -404,9 +492,11 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             (local,),
         )
 
-    def test_head_partitions_support_split_storage_and_zero_head_rank(self):
+    def test_partitioned_compute_supports_fragmented_storage_and_empty_participant(
+        self,
+    ):
         participants = (3, 7, 11, 13)
-        plan = _head_redistribution_plan(participants)
+        plan = _fragmented_partition_plan(participants)
 
         self.assertEqual(plan.logical_shape, (5, 3, 2))
         self.assertEqual(plan.storage_partition(13).tensor_shape, (3, 2))
@@ -470,7 +560,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
 
     def test_prepare_and_finalize_assemble_multiple_endpoint_spans(self):
         participants = (3, 7, 11, 13)
-        redistribution_plan = _head_redistribution_plan(participants)
+        redistribution_plan = _fragmented_partition_plan(participants)
         local_participant = 7
         forward = _lower_packed_all_to_all(
             (redistribution_plan,),

@@ -34,8 +34,9 @@ class BucketConfig:
     ``mesh_axes`` contains exactly one storage mesh axis name. When
     ``owner_rank_by_fqn`` is nonempty, its redistributed parameters determine
     the resolved mesh; otherwise all parameters matching ``patterns`` do. For
-    DistributedMuon, owner-assigned parameters use ``Owned`` while compute-ready
-    parameters in the same bucket may use a different storage mesh.
+    DistributedMuon, owner-assigned parameters use ``Owned``. An owner-free
+    parameter may compute locally or redistribute on the resolved bucket mesh
+    without a designated owner.
     """
 
     patterns: tuple[str, ...]
@@ -69,10 +70,11 @@ class BucketSpec:
     Patterns use case-sensitive ``fnmatch`` syntax. Every optimizer FQN must
     match exactly one bucket, and sequence order controls execution order.
     ``mesh`` is the bucket's exact one-dimensional communication mesh.
-    ``owner_rank_by_fqn`` must exactly cover parameters requiring whole-tensor
-    redistribution and uses mesh-local ranks. Compute-ready parameters have no
-    owner entry. A rank-0 entry is also accepted for compute-ready parameters
-    on a one-rank mesh, where sharded storage may normalize to replication.
+    ``owner_rank_by_fqn`` must exactly cover parameters whose compute transition
+    requires a designated owner and uses mesh-local ranks. Owner-free
+    transitions have no entry whether they compute locally or redistribute. A
+    redundant rank-0 entry is accepted for a local transition on a one-rank
+    mesh, where sharded storage may normalize to replication.
     ``name`` is diagnostic metadata only.
     """
 
@@ -828,7 +830,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                     prepare=prepare,
                 )
                 redistributed_index += 1
-                # Keep collective launches ahead of owner-dependent work:
+                # Keep collective launches ahead of redistributed work:
                 # gather(current) -> return(previous) -> compute(current).
                 if previous is not None:
                     self._complete(previous, context, finalize=finalize)
@@ -1256,10 +1258,10 @@ def _build_bucket_plans(
     """Build ordered local and redistributed optimizer bucket plans.
 
     ``redistribution_plan`` receives a mesh-local owner rank exactly when
-    ``requires_owner`` is true. It returns ``None`` for compute-ready local
-    storage or a transport-neutral plan for redistribution. This keeps bucket
-    ordering, owner validation, dtype validation, and packed communication
-    independent of a particular optimizer compute placement.
+    ``requires_owner`` is true. It returns ``None`` when storage is already
+    compute-ready or a transport-neutral plan for redistribution. This keeps
+    bucket ordering, owner validation, dtype validation, and packed
+    communication independent of a particular optimizer compute placement.
     """
     resolved = _resolve_buckets(items, specs, fqn=fqn)
     plans = []
@@ -1275,7 +1277,7 @@ def _build_bucket_plans(
         if missing_owners:
             raise ValueError(
                 f"bucket {spec.name!r} owner assignment must exactly cover "
-                "whole-tensor-owned parameters; "
+                "owner-requiring parameters; "
                 f"missing={sorted(missing_owners)}, "
                 f"extra={sorted(provided_owners - expected_owners)}"
             )
@@ -1324,7 +1326,7 @@ def _build_bucket_plans(
         if effective_provided_owners != expected_owners:
             raise ValueError(
                 f"bucket {spec.name!r} owner assignment must exactly cover "
-                "whole-tensor-owned parameters; "
+                "owner-requiring parameters; "
                 f"missing={sorted(expected_owners - effective_provided_owners)}, "
                 f"extra={sorted(effective_provided_owners - expected_owners)}"
             )
