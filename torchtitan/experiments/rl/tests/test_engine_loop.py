@@ -53,15 +53,10 @@ def _bare_generator(
     generator._queued_generation_requests = pending or []
     generator._request_dispatcher = RequestDispatcher(
         rank=0,
-        parallelism=SimpleNamespace(
-            data_parallel_degree=dp_size, tensor_parallel_degree=1
-        ),
+        dp_rank=0,
+        tp_rank=0,
+        dp_degree=dp_size,
         broadcast_group=None,
-        vllm_parallel_config=SimpleNamespace(
-            tensor_parallel_size=1,
-            data_parallel_size=dp_size,
-            data_parallel_rank=0,
-        ),
         intra_generator_router=IntraGeneratorRouter.Config(
             strategy=dp_routing_strategy or LeastLoadedRoutingStrategy.Config()
         ),

@@ -111,3 +111,29 @@ python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grp
 ```
 
 This config sets `DebugConfig(batch_invariant=True, deterministic=True)`. The trainer must compute its forward in bfloat16 to match the generator. This is achieved with FSDP mixed precision: the trainer keeps fp32 master weights and FSDP casts them to bfloat16 (`training.mixed_precision_param="bfloat16"`, the default) for the forward, which is bitwise identical to the generator's bfloat16 forward. The trainer always wraps the model in FSDP, so this cast happens even at `data_parallel_shard_degree=1` (where FSDP acts purely as a mixed-precision boundary) -- no extra GPUs are needed.
+
+## vLLM engine metrics (OpenTelemetry)
+
+Generator can export vLLM's engine-aggregate inference stats via [OpenTelemetry](https://opentelemetry.io/) (OTLP). These stats captures what the inference engine itself is doing during rollout.
+
+The logger (`observability/vllm_otel_stat_logger.py`) is registered by default via generator's config field `vllm_stat_loggers` and is a **no-op unless you opt in** with an exporter env var. vLLM currently installs the required OpenTelemetry libraries as dependencies, so no additional installation should normally be needed. If they are unavailable (for example, because vLLM's dependencies change in the future), install them explicitly:
+
+```bash
+uv pip install opentelemetry-sdk                       # required for both modes
+uv pip install opentelemetry-exporter-otlp-proto-http  # only for OTLP push (mode 2)
+```
+
+**Mode 1 — write to a file, no collector needed (quick inspection):**
+```bash
+OTEL_METRICS_EXPORTER=console python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grpo_qwen3_0_6b_varlen
+```
+Writes one compact-JSON row per flush to `{output_dir}/vllm_metrics/{generator_name}.rank{rank}.jsonl` (falls back to stdout if there is no output dir).
+
+**Mode 2 — push OTLP to a collector / backend** (OpenTelemetry Collector, Prometheus' OTLP receiver, Grafana, ...):
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grpo_qwen3_0_6b_varlen
+```
+
+Useful knobs:
+- `VLLM_LOG_STATS_INTERVAL=<seconds>` — how often a row is emitted (default ~10s; lower it for more frequent rows). Rows are emitted only while the engine is generating.
+- `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES="run.id=...,team=..."` — standard OpenTelemetry env vars.

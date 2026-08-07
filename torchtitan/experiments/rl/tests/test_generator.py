@@ -99,24 +99,13 @@ def _generator():
 
 
 def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
-    """A bare RequestDispatcher; broadcast_group is unused unless ``setup`` runs.
-
-    Passes a vLLM parallel config that matches the layout so the construction-time
-    assert holds.
-    """
-    parallelism = SimpleNamespace(
-        data_parallel_degree=dp_degree, tensor_parallel_degree=tp_degree
-    )
-    vllm_parallel_config = SimpleNamespace(
-        tensor_parallel_size=tp_degree,
-        data_parallel_size=dp_degree,
-        data_parallel_rank=rank // tp_degree,
-    )
+    """A bare RequestDispatcher; broadcast_group is unused unless ``setup`` runs."""
     return RequestDispatcher(
         rank=rank,
-        parallelism=parallelism,
+        dp_rank=rank // tp_degree,
+        tp_rank=rank % tp_degree,
+        dp_degree=dp_degree,
         broadcast_group=None,
-        vllm_parallel_config=vllm_parallel_config,
         intra_generator_router=IntraGeneratorRouter.Config(
             strategy=dp_routing_strategy or LeastLoadedRoutingStrategy.Config()
         ),
