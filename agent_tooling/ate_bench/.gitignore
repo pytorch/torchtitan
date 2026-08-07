@@ -1,0 +1,6 @@
+# ATE-Bench run outputs (transcripts, metrics, summaries) are generated artifacts.
+results/
+# Task artifacts produced by the agent (routing traces, profiles, logs).
+workspace/
+# Transient per-attempt git worktrees (new-feature runner).
+worktrees/
