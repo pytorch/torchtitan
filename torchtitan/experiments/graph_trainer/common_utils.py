@@ -20,8 +20,12 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
-    data_parallel,
+    data_parallel as dtensor_data_parallel,
     MixedPrecisionPolicy,
+)
+from torchtitan.experiments.graph_trainer.simple_fsdp_spmd import (
+    build_legacy_dense_mesh,
+    data_parallel as spmd_data_parallel,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
@@ -419,6 +423,21 @@ def apply_simple_fsdp(
     (the routed-expert weights) are separately wrapped on the EDP mesh when expert
     parallelism is enabled.
     """
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+    )
+    if parallel_dims.spmd_backend == "spmd_types":
+        model = spmd_data_parallel(
+            model,
+            storage_mesh=build_legacy_dense_mesh(parallel_dims),
+            compute_mesh=parallel_dims.spmd_dense_mesh(),
+            shard_dim=0,
+            mp_policy=mp_policy,
+        )
+        logger.info("Applied Data Parallel (simple_fsdp_spmd) to the model")
+        return model
+
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
             dp_mesh_dim_names = ["dp_replicate", "fsdp"]
@@ -431,11 +450,6 @@ def apply_simple_fsdp(
         dp_mode = "fully_shard"
 
     dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-    )
-
     if parallel_dims.ep_enabled and isinstance(model, Decoder):
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
@@ -456,7 +470,7 @@ def apply_simple_fsdp(
             if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
                 experts_shard_dim = 1
 
-            moe.routed_experts.inner_experts = data_parallel(
+            moe.routed_experts.inner_experts = dtensor_data_parallel(
                 inner_experts,
                 edp_mesh,
                 dp_mode,
@@ -464,7 +478,7 @@ def apply_simple_fsdp(
                 shard_dim=experts_shard_dim,
             )
 
-    model = data_parallel(
+    model = dtensor_data_parallel(
         model,
         dp_mesh,
         dp_mode,
