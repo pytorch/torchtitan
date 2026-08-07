@@ -6,6 +6,7 @@
 
 import dataclasses
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -32,10 +33,24 @@ from torchtitan.protocols.module import Module
 
 
 def apply_attention_sink_rescale(
-    out: torch.Tensor, lse: torch.Tensor, sinks: torch.Tensor
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    sinks: torch.Tensor,
+    *,
+    head_axis: int = -1,
 ) -> torch.Tensor:
-    """Rescale attention output by the learned per-head sink term."""
-    sinks = sinks.view(*([1] * (lse.ndim - 1)), -1)
+    """Rescale attention output by the learned per-head sink term.
+
+    ``out`` shares ``lse``'s layout plus a trailing head-dim (H), so the sink
+    scale broadcasts onto ``out`` after a single ``unsqueeze(-1)``. ``head_axis``
+    locates the head axis within ``lse`` so the per-head ``sinks`` broadcast to
+    the right axis without transposing: the training and packed-varlen layouts
+    keep heads last (default -1), while vLLM's flex backend passes (B, N, L)
+    with heads at axis 1.
+    """
+    shape = [1] * lse.ndim
+    shape[head_axis] = -1
+    sinks = sinks.view(shape)
     sink_scale = torch.sigmoid(lse - sinks).unsqueeze(-1)
     return out * sink_scale.to(out.dtype)
 
@@ -59,6 +74,9 @@ class Attention(BaseAttention):
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
         rope: RoPE.Config
+        out_transform: Callable[..., torch.Tensor] | None = apply_attention_sink_rescale
+        """Attention-output epilogue ``(out, lse, sinks) -> out``; GPT-OSS uses
+        it for sink rescaling. See ``BaseAttention.Config.out_transform``."""
 
     def __init__(self, config: Config):
         super().__init__()
@@ -80,6 +98,7 @@ class Attention(BaseAttention):
         self.qkv_linear = config.qkv_linear.build()
         self.wo = config.wo.build()
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
+        self.out_transform = config.out_transform
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
@@ -113,7 +132,7 @@ class Attention(BaseAttention):
             attention_masks=attention_masks,
             scale=self.softmax_scale,
             enable_gqa=self.enable_gqa,
-            out_transform=self._apply_sinks,
+            out_transform=self._apply_sinks if self.out_transform is not None else None,
         )
 
         # Reshape and project output
@@ -124,11 +143,16 @@ class Attention(BaseAttention):
         return output
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
-        """out_transform hook: rescale attention output by this layer's sinks."""
+        """out_transform hook: bind this layer's sinks to the configured
+        ``out_transform`` epilogue (heads-last layout for the training path).
+
+        Only wired up by ``forward`` when ``out_transform`` is set.
+        """
+        assert self.out_transform is not None
         sinks = self.sinks
         if isinstance(sinks, DTensor):
             sinks = sinks.to_local(grad_placements=sinks.placements)
-        return apply_attention_sink_rescale(out, lse, sinks)
+        return self.out_transform(out, lse, sinks)
 
 
 class GptOssTransformerBlock(TransformerBlock):

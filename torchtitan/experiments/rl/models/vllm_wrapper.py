@@ -320,19 +320,24 @@ class VLLMModelWrapper(Module):
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
-        """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
+        """Give each gpt-oss attention's vLLM backend its sink-rescale hook.
+        """
         from torchtitan.models.gpt_oss.model import (
             apply_attention_sink_rescale,
             Attention,
         )
+        from vllm.v1.attention.backends.flex_attention import FlexAttentionImpl
 
         for module in self.model.modules():
             if not isinstance(module, Attention):
                 continue
             sinks = module.sinks
             local_sinks = sinks._local_tensor if isinstance(sinks, DTensor) else sinks
-            module.inner_attention.vllm_attn.impl.out_transform = partial(
-                apply_attention_sink_rescale, sinks=local_sinks
+            impl = module.inner_attention.vllm_attn.impl
+
+            head_axis = 1 if isinstance(impl, FlexAttentionImpl) else -1
+            impl.out_transform = partial(
+                apply_attention_sink_rescale, sinks=local_sinks, head_axis=head_axis
             )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

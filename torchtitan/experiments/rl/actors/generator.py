@@ -864,6 +864,12 @@ class VLLMGenerator(Actor, Configurable):
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
+
+        if (
+            config.debug.batch_invariant
+            and model_spec.model.layers[0].attention.out_transform is not None
+        ):
+            engine_kwargs["enable_prefix_caching"] = False
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
