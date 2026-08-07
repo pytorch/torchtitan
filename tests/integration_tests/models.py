@@ -11,14 +11,7 @@ from tests.integration_tests import OverrideDefinitions
 
 
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Use ``backend`` for every variant, or return an unsupported test unchanged."""
-    if backend == "spmd_types" and any(
-        "--module kimi_k2_7" in arg
-        for variant in t.override_args
-        for arg in variant
-    ):
-        return t
-
+    """Use ``backend`` for every variant."""
     test_name = f"{t.test_name}_{backend}"
     new_args = []
     for variant in t.override_args:
@@ -259,15 +252,12 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    # Do not enable --debug.spmd_typechecking: multimodal pixel
-                    # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--parallelism.spmd_backend spmd_types",
                     "--parallelism.data_parallel_shard_degree 2",
                 ],
             ],
-            "Kimi K2.7 multimodal spmd_types FSDP",
-            "kimi_k2_5_mm_fsdp_spmd_types",
+            "Kimi K2.7 multimodal FSDP",
+            "kimi_k2_5_mm_fsdp",
             ngpu=2,
         ),
         OverrideDefinitions(
