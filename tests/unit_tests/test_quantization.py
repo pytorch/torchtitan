@@ -242,9 +242,9 @@ def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
     assert config.parallelism.spmd_backend == "spmd_types"
 
     overridden = ConfigManager().parse_args(
-        [*base_args, "--parallelism.spmd_backend", "default"]
+        [*base_args, "--parallelism.spmd_backend", "partial_dtensor"]
     )
-    assert overridden.parallelism.spmd_backend == "default"
+    assert overridden.parallelism.spmd_backend == "partial_dtensor"
 
 
 @pytest.mark.parametrize(
