@@ -435,6 +435,12 @@ def construct_default_graph_passes(
                 parallel_dims=parallel_dims,
             )
         )
+    else:
+        # GraphModule.__reduce__ strips _CodegenGraphModule's fast dispatch
+        # during pickling, falling back to slow FX graph interpretation.
+        # Re-apply custom_codegen_pass to regenerate the monolithic Python
+        # forward from the graph IR which survives the pickle round-trip.
+        passes.append(custom_codegen_pass)
 
     if want_cudagraph:
         static_input_indices = list(range(traced_result.num_static_inputs))
