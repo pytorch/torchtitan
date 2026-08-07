@@ -213,10 +213,7 @@ class VLLMCudagraphConfig:
     # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
-        self,
-        *,
-        max_num_seqs: int,
-        max_num_batched_tokens: int | None = None,
+        self, *, max_num_seqs: int, max_num_batched_tokens: int | None = None
     ) -> CompilationConfig | None:
         """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
         when CUDA graphs are disabled.
@@ -235,7 +232,6 @@ class VLLMCudagraphConfig:
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
         cudagraph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
         also forces ``mode=NONE`` when that env is set) (#3709).
-
         """
         if not self.enable:
             return None

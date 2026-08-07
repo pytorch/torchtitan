@@ -75,8 +75,8 @@ class InferenceParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
         the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
 
-        Pins the inference-only invariants: no DP replication, CP/PP, dense
-        sequence parallelism, or loss parallelism.
+        Pins the inference-only invariants: no DP replication, no CP/PP, no
+        sequence parallel, and loss parallel disabled.
         """
         return ParallelismConfig(
             # Carry the vLLM DP factor on dp_shard (not dp_replicate) so the
@@ -94,6 +94,7 @@ class InferenceParallelismConfig:
             enable_sequence_parallel=False,
             spmd_backend=self.spmd_backend,
         )
+
 
 def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     """Build the HF-shaped config dict that vLLM's engine init reads.
