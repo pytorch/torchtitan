@@ -53,32 +53,6 @@ class MetricsTimer:
         ]
 
 
-def combine_microbatch_metrics(
-    microbatch_metrics: list[dict[str, float]],
-) -> dict[str, float]:
-    """Combine per-microbatch loss metrics over the grad-accumulation: mean/frac keys are pre-normalized
-    by num_global_valid_tokens so summing them reconstructs the global value. For keys ending in "max",
-    the max value is taken.
-
-    Example:
-        # already normalized by num_global_valid_tokens
-        combine_microbatch_metrics([{"loss/ratio_clipped_frac": 0.1, "x/max": 2.0},
-                                    {"loss/ratio_clipped_frac": 0.2, "x/max": 5.0}])
-        # output
-        # -> {"loss/ratio_clipped_frac": 0.3, "x/max": 5.0}
-    """
-    combined: dict[str, float] = {}
-    for microbatch in microbatch_metrics:
-        for key, value in microbatch.items():
-            if key not in combined:
-                combined[key] = value
-            elif key.endswith("/max"):
-                combined[key] = max(combined[key], value)
-            elif key.endswith(("/mean", "_mean", "/frac", "_frac")):
-                combined[key] += value
-    return combined
-
-
 def compute_perf_ratio_metrics(
     *, num_global_valid_tokens: int, time_metrics: list[m.Metric]
 ) -> list[m.Metric]:

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
@@ -18,6 +19,10 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import ValidationContext, Validator
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.metrics import (
+    collect_dtensor_metrics,
+    distribute_rank_local_metric,
+)
 from torchtitan.tools.logging import logger
 
 from .configs import SamplingConfig
@@ -293,9 +298,16 @@ class FluxValidator(Validator):
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.get_optional_mesh("loss")
-            )
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
+            assert loss_mesh is not None
+            local_loss = loss.to_local() if isinstance(loss, DTensor) else loss
+            global_avg_loss_dt = distribute_rank_local_metric(
+                local_loss, loss_mesh
+            ).mean()
+            assert isinstance(global_avg_loss_dt, DTensor)
+            global_avg_loss = collect_dtensor_metrics(
+                {"validation_metrics/loss": global_avg_loss_dt}
+            )["validation_metrics/loss"]
         else:
             global_avg_loss = float(loss.item())
 

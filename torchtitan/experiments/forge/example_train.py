@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
@@ -21,6 +22,10 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.distributed.metrics import (
+    collect_dtensor_metrics,
+    distribute_rank_local_metric,
+)
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer as TitanTrainer
@@ -291,13 +296,15 @@ class Trainer(ForgeEngine):
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
 
-        # All-reduce to get global token count across DP ranks
-        # Move to GPU for distributed communication
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(
+            global_valid_tokens_dt = distribute_rank_local_metric(
                 local_valid_tokens.to(self.device), batch_mesh
-            )
+            ).sum()
+            assert isinstance(global_valid_tokens_dt, DTensor)
+            global_valid_tokens = collect_dtensor_metrics(
+                {"global_valid_tokens": global_valid_tokens_dt}
+            )["global_valid_tokens"]
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
@@ -347,10 +354,25 @@ class Trainer(ForgeEngine):
 
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
-            global_avg_loss, global_max_loss = (
-                dist_utils.dist_sum(loss, parallel_dims.get_optional_mesh("loss")),
-                dist_utils.dist_max(loss, parallel_dims.get_optional_mesh("loss")),
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
+            assert loss_mesh is not None
+            local_loss = loss.to_local() if isinstance(loss, DTensor) else loss
+            global_avg_loss_dt = distribute_rank_local_metric(
+                local_loss, loss_mesh
+            ).sum()
+            global_max_loss_dt = distribute_rank_local_metric(
+                local_loss, loss_mesh
+            ).amax()
+            assert isinstance(global_avg_loss_dt, DTensor)
+            assert isinstance(global_max_loss_dt, DTensor)
+            collected_metrics = collect_dtensor_metrics(
+                {
+                    "loss_metrics/global_avg_loss": global_avg_loss_dt,
+                    "loss_metrics/global_max_loss": global_max_loss_dt,
+                }
             )
+            global_avg_loss = collected_metrics["loss_metrics/global_avg_loss"]
+            global_max_loss = collected_metrics["loss_metrics/global_max_loss"]
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
 

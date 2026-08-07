@@ -212,10 +212,9 @@ def _precompile_aot_fx_trace(
     dummy_labels = torch.randint(
         0, vocab_size, (local_batch_size, seq_len), device=device
     )
-    # The trainer computes global_valid_tokens via dist_sum (an
-    # all-reduce + .item()), which returns a Python float. Use the
-    # same type here so make_fx bakes it as a graph constant — not a
-    # graph input — identical to the non-precompile runtime trace.
+    # The trainer materializes global_valid_tokens as a Python float. Use the
+    # same type here so make_fx bakes it as a graph constant, not a graph input,
+    # identical to the non-precompile runtime trace.
     global_batch_size = (
         local_batch_size
         * parallel_dims.dp_shard

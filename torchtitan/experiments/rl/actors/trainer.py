@@ -12,6 +12,7 @@ from typing import Any
 import torch
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
@@ -32,6 +33,10 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     SelectiveAC,
+)
+from torchtitan.distributed.metrics import (
+    collect_dtensor_metrics,
+    merge_dtensor_metrics,
 )
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
@@ -317,52 +322,18 @@ class PolicyTrainer(Actor, Configurable):
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
-    def reduce_forward_backward_metrics(
-        self,
-        *,
-        sum_reduced_metrics: dict[str, torch.Tensor],
-        max_reduced_metrics: dict[str, torch.Tensor],
-    ) -> dict[str, float]:
-        """Reduce forward/backward metrics across the loss mesh.
-
-        Args:
-            sum_reduced_metrics: Per-rank shares to be SUM-reduced. Each
-                value must be pre-normalized so that summing across ranks
-                reconstructs the global metric.
-            max_reduced_metrics: Per-rank values to be MAX-reduced.
-
-        Returns:
-            {key: float} after collective reduction.
-        """
-        # TODO: switch from plain tensors to DTensor / spmd_types so the
-        # reduction op is encoded in the placement instead of split across
-        # `sum_reduced_metrics` / `max_reduced_metrics` dicts.
-        loss_mesh = self.parallel_dims.get_optional_mesh("loss")
-
-        out: dict[str, float] = {
-            key: dist_utils.dist_sum(value.detach(), loss_mesh)
-            for key, value in sum_reduced_metrics.items()
-        }
-        out.update(
-            {
-                key: dist_utils.dist_max(value.detach(), loss_mesh)
-                for key, value in max_reduced_metrics.items()
-            }
-        )
-        return out
-
     @endpoint
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[TrainingMicrobatch],
+        training_microbatches: list[list[TrainingMicrobatch]],
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
-        """Run forward pass, compute loss, call backward, and reduce metrics.
+        """Run all training microbatches and materialize their metrics once.
 
         Args:
-            training_data: List of TrainingMicrobatch, one per DP rank. Local rank
-                picks training_data[self.dp_rank].
+            training_microbatches: Microbatches for one optimizer step. Each
+                inner list has one ``TrainingMicrobatch`` per DP rank.
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
                 sharding training_samples.
@@ -384,50 +355,51 @@ class PolicyTrainer(Actor, Configurable):
                 "supported in RL)."
             )
         model = self.model_parts[0]
-
-        local_batch = training_data[self.dp_rank]
         device = self.device
-        token_ids = local_batch.token_ids.to(device)
-        labels = local_batch.labels.to(device)
-        positions = local_batch.positions.to(device)
-        loss_mask = local_batch.loss_mask.to(device)
-        generator_logprobs = local_batch.generator_logprobs.to(device)
-        advantages = local_batch.advantages.to(device)
-
-        attention_masks = model.get_attention_masks(positions)
-
-        with self.train_context():
-            with sl.log_trace_span("model_forward"):
-                pred = model(
-                    token_ids, attention_masks=attention_masks, positions=positions
-                )
-
-            with sl.log_trace_span("loss_fn"):
-                loss, loss_metrics = self.loss_fn(
-                    pred,
-                    labels,
-                    num_global_valid_tokens,
-                    generator_logprobs=generator_logprobs,
-                    advantages=advantages,
-                    loss_mask=loss_mask,
-                )
-
-            with sl.log_trace_span("model_backward"):
-                loss.backward()
-
-        sum_reduced_metrics = {
-            key: value
-            for key, value in loss_metrics.items()
-            if not key.endswith("/max")
-        }
-        max_reduced_metrics = {
-            key: value for key, value in loss_metrics.items() if key.endswith("/max")
-        }
-
-        return self.reduce_forward_backward_metrics(
-            sum_reduced_metrics=sum_reduced_metrics,
-            max_reduced_metrics=max_reduced_metrics,
+        loss_mesh = self.parallel_dims.get_optional_mesh(
+            "loss", include_singleton_axes=True
         )
+        assert loss_mesh is not None
+        accumulated_metrics: dict[str, DTensor] = {}
+
+        for training_data in training_microbatches:
+            local_batch = training_data[self.dp_rank]
+            token_ids = local_batch.token_ids.to(device)
+            labels = local_batch.labels.to(device)
+            positions = local_batch.positions.to(device)
+            loss_mask = local_batch.loss_mask.to(device)
+            generator_logprobs = local_batch.generator_logprobs.to(device)
+            advantages = local_batch.advantages.to(device)
+
+            attention_masks = model.get_attention_masks(positions)
+
+            with self.train_context():
+                with sl.log_trace_span("model_forward"):
+                    pred = model(
+                        token_ids,
+                        attention_masks=attention_masks,
+                        positions=positions,
+                    )
+
+                with sl.log_trace_span("loss_fn"):
+                    loss, loss_metrics = self.loss_fn(
+                        pred,
+                        labels,
+                        num_global_valid_tokens,
+                        generator_logprobs=generator_logprobs,
+                        advantages=advantages,
+                        loss_mask=loss_mask,
+                        metric_mesh=loss_mesh,
+                    )
+
+                with sl.log_trace_span("model_backward"):
+                    loss.backward()
+
+            accumulated_metrics = merge_dtensor_metrics(
+                accumulated_metrics, loss_metrics
+            )
+
+        return collect_dtensor_metrics(accumulated_metrics)
 
     @endpoint
     @sl.log_trace_span("optim_step")

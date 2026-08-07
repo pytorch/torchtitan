@@ -11,9 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.loss import BaseLoss, compute_logprobs
 from torchtitan.config import CompileConfig
+from torchtitan.distributed.metrics import distribute_rank_local_metric
 
 # Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
 # logprob mismatch cannot overflow exp() to inf/NaN.
@@ -62,7 +65,8 @@ class DAPOLoss(BaseLoss):
         generator_logprobs: torch.Tensor,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        metric_mesh: DeviceMesh,
+    ) -> tuple[torch.Tensor, dict[str, DTensor]]:
         """Compute the per-token clip-higher surrogate loss.
 
         Args:
@@ -71,12 +75,15 @@ class DAPOLoss(BaseLoss):
             generator_logprobs: [B, L] logprobs from the sampling policy.
             loss_mask: [B, L] bool mask; True for response tokens.
             advantages: [B, L] per-token advantages (0.0 for prompt/padding).
+            metric_mesh: Mesh across which rank-local metric contributions are
+                distributed.
             global_valid_tokens: total response tokens across all microbatches and
                 DP ranks; the loss denominator.
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
-            scalar tensors pre-normalized for SUM reduction across DP ranks.
+            scalar DTensors whose propagated ``Partial`` placements encode their
+            cross-rank reduction.
         """
         trainer_logprobs, token_entropy = compute_logprobs(
             logits, labels, return_entropy=True
@@ -112,7 +119,7 @@ class DAPOLoss(BaseLoss):
                 torch.zeros_like(diff),
             )
             masked_ratio = ratio * loss_mask
-            metrics = {
+            local_sum_metrics = {
                 "loss/mean": loss.detach(),
                 "loss/ratio_mean": masked_ratio.sum() / loss_denominator,
                 "loss/ratio_clipped_frac": (
@@ -133,10 +140,28 @@ class DAPOLoss(BaseLoss):
                     (diff_for_metrics.abs() > 1e-6).float() * loss_mask
                 ).sum()
                 / loss_denominator,
-                "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
                 # Mean trainer-policy entropy H(p) over response tokens.
                 "trainer/entropy/mean": (token_entropy * response_mask).sum()
                 / loss_denominator,
             }
+
+            metrics: dict[str, DTensor] = {}
+            for name, value in local_sum_metrics.items():
+                local_value = value.to_local() if isinstance(value, DTensor) else value
+                values_by_rank = distribute_rank_local_metric(
+                    local_value.detach(), metric_mesh
+                )
+                metric = values_by_rank.sum()
+                assert isinstance(metric, DTensor)
+                metrics[name] = metric
+
+            local_max_diff = diff_for_metrics.abs().max()
+            if isinstance(local_max_diff, DTensor):
+                local_max_diff = local_max_diff.to_local()
+            max_diff_metric = distribute_rank_local_metric(
+                local_max_diff.detach(), metric_mesh
+            ).amax()
+            assert isinstance(max_diff_metric, DTensor)
+            metrics["bit_wise/logprob_diff/max"] = max_diff_metric
 
         return loss, metrics

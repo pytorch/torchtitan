@@ -10,10 +10,15 @@ from dataclasses import dataclass, field, replace
 
 import spmd_types as spmd
 import torch
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.metrics import (
+    collect_dtensor_metrics,
+    distribute_rank_local_metric,
+)
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.model import FluxModel
@@ -207,7 +212,13 @@ class FluxTrainer(Trainer):
 
         if self.parallel_dims.dp_enabled:
             batch_mesh = self.parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+            global_valid_tokens_dt = distribute_rank_local_metric(
+                local_valid_tokens, batch_mesh
+            ).sum()
+            assert isinstance(global_valid_tokens_dt, DTensor)
+            global_valid_tokens = collect_dtensor_metrics(
+                {"global_valid_tokens": global_valid_tokens_dt}
+            )["global_valid_tokens"]
         else:
             global_valid_tokens = float(local_valid_tokens.item())
 
@@ -330,18 +341,34 @@ class FluxTrainer(Trainer):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             loss_mesh = parallel_dims.get_optional_mesh("loss")
+            assert loss_mesh is not None
 
-            # NOTE: the loss returned by train
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_sum(loss, loss_mesh),
-                dist_utils.dist_max(loss, loss_mesh),
-                dist_utils.dist_sum(
-                    torch.tensor(
-                        self.ntokens_seen, dtype=torch.int64, device=self.device
-                    ),
-                    loss_mesh,
-                ),
+            local_loss = loss.to_local() if isinstance(loss, DTensor) else loss
+            local_ntokens_seen = torch.tensor(
+                self.ntokens_seen, dtype=torch.int64, device=self.device
             )
+            global_avg_loss_dt = distribute_rank_local_metric(
+                local_loss, loss_mesh
+            ).sum()
+            global_max_loss_dt = distribute_rank_local_metric(
+                local_loss, loss_mesh
+            ).amax()
+            global_ntokens_seen_dt = distribute_rank_local_metric(
+                local_ntokens_seen, loss_mesh
+            ).sum()
+            assert isinstance(global_avg_loss_dt, DTensor)
+            assert isinstance(global_max_loss_dt, DTensor)
+            assert isinstance(global_ntokens_seen_dt, DTensor)
+            collected_metrics = collect_dtensor_metrics(
+                {
+                    "loss_metrics/global_avg_loss": global_avg_loss_dt,
+                    "loss_metrics/global_max_loss": global_max_loss_dt,
+                    "n_tokens_seen": global_ntokens_seen_dt,
+                }
+            )
+            global_avg_loss = collected_metrics["loss_metrics/global_avg_loss"]
+            global_max_loss = collected_metrics["loss_metrics/global_max_loss"]
+            global_ntokens_seen = collected_metrics["n_tokens_seen"]
         else:
             global_avg_loss = global_max_loss = float(loss.detach().item())
             global_ntokens_seen = self.ntokens_seen
