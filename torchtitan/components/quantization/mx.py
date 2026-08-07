@@ -8,6 +8,10 @@ from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
 from typing import Literal
 
+import torch
+import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
+
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
@@ -20,6 +24,8 @@ from .utils import swap_token_dispatcher
 try:
     from torchao.prototype.moe_training.mxfp8_linear import (
         MXFP8Linear as TorchAOMXFP8Linear,
+        mxfp8_mm_cached_weight,
+        quantize_weight_for_mxfp8_cache,
     )
 
     class MXFP8Linear(TorchAOMXFP8Linear, Module):
@@ -28,6 +34,11 @@ try:
         Linear.__init__. Config still inherits from Linear.Config for
         field compatibility.
         """
+
+        # Inference weight cache (see update_mxfp8_weight_cache). None -> the
+        # dynamic path (weight quantized every forward). A generator refreshes
+        # this once per weight update so static weights are never re-quantized.
+        _mxfp8_weight_cache = None
 
         @dataclass(kw_only=True, slots=True)
         class Config(Linear.Config):
@@ -45,6 +56,42 @@ try:
                 bias=config.bias,
                 bf16_bwd=config.bf16_bwd,
             )
+
+        def update_mxfp8_weight_cache(self) -> None:
+            """Pre-quantize the (static) weight to the MXFP8 MXTensor the forward
+            consumes, so subsequent forwards skip the per-forward weight quant.
+
+            Intended for inference (generator) where the weight is constant
+            between policy syncs; call once per weight update. Bitwise-identical
+            to the dynamic path because it quantizes the same ``self.weight`` with
+            the same modes the forward would use.
+            """
+            self._mxfp8_weight_cache = quantize_weight_for_mxfp8_cache(
+                self.weight,
+                self.scale_calculation_mode,
+                self.kernel_preference,
+            )
+
+        def clear_mxfp8_weight_cache(self) -> None:
+            self._mxfp8_weight_cache = None
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            if self._mxfp8_weight_cache is None:
+                return TorchAOMXFP8Linear.forward(self, input)
+            # Cached (inference) path: reuse the pre-quantized weight, quantize only
+            # the input. Uses the plain forward-only helper -- not the autograd
+            # function -- because the cached MXTensor weight is an inference tensor
+            # and ``save_for_backward`` on it would raise "Cannot set version_counter
+            # for inference tensor". Generation never needs the backward.
+            output = mxfp8_mm_cached_weight(
+                input,
+                self._mxfp8_weight_cache,
+                kernel_preference=self.kernel_preference,
+                scale_calculation_mode=self.scale_calculation_mode,
+            )
+            if self.bias is not None:
+                output = output + self.bias.to(output.dtype)
+            return output
 
 except ImportError:
     MXFP8Linear = None
@@ -154,6 +201,97 @@ class MXFP8LinearQATConverter(QuantizationConverter):
         return model_config
 
 
+class _MXFP8GroupedExpertsWeightCacheMixin:
+    """Mixin adding an inference weight cache to an mxfp8 grouped-experts module.
+
+    The dynamic path re-quantizes the (static) expert weights to MXFP8 on every
+    forward. For a generator whose weights change only at policy syncs that is
+    pure overhead -- and especially costly for grouped experts, where the whole
+    G*K*N weight is re-quantized but only the routed activation rows are new.
+
+    When the cache is populated (via ``update_mxfp8_weight_cache`` after a weight
+    update) ``forward`` reuses the pre-quantized weights and quantizes only the
+    activation. The result is bitwise-identical to the dynamic path when the
+    cache is fresh: the cached forward mirrors ``GroupedExperts.forward`` and the
+    torchao helpers reproduce exactly the forward quant of ``_compute_fwd_sm100``.
+
+    Applied via MRO (``class X(_MXFP8GroupedExpertsWeightCacheMixin, parent)``) so
+    the cached ``forward`` overrides the parent's and ``super().forward(...)``
+    still reaches the parent's dynamic path.
+    """
+
+    # None -> dynamic path. Otherwise a dict name -> (weight_e4m3, scales_blocked).
+    _mxfp8_weight_cache = None
+    _mxfp8_kernel_preference = None
+    _mxfp8_scale_calculation_mode = None
+
+    def update_mxfp8_weight_cache(self) -> None:
+        from torchao.prototype.moe_training.mxfp8_grouped_mm import (
+            quantize_grouped_weight_for_cache,
+        )
+        from torchao.prototype.moe_training.utils import unwrap_weight
+
+        cache = {}
+        kernel_preference = None
+        scale_calculation_mode = None
+        for name in ("w1_EFD", "w2_EDF", "w3_EFD"):
+            param = getattr(self, name)
+            # DTensor (outer) wraps the mxfp8 weight-wrapper (local) under EP/TP;
+            # mirror GroupedExperts.forward, which uses the local tensor.
+            wrapper = param.to_local() if isinstance(param, DTensor) else param
+            # The mxfp8 op config (kernel preference, scale mode) lives on the
+            # weight wrapper; read it so the cached forward matches the dynamic one.
+            kernel_preference = wrapper.config.kernel_preference  # type: ignore[missing-attribute]
+            scale_calculation_mode = wrapper.config.scale_calculation_mode  # type: ignore[missing-attribute]
+            hp = unwrap_weight(wrapper)
+            # (E, F, D) -> (E, D, F) == (E, K, N), the weight_t passed to grouped_mm.
+            weight_t = hp.bfloat16().transpose(-2, -1)
+            cache[name] = quantize_grouped_weight_for_cache(
+                weight_t, scale_calculation_mode
+            )
+        self._mxfp8_weight_cache = cache
+        self._mxfp8_kernel_preference = kernel_preference
+        self._mxfp8_scale_calculation_mode = scale_calculation_mode
+
+    def clear_mxfp8_weight_cache(self) -> None:
+        self._mxfp8_weight_cache = None
+
+    def forward(
+        self,
+        x_RD: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._mxfp8_weight_cache is None:
+            return super().forward(x_RD, num_tokens_per_expert_E)  # type: ignore[missing-attribute]
+
+        from torchao.prototype.moe_training.mxfp8_grouped_mm import (
+            mxfp8_scaled_grouped_mm_cached_weight,
+        )
+
+        # Cached inference path: mirrors GroupedExperts.forward (silu(x@w1) * (x@w3),
+        # then @w2) but reuses the pre-quantized weights. Token groups are already
+        # padded by the mxfp8 token dispatcher, so no padding happens here.
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+        cache = self._mxfp8_weight_cache
+        kp = self._mxfp8_kernel_preference
+        sm = self._mxfp8_scale_calculation_mode
+
+        def grouped_mm(act, weight_key):
+            weight_e4m3, weight_scales_blocked = cache[weight_key]
+            return mxfp8_scaled_grouped_mm_cached_weight(
+                act,
+                weight_e4m3,
+                weight_scales_blocked,
+                offsets_E,
+                scale_calculation_mode=sm,
+                kernel_preference=kp,
+            )
+
+        h_RF = F.silu(grouped_mm(x_RD.bfloat16(), "w1_EFD"))
+        h_RF = h_RF * grouped_mm(x_RD.bfloat16(), "w3_EFD")
+        return grouped_mm(h_RF, "w2_EDF").type_as(x_RD)
+
+
 _mxfp8_experts_cache: dict[type, type] = {}
 
 
@@ -172,7 +310,9 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
 
     parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
 
-    class MXFP8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+    class MXFP8GroupedExperts(  # type: ignore[valid-type, misc]
+        _MXFP8GroupedExpertsWeightCacheMixin, parent_cls
+    ):
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             recipe_name: str = "mxfp8_rceil"
@@ -278,7 +418,9 @@ def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
 
     parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
 
-    class MXFP8QATGroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+    class MXFP8QATGroupedExperts(  # type: ignore[valid-type, misc]
+        _MXFP8GroupedExpertsWeightCacheMixin, parent_cls
+    ):
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             recipe_name: str = "mxfp8_rceil"
@@ -369,3 +511,24 @@ class MXFP8GroupedExpertsQATConverter(QuantizationConverter):
             "Triton kernels) for grouped_mm ops"
         )
         return model_config
+
+
+def refresh_mxfp8_weight_caches(model: torch.nn.Module) -> int:
+    """Refresh the inference weight cache on every mxfp8 module under ``model``.
+
+    Quantizes each mxfp8 linear / grouped-experts weight to MXFP8 once so
+    subsequent forwards skip the per-forward weight quant. Call after a weight
+    update (e.g. in the generator's ``_pull_model_state_dict``). Returns the
+    number of modules refreshed. No-op-safe: modules without a cache are skipped.
+
+    Only meaningful for inference, where weights are static between updates; do
+    not use in the trainer (weights change every optimizer step and the backward
+    needs the dynamic quant path).
+    """
+    count = 0
+    for module in model.modules():
+        update_fn = getattr(module, "update_mxfp8_weight_cache", None)
+        if callable(update_fn):
+            update_fn()
+            count += 1
+    return count

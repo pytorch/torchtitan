@@ -775,6 +775,13 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
+        mxfp8_cache_weights: bool = True
+        """For mxfp8 models, pre-quantize the (static) weights to MXFP8 once per
+        weight sync and reuse them across forwards, instead of re-quantizing every
+        forward. Bitwise-identical to the dynamic path; big rollout speedup for
+        grouped experts. No effect on non-mxfp8 models. Disable to A/B or to fall
+        back to the dynamic path."""
+
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -1305,6 +1312,20 @@ class VLLMGenerator(Actor, Configurable):
         # harmless self-copy; only the fused wqkv is actually rebuilt.
         # TODO: investigate can we avoid the copy and properly load fused qkv weights
         model.model.load_state_dict(model_sd, strict=False)
+        if self.config.mxfp8_cache_weights:
+            # Weights just changed: re-quantize the mxfp8 weight cache so forwards
+            # reuse the pre-quantized weights until the next sync (no-op if the
+            # model has no mxfp8 modules).
+            from torchtitan.components.quantization.mx import (
+                refresh_mxfp8_weight_caches,
+            )
+
+            num_cached = refresh_mxfp8_weight_caches(model.model)
+            if num_cached:
+                logger.info(
+                    f"Refreshed mxfp8 weight cache on {num_cached} modules "
+                    f"(policy version {version})"
+                )
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
