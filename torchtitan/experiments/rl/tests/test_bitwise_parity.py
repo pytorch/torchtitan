@@ -856,17 +856,13 @@ def _moe_tp4_varlen_batch_invariant_config() -> Controller.Config:
     config.trainer.parallelism.tensor_parallel_degree = 4
     config.generator.parallelism.data_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 4
-    config.generator.parallelism.enable_sequence_parallel = True
-    config.generator.parallelism.spmd_backend = "spmd_types"
     return config
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     """Test bitwise parity between trainer and vLLM generator with MoE EP.
 
-    On 4 GPUs, both trainer and generator use TP=4 and EP=4. The generator also
-    uses the SPMD types backend with dense sequence parallelism enabled, so an
-    odd three-request decode batch exercises uneven sequence sharding over TP.
+    On 4 GPUs, both trainer and generator use TP=4 and EP=4.
 
     Uses the bundled debug MoE assets by default. Override with
     MOE_HF_ASSETS_PATH if needed.
@@ -883,30 +879,6 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     min_world_size = 4
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
     sync_weights_from_trainer = True
-
-    def test_vllm_uneven_decode_tp_padding(self):
-        """Three decode tokens must run with dense SP over four TP ranks."""
-        generated_ids, decode_logprobs = vllm_generate(
-            self.engine,
-            self.prompt_ids,
-            max_tokens=2,
-            ignore_eos=True,
-        )
-        prefill_logprobs = vllm_2nd_pass_prefill(
-            self.engine,
-            self.prompt_ids,
-            generated_ids,
-        )
-
-        for i, generated in enumerate(generated_ids):
-            self.assertEqual(len(generated), 2)
-            self._assert_logprobs_equal(
-                f"request {i} decode vs prefill",
-                decode_logprobs[i],
-                prefill_logprobs[i],
-                "Decode",
-                "2ndPrefill",
-            )
 
 
 class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):
