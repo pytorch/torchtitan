@@ -382,7 +382,9 @@ class FaultTolerantTrainer(Trainer):
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        self.optimizers.zero_grad()
+        self.optimizers.zero_grad(
+            set_to_none=not self.config.training.enable_cuda_graphs
+        )
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
 

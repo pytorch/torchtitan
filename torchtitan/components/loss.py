@@ -319,7 +319,7 @@ class BaseLoss(ABC, Configurable):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: float | None = None,
+        global_valid_tokens: float | torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return the scaled loss and any metrics computed by the loss."""
         loss = self.fn(pred, labels)
@@ -349,7 +349,7 @@ class CrossEntropyLoss(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: float | None = None,
+        global_valid_tokens: float | torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
@@ -625,7 +625,7 @@ class ChunkedLossWrapper(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: float | None = None,
+        global_valid_tokens: float | torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute chunked loss.
