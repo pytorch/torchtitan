@@ -408,6 +408,47 @@ class TestParamGroupConfig(unittest.TestCase):
 
 
 class TestOptimizersContainerWithParamGroups(unittest.TestCase):
+    def test_grad_scaler_unscales_and_skips_overflow(self):
+        model = nn.Linear(2, 1, bias=False)
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={
+                        "lr": 0.1,
+                        "weight_decay": 0.0,
+                    },
+                )
+            ],
+        )
+        optimizers = config.build(model_parts=[model])
+        scaler = torch.amp.GradScaler(
+            device="cpu",
+            init_scale=8.0,
+            growth_interval=2,
+        )
+
+        scaler.scale(model(torch.ones(1, 2)).sum()).backward()
+        scaler.unscale_(optimizers)
+        value_before = model.weight.detach().clone()
+        scaler.step(optimizers)
+        scaler.update()
+        self.assertFalse(torch.equal(model.weight, value_before))
+        optimizers.zero_grad()
+
+        scaler.scale(model(torch.ones(1, 2)).sum()).backward()
+        assert model.weight.grad is not None
+        model.weight.grad.fill_(float("inf"))
+        scaler.unscale_(optimizers)
+        value_before = model.weight.detach().clone()
+        scaler.step(optimizers)
+        scaler.update()
+
+        torch.testing.assert_close(model.weight, value_before)
+        self.assertEqual(scaler.get_scale(), 4.0)
+
     def test_build_optimizer_with_param_groups(self):
         """End-to-end: build OptimizersContainer with param groups."""
         model = SimpleModel()

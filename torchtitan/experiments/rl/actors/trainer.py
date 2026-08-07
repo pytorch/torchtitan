@@ -44,6 +44,8 @@ from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
 
+_TRAIN_STATE_VERSION = 1
+
 
 class PolicyTrainer(Actor, Configurable):
     """Updates policy based on collected TrainingSample using TorchTitan components.
@@ -126,6 +128,10 @@ class PolicyTrainer(Actor, Configurable):
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         device_module.set_device(self.device)
+        self.grad_scaler = torch.amp.GradScaler(
+            device=device_type,
+            enabled=config.training.mixed_precision_param == "float16",
+        )
 
         # Enable batch-invariant mode BEFORE init_distributed
         set_batch_invariance(config.debug.batch_invariant)
@@ -215,12 +221,37 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     def state_dict(self) -> dict[str, Any]:
-        # Checkpoint "train_state": policy_version == completed optim steps, so it
+        # Checkpoint "train_state": policy_version == completed trainer steps, so it
         # doubles as the resume step counter.
-        return {"policy_version": self.policy_version}
+        if not self.grad_scaler.is_enabled():
+            return {"policy_version": self.policy_version}
+
+        # DCP requires every requested nested key to exist in older checkpoints.
+        # Keep AMP state in the existing leaf so pre-AMP checkpoints remain loadable.
+        return {
+            "policy_version": (
+                _TRAIN_STATE_VERSION,
+                self.policy_version,
+                self.grad_scaler.state_dict(),
+            )
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.policy_version = state_dict["policy_version"]
+        policy_state = state_dict["policy_version"]
+        grad_scaler_state = None
+        if isinstance(policy_state, tuple):
+            state_version, policy_version, grad_scaler_state = policy_state
+            if state_version != _TRAIN_STATE_VERSION:
+                raise ValueError(
+                    f"Unsupported PolicyTrainer state version {state_version}."
+                )
+            self.policy_version = policy_version
+        else:
+            # Checkpoints written before fp16 support stored only the integer version.
+            self.policy_version = policy_state
+
+        if grad_scaler_state is not None and self.grad_scaler.is_enabled():
+            self.grad_scaler.load_state_dict(grad_scaler_state)
 
     @endpoint
     async def get_policy_version(self) -> int:
@@ -403,17 +434,34 @@ class PolicyTrainer(Actor, Configurable):
                 )
 
             with sl.log_trace_span("loss_fn"):
+                backward_scale: float | torch.Tensor = 1.0
+                if (
+                    isinstance(self.loss_fn, ChunkedLossWrapper)
+                    and self.grad_scaler.is_enabled()
+                ):
+                    # Scaling a scala also lazily initializes GradScaler's device-side tensor
+                    backward_scale = self.grad_scaler.scale(
+                        torch.ones((), device=device, dtype=torch.float32)
+                    )
+                loss_kwargs: dict[str, Any] = {
+                    "generator_logprobs": generator_logprobs,
+                    "advantages": advantages,
+                    "loss_mask": loss_mask,
+                }
+                if isinstance(self.loss_fn, ChunkedLossWrapper):
+                    loss_kwargs["backward_scale"] = backward_scale
                 loss, loss_metrics = self.loss_fn(
                     pred,
                     labels,
                     num_global_valid_tokens,
-                    generator_logprobs=generator_logprobs,
-                    advantages=advantages,
-                    loss_mask=loss_mask,
+                    **loss_kwargs,
                 )
 
             with sl.log_trace_span("model_backward"):
-                loss.backward()
+                if isinstance(self.loss_fn, ChunkedLossWrapper):
+                    loss.backward()
+                else:
+                    self.grad_scaler.scale(loss).backward()
 
         sum_reduced_metrics = {
             key: value
@@ -428,6 +476,12 @@ class PolicyTrainer(Actor, Configurable):
             sum_reduced_metrics=sum_reduced_metrics,
             max_reduced_metrics=max_reduced_metrics,
         )
+
+    def _step_optimizer(self) -> bool:
+        scale_before = self.grad_scaler.get_scale()
+        self.grad_scaler.step(self.optimizers)
+        self.grad_scaler.update()
+        return self.grad_scaler.get_scale() < scale_before
 
     @endpoint
     @sl.log_trace_span("optim_step")
@@ -446,6 +500,7 @@ class PolicyTrainer(Actor, Configurable):
         current_lr = float(current_lrs[0])
 
         with sl.log_trace_span("grad_clip"):
+            self.grad_scaler.unscale_(self.optimizers)
             grad_norm = dist_utils.clip_grad_norm_(
                 [p for m in self.model_parts for p in m.parameters()],
                 self.config.training.max_norm,
@@ -455,11 +510,13 @@ class PolicyTrainer(Actor, Configurable):
             )
 
         with sl.log_trace_span("optim"):
-            self.optimizers.step()
-            self.lr_schedulers.step()
+            step_skipped = self._step_optimizer()
+            if not step_skipped:
+                self.lr_schedulers.step()
+            # The controller and checkpoint folders count training iterations.
+            # A skipped AMP update still consumes one iteration and weight sync.
+            self.policy_version += 1
             self.optimizers.zero_grad()
-
-        self.policy_version += 1
 
         logger.debug(
             f"{os.getpid()=} PolicyTrainer optim_step done, "
@@ -472,6 +529,8 @@ class PolicyTrainer(Actor, Configurable):
                 "trainer/grad_norm/mean": float(grad_norm.item()),
                 "trainer/lr": current_lr,
                 "trainer/policy_version": float(self.policy_version),
+                "trainer/amp/grad_scale": float(self.grad_scaler.get_scale()),
+                "trainer/amp/step_skipped": float(step_skipped),
             },
         )
 

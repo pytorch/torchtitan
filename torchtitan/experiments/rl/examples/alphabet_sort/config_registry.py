@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+from typing import Any, cast
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
@@ -135,6 +136,20 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_0_6b_varlen_fp16() -> Controller.Config:
+    """GRPO config for Qwen3-0.6B with fp16 trainer and generator forwards."""
+    config = rl_grpo_qwen3_0_6b_varlen()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        training=dataclasses.replace(
+            config.trainer.training,
+            mixed_precision_param=cast(Any, "float16"),
+        ),
+    )
+    config.generator = dataclasses.replace(config.generator, model_dtype="float16")
+    return config
 
 
 def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
