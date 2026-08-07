@@ -263,8 +263,8 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
         A backend maps the current capacity to its native logical view: DeepEP
         uses it as the dispatch stride, HybridEP uses it for its current output
         view, and AllToAll uses exact tensor/count shapes without persistent
-        storage. MinimalAsyncEP currently requires it to equal the backend's
-        fixed input capacity.
+        storage. MinimalAsyncEP keeps its physical receive view at the fixed
+        maximum and uses the current capacity to reconstruct the SP output.
         """
         raise NotImplementedError
 
@@ -1177,8 +1177,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using MinimalAsyncEP for constrained EP communication.
 
-    This first integration supports EP with ``sp_size == 1`` only. TP/SP, CP,
-    PP, and padding are intentionally out of scope.
+    TP token sharding is supported independently of the dense sequence-parallel
+    setting. CP and PP are intentionally out of scope.
     """
 
     ep_mesh: DeviceMesh | None
@@ -1278,16 +1278,14 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
                 dispatch inputs; see ``torchtitan.models.common.moe`` for shape
                 suffix definitions.
             num_tokens_per_rank: Common rank-wide capacity accepted by the
-                unified API. MinimalAsyncEP derives its current dispatch shapes
-                from ``x_TD.shape[0]`` because it does not support TP/SP, so there
-                is no uneven token split across TP ranks.
+                unified API. It may exceed ``x_TD.shape[0]`` when TP/SP produces
+                uneven token shards.
 
         Returns:
             routed_input_RD: local-expert rows for grouped-mm.
             num_tokens_per_local_expert_e: ``(num_local_experts,)`` token counts
             metadata: dispatch metadata for combine()
         """
-        del num_tokens_per_rank
         assert self.ep_mesh is not None, "ep_mesh must be set before dispatch"
         ep_group = self.ep_mesh.get_group()
 
@@ -1297,7 +1295,15 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         ep_size = ep_group.size()
         num_tokens = x_TD.shape[0]
         num_local_experts = num_local_tokens_per_expert_E.numel() // ep_size
-        num_receive_rows_per_source_rank = num_tokens * min(top_k, num_local_experts)
+        assert self.num_max_tokens_per_rank is not None
+        assert num_tokens <= num_tokens_per_rank
+        assert num_tokens_per_rank <= self.num_max_tokens_per_rank
+        # TODO: Keep the underlying storage at maximum capacity but return a
+        # current-sized view once MinimalAsyncEP supports such descriptors.
+        # Today the custom op returns the entire symmetric receive buffer.
+        num_receive_rows_per_source_rank = self.num_max_tokens_per_rank * min(
+            top_k, num_local_experts
+        )
         receive_capacity = ep_size * num_receive_rows_per_source_rank
 
         (
@@ -1345,7 +1351,6 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
-        del num_local_tokens_after_padding, local_seq_len_after_padding
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
         combined_TD, _routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
             routed_output_RD,
@@ -1360,6 +1365,23 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             state.num_tokens,
             state.top_k,
         )
+        if self.sp_size > 1:
+            out_TD = torch.zeros(
+                num_local_tokens_after_padding * self.sp_size,
+                combined_TD.shape[-1],
+                device=combined_TD.device,
+                dtype=combined_TD.dtype,
+            )
+            local_indices = torch.arange(
+                combined_TD.shape[0], device=combined_TD.device
+            )
+            global_indices = self._sp_global_token_indices(
+                local_indices,
+                local_seq_len_after_padding,
+            )
+            out_TD[global_indices] = combined_TD
+            return out_TD
+
         return combined_TD
 
 
@@ -1377,6 +1399,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
             (
                 DeepEPTokenDispatcher.Config,
                 HybridEPTokenDispatcher.Config,
+                MinimalAsyncEPTokenDispatcher.Config,
             ),
         ):
             continue
