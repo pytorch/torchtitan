@@ -223,14 +223,12 @@ class FluxDataset(IterableDataset, Stateful):
 
     def __iter__(self):
         dataset_iterator = self._get_data_iter()
+        consecutive_bad = 0
+        MAX_CONSECUTIVE_ERRORS = 200
         while True:
-            # TODO: Add support for robust data loading and error handling.
-            # Currently, we assume the dataset is well-formed and does not contain corrupted samples.
-            # If a corrupted sample is encountered, the program will crash and throw an exception.
-            # You can NOT try to catch the exception and continue, because the iterator within dataset
-            # is not broken after raising an exception, so calling next() will throw StopIteration and might cause re-loop.
             try:
                 sample = next(dataset_iterator)
+            # StopIteration must be caught before Exception: it is a subclass of Exception in Python 3.
             except StopIteration:
                 # We are asumming the program hits here only when reaching the end of the dataset.
                 if not self.infinite:
@@ -250,6 +248,30 @@ class FluxDataset(IterableDataset, Stateful):
                         ):
                             self._data.set_epoch(self._data.epoch + 1)
                     continue
+            except Exception as e:
+                # HuggingFace datasets decode images internally during iteration;
+                # errors (e.g. from truncated image data) are raised before we
+                # receive a sample dict. PIL EXIF errors are suppressed at startup
+                # by exif_safe_patch.apply(), so this path is rarely triggered.
+                # We recreate the iterator because its internal state may be broken
+                # after an exception.
+                consecutive_bad += 1
+                logger.warning(
+                    f"FluxDataset: skipping dataset error "
+                    f"({consecutive_bad}/{MAX_CONSECUTIVE_ERRORS}): "
+                    f"{type(e).__name__}: {e}"
+                )
+                if consecutive_bad >= MAX_CONSECUTIVE_ERRORS:
+                    raise RuntimeError(
+                        f"FluxDataset: aborting after {consecutive_bad} consecutive "
+                        f"dataset errors. Last: {type(e).__name__}: {e}"
+                    ) from e
+                # For non-streaming (map-style) datasets, advance the index so
+                # that _get_data_iter() skips the bad sample on the next attempt.
+                if isinstance(self._data, Dataset):
+                    self._sample_idx += 1
+                dataset_iterator = self._get_data_iter()
+                continue
 
             # Use the dataset-specific preprocessor
             sample_dict = self._data_processor(
@@ -276,6 +298,7 @@ class FluxDataset(IterableDataset, Stateful):
                 if torch.rand(1).item() < dropout_prob:
                     sample_dict["clip"] = self._clip_empty_token
 
+            consecutive_bad = 0
             self._sample_idx += 1
 
             labels = sample_dict.pop("image")
