@@ -6,9 +6,8 @@
 
 """MinimalAsyncEP primitives for constrained MoE expert parallel dispatch.
 
-This backend is intentionally narrow: it supports the launch shape where the
-EP process group is the data-parallel group and TP/CP/PP/SP are disabled.
-The symmetric-memory allocation is explicit and must happen before dispatch.
+This backend supports EP with optional CP, TP, and PP. The symmetric-memory
+allocation is explicit and must happen before dispatch.
 
 Shape symbols used by the API entrypoints:
     ``T``: local token rows.
@@ -116,14 +115,6 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             "MinimalAsyncEPTokenDispatcher.Config requires expert parallelism "
             "(expert_parallel_degree > 1)."
         )
-    if parallelism.tensor_parallel_degree != 1:
-        raise ValueError(
-            "MinimalAsyncEP does not support tensor or sequence parallelism."
-        )
-    if parallelism.context_parallel_degree != 1:
-        raise ValueError("MinimalAsyncEP does not support context parallelism.")
-    if parallelism.pipeline_parallel_degree != 1:
-        raise ValueError("MinimalAsyncEP does not support pipeline parallelism.")
     for num_experts in {cfg.num_experts for cfg in dispatcher_cfgs}:
         if num_experts % parallelism.expert_parallel_degree != 0:
             raise ValueError(
@@ -151,10 +142,6 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         )
 
     for token_dispatcher_cfg in dispatcher_cfgs:
-        token_dispatcher_cfg.hidden_dim = model_config.dim
-        token_dispatcher_cfg.num_max_tokens_per_rank = (
-            training.local_batch_size * training.seq_len
-        )
         token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
 
 
