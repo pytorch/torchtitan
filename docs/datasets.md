@@ -19,10 +19,15 @@ TorchTitan uses one Grain-based data pipeline for text pretraining, SFT, and ima
     output: MapDataset | IterDataset
 
 4. Dataloader:
-    class: GrainDataLoader
+    runtime: GrainDataLoader
+    config:  GrainDataLoader.Config
     input:  MapDataset | IterDataset
     does:   convert to iterable if needed -> batch -> collate -> prefetch
     output: TrainerBatch
+
+5. Trainer:
+    input: TrainerBatch
+    does:  model forward and backward
 ```
 
 # Text Pretraining
@@ -32,8 +37,8 @@ TorchTitan uses one Grain-based data pipeline for text pretraining, SFT, and ima
 Each non-empty line must contain one JSON object:
 
 ```json
-{"text": "The first document."}
-{"text": "The second document."}
+{"title": "First", "body": "The first document."}
+{"title": "Second", "body": "The second document."}
 ```
 
 ```python
@@ -69,8 +74,6 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-Patterns are expanded in sorted order. A missing pattern or a file selected by more than one pattern is an error.
-
 ## Hugging Face sources
 
 Use random access for a materialized dataset:
@@ -97,128 +100,9 @@ source = HuggingFaceStreamingSource.Config(
 )
 ```
 
-# SFT
+## Adding your own source -- Example: Pretokenized data
 
-SFT changes the processor and packing policy, not the loader:
-
-```python
-from torchtitan.components.data import (
-    FirstFitPackingConfig,
-    GrainDataLoader,
-    HuggingFaceRandomAccessSource,
-    SingleDatasetConfig,
-    TextCollator,
-)
-from torchtitan.hf_datasets.text_datasets import ChatProcessor
-
-
-def gsm8k_messages(row):
-    return [
-        {"role": "user", "content": row["question"]},
-        {"role": "assistant", "content": row["answer"]},
-    ]
-
-
-gsm8k_ds = SingleDatasetConfig(
-    source=HuggingFaceRandomAccessSource.Config(
-        path="openai/gsm8k",
-        name="main",
-        split="train",
-        revision="<immutable-revision>",
-    ),
-    processor=ChatProcessor.Config(messages_fn=gsm8k_messages),
-    post_filters=(lambda sample: sample is not None,),
-)
-
-gsm8k_packed_ds = FirstFitPackingConfig(dataset=gsm8k_ds)
-
-config.dataloader = GrainDataLoader.Config(
-    dataset=gsm8k_packed_ds,
-    collator=TextCollator.Config(),
-)
-```
-
-`ChatProcessor` applies the tokenizer's chat template and sets prompt labels to `IGNORE_INDEX`.
-
-# Mixing datasets
-
-Keep each weight next to its dataset:
-
-```python
-from torchtitan.components.data import DatasetMixConfig, WeightedDataset
-
-# `books_ds` and `code_ds` are SingleDatasetConfig values.
-pretraining_mix_ds = DatasetMixConfig(
-    datasets=(
-        WeightedDataset(dataset=books_ds, weight=0.75),
-        WeightedDataset(dataset=code_ds, weight=0.25),
-    ),
-)
-```
-
-Examples use probabilities that sum to `1.0`, but any positive relative weights are accepted and normalized internally. `weight=0.75` next to `weight=0.25` means the first dataset is drawn three times as often.
-
-NOTE: When every child is random-access, Grain keeps one map root and weights select indexed draw attempts before sparse filters. If any child is streaming, random-access children are converted individually and all weights select emitted elements. This preserves one read-prefetch budget for the common all-random-access pretraining mix; a mixed graph has one budget per converted random-access child.
-
-For an all-random-access mix with a sparse filter:
-
-```text
-configured draw attempts: sparse 50%, dense 50%
-sparse accepts 1 in 10:   sparse 5%, dense 50%
-accepted output share:    sparse 5 / (5 + 50) = 9.1%
-```
-
-The mixed element determines what each draw counts.
-
-Mix documents before packing when weights should count documents:
-
-```python
-packed_pretraining_ds = ConcatThenSplitPackingConfig(
-    dataset=pretraining_mix_ds,
-)
-```
-
-```text
-2 book documents : 1 code document
-long documents contribute more tokens
-```
-
-Pack each child before mixing when weights should count fixed-length rows and therefore physical tokens:
-
-```python
-books_packed_ds = ConcatThenSplitPackingConfig(dataset=books_ds)
-code_packed_ds = ConcatThenSplitPackingConfig(dataset=code_ds)
-
-token_ratio_mix_ds = DatasetMixConfig(
-    datasets=(
-        WeightedDataset(dataset=books_packed_ds, weight=0.67),
-        WeightedDataset(dataset=code_packed_ds, weight=0.33),
-    ),
-)
-```
-
-```text
-2 book rows : 1 code row
-each row contains seq_len tokens
-```
-
-Automatic token-weighted mixing from source token counts is not implemented.
-
-Use concatenation to make finite map-style datasets one index space before global shuffle and sharding:
-
-```python
-from torchtitan.components.data import DatasetConcatConfig
-
-pretraining_corpus_ds = DatasetConcatConfig(
-    datasets=(books_ds, code_ds, math_ds),
-)
-```
-
-With `repeat=False`, a mix stops when its first child exhausts, while concatenation consumes every child in order.
-
-## Pretokenized data
-
-A custom random-access source needs `__len__` and `__getitem__`. Its constructor receives the loader's run policy:
+This example uses token offsets to expose one pretokenized document per index, then reuses the normal processing and packing configs.
 
 ```python
 from dataclasses import dataclass
@@ -229,6 +113,7 @@ from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     DatasetBuildContext,
     DatasetIterationPolicy,
+    RandomAccessDataSource,
     SampleProcessor,
     SingleDatasetConfig,
     TextSequence,
@@ -236,7 +121,7 @@ from torchtitan.components.data import (
 from torchtitan.config import Configurable
 
 
-class MemmapTokenSource(Configurable):
+class PretokenizedMemmapSource(Configurable, RandomAccessDataSource):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         tokens_path: str
@@ -277,7 +162,7 @@ class TokensToTextSequence(SampleProcessor):
 
 
 token_documents_ds = SingleDatasetConfig(
-    source=MemmapTokenSource.Config(
+    source=PretokenizedMemmapSource.Config(
         tokens_path="tokens.bin",
         document_offsets_path="document_offsets.npy",
     ),
@@ -289,47 +174,133 @@ packed_tokens_ds = ConcatThenSplitPackingConfig(
 )
 ```
 
-`RandomAccessDataSource` is a protocol, so the custom source does not need to inherit from it.
+# SFT
 
-An OLMo-style source can use token offsets to select a deterministic document prefix before composing with the same mixing and packing configs. TorchTitan does not prescribe that storage format.
-
-If storage already contains fixed `seq_len` rows, return them as `TextSequence` objects, skip packing, and use `TextCollator`.
-
-## Images and multimodal data
-
-Images use the same source, dataset, loader, sharding, and checkpoint contracts. Their processors preserve modality-specific sample dictionaries, and their collators create model-specific batches.
-
-Flux:
+SFT changes the processor and packing policy, not the loader:
 
 ```python
-from torchtitan.components.data import GrainDataLoader
-from torchtitan.models.flux.flux_datasets import DATASETS, FluxCollator
+from torchtitan.components.data import (
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+    TextCollator,
+)
+from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
-flux_ds = DATASETS["cc12m-test"]
+
+def gsm8k_messages(row):
+    return [
+        {"role": "user", "content": row["question"]},
+        {"role": "assistant", "content": row["answer"]},
+    ]
+
+
+gsm8k_ds = SingleDatasetConfig(
+    source=HuggingFaceRandomAccessSource.Config(
+        path="openai/gsm8k",
+        name="main",
+        split="train",
+    ),
+    processor=ChatProcessor.Config(messages_fn=gsm8k_messages),
+    post_filters=(lambda sample: sample is not None,),
+)
+
+gsm8k_packed_ds = FirstFitPackingConfig(dataset=gsm8k_ds)
 
 config.dataloader = GrainDataLoader.Config(
-    dataset=flux_ds,
-    collator=FluxCollator.Config(),
-    streaming_shuffle_buffer_size=128,
+    dataset=gsm8k_packed_ds,
+    collator=TextCollator.Config(),
 )
 ```
 
-Use `DATASETS["cc12m-wds"]` for the full streamed corpus.
+`ChatProcessor` applies the tokenizer's chat template and sets prompt labels to `IGNORE_INDEX`.
 
-Qwen multimodal:
+# Mixing datasets
+
+Keep each weight next to its dataset:
 
 ```python
-from torchtitan.components.data import GrainDataLoader
+from torchtitan.components.data import DatasetMixConfig, WeightedDataset
+
+# `books_ds` and `code_ds` are SingleDatasetConfig values.
+pretraining_mix_ds = DatasetMixConfig(
+    datasets=(
+        WeightedDataset(dataset=books_ds, weight=0.75),
+        WeightedDataset(dataset=code_ds, weight=0.25),
+    ),
+)
+```
+
+Examples use probabilities that sum to `1.0`, but any positive relative weights are accepted and normalized internally. `weight=0.75` next to `weight=0.25` means the first dataset is drawn three times as often.
+
+### Mix documents before packing when weights should count documents
+
+```python
+packed_pretraining_ds = ConcatThenSplitPackingConfig(
+    dataset=pretraining_mix_ds,
+)
+```
+
+### Pack each child before mixing when weights should count fixed-length rows
+
+```python
+books_packed_ds = ConcatThenSplitPackingConfig(dataset=books_ds)
+code_packed_ds = ConcatThenSplitPackingConfig(dataset=code_ds)
+
+token_ratio_mix_ds = DatasetMixConfig(
+    datasets=(
+        WeightedDataset(dataset=books_packed_ds, weight=0.67),
+        WeightedDataset(dataset=code_packed_ds, weight=0.33),
+    ),
+)
+```
+
+Automatic adjustment from observed document or supervised-token counts is not implemented. A custom mix can maintain per-dataset moving averages and rebalance its weights.
+
+### Concatenate datasets
+
+Use concatenation to treat finite datasets as one corpus. Every row appears once; dataset sizes determine their proportions. Use mixing instead for explicit weights or streaming datasets.
+
+```python
+from torchtitan.components.data import DatasetConcatConfig
+
+pretraining_corpus_ds = DatasetConcatConfig(
+    datasets=(books_ds, code_ds, math_ds),
+)
+```
+
+# Images and multimodal data
+
+Images use the same source, dataset, loader, sharding, and checkpoint contracts. Their processors preserve modality-specific sample dictionaries, and their collators create model-specific batches.
+
+Example for Qwen multimodal:
+
+```python
+from torchtitan.components.data import (
+    GrainDataLoader,
+    HuggingFaceStreamingSource,
+    SingleDatasetConfig,
+)
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
-    MM_DATASETS,
     MMSamplePackingConfig,
     MultiModalProcessor,
+    _process_cc12_wd_sample,
 )
 
-mm_ds = MM_DATASETS["cc12m"]
-processor = mm_ds.processor
-assert isinstance(processor, MultiModalProcessor.Config)
+mm_processor = MultiModalProcessor.Config(
+    sample_processor=_process_cc12_wd_sample,
+)
+
+mm_ds = SingleDatasetConfig(
+    source=HuggingFaceStreamingSource.Config(
+        path="pixparse/cc12m-wds",
+        split="train",
+    ),
+    processor=mm_processor,
+    post_filters=(lambda sample: sample is not None,),
+)
 
 packed_mm_ds = MMSamplePackingConfig(
     dataset=mm_ds,
@@ -340,17 +311,17 @@ config.dataloader = GrainDataLoader.Config(
     dataset=packed_mm_ds,
     collator=MultiModalCollator.Config(
         build_mrope_positions=True,
-        patch_size=processor.patch_size,
-        temporal_patch_size=processor.temporal_patch_size,
-        spatial_merge_size=processor.spatial_merge_size,
+        patch_size=mm_processor.patch_size,
+        temporal_patch_size=mm_processor.temporal_patch_size,
+        spatial_merge_size=mm_processor.spatial_merge_size,
     ),
     streaming_shuffle_buffer_size=128,
 )
 ```
 
-Custom image augmentation belongs in a `SampleProcessor`. Grain supplies its deterministic `numpy.random.Generator`, so crop and dropout decisions participate in exact resume.
+Custom image augmentation belongs in a `SampleProcessor`.
 
-## Loader policy
+# Loader policy
 
 Configure run-wide behavior once:
 
@@ -368,24 +339,44 @@ config.dataloader = GrainDataLoader.Config(
         num_threads=16,
         prefetch_buffer_size=500,
     ),
-    num_workers=0,
     num_prefetch_batches=2,
 )
 ```
 
-`streaming_shuffle_buffer_size` is the number of raw streaming rows available to window shuffle.
+### Reading indexed datasets
 
-`read_options` controls concurrent indexed reads whenever a `MapDataset` becomes an `IterDataset`. An all-map mix has one conversion; a mixed map/stream graph converts each map child separately. Native streams do not use this option. Set `num_threads=0` for in-memory Python data.
+A random-access source becomes a `MapDataset`, which supports `dataset[index]`. It becomes an `IterDataset` when a later stage needs to consume samples sequentially:
 
-`num_workers` adds one multiprocessing pool for an eligible map-root graph; it is not multiplied by child datasets.
+```text
+all children are MapDataset: DatasetMixConfig remains a MapDataset
+any child is IterDataset:    DatasetMixConfig converts each MapDataset child
+packing:                     converts its child if needed and returns IterDataset
+GrainDataLoader:             converts a MapDataset if no earlier stage did
+```
 
-`num_prefetch_batches` queues completed collated batches in one background thread.
+`read_options` controls each `MapDataset`-to-`IterDataset` conversion:
 
-Multiprocessing prefetch is opt-in and requires a map-root dataset. Streaming, mixing, and packing roots remain in-process.
+```python
+grain.ReadOptions(
+    num_threads=16,            # indexed samples read concurrently
+    prefetch_buffer_size=500,  # samples waiting for the consumer
+)
+```
 
-Omitting `collator` uses `DefaultCollator`, which stacks rows that are already `(model_inputs, labels)` pairs.
+Each conversion has its own threads and buffer. An all-map mix converts once; a mix containing a stream converts each map child separately.
 
-## Distributed and checkpoint behavior
+### Streaming shuffle and ready batches
+
+`streaming_shuffle_buffer_size` is the number of raw rows retained for approximate shuffling. A larger buffer improves mixing but uses more memory.
+
+`num_prefetch_batches` is the number of complete, collated batches allowed to wait for the trainer:
+
+```text
+trainer computes batch 10
+background thread prepares batches 11 and 12
+```
+
+# Distributed and checkpoint behavior
 
 Only the effective data-parallel coordinate selects data:
 
@@ -396,39 +387,24 @@ different effective-DP ranks -> disjoint source rows
 TP/PP/CP peers               -> same rows for their effective-DP coordinate
 ```
 
-Random-access data is globally shuffled, then stride-sharded. Hugging Face streams are sharded at the source. Packing happens after sharding and is rank-local.
+Data ownership is decided before batching:
 
-Repeated map datasets receive a fresh Grain shuffle permutation each epoch. Shuffled Hugging Face streams advance their shard order on each repeat.
+```text
+random-access source -> global shuffle -> DP stride shard
+Hugging Face stream -> source-level DP shard
+DatasetMixConfig    -> combines children already owned by this DP rank
+DatasetConcatConfig -> concatenates, globally shuffles, then DP-shards
+packing             -> packs samples locally on each DP rank
+GrainDataLoader     -> batches and collates that rank's samples
+```
 
-With effective DP greater than one, `repeat=False` is rejected because finite ranks can exhaust at different steps and hang collectives. Use `repeat=True` with a trainer-controlled step count.
+With effective DP greater than one, `repeat=False` is rejected because ranks can exhaust at different steps and hang training collectives. Use `repeat=True` and let the trainer's step count stop training.
 
 `GrainDataLoader.state_dict()` records:
 
 - source cursors and shuffle/repeat progress
 - mix-child and packing-buffer state
 - batching and prefetch state
-- effective DP degree and process-worker count
+- effective DP degree
 
-Resume requires unchanged code, config, source contents, tokenizer, effective DP degree, and process-worker count.
-
-Custom dataset graph nodes use frozen config dataclasses with an explicit `build()`:
-
-```python
-from dataclasses import dataclass
-
-from torchtitan.components.data import DatasetConfig
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class MyDatasetConfig:
-    dataset: DatasetConfig
-
-    def build(self, *, context, dataset_iteration_policy):
-        child_ds = self.dataset.build(
-            context=context,
-            dataset_iteration_policy=dataset_iteration_policy,
-        )
-        return MyCheckpointableGrainDataset(child_ds)
-```
-
-Sources, processors, collators, and loaders own configured runtime behavior and use TorchTitan `Configurable`. Dataset graph configs describe composition and return Grain datasets.
+Resume requires unchanged code, config, source contents, tokenizer, and effective DP degree.

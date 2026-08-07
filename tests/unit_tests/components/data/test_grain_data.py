@@ -7,8 +7,6 @@
 """CPU tests for the composed Grain data pipeline."""
 
 import json
-import multiprocessing
-import time
 from dataclasses import dataclass, replace
 from typing import Any
 from unittest import mock
@@ -42,7 +40,6 @@ from torchtitan.components.data.sources import (
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, TextProcessor
-from torchtitan.trainer import Trainer
 
 
 class FakeTokenizer:
@@ -115,19 +112,6 @@ class VerifyFilterOrder(SampleProcessor):
         del rng
         assert sample["keep"]
         return {"value": sample["value"] * 2, "processed": True}
-
-
-class RaiseInWorker(SampleProcessor):
-    @dataclass(kw_only=True, slots=True)
-    class Config(SampleProcessor.Config):
-        pass
-
-    def __init__(self, config: Config, *, context: DatasetBuildContext):
-        del config, context
-
-    def __call__(self, sample, rng):
-        del rng
-        raise RuntimeError(f"worker failed on row {sample['value']}")
 
 
 def test_indexed_jsonl_random_access(tmp_path):
@@ -1607,57 +1591,6 @@ def finite_rows_loader():
     loader.close()
 
 
-def build_process_rows_loader(*, num_workers, row_count):
-    # DefaultCollator converts these rows to tensors after process prefetch.
-    rows = tuple(
-        (
-            {
-                "input": np.asarray([index], dtype=np.int64),
-                "positions": np.asarray([0], dtype=np.int64),
-            },
-            np.asarray([index], dtype=np.int64),
-        )
-        for index in range(row_count)
-    )
-    return GrainDataLoader.Config(
-        dataset=SingleDatasetConfig(source=RowsSourceConfig(rows=rows)),
-        shuffle=False,
-        repeat=False,
-        num_prefetch_batches=1,
-        num_workers=num_workers,
-    ).build(
-        dp_world_size=1,
-        dp_rank=0,
-        tokenizer=FakeTokenizer(),
-        seq_len=1,
-        local_batch_size=2,
-    )
-
-
-def wait_for_processes_to_start(baseline_pids):
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        added = {
-            process.pid for process in multiprocessing.active_children()
-        } - baseline_pids
-        if added:
-            return added
-        time.sleep(0.05)
-    pytest.fail("process workers did not start within 5 seconds")
-
-
-def wait_for_processes_to_stop(process_pids):
-    remaining = process_pids
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        active_pids = {process.pid for process in multiprocessing.active_children()}
-        remaining = process_pids & active_pids
-        if not remaining:
-            return
-        time.sleep(0.05)
-    pytest.fail(f"process workers did not stop within 5 seconds: {sorted(remaining)}")
-
-
 def test_mix_rejects_empty_datasets():
     with pytest.raises(ValueError, match="positive-weight"):
         DatasetMixConfig(datasets=()).build(
@@ -1709,98 +1642,12 @@ def test_loader_batches_exact_rows_and_preserves_finite_tail(finite_rows_loader)
     assert batches[2][1].tolist() == [[4]]
 
 
-@pytest.mark.parametrize("num_workers", [1, 2, 4])
-def test_num_workers_emit_every_map_row_once(num_workers):
-    baseline_pids = {process.pid for process in multiprocessing.active_children()}
-    loader = build_process_rows_loader(
-        num_workers=num_workers,
-        row_count=17,
-    )
-    worker_pids = set()
-    try:
-        iterator = iter(loader)
-        batches = [next(iterator)]
-        worker_pids = wait_for_processes_to_start(baseline_pids)
-        batches.extend(iterator)
-        values = [
-            value
-            for inputs, _ in batches
-            for value in inputs["input"].flatten().tolist()
-        ]
-        assert sorted(values) == list(range(17))
-    finally:
-        loader.close()
-
-    wait_for_processes_to_stop(worker_pids)
-
-
-def test_num_workers_reject_iterable_root_before_startup():
-    config = GrainDataLoader.Config(
-        dataset=SingleDatasetConfig(
-            source=StreamingRowsSourceConfig(
-                rows=tuple({"value": index} for index in range(4))
-            )
-        ),
-        num_workers=1,
-    )
-
-    with pytest.raises(ValueError, match="requires a map-root dataset"):
-        config.build(
-            dp_world_size=1,
-            dp_rank=0,
-            tokenizer=FakeTokenizer(),
-            seq_len=1,
-            local_batch_size=1,
-        )
-
-
-def test_num_workers_restore_exactly_with_same_topology():
-    loader = build_process_rows_loader(num_workers=1, row_count=24)
-    restored = None
-    try:
-        iterator = iter(loader)
-        next(iterator)
-        state = loader.state_dict()
-        expected = [next(iterator) for _ in range(4)]
-
-        restored = build_process_rows_loader(num_workers=1, row_count=24)
-        restored.load_state_dict(state)
-        actual = [next(iter(restored)) for _ in range(4)]
-
-        for expected_batch, actual_batch in zip(expected, actual, strict=True):
-            assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
-            assert torch.equal(expected_batch[1], actual_batch[1])
-    finally:
-        loader.close()
-        if restored is not None:
-            restored.close()
-
-
 def mock_grain_loader():
     loader = object.__new__(GrainDataLoader)
     loader._dp_world_size = 1
-    loader._num_workers = 0
     loader._rank_id = "dp_rank_0"
     loader._iterator = mock.Mock()
     return loader
-
-
-def test_changed_process_topology_closes_before_rejecting():
-    baseline_pids = {process.pid for process in multiprocessing.active_children()}
-    loader = build_process_rows_loader(num_workers=1, row_count=10_000)
-    worker_pids = set()
-    try:
-        next(iter(loader))
-        worker_pids = wait_for_processes_to_start(baseline_pids)
-        state = loader.state_dict()
-        state["num_workers"] = 2
-
-        with pytest.raises(ValueError, match="changing num_workers"):
-            loader.load_state_dict(state)
-    finally:
-        loader.close()
-
-    wait_for_processes_to_stop(worker_pids)
 
 
 def test_restore_failure_closes_loader():
@@ -1812,55 +1659,6 @@ def test_restore_failure_closes_loader():
         loader.load_state_dict(state)
 
     loader._iterator.close.assert_called_once_with()
-
-
-def test_trainer_shutdown_closes_num_workers():
-    baseline_pids = {process.pid for process in multiprocessing.active_children()}
-    loader = build_process_rows_loader(num_workers=1, row_count=10_000)
-    worker_pids = set()
-    try:
-        next(iter(loader))
-        worker_pids = wait_for_processes_to_start(baseline_pids)
-        trainer = Trainer.__new__(Trainer)
-        trainer.dataloader = loader
-        trainer.checkpointer = None
-        trainer.metrics_processor = None
-
-        trainer.close()
-    finally:
-        loader.close()
-
-    wait_for_processes_to_stop(worker_pids)
-
-
-def test_process_worker_exception_reaches_consumer():
-    baseline_pids = {process.pid for process in multiprocessing.active_children()}
-    loader = GrainDataLoader.Config(
-        dataset=SingleDatasetConfig(
-            source=RowsSourceConfig(rows=({"value": 0},)),
-            processor=RaiseInWorker.Config(),
-        ),
-        shuffle=False,
-        repeat=False,
-        num_workers=1,
-        num_prefetch_batches=1,
-    ).build(
-        dp_world_size=1,
-        dp_rank=0,
-        tokenizer=FakeTokenizer(),
-        seq_len=1,
-        local_batch_size=1,
-    )
-    try:
-        with pytest.raises(Exception, match="worker failed on row 0"):
-            next(iter(loader))
-    finally:
-        loader.close()
-    remaining_pids = {
-        process.pid for process in multiprocessing.active_children()
-    } - baseline_pids
-    wait_for_processes_to_stop(remaining_pids)
-
 
 def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):
     path = tmp_path / "rows.jsonl"

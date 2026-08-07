@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import grain.python as grain
-import torch
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 
@@ -51,11 +50,6 @@ class BaseDataLoader(Stateful, ABC, Configurable):
         pass
 
 
-def _configure_data_worker(worker_index: int, worker_count: int) -> None:
-    del worker_index, worker_count
-    torch.set_num_threads(1)
-
-
 class GrainDataLoader(BaseDataLoader):
     """Batches and checkpoints one composed Grain dataset graph."""
 
@@ -70,8 +64,6 @@ class GrainDataLoader(BaseDataLoader):
         """Streaming rows retained per rank for approximate shuffling."""
         read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
-        num_workers: int = 0
-        """Worker processes per rank that run the eligible map pipeline."""
         num_prefetch_batches: int = 2
         """Collated batches queued per rank for trainer consumption."""
 
@@ -86,6 +78,10 @@ class GrainDataLoader(BaseDataLoader):
         local_batch_size: int,
     ) -> None:
         # Validate the run policy.
+        # TODO(data-finite-dp): Support finite distributed datasets with a global
+        # remainder policy. Simple map datasets can truncate or pad before DP
+        # sharding; filtered, mixed, packed, and streaming datasets need coordinated
+        # exhaustion so every rank runs the same number of steps.
         if dp_world_size > 1 and not config.repeat:
             raise ValueError(
                 "repeat=False with data parallelism can exhaust ranks at different "
@@ -93,7 +89,6 @@ class GrainDataLoader(BaseDataLoader):
                 "controlled step count"
             )
         self._dp_world_size = dp_world_size
-        self._num_workers = config.num_workers
         self._rank_id = f"dp_rank_{dp_rank}"
 
         # Build the dataset graph and collator.
@@ -119,21 +114,14 @@ class GrainDataLoader(BaseDataLoader):
         )
         collator = config.collator.build(context=context)
 
-        # Convert the map root and start optional worker processes.
-        if config.num_workers and not isinstance(dataset, grain.MapDataset):
-            raise ValueError("multiprocessing prefetch requires a map-root dataset")
+        # TODO(data-multiprocessing): CPU-heavy processing should use multiple
+        # processes rather than only threads. Grain can divide map-style data among
+        # workers, but packing and mixing map data with a stream produce an iterable
+        # before the loader sees it. Investigate an earlier boundary where one
+        # shared worker pool processes samples, instead of creating a pool per
+        # dataset or packing per worker.
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=read_options)
-
-        # Run the map-root preprocessing pipeline in one loader-level process
-        # pool. Eight workers means eight total workers per rank, not per child.
-        if config.num_workers:
-            dataset = dataset.mp_prefetch(
-                grain.MultiprocessingOptions(
-                    num_workers=config.num_workers,
-                ),
-                worker_init_fn=_configure_data_worker,
-            )
 
         # Batch and collate samples.
         dataset = dataset.batch(
@@ -155,7 +143,6 @@ class GrainDataLoader(BaseDataLoader):
         return {
             "version": 1,
             "dp_world_size": self._dp_world_size,
-            "num_workers": self._num_workers,
             self._rank_id: self._iterator.get_state(),
         }
 
@@ -169,13 +156,6 @@ class GrainDataLoader(BaseDataLoader):
         if state_dict["dp_world_size"] != self._dp_world_size:
             raise ValueError(
                 "cannot resume after changing the effective data-parallel degree"
-            )
-        if state_dict["num_workers"] != self._num_workers:
-            self.close()
-            raise ValueError(
-                "cannot resume after changing num_workers from "
-                f"{state_dict['num_workers']} "
-                f"to {self._num_workers}"
             )
         if self._rank_id not in state_dict:
             raise ValueError(
