@@ -82,8 +82,8 @@ Update `torchtitan/components/distributed_optimizers/muon_parameter_prep.py`:
 - Stop requiring every FSDP2 shard to begin and end on a head boundary.
 - Preserve global compute-view metadata without eagerly viewing a split local
   shard as `[local_H, R, C]`.
-- Represent the local compute tensor as optional or descriptor-based. Construct
-  a direct alias only for the aligned local fast path.
+- Represent the local storage view as optional. Construct a direct alias only
+  for the aligned local fast path.
 - Derive validation from globally identical DTensor metadata and inspect every
   mesh coordinate before optimizer construction. Do not introduce rank-local
   validation that could strand peers in a later collective.
@@ -92,8 +92,9 @@ Update `torchtitan/components/distributed_optimizers/muon_parameter_prep.py`:
 
 Update `torchtitan/components/distributed_optimizers/muon.py`:
 
-- Replace the binary `compute_locally` result with an explicit transition:
-  local, whole-tensor `Owned`, or matrix-batch repartition.
+- Represent storage-to-compute behavior with explicit transitions: no
+  redistribution, whole-tensor `Owned` redistribution, or batched-matrix
+  repartition.
 - Keep the logical placement fingerprint as `("shard", 0)` for both aligned
   and redistributed cases.
 - Do not include generated routes, world size, or storage alignment in the
@@ -115,8 +116,8 @@ Update
   `[H * R, C]` storage rows.
 - Intersect storage ranges with compute head ranges to generate routes.
 - Keep separate route endpoint descriptions:
-  - a source or destination block in flat 2D storage coordinates;
-  - the corresponding block in logical 3D head coordinates.
+  - a source or destination region in flat 2D storage coordinates;
+  - the corresponding region in logical 3D head coordinates.
 - Require equal element counts between route endpoints.
 - Validate that storage routes cover the original tensor exactly and compute
   routes collectively cover the logical tensor exactly.

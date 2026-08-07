@@ -25,12 +25,12 @@ from .flex_optimizer_reshard import (
     _build_bucket_plans,
     _build_owned_redistribution_plan,
     _device_mesh_ranks,
-    _dtensor_storage_blocks,
-    _MatrixBlock,
-    _MatrixBlockRoute,
+    _dtensor_storage_regions,
     _ParticipantPartition,
     _RedistributionGroup,
     _RedistributionPlan,
+    _TensorRegion,
+    _TensorRegionRoute,
     _validate_bucket_plans_across_ranks,
     assign_balanced_owners,
     BucketSpec,
@@ -216,12 +216,12 @@ class DistributedMuon(Optimizer):
             compute_placement = self._group_compute_placements[group_index]
             prepared = self._prepared_compute_views[fqn]
             global_compute_shape = torch.Size(prepared.global_compute_shape)
-            local_compute_tensor = prepared.local_compute_tensor
-            resolved_compute_placement = _resolve_compute_placement(
+            local_storage_view = prepared.local_storage_view
+            resolved_transition = _resolve_storage_to_compute_transition(
                 fqn,
                 param,
                 global_compute_shape,
-                local_compute_tensor,
+                local_storage_view,
                 compute_placement,
             )
             compute_layouts.append(
@@ -231,10 +231,10 @@ class DistributedMuon(Optimizer):
                     group_index=group_index,
                     compute_view_key=prepared.compute_view_key,
                     global_compute_shape=global_compute_shape,
-                    local_compute_tensor=local_compute_tensor,
+                    local_storage_view=local_storage_view,
                     local_storage_signature=_local_storage_signature(param.to_local()),
-                    compute_placement_key=resolved_compute_placement.fingerprint_key,
-                    compute_transition=resolved_compute_placement.compute_transition,
+                    compute_placement_key=resolved_transition.fingerprint_key,
+                    storage_to_compute_transition=resolved_transition.storage_to_compute_transition,
                 )
             )
         return tuple(compute_layouts)
@@ -244,10 +244,10 @@ class DistributedMuon(Optimizer):
         result = _build_bucket_plans(
             compute_layouts,
             self._specs,
-            fqn=lambda item: item.fqn,
+            get_fqn=lambda item: item.fqn,
             requires_owner=lambda item: item.requires_owner,
-            storage_dtensor=lambda item: item.param,
-            redistribution_plan=_build_compute_redistribution_plan,
+            get_storage_dtensor=lambda item: item.param,
+            build_redistribution_plan=_build_parameter_redistribution_plan,
         )
         self._plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
@@ -286,7 +286,7 @@ class DistributedMuon(Optimizer):
             str(compute_layout.param.dtype),
             compute_layout.param.to_local().device.type,
             tuple(compute_layout.global_compute_shape),
-            type(compute_layout.compute_transition).__name__,
+            type(compute_layout.storage_to_compute_transition).__name__,
             compute_layout.compute_view_key,
             compute_layout.compute_placement_key,
             _device_mesh_ranks(compute_layout.param.device_mesh),
@@ -335,7 +335,7 @@ class DistributedMuon(Optimizer):
 
         for compute_layout in self._parameter_compute_layouts:
             if (
-                compute_layout.compute_locally
+                compute_layout.storage_is_compute_ready
                 and _local_storage_signature(compute_layout.param.to_local())
                 != compute_layout.local_storage_signature
             ):
@@ -426,8 +426,8 @@ class DistributedMuon(Optimizer):
         grad = cast(DTensor, compute_layout.param.grad)
         momentum = cast(DTensor, self.state[compute_layout.param]["momentum_buffer"])
         local_reference = (
-            compute_layout.local_compute_tensor
-            if compute_layout.compute_locally
+            compute_layout.local_storage_view
+            if compute_layout.storage_is_compute_ready
             else compute_layout.param.to_local()
         )
         assert local_reference is not None
@@ -475,8 +475,8 @@ class DistributedMuon(Optimizer):
     ) -> None:
         group = self._group(compute_layout)
         local_param = (
-            compute_layout.local_compute_tensor
-            if compute_layout.compute_locally
+            compute_layout.local_storage_view
+            if compute_layout.storage_is_compute_ready
             else compute_layout.param.to_local()
         )
         assert local_param is not None
@@ -493,7 +493,7 @@ class DistributedMuon(Optimizer):
     def _local_tensor_spec(
         compute_layout: _ParameterComputeLayout,
     ) -> tuple[torch.Size, torch.dtype, torch.device]:
-        tensor = compute_layout.local_compute_tensor
+        tensor = compute_layout.local_storage_view
         assert tensor is not None
         return tensor.shape, tensor.dtype, tensor.device
 
@@ -506,7 +506,7 @@ _LAYOUT_FINGERPRINT_VERSION = 1
 class _PreparedParameterComputeView:
     compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
-    local_compute_tensor: Tensor | None
+    local_storage_view: Tensor | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,78 +516,86 @@ class _ParameterComputeLayout:
     group_index: int
     compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
-    local_compute_tensor: Tensor | None
+    local_storage_view: Tensor | None
     local_storage_signature: tuple[Any, ...]
     compute_placement_key: tuple[Any, ...]
-    compute_transition: _ComputeTransition
+    storage_to_compute_transition: _StorageToComputeTransition
 
     @property
-    def compute_locally(self) -> bool:
-        return isinstance(self.compute_transition, _LocalCompute)
+    def storage_is_compute_ready(self) -> bool:
+        return isinstance(
+            self.storage_to_compute_transition, _NoRedistributionTransition
+        )
 
     @property
     def requires_owner(self) -> bool:
-        return isinstance(self.compute_transition, _OwnedCompute)
+        return isinstance(
+            self.storage_to_compute_transition, _OwnedRedistributionTransition
+        )
 
 
 @dataclass(frozen=True, slots=True)
-class _LocalCompute:
+class _NoRedistributionTransition:
     pass
 
 
 @dataclass(frozen=True, slots=True)
-class _OwnedCompute:
+class _OwnedRedistributionTransition:
     pass
 
 
 @dataclass(frozen=True, slots=True)
-class _MatrixBatchShardCompute:
+class _BatchedMatrixRepartitionTransition:
     pass
 
 
-_ComputeTransition = _LocalCompute | _OwnedCompute | _MatrixBatchShardCompute
+_StorageToComputeTransition = (
+    _NoRedistributionTransition
+    | _OwnedRedistributionTransition
+    | _BatchedMatrixRepartitionTransition
+)
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedComputePlacement:
+class _ResolvedStorageToComputeTransition:
     fingerprint_key: tuple[Any, ...]
-    compute_transition: _ComputeTransition
+    storage_to_compute_transition: _StorageToComputeTransition
 
 
-def _build_compute_redistribution_plan(
+def _build_parameter_redistribution_plan(
     compute_layout: _ParameterComputeLayout,
     group: _RedistributionGroup,
     owner_rank: int | None,
 ) -> _RedistributionPlan | None:
-    transition = compute_layout.compute_transition
-    if isinstance(transition, _LocalCompute):
+    transition = compute_layout.storage_to_compute_transition
+    if isinstance(transition, _NoRedistributionTransition):
         return None
 
-    storage_blocks = _dtensor_storage_blocks(
+    storage_regions = _dtensor_storage_regions(
         compute_layout.param,
         group.participants,
     )
-    if isinstance(transition, _OwnedCompute):
+    if isinstance(transition, _OwnedRedistributionTransition):
         assert owner_rank is not None
         return _build_owned_redistribution_plan(
-            storage_blocks,
+            storage_regions,
             participants=group.participants,
             owner=group.participants[owner_rank],
             logical_shape=tuple(compute_layout.param.shape),
         )
 
-    assert isinstance(transition, _MatrixBatchShardCompute)
+    assert isinstance(transition, _BatchedMatrixRepartitionTransition)
     assert owner_rank is None
-    return _build_matrix_batch_shard_redistribution_plan(
-        storage_blocks,
+    return _build_batched_matrix_repartition_plan(
+        storage_regions,
         participants=group.participants,
         storage_shape=tuple(compute_layout.param.shape),
         compute_shape=tuple(compute_layout.global_compute_shape),
     )
 
 
-def _build_matrix_batch_shard_redistribution_plan(
-    storage_blocks: Sequence[tuple[tuple[int, ...], _MatrixBlock]],
+def _build_batched_matrix_repartition_plan(
+    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
     *,
     participants: tuple[int, ...],
     storage_shape: tuple[int, ...],
@@ -604,27 +612,27 @@ def _build_matrix_batch_shard_redistribution_plan(
 
     num_matrices, matrix_rows, matrix_columns = compute_shape
     storage_by_participant = {}
-    for holders, logical_block in storage_blocks:
+    for holders, logical_region in storage_regions:
         if len(holders) != 1:
             raise NotImplementedError(
-                "matrix-batch redistribution requires one storage holder per block"
+                "matrix-batch redistribution requires one storage holder per region"
             )
         participant = holders[0]
         if (
-            len(logical_block.shape) != 2
-            or logical_block.offsets[1] != 0
-            or logical_block.shape[1] != matrix_columns
+            len(logical_region.shape) != 2
+            or logical_region.offsets[1] != 0
+            or logical_region.shape[1] != matrix_columns
         ):
             raise ValueError(
                 "matrix-batch redistribution requires row-sharded 2D storage"
             )
-        storage_by_participant[participant] = logical_block
+        storage_by_participant[participant] = logical_region
 
     storage_partitions = tuple(
         _ParticipantPartition(
             participant=participant,
             tensor_shape=storage_by_participant[participant].shape,
-            logical_blocks=(storage_by_participant[participant],),
+            logical_regions=(storage_by_participant[participant],),
         )
         for participant in participants
     )
@@ -637,31 +645,31 @@ def _build_matrix_batch_shard_redistribution_plan(
             len(participants),
             mesh_rank,
         )
-        logical_block = _MatrixBlock(
+        logical_region = _TensorRegion(
             offsets=(matrix_offset * matrix_rows, 0),
             shape=(local_num_matrices * matrix_rows, matrix_columns),
         )
         compute_ranges[participant] = (
             matrix_offset,
             local_num_matrices,
-            logical_block,
+            logical_region,
         )
         compute_partitions.append(
             _ParticipantPartition(
                 participant=participant,
                 tensor_shape=(local_num_matrices, matrix_rows, matrix_columns),
-                logical_blocks=(logical_block,),
+                logical_regions=(logical_region,),
             )
         )
 
     storage_to_compute_routes = []
     compute_to_storage_routes = []
     for source in participants:
-        storage_block = storage_by_participant[source]
-        storage_row_offset = storage_block.offsets[0]
-        storage_row_end = storage_row_offset + storage_block.shape[0]
+        storage_region = storage_by_participant[source]
+        storage_row_offset = storage_region.offsets[0]
+        storage_row_end = storage_row_offset + storage_region.shape[0]
         for destination in participants:
-            matrix_offset, local_num_matrices, _logical_block = compute_ranges[
+            matrix_offset, local_num_matrices, _logical_region = compute_ranges[
                 destination
             ]
             for local_matrix_index in range(local_num_matrices):
@@ -676,15 +684,15 @@ def _build_matrix_batch_shard_redistribution_plan(
                 if route_rows <= 0:
                     continue
 
-                logical_block = _MatrixBlock(
+                logical_region = _TensorRegion(
                     offsets=(route_row_offset, 0),
                     shape=(route_rows, matrix_columns),
                 )
-                storage_tensor_block = _MatrixBlock(
+                storage_tensor_region = _TensorRegion(
                     offsets=(route_row_offset - storage_row_offset, 0),
                     shape=(route_rows, matrix_columns),
                 )
-                compute_tensor_block = _MatrixBlock(
+                compute_tensor_region = _TensorRegion(
                     offsets=(
                         local_matrix_index,
                         route_row_offset - matrix_row_offset,
@@ -693,19 +701,19 @@ def _build_matrix_batch_shard_redistribution_plan(
                     shape=(1, route_rows, matrix_columns),
                 )
                 storage_to_compute_routes.append(
-                    _MatrixBlockRoute(
-                        logical_block=logical_block,
-                        source_block=storage_tensor_block,
-                        destination_block=compute_tensor_block,
+                    _TensorRegionRoute(
+                        logical_region=logical_region,
+                        source_region=storage_tensor_region,
+                        destination_region=compute_tensor_region,
                         source_participants=(source,),
                         destination_participants=(destination,),
                     )
                 )
                 compute_to_storage_routes.append(
-                    _MatrixBlockRoute(
-                        logical_block=logical_block,
-                        source_block=compute_tensor_block,
-                        destination_block=storage_tensor_block,
+                    _TensorRegionRoute(
+                        logical_region=logical_region,
+                        source_region=compute_tensor_region,
+                        destination_region=storage_tensor_region,
                         source_participants=(destination,),
                         destination_participants=(source,),
                     )
@@ -721,13 +729,13 @@ def _build_matrix_batch_shard_redistribution_plan(
     )
 
 
-def _resolve_compute_placement(
+def _resolve_storage_to_compute_transition(
     fqn: str,
     param: DTensor,
     global_compute_shape: torch.Size,
-    local_compute_tensor: Tensor | None,
+    local_storage_view: Tensor | None,
     compute_placement: object,
-) -> _ResolvedComputePlacement:
+) -> _ResolvedStorageToComputeTransition:
     """Validate and canonicalize one storage-to-compute transition.
 
     ``Owned`` accepts a 2D matrix stored as exact ``Shard`` on a 1D mesh and
@@ -747,21 +755,21 @@ def _resolve_compute_placement(
         ):
             if (
                 replicated_storage
-                and local_compute_tensor is not None
-                and local_compute_tensor.shape == global_compute_shape
+                and local_storage_view is not None
+                and local_storage_view.shape == global_compute_shape
             ) or (
-                local_compute_tensor is not None
-                and local_compute_tensor.shape[1:] == global_compute_shape[1:]
+                local_storage_view is not None
+                and local_storage_view.shape[1:] == global_compute_shape[1:]
                 and _has_dim0_sharded_storage(param)
             ):
-                return _ResolvedComputePlacement(
+                return _ResolvedStorageToComputeTransition(
                     fingerprint_key=("shard", 0),
-                    compute_transition=_LocalCompute(),
+                    storage_to_compute_transition=_NoRedistributionTransition(),
                 )
-            if local_compute_tensor is None and _has_exact_1d_sharded_storage(param):
-                return _ResolvedComputePlacement(
+            if local_storage_view is None and _has_exact_1d_sharded_storage(param):
+                return _ResolvedStorageToComputeTransition(
                     fingerprint_key=("shard", 0),
-                    compute_transition=_MatrixBatchShardCompute(),
+                    storage_to_compute_transition=_BatchedMatrixRepartitionTransition(),
                 )
     elif (
         isinstance(compute_placement, Owned)
@@ -769,14 +777,14 @@ def _resolve_compute_placement(
         and param.ndim == 2
     ):
         if replicated_storage:
-            return _ResolvedComputePlacement(
+            return _ResolvedStorageToComputeTransition(
                 fingerprint_key=("owned",),
-                compute_transition=_LocalCompute(),
+                storage_to_compute_transition=_NoRedistributionTransition(),
             )
         if _has_exact_1d_sharded_storage(param):
-            return _ResolvedComputePlacement(
+            return _ResolvedStorageToComputeTransition(
                 fingerprint_key=("owned",),
-                compute_transition=_OwnedCompute(),
+                storage_to_compute_transition=_OwnedRedistributionTransition(),
             )
     raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
 

@@ -149,7 +149,7 @@ def build_distributed_muon(
     for param, fqn, compute_view in parameters_to_prepare:
         global_storage_shape = torch.Size(param.shape)
         resolved_view = None
-        local_view_is_aligned = True
+        storage_shards_are_matrix_aligned = True
         if compute_view is not None and any(
             type(placement) not in (Shard, Replicate)
             for placement in getattr(param, "placements", ())
@@ -161,10 +161,12 @@ def build_distributed_muon(
         if compute_view is not None:
             resolved_view = compute_view._resolve(global_storage_shape)
             if isinstance(param, DTensor):
-                local_view_is_aligned = _validate_batched_matrix_storage_shards(
-                    fqn,
-                    param,
-                    resolved_view,
+                storage_shards_are_matrix_aligned = (
+                    _validate_batched_matrix_storage_alignment(
+                        fqn,
+                        param,
+                        resolved_view,
+                    )
                 )
         local_storage = param.to_local() if isinstance(param, DTensor) else param
         compute_storage = (
@@ -174,7 +176,7 @@ def build_distributed_muon(
         if compute_view is None:
             compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
-            local_compute_tensor = compute_storage
+            local_storage_view = compute_storage
         else:
             compute_view_key = (
                 "batched_matrix",
@@ -189,15 +191,15 @@ def build_distributed_muon(
                     resolved_view.matrix_columns,
                 )
             )
-            local_compute_tensor = (
+            local_storage_view = (
                 compute_storage.view(resolved_view.compute_shape(local_storage_shape))
-                if local_view_is_aligned
+                if storage_shards_are_matrix_aligned
                 else None
             )
         prepared_compute_views[fqn] = _PreparedParameterComputeView(
             compute_view_key=compute_view_key,
             global_compute_shape=global_compute_shape,
-            local_compute_tensor=local_compute_tensor,
+            local_storage_view=local_storage_view,
         )
 
     return DistributedMuon(
@@ -232,7 +234,7 @@ class _ResolvedBatchedMatrixView:
         )
 
 
-def _validate_batched_matrix_storage_shards(
+def _validate_batched_matrix_storage_alignment(
     fqn: str,
     param: DTensor,
     resolved_view: _ResolvedBatchedMatrixView,
