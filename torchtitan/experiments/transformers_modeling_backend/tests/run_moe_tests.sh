@@ -36,7 +36,7 @@ run_test() {
     # the last pipeline stage; rank 0 prints the -1.0 placeholder). For non-PP
     # runs every rank has the same loss, so this is always safe.
     if CUDA_VISIBLE_DEVICES=$gpus NGPU=$ngpu LOG_RANK=$((ngpu - 1)) MODULE=$MODULE CONFIG=$CONFIG \
-        ./run_train.sh --training.steps $STEPS "$@" > "$result_file.log" 2>&1; then
+        ./run_train.sh --parallelism.spmd_backend spmd_types --training.steps $STEPS "$@" > "$result_file.log" 2>&1; then
         echo "PASSED" > "$result_file.status"
         echo "  PASSED: $name"
     else
