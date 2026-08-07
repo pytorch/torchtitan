@@ -156,11 +156,11 @@ def _resolve_buckets(
     items: Sequence[_ItemT],
     specs: Sequence[BucketSpec],
     *,
-    fqn: Callable[[_ItemT], str],
+    get_fqn: Callable[[_ItemT], str],
 ) -> tuple[tuple[_ItemT, ...], ...]:
     resolved: list[list[_ItemT]] = [[] for _ in specs]
     for item in items:
-        name = fqn(item)
+        name = get_fqn(item)
         matches = [
             index
             for index, spec in enumerate(specs)
@@ -173,7 +173,7 @@ def _resolve_buckets(
 
 
 @dataclass(frozen=True, slots=True)
-class _MatrixBlock:
+class _TensorRegion:
     """One rectangular tensor region."""
 
     offsets: tuple[int, ...]
@@ -190,22 +190,22 @@ class _ParticipantPartition:
 
     participant: int
     tensor_shape: tuple[int, ...]
-    logical_blocks: tuple[_MatrixBlock, ...]
+    logical_regions: tuple[_TensorRegion, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tensor_shape", tuple(self.tensor_shape))
-        object.__setattr__(self, "logical_blocks", tuple(self.logical_blocks))
+        object.__setattr__(self, "logical_regions", tuple(self.logical_regions))
         if any(size < 0 for size in self.tensor_shape):
             raise ValueError("participant tensor shape must be nonnegative")
 
 
 @dataclass(frozen=True, slots=True)
-class _MatrixBlockRoute:
-    """Map one logical block between differently shaped endpoint tensors."""
+class _TensorRegionRoute:
+    """Map one logical region between differently shaped endpoint tensors."""
 
-    logical_block: _MatrixBlock
-    source_block: _MatrixBlock
-    destination_block: _MatrixBlock
+    logical_region: _TensorRegion
+    source_region: _TensorRegion
+    destination_region: _TensorRegion
     source_participants: tuple[int, ...]
     destination_participants: tuple[int, ...]
 
@@ -215,11 +215,11 @@ class _MatrixBlockRoute:
             self, "destination_participants", tuple(self.destination_participants)
         )
         if not (
-            self.logical_block.numel
-            == self.source_block.numel
-            == self.destination_block.numel
+            self.logical_region.numel
+            == self.source_region.numel
+            == self.destination_region.numel
         ):
-            raise ValueError("route endpoint blocks must have equal numel")
+            raise ValueError("route endpoint regions must have equal numel")
         if len(set(self.source_participants)) != len(self.source_participants) or len(
             set(self.destination_participants)
         ) != len(self.destination_participants):
@@ -228,14 +228,14 @@ class _MatrixBlockRoute:
 
 @dataclass(frozen=True, slots=True)
 class _RedistributionPlan:
-    """Transport-neutral exact block partitions in both directions."""
+    """Transport-neutral exact region partitions in both directions."""
 
     participants: tuple[int, ...]
     logical_shape: tuple[int, ...]
     storage_partitions: tuple[_ParticipantPartition, ...]
     compute_partitions: tuple[_ParticipantPartition, ...]
-    storage_to_compute_routes: tuple[_MatrixBlockRoute, ...]
-    compute_to_storage_routes: tuple[_MatrixBlockRoute, ...]
+    storage_to_compute_routes: tuple[_TensorRegionRoute, ...]
+    compute_to_storage_routes: tuple[_TensorRegionRoute, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "participants", tuple(self.participants))
@@ -260,11 +260,11 @@ class _RedistributionPlan:
                 raise ValueError(
                     f"{name} partitions must follow the redistribution participants"
                 )
-            _validate_matrix_block_partition(
+            _validate_tensor_region_partition(
                 tuple(
-                    block
+                    region
                     for partition in partitions
-                    for block in partition.logical_blocks
+                    for region in partition.logical_regions
                 ),
                 self.logical_shape,
                 direction=f"{name} logical partition",
@@ -286,26 +286,26 @@ class _RedistributionPlan:
         ):
             raise ValueError("redistribution route references an unknown participant")
 
-        def route_key(route: _MatrixBlockRoute) -> tuple[Any, ...]:
+        def route_key(route: _TensorRegionRoute) -> tuple[Any, ...]:
             return (
-                route.logical_block.offsets,
-                route.logical_block.shape,
-                route.source_block.offsets,
-                route.source_block.shape,
-                route.destination_block.offsets,
-                route.destination_block.shape,
+                route.logical_region.offsets,
+                route.logical_region.shape,
+                route.source_region.offsets,
+                route.source_region.shape,
+                route.destination_region.offsets,
+                route.destination_region.shape,
                 route.source_participants,
                 route.destination_participants,
             )
 
         mirrored_forward_keys = sorted(
             (
-                route.logical_block.offsets,
-                route.logical_block.shape,
-                route.destination_block.offsets,
-                route.destination_block.shape,
-                route.source_block.offsets,
-                route.source_block.shape,
+                route.logical_region.offsets,
+                route.logical_region.shape,
+                route.destination_region.offsets,
+                route.destination_region.shape,
+                route.source_region.offsets,
+                route.source_region.shape,
                 route.destination_participants,
                 route.source_participants,
             )
@@ -320,8 +320,8 @@ class _RedistributionPlan:
             ("storage-to-compute", self.storage_to_compute_routes),
             ("compute-to-storage", self.compute_to_storage_routes),
         ):
-            _validate_matrix_block_partition(
-                tuple(route.logical_block for route in routes),
+            _validate_tensor_region_partition(
+                tuple(route.logical_region for route in routes),
                 self.logical_shape,
                 direction=direction,
             )
@@ -340,28 +340,28 @@ class _RedistributionPlan:
                     "storage-to-compute source",
                     self.storage_to_compute_routes,
                     "source_participants",
-                    "source_block",
+                    "source_region",
                     storage,
                 ),
                 (
                     "storage-to-compute destination",
                     self.storage_to_compute_routes,
                     "destination_participants",
-                    "destination_block",
+                    "destination_region",
                     compute,
                 ),
                 (
                     "compute-to-storage source",
                     self.compute_to_storage_routes,
                     "source_participants",
-                    "source_block",
+                    "source_region",
                     compute,
                 ),
                 (
                     "compute-to-storage destination",
                     self.compute_to_storage_routes,
                     "destination_participants",
-                    "destination_block",
+                    "destination_region",
                     storage,
                 ),
             )
@@ -369,7 +369,7 @@ class _RedistributionPlan:
                 direction,
                 routes,
                 participants_attr,
-                block_attr,
+                region_attr,
                 partition,
             ) in endpoint_specs:
                 participant_routes = tuple(
@@ -377,14 +377,14 @@ class _RedistributionPlan:
                     for route in routes
                     if participant in getattr(route, participants_attr)
                 )
-                _validate_blocks_cover_partition(
-                    tuple(route.logical_block for route in participant_routes),
-                    partition.logical_blocks,
+                _validate_regions_cover_partition(
+                    tuple(route.logical_region for route in participant_routes),
+                    partition.logical_regions,
                     self.logical_shape,
                     direction=f"{direction} {participant}",
                 )
-                _validate_matrix_block_partition(
-                    tuple(getattr(route, block_attr) for route in participant_routes),
+                _validate_tensor_region_partition(
+                    tuple(getattr(route, region_attr) for route in participant_routes),
                     partition.tensor_shape,
                     direction=f"{direction} tensor {participant}",
                 )
@@ -404,28 +404,28 @@ class _RedistributionPlan:
         )
 
 
-def _validate_matrix_block_partition(
-    blocks: tuple[_MatrixBlock, ...],
+def _validate_tensor_region_partition(
+    regions: tuple[_TensorRegion, ...],
     logical_shape: tuple[int, ...],
     *,
     direction: str,
 ) -> None:
     if any(size < 0 for size in logical_shape) or any(
-        len(block.offsets) != len(logical_shape)
-        or len(block.shape) != len(logical_shape)
+        len(region.offsets) != len(logical_shape)
+        or len(region.shape) != len(logical_shape)
         or any(
             offset < 0 or size < 0 or offset + size > logical_size
             for offset, size, logical_size in zip(
-                block.offsets, block.shape, logical_shape, strict=True
+                region.offsets, region.shape, logical_shape, strict=True
             )
         )
-        for block in blocks
+        for region in regions
     ):
-        raise ValueError(f"{direction} blocks must be in bounds")
+        raise ValueError(f"{direction} regions must be in bounds")
 
-    positive_blocks = tuple(block for block in blocks if block.numel)
-    for index, first in enumerate(positive_blocks):
-        for second in positive_blocks[index + 1 :]:
+    positive_regions = tuple(region for region in regions if region.numel)
+    for index, first in enumerate(positive_regions):
+        for second in positive_regions[index + 1 :]:
             if all(
                 max(first_offset, second_offset)
                 < min(
@@ -441,14 +441,16 @@ def _validate_matrix_block_partition(
                 )
             ):
                 raise NotImplementedError(
-                    "overlapping logical matrix blocks are not supported"
+                    "overlapping logical tensor regions are not supported"
                 )
 
-    if sum(block.numel for block in blocks) != math.prod(logical_shape):
-        raise ValueError(f"{direction} blocks do not cover the logical tensor")
+    if sum(region.numel for region in regions) != math.prod(logical_shape):
+        raise ValueError(f"{direction} regions do not cover the logical tensor")
 
 
-def _matrix_block_intersection_numel(first: _MatrixBlock, second: _MatrixBlock) -> int:
+def _tensor_region_intersection_numel(
+    first: _TensorRegion, second: _TensorRegion
+) -> int:
     if len(first.shape) != len(second.shape):
         return 0
     intersection_shape = tuple(
@@ -468,80 +470,82 @@ def _matrix_block_intersection_numel(first: _MatrixBlock, second: _MatrixBlock) 
     return math.prod(intersection_shape)
 
 
-def _validate_blocks_cover_partition(
-    blocks: tuple[_MatrixBlock, ...],
-    expected: tuple[_MatrixBlock, ...],
+def _validate_regions_cover_partition(
+    regions: tuple[_TensorRegion, ...],
+    expected: tuple[_TensorRegion, ...],
     logical_shape: tuple[int, ...],
     *,
     direction: str,
 ) -> None:
-    """Validate that nonoverlapping blocks exactly cover an expected region."""
+    """Validate that nonoverlapping regions exactly cover an expected partition."""
     if any(
-        len(block.offsets) != len(logical_shape)
-        or len(block.shape) != len(logical_shape)
+        len(region.offsets) != len(logical_shape)
+        or len(region.shape) != len(logical_shape)
         or any(
             offset < 0 or size < 0 or offset + size > logical_size
             for offset, size, logical_size in zip(
-                block.offsets, block.shape, logical_shape, strict=True
+                region.offsets, region.shape, logical_shape, strict=True
             )
         )
-        for block in blocks
+        for region in regions
     ):
-        raise ValueError(f"{direction} blocks must be in bounds")
+        raise ValueError(f"{direction} regions must be in bounds")
 
-    positive_blocks = tuple(block for block in blocks if block.numel)
-    for index, first in enumerate(positive_blocks):
-        for second in positive_blocks[index + 1 :]:
-            if _matrix_block_intersection_numel(first, second):
+    positive_regions = tuple(region for region in regions if region.numel)
+    for index, first in enumerate(positive_regions):
+        for second in positive_regions[index + 1 :]:
+            if _tensor_region_intersection_numel(first, second):
                 raise NotImplementedError(
-                    "overlapping logical matrix blocks are not supported"
+                    "overlapping logical tensor regions are not supported"
                 )
 
-    if sum(block.numel for block in blocks) != sum(block.numel for block in expected):
-        raise ValueError(f"{direction} blocks do not cover the participant partition")
-    for block in positive_blocks:
+    if sum(region.numel for region in regions) != sum(
+        region.numel for region in expected
+    ):
+        raise ValueError(f"{direction} regions do not cover the participant partition")
+    for region in positive_regions:
         if (
             sum(
-                _matrix_block_intersection_numel(block, expected_block)
-                for expected_block in expected
+                _tensor_region_intersection_numel(region, expected_region)
+                for expected_region in expected
             )
-            != block.numel
+            != region.numel
         ):
-            raise ValueError(f"{direction} blocks leave the participant partition")
+            raise ValueError(f"{direction} regions leave the participant partition")
 
 
 def _build_owned_redistribution_plan(
-    storage_blocks: Sequence[tuple[tuple[int, ...], _MatrixBlock]],
+    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
     *,
     participants: tuple[int, ...],
     owner: int,
     logical_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
-    """Build mirrored routes from one canonical block-to-holders mapping."""
+    """Build mirrored routes from one canonical region-to-holders mapping."""
     storage_partitions = []
     storage_mapping_by_participant = {}
-    for holders, logical_block in storage_blocks:
+    for holders, logical_region in storage_regions:
         if len(holders) != 1:
             raise NotImplementedError(
-                "redistributed optimizer storage requires one holder per block"
+                "redistributed optimizer storage requires one holder per region"
             )
         participant = holders[0]
-        tensor_block = _MatrixBlock(
-            offsets=(0,) * len(logical_block.shape),
-            shape=logical_block.shape,
+        tensor_region = _TensorRegion(
+            offsets=(0,) * len(logical_region.shape),
+            shape=logical_region.shape,
         )
-        storage_mapping_by_participant[participant] = (logical_block, tensor_block)
+        storage_mapping_by_participant[participant] = (logical_region, tensor_region)
     for participant in participants:
-        logical_block, tensor_block = storage_mapping_by_participant[participant]
+        logical_region, tensor_region = storage_mapping_by_participant[participant]
         storage_partitions.append(
             _ParticipantPartition(
                 participant=participant,
-                tensor_shape=tensor_block.shape,
-                logical_blocks=(logical_block,),
+                tensor_shape=tensor_region.shape,
+                logical_regions=(logical_region,),
             )
         )
 
-    full_block = _MatrixBlock(
+    full_region = _TensorRegion(
         offsets=(0,) * len(logical_shape),
         shape=logical_shape,
     )
@@ -549,7 +553,7 @@ def _build_owned_redistribution_plan(
         _ParticipantPartition(
             participant=participant,
             tensor_shape=logical_shape if participant == owner else (0,),
-            logical_blocks=(full_block,) if participant == owner else (),
+            logical_regions=(full_region,) if participant == owner else (),
         )
         for participant in participants
     )
@@ -559,38 +563,38 @@ def _build_owned_redistribution_plan(
         storage_partitions=tuple(storage_partitions),
         compute_partitions=compute_partitions,
         storage_to_compute_routes=tuple(
-            _MatrixBlockRoute(
-                logical_block=logical_block,
-                source_block=storage_mapping_by_participant[holders[0]][1],
-                destination_block=logical_block,
+            _TensorRegionRoute(
+                logical_region=logical_region,
+                source_region=storage_mapping_by_participant[holders[0]][1],
+                destination_region=logical_region,
                 source_participants=holders,
                 destination_participants=(owner,),
             )
-            for holders, logical_block in storage_blocks
+            for holders, logical_region in storage_regions
         ),
         compute_to_storage_routes=tuple(
-            _MatrixBlockRoute(
-                logical_block=logical_block,
-                source_block=logical_block,
-                destination_block=storage_mapping_by_participant[holders[0]][1],
+            _TensorRegionRoute(
+                logical_region=logical_region,
+                source_region=logical_region,
+                destination_region=storage_mapping_by_participant[holders[0]][1],
                 source_participants=(owner,),
                 destination_participants=holders,
             )
-            for holders, logical_block in storage_blocks
+            for holders, logical_region in storage_regions
         ),
     )
 
 
 @dataclass(frozen=True, slots=True)
 class _PackedSpan:
-    """Physical packed-buffer location for a logical matrix block."""
+    """Physical packed-buffer location for an endpoint tensor region."""
 
-    block: _MatrixBlock
+    region: _TensorRegion
     buffer_offset: int
 
     @property
     def numel(self) -> int:
-        return self.block.numel
+        return self.region.numel
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,7 +688,7 @@ class _BufferSlot:
     compute_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
         default_factory=dict
     )
-    local_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+    storage_partition_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
         default_factory=dict
     )
 
@@ -741,7 +745,7 @@ class _BufferSlot:
             device=device,
         ).view(shape)
 
-    def local_buffer(
+    def storage_partition_buffer(
         self,
         shape: torch.Size | tuple[int, ...],
         *,
@@ -749,7 +753,7 @@ class _BufferSlot:
         device: torch.device,
     ) -> Tensor:
         return self._ensure_capacity(
-            self.local_storage,
+            self.storage_partition_storage,
             numel=math.prod(shape),
             dtype=dtype,
             device=device,
@@ -823,7 +827,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                         )
                     continue
 
-                work = self._begin_communication(
+                work = self._enqueue_storage_to_compute(
                     plan,
                     slot,
                     context,
@@ -833,7 +837,9 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 # Keep collective launches ahead of redistributed work:
                 # gather(current) -> return(previous) -> compute(current).
                 if previous is not None:
-                    self._complete(previous, context, finalize=finalize)
+                    self._enqueue_compute_to_storage(
+                        previous, context, finalize=finalize
+                    )
 
                 self._compute_bucket(
                     work,
@@ -850,7 +856,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 previous = work
 
             if previous is not None:
-                self._complete(previous, context, finalize=finalize)
+                self._enqueue_compute_to_storage(previous, context, finalize=finalize)
                 self._release(previous, caller)
         except Exception:
             # Preserve allocator lifetime ordering for work already enqueued on
@@ -860,7 +866,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             raise
 
     @staticmethod
-    def _begin_communication(
+    def _enqueue_storage_to_compute(
         plan: _BucketPlan[_ItemT],
         slot: _BufferSlot,
         context: _CommunicationContext,
@@ -921,7 +927,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             work.compute_done.record(caller_stream)
 
     @staticmethod
-    def _complete(
+    def _enqueue_compute_to_storage(
         work: _BucketWork[_ItemT],
         context: _CommunicationContext,
         *,
@@ -982,7 +988,7 @@ def _prepare_redistributed(
         )
     ):
         partition = redistribution_plan.storage_partition(participant)
-        prepared = slot.local_buffer(
+        prepared = slot.storage_partition_buffer(
             partition.tensor_shape,
             dtype=plan.dtype,
             device=plan.device,
@@ -993,7 +999,7 @@ def _prepare_redistributed(
             packed = storage_buffer[
                 span.buffer_offset : span.buffer_offset + span.numel
             ]
-            packed.copy_(_matrix_block_view(prepared, span.block).reshape(-1))
+            packed.copy_(_tensor_region_view(prepared, span.region).reshape(-1))
 
 
 def _compute_redistributed(
@@ -1026,8 +1032,8 @@ def _compute_redistributed(
             received = work.compute_fragment_buffer[
                 span.buffer_offset : span.buffer_offset + span.numel
             ]
-            _matrix_block_view(compute_tensor, span.block).copy_(
-                received.view(span.block.shape)
+            _tensor_region_view(compute_tensor, span.region).copy_(
+                received.view(span.region.shape)
             )
 
         compute(item, compute_tensor)
@@ -1036,7 +1042,7 @@ def _compute_redistributed(
             packed = work.compute_fragment_buffer[
                 span.buffer_offset : span.buffer_offset + span.numel
             ]
-            packed.copy_(_matrix_block_view(compute_tensor, span.block).reshape(-1))
+            packed.copy_(_tensor_region_view(compute_tensor, span.region).reshape(-1))
 
 
 def _finalize_redistributed(
@@ -1056,7 +1062,7 @@ def _finalize_redistributed(
         )
     ):
         partition = redistribution_plan.storage_partition(participant)
-        update = slot.local_buffer(
+        update = slot.storage_partition_buffer(
             partition.tensor_shape,
             dtype=plan.dtype,
             device=plan.device,
@@ -1066,13 +1072,15 @@ def _finalize_redistributed(
             packed = work.storage_buffer[
                 span.buffer_offset : span.buffer_offset + span.numel
             ]
-            _matrix_block_view(update, span.block).copy_(packed.view(span.block.shape))
+            _tensor_region_view(update, span.region).copy_(
+                packed.view(span.region.shape)
+            )
         finalize(item, update)
 
 
-def _copy_transfers(
-    routes: tuple[_MatrixBlockRoute, ...], participants: tuple[int, ...]
-) -> tuple[tuple[int, int, _MatrixBlock, _MatrixBlock], ...]:
+def _resolve_routes_to_transfers(
+    routes: tuple[_TensorRegionRoute, ...], participants: tuple[int, ...]
+) -> tuple[tuple[int, int, _TensorRegion, _TensorRegion], ...]:
     participant_order = {
         participant: index for index, participant in enumerate(participants)
     }
@@ -1084,7 +1092,7 @@ def _copy_transfers(
         for destination in route.destination_participants:
             source = destination if destination in sources else sources[0]
             transfers.append(
-                (source, destination, route.source_block, route.destination_block)
+                (source, destination, route.source_region, route.destination_region)
             )
     return tuple(transfers)
 
@@ -1120,7 +1128,8 @@ def _lower_packed_all_to_all(
             plan.compute_to_storage_routes for plan in redistribution_plans
         )
     transfers_by_parameter = tuple(
-        _copy_transfers(routes, participants) for routes in routes_by_parameter
+        _resolve_routes_to_transfers(routes, participants)
+        for routes in routes_by_parameter
     )
 
     input_split_sizes = []
@@ -1132,15 +1141,15 @@ def _lower_packed_all_to_all(
             for (
                 source,
                 transfer_destination,
-                source_block,
-                _destination_block,
+                source_region,
+                _destination_region,
             ) in transfers:
                 if source != local_participant or transfer_destination != destination:
                     continue
                 input_spans.append(
-                    (parameter_index, _PackedSpan(source_block, input_cursor))
+                    (parameter_index, _PackedSpan(source_region, input_cursor))
                 )
-                input_cursor += source_block.numel
+                input_cursor += source_region.numel
         input_split_sizes.append(input_cursor - split_start)
 
     output_split_sizes = []
@@ -1152,15 +1161,15 @@ def _lower_packed_all_to_all(
             for (
                 transfer_source,
                 destination,
-                _source_block,
-                destination_block,
+                _source_region,
+                destination_region,
             ) in transfers:
                 if transfer_source != source or destination != local_participant:
                     continue
                 output_spans.append(
-                    (parameter_index, _PackedSpan(destination_block, output_cursor))
+                    (parameter_index, _PackedSpan(destination_region, output_cursor))
                 )
-                output_cursor += destination_block.numel
+                output_cursor += destination_region.numel
         output_split_sizes.append(output_cursor - split_start)
 
     return _PackedAllToAllSchedule(
@@ -1194,19 +1203,21 @@ def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
     )
 
 
-def _dtensor_storage_block_for_participant(
+def _dtensor_storage_region_for_participant(
     tensor: DTensor,
     participant: int,
-) -> _MatrixBlock:
+) -> _TensorRegion:
     mesh_shape = tuple(tensor.device_mesh.shape)
-    mesh_rank = _device_mesh_ranks(tensor.device_mesh).index(participant)
-    coordinate = [0] * len(mesh_shape)
-    for mesh_dim in range(len(mesh_shape) - 1, -1, -1):
-        mesh_rank, coordinate[mesh_dim] = divmod(mesh_rank, mesh_shape[mesh_dim])
+    flat_mesh_index = _device_mesh_ranks(tensor.device_mesh).index(participant)
+    mesh_coordinate = [0] * len(mesh_shape)
+    for mesh_axis in range(len(mesh_shape) - 1, -1, -1):
+        flat_mesh_index, mesh_coordinate[mesh_axis] = divmod(
+            flat_mesh_index, mesh_shape[mesh_axis]
+        )
 
     local_shape = list(tensor.shape)
     global_offsets = [0] * tensor.ndim
-    for mesh_dim, placement in enumerate(tensor.placements):
+    for mesh_axis, placement in enumerate(tensor.placements):
         if type(placement) is not Shard:
             raise ValueError(
                 "redistributed optimizer storage requires exact Shard placements"
@@ -1214,21 +1225,21 @@ def _dtensor_storage_block_for_participant(
         tensor_dim = placement.dim % tensor.ndim
         local_size, global_offset = Shard.local_shard_size_and_offset(
             tensor.shape[tensor_dim],
-            mesh_shape[mesh_dim],
-            coordinate[mesh_dim],
+            mesh_shape[mesh_axis],
+            mesh_coordinate[mesh_axis],
         )
         local_shape[tensor_dim] = local_size
         global_offsets[tensor_dim] = global_offset
-    return _MatrixBlock(
+    return _TensorRegion(
         offsets=tuple(global_offsets),
         shape=tuple(local_shape),
     )
 
 
-def _dtensor_storage_blocks(
+def _dtensor_storage_regions(
     tensor: DTensor,
     participants: tuple[int, ...],
-) -> tuple[tuple[tuple[int, ...], _MatrixBlock], ...]:
+) -> tuple[tuple[tuple[int, ...], _TensorRegion], ...]:
     storage_participants = _device_mesh_ranks(tensor.device_mesh)
     if storage_participants != participants:
         raise ValueError(
@@ -1237,7 +1248,7 @@ def _dtensor_storage_blocks(
     return tuple(
         (
             (participant,),
-            _dtensor_storage_block_for_participant(tensor, participant),
+            _dtensor_storage_region_for_participant(tensor, participant),
         )
         for participant in participants
     )
@@ -1247,31 +1258,33 @@ def _build_bucket_plans(
     items: Sequence[_ItemT],
     specs: Sequence[BucketSpec],
     *,
-    fqn: Callable[[_ItemT], str],
+    get_fqn: Callable[[_ItemT], str],
     requires_owner: Callable[[_ItemT], bool],
-    storage_dtensor: Callable[[_ItemT], DTensor],
-    redistribution_plan: Callable[
+    get_storage_dtensor: Callable[[_ItemT], DTensor],
+    build_redistribution_plan: Callable[
         [_ItemT, _RedistributionGroup, int | None],
         _RedistributionPlan | None,
     ],
 ) -> _BucketPlanningResult[_ItemT]:
     """Build ordered local and redistributed optimizer bucket plans.
 
-    ``redistribution_plan`` receives a mesh-local owner rank exactly when
+    ``build_redistribution_plan`` receives a mesh-local owner rank exactly when
     ``requires_owner`` is true. It returns ``None`` when storage is already
     compute-ready or a transport-neutral plan for redistribution. This keeps
     bucket ordering, owner validation, dtype validation, and packed
     communication independent of a particular optimizer compute placement.
     """
-    resolved = _resolve_buckets(items, specs, fqn=fqn)
+    resolved = _resolve_buckets(items, specs, get_fqn=get_fqn)
     plans = []
     ordered_items = []
     for spec, bucket in zip(specs, resolved, strict=True):
         if not bucket:
             continue
         group = _redistribution_group(spec.mesh)
-        sorted_bucket = tuple(sorted(bucket, key=fqn))
-        expected_owners = {fqn(item) for item in sorted_bucket if requires_owner(item)}
+        sorted_bucket = tuple(sorted(bucket, key=get_fqn))
+        expected_owners = {
+            get_fqn(item) for item in sorted_bucket if requires_owner(item)
+        }
         provided_owners = set(spec.owner_rank_by_fqn)
         missing_owners = expected_owners - provided_owners
         if missing_owners:
@@ -1287,14 +1300,14 @@ def _build_bucket_plans(
         redistribution_plans = []
         for item in sorted_bucket:
             needs_owner = requires_owner(item)
-            owner_rank = spec.owner_rank_by_fqn[fqn(item)] if needs_owner else None
+            owner_rank = spec.owner_rank_by_fqn[get_fqn(item)] if needs_owner else None
             if owner_rank is not None and owner_rank not in range(
                 len(group.participants)
             ):
                 raise ValueError(
                     f"bucket {spec.name!r} has owner outside its process group"
                 )
-            item_plan = redistribution_plan(item, group, owner_rank)
+            item_plan = build_redistribution_plan(item, group, owner_rank)
             if item_plan is None:
                 local_items_list.append(item)
                 continue
@@ -1303,7 +1316,7 @@ def _build_bucket_plans(
                     f"bucket {spec.name!r} redistribution participants do not "
                     "match its process group"
                 )
-            local_tensor = storage_dtensor(item).to_local()
+            local_tensor = get_storage_dtensor(item).to_local()
             storage_partition = item_plan.storage_partition(group.local_participant)
             if tuple(local_tensor.shape) != storage_partition.tensor_shape:
                 raise ValueError(
@@ -1317,10 +1330,10 @@ def _build_bucket_plans(
         # Size-one sharded storage may normalize to Replicate. In that case a
         # static rank-0 owner entry is equivalent to the resolved local compute.
         redundant_owners = {
-            fqn(item)
+            get_fqn(item)
             for item in local_items
             if len(group.participants) == 1
-            and spec.owner_rank_by_fqn.get(fqn(item)) == 0
+            and spec.owner_rank_by_fqn.get(get_fqn(item)) == 0
         }
         effective_provided_owners = provided_owners - redundant_owners
         if effective_provided_owners != expected_owners:
@@ -1334,7 +1347,7 @@ def _build_bucket_plans(
         ordered_items.extend(redistributed_items)
 
         if not redistributed_items:
-            tensor = storage_dtensor(local_items[0]).to_local()
+            tensor = get_storage_dtensor(local_items[0]).to_local()
             plans.append(
                 _BucketPlan(
                     local_items=local_items,
@@ -1349,7 +1362,7 @@ def _build_bucket_plans(
             )
             continue
 
-        storage_dtensors = [storage_dtensor(item) for item in redistributed_items]
+        storage_dtensors = [get_storage_dtensor(item) for item in redistributed_items]
         local_tensors = [tensor.to_local() for tensor in storage_dtensors]
         dtype = local_tensors[0].dtype
         device = local_tensors[0].device
@@ -1392,23 +1405,23 @@ def _build_owned_bucket_plans(
     items: Sequence[_ItemT],
     specs: Sequence[BucketSpec],
     *,
-    fqn: Callable[[_ItemT], str],
-    compute_locally: Callable[[_ItemT], bool],
-    storage_dtensor: Callable[[_ItemT], DTensor],
+    get_fqn: Callable[[_ItemT], str],
+    storage_is_compute_ready: Callable[[_ItemT], bool],
+    get_storage_dtensor: Callable[[_ItemT], DTensor],
 ) -> _BucketPlanningResult[_ItemT]:
     """Compatibility wrapper for local and whole-tensor-owned compute."""
 
-    def build_plan(
+    def build_owned_redistribution_plan(
         item: _ItemT,
         group: _RedistributionGroup,
         owner_rank: int | None,
     ) -> _RedistributionPlan | None:
-        if compute_locally(item):
+        if storage_is_compute_ready(item):
             return None
         assert owner_rank is not None
-        tensor = storage_dtensor(item)
+        tensor = get_storage_dtensor(item)
         return _build_owned_redistribution_plan(
-            _dtensor_storage_blocks(tensor, group.participants),
+            _dtensor_storage_regions(tensor, group.participants),
             participants=group.participants,
             owner=group.participants[owner_rank],
             logical_shape=tuple(tensor.shape),
@@ -1417,10 +1430,10 @@ def _build_owned_bucket_plans(
     return _build_bucket_plans(
         items,
         specs,
-        fqn=fqn,
-        requires_owner=lambda item: not compute_locally(item),
-        storage_dtensor=storage_dtensor,
-        redistribution_plan=build_plan,
+        get_fqn=get_fqn,
+        requires_owner=lambda item: not storage_is_compute_ready(item),
+        get_storage_dtensor=get_storage_dtensor,
+        build_redistribution_plan=build_owned_redistribution_plan,
     )
 
 
@@ -1460,11 +1473,11 @@ def _validate_bucket_plans_across_ranks(
             raise RuntimeError("optimizer bucket plans differ across ranks")
 
 
-def _matrix_block_view(tensor: Tensor, block: _MatrixBlock) -> Tensor:
+def _tensor_region_view(tensor: Tensor, region: _TensorRegion) -> Tensor:
     view = tensor[
         tuple(
             slice(offset, offset + size)
-            for offset, size in zip(block.offsets, block.shape, strict=True)
+            for offset, size in zip(region.offsets, region.shape, strict=True)
         )
     ]
     return view
@@ -1475,17 +1488,19 @@ def _redistribution_plan_key(plan: _RedistributionPlan) -> tuple[Any, ...]:
         return (
             partition.participant,
             partition.tensor_shape,
-            tuple((block.offsets, block.shape) for block in partition.logical_blocks),
+            tuple(
+                (region.offsets, region.shape) for region in partition.logical_regions
+            ),
         )
 
-    def route_key(route: _MatrixBlockRoute) -> tuple[Any, ...]:
+    def route_key(route: _TensorRegionRoute) -> tuple[Any, ...]:
         return (
-            route.logical_block.offsets,
-            route.logical_block.shape,
-            route.source_block.offsets,
-            route.source_block.shape,
-            route.destination_block.offsets,
-            route.destination_block.shape,
+            route.logical_region.offsets,
+            route.logical_region.shape,
+            route.source_region.offsets,
+            route.source_region.shape,
+            route.destination_region.offsets,
+            route.destination_region.shape,
             route.source_participants,
             route.destination_participants,
         )

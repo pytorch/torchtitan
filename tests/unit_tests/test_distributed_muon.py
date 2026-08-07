@@ -457,7 +457,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             .float(),
         }
 
-        def build(names, *, compute_locally=False):
+        def build(names, *, storage_is_compute_ready=False):
             parameters = [
                 torch.nn.Parameter(
                     distribute_tensor(values[name].clone(), self.mesh, (Shard(0),))
@@ -469,7 +469,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     view_before_placement=BatchedMatrixComputeView(num_matrices=2),
                     placement=Shard(0),
                 )
-                if compute_locally
+                if storage_is_compute_ready
                 else MuonComputeSharding(placement=Owned())
             )
             optimizer = build_distributed_muon(
@@ -484,7 +484,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn=(
-                            {} if compute_locally else dict.fromkeys(names, 0)
+                            {} if storage_is_compute_ready else dict.fromkeys(names, 0)
                         ),
                         mesh=self.mesh,
                     )
@@ -517,7 +517,9 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             source_optimizer.state[source_parameters[0]]["momentum_buffer"].to_local(),
         )
 
-        _, changed_layout_optimizer = build(("layers.0.a",), compute_locally=True)
+        _, changed_layout_optimizer = build(
+            ("layers.0.a",), storage_is_compute_ready=True
+        )
         init_optim_state(changed_layout_optimizer)
         with self.assertRaisesRegex(ValueError, "compute layout"):
             load_flat_optim_state_dict(

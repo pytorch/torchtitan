@@ -25,7 +25,7 @@ from .flex_optimizer_reshard import (
     _build_bucket_plans,
     _build_owned_redistribution_plan,
     _device_mesh_ranks,
-    _dtensor_storage_blocks,
+    _dtensor_storage_regions,
     _RedistributionGroup,
     _RedistributionPlan,
     _validate_bucket_plans_across_ranks,
@@ -213,12 +213,12 @@ class DistributedMuon(Optimizer):
             compute_placement = self._group_compute_placements[group_index]
             prepared = self._prepared_compute_views[fqn]
             global_compute_shape = torch.Size(prepared.global_compute_shape)
-            local_compute_tensor = prepared.local_compute_tensor
-            resolved_compute_placement = _resolve_compute_placement(
+            local_storage_view = prepared.local_storage_view
+            resolved_transition = _resolve_storage_to_compute_transition(
                 fqn,
                 param,
                 global_compute_shape,
-                local_compute_tensor,
+                local_storage_view,
                 compute_placement,
             )
             compute_layouts.append(
@@ -228,10 +228,10 @@ class DistributedMuon(Optimizer):
                     group_index=group_index,
                     compute_view_key=prepared.compute_view_key,
                     global_compute_shape=global_compute_shape,
-                    local_compute_tensor=local_compute_tensor,
+                    local_storage_view=local_storage_view,
                     local_storage_signature=_local_storage_signature(param.to_local()),
-                    compute_placement_key=resolved_compute_placement.fingerprint_key,
-                    compute_transition=resolved_compute_placement.compute_transition,
+                    compute_placement_key=resolved_transition.fingerprint_key,
+                    storage_to_compute_transition=resolved_transition.storage_to_compute_transition,
                 )
             )
         return tuple(compute_layouts)
@@ -241,10 +241,10 @@ class DistributedMuon(Optimizer):
         result = _build_bucket_plans(
             compute_layouts,
             self._specs,
-            fqn=lambda item: item.fqn,
+            get_fqn=lambda item: item.fqn,
             requires_owner=lambda item: item.requires_owner,
-            storage_dtensor=lambda item: item.param,
-            redistribution_plan=_build_compute_redistribution_plan,
+            get_storage_dtensor=lambda item: item.param,
+            build_redistribution_plan=_build_parameter_redistribution_plan,
         )
         self._plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
@@ -283,7 +283,7 @@ class DistributedMuon(Optimizer):
             str(compute_layout.param.dtype),
             compute_layout.param.to_local().device.type,
             tuple(compute_layout.global_compute_shape),
-            type(compute_layout.compute_transition).__name__,
+            type(compute_layout.storage_to_compute_transition).__name__,
             compute_layout.compute_view_key,
             compute_layout.compute_placement_key,
             _device_mesh_ranks(compute_layout.param.device_mesh),
@@ -332,7 +332,7 @@ class DistributedMuon(Optimizer):
 
         for compute_layout in self._parameter_compute_layouts:
             if (
-                compute_layout.compute_locally
+                compute_layout.storage_is_compute_ready
                 and _local_storage_signature(compute_layout.param.to_local())
                 != compute_layout.local_storage_signature
             ):
@@ -422,10 +422,8 @@ class DistributedMuon(Optimizer):
     ) -> tuple[Tensor, Tensor, dict[str, Any]]:
         grad = cast(DTensor, compute_layout.param.grad)
         momentum = cast(DTensor, self.state[compute_layout.param]["momentum_buffer"])
-        local_grad = grad.to_local().view_as(compute_layout.local_compute_tensor)
-        local_momentum = momentum.to_local().view_as(
-            compute_layout.local_compute_tensor
-        )
+        local_grad = grad.to_local().view_as(compute_layout.local_storage_view)
+        local_momentum = momentum.to_local().view_as(compute_layout.local_storage_view)
         group = self._group(compute_layout)
         local_momentum.lerp_(local_grad, 1 - group["momentum"])
         torch.autograd.graph.increment_version(momentum)
@@ -468,8 +466,8 @@ class DistributedMuon(Optimizer):
     ) -> None:
         group = self._group(compute_layout)
         local_param = (
-            compute_layout.local_compute_tensor
-            if compute_layout.compute_locally
+            compute_layout.local_storage_view
+            if compute_layout.storage_is_compute_ready
             else compute_layout.param.to_local()
         )
         adjusted_lr = _adjust_learning_rate(
@@ -485,7 +483,7 @@ class DistributedMuon(Optimizer):
     def _local_tensor_spec(
         compute_layout: _ParameterComputeLayout,
     ) -> tuple[torch.Size, torch.dtype, torch.device]:
-        tensor = compute_layout.local_compute_tensor
+        tensor = compute_layout.local_storage_view
         return tensor.shape, tensor.dtype, tensor.device
 
 
@@ -497,7 +495,7 @@ _LAYOUT_FINGERPRINT_VERSION = 1
 class _PreparedParameterComputeView:
     compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
-    local_compute_tensor: Tensor
+    local_storage_view: Tensor
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,65 +505,71 @@ class _ParameterComputeLayout:
     group_index: int
     compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
-    local_compute_tensor: Tensor
+    local_storage_view: Tensor
     local_storage_signature: tuple[Any, ...]
     compute_placement_key: tuple[Any, ...]
-    compute_transition: _ComputeTransition
+    storage_to_compute_transition: _StorageToComputeTransition
 
     @property
-    def compute_locally(self) -> bool:
-        return isinstance(self.compute_transition, _LocalCompute)
+    def storage_is_compute_ready(self) -> bool:
+        return isinstance(
+            self.storage_to_compute_transition, _NoRedistributionTransition
+        )
 
     @property
     def requires_owner(self) -> bool:
-        return isinstance(self.compute_transition, _OwnedCompute)
+        return isinstance(
+            self.storage_to_compute_transition, _OwnedRedistributionTransition
+        )
 
 
 @dataclass(frozen=True, slots=True)
-class _LocalCompute:
+class _NoRedistributionTransition:
     pass
 
 
 @dataclass(frozen=True, slots=True)
-class _OwnedCompute:
+class _OwnedRedistributionTransition:
     pass
 
 
-_ComputeTransition = _LocalCompute | _OwnedCompute
+_StorageToComputeTransition = (
+    _NoRedistributionTransition | _OwnedRedistributionTransition
+)
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedComputePlacement:
+class _ResolvedStorageToComputeTransition:
     fingerprint_key: tuple[Any, ...]
-    compute_transition: _ComputeTransition
+    storage_to_compute_transition: _StorageToComputeTransition
 
 
-def _build_compute_redistribution_plan(
+def _build_parameter_redistribution_plan(
     compute_layout: _ParameterComputeLayout,
     group: _RedistributionGroup,
     owner_rank: int | None,
 ) -> _RedistributionPlan | None:
-    transition = compute_layout.compute_transition
-    if isinstance(transition, _LocalCompute):
+    transition = compute_layout.storage_to_compute_transition
+    if isinstance(transition, _NoRedistributionTransition):
         return None
 
-    assert isinstance(transition, _OwnedCompute)
+    assert isinstance(transition, _OwnedRedistributionTransition)
     assert owner_rank is not None
     return _build_owned_redistribution_plan(
-        _dtensor_storage_blocks(compute_layout.param, group.participants),
+        _dtensor_storage_regions(compute_layout.param, group.participants),
         participants=group.participants,
         owner=group.participants[owner_rank],
         logical_shape=tuple(compute_layout.param.shape),
     )
 
 
-def _resolve_compute_placement(
+def _resolve_storage_to_compute_transition(
     fqn: str,
     param: DTensor,
     global_compute_shape: torch.Size,
-    local_compute_tensor: Tensor,
+    local_storage_view: Tensor,
     compute_placement: object,
-) -> _ResolvedComputePlacement:
+) -> _ResolvedStorageToComputeTransition:
     """Validate and canonicalize one storage-to-compute transition.
 
     ``Owned`` accepts a 2D matrix stored as exact ``Shard`` on a 1D mesh and
@@ -586,17 +590,17 @@ def _resolve_compute_placement(
             and (
                 (
                     replicated_storage
-                    and local_compute_tensor.shape == global_compute_shape
+                    and local_storage_view.shape == global_compute_shape
                 )
                 or (
-                    local_compute_tensor.shape[1:] == global_compute_shape[1:]
+                    local_storage_view.shape[1:] == global_compute_shape[1:]
                     and _has_dim0_sharded_storage(param)
                 )
             )
         ):
-            return _ResolvedComputePlacement(
+            return _ResolvedStorageToComputeTransition(
                 fingerprint_key=("shard", 0),
-                compute_transition=_LocalCompute(),
+                storage_to_compute_transition=_NoRedistributionTransition(),
             )
     elif (
         isinstance(compute_placement, Owned)
@@ -604,14 +608,14 @@ def _resolve_compute_placement(
         and param.ndim == 2
     ):
         if replicated_storage:
-            return _ResolvedComputePlacement(
+            return _ResolvedStorageToComputeTransition(
                 fingerprint_key=("owned",),
-                compute_transition=_LocalCompute(),
+                storage_to_compute_transition=_NoRedistributionTransition(),
             )
         if _has_owned_sharded_storage(param):
-            return _ResolvedComputePlacement(
+            return _ResolvedStorageToComputeTransition(
                 fingerprint_key=("owned",),
-                compute_transition=_OwnedCompute(),
+                storage_to_compute_transition=_OwnedRedistributionTransition(),
             )
     raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
 

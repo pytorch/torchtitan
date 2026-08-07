@@ -77,7 +77,7 @@ class TestMuonParameterPrep(unittest.TestCase):
             torch.Size((3, 2, 4)),
         )
         self.assertEqual(
-            prepared["layers.0.wq.weight"].local_compute_tensor.shape,
+            prepared["layers.0.wq.weight"].local_storage_view.shape,
             torch.Size((3, 2, 4)),
         )
         self.assertEqual(
@@ -85,11 +85,11 @@ class TestMuonParameterPrep(unittest.TestCase):
             torch.Size((3, 3, 5)),
         )
         self.assertEqual(
-            prepared["layers.0.wkv_b.weight"].local_compute_tensor.shape,
+            prepared["layers.0.wkv_b.weight"].local_storage_view.shape,
             torch.Size((3, 3, 5)),
         )
         self.assertEqual(
-            prepared["layers.0.wq.weight"].local_compute_tensor.data_ptr(),
+            prepared["layers.0.wq.weight"].local_storage_view.data_ptr(),
             storage.data_ptr(),
         )
         self.assertEqual(
@@ -97,11 +97,11 @@ class TestMuonParameterPrep(unittest.TestCase):
             identity_storage.shape,
         )
         self.assertEqual(
-            prepared["layers.0.wkv_a.weight"].local_compute_tensor.shape,
+            prepared["layers.0.wkv_a.weight"].local_storage_view.shape,
             identity_storage.shape,
         )
         self.assertIs(
-            prepared["layers.0.wkv_a.weight"].local_compute_tensor,
+            prepared["layers.0.wkv_a.weight"].local_storage_view,
             identity_storage,
         )
 
