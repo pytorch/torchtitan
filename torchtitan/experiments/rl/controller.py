@@ -118,7 +118,6 @@ from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWorkBuffer,
 )
 from torchtitan.experiments.rl.controller_metrics import (
-    combine_microbatch_metrics,
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
@@ -1096,17 +1095,11 @@ class Controller(Configurable):
                 with sl.log_trace_span("forward_backward"), step_timer.record(
                     "timing/step/forward_backward"
                 ):
-                    # fwd_bwd on all microbatches
-                    microbatch_metrics = [
-                        self._get_rank_0_value(
-                            await self.trainer.forward_backward.call(
-                                microbatch, packed.num_global_valid_tokens
-                            )
+                    fwd_bwd_metrics = self._get_rank_0_value(
+                        await self.trainer.forward_backward.call(
+                            packed.microbatches, packed.num_global_valid_tokens
                         )
-                        for microbatch in packed.microbatches
-                    ]
-
-                    fwd_bwd_metrics = combine_microbatch_metrics(microbatch_metrics)
+                    )
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                         logger.error("Loss is NaN/Inf; training diverged")

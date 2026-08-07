@@ -12,14 +12,19 @@ from typing import Any, cast, TypeAlias
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import full_dtensor, ParallelDims
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.distributed.metrics import (
+    collect_dtensor_metrics,
+    distribute_rank_local_metric,
+)
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
@@ -268,12 +273,15 @@ class Validator(BaseValidator):
             except StopIteration:
                 break
 
-            # All-reduce token count across DP ranks to get global token count
             if parallel_dims.dp_enabled:
                 batch_mesh = parallel_dims.get_mesh("batch")
-                global_valid_tokens = dist_utils.dist_sum(
-                    local_valid_tokens, batch_mesh, None
-                )
+                global_valid_tokens_dt = distribute_rank_local_metric(
+                    local_valid_tokens, batch_mesh
+                ).sum()
+                assert isinstance(global_valid_tokens_dt, DTensor)
+                global_valid_tokens = collect_dtensor_metrics(
+                    {"global_valid_tokens": global_valid_tokens_dt}
+                )["global_valid_tokens"]
             else:
                 global_valid_tokens = float(local_valid_tokens.item())
 
@@ -334,9 +342,16 @@ class Validator(BaseValidator):
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_sum(
-                loss, parallel_dims.get_optional_mesh("loss")
-            )
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
+            assert loss_mesh is not None
+            local_loss = loss.to_local() if isinstance(loss, DTensor) else loss
+            global_avg_loss_dt = distribute_rank_local_metric(
+                local_loss, loss_mesh
+            ).sum()
+            assert isinstance(global_avg_loss_dt, DTensor)
+            global_avg_loss = collect_dtensor_metrics(
+                {"validation_metrics/loss": global_avg_loss_dt}
+            )["validation_metrics/loss"]
         else:
             global_avg_loss = float(loss.item())
 
