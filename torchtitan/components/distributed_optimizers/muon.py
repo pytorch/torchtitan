@@ -56,6 +56,11 @@ class DistributedMuon(Optimizer):
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
     are frozen after construction. Every configured parameter must have a
     layout-compatible DTensor gradient before each rank enters ``step()``.
+
+    Batched matrix compute views use batched BF16 kernels. They implement the
+    same mathematical update as ``torch.optim.Muon`` running one matrix at a
+    time, but bitwise equality across the two kernel schedules is not part of
+    the contract.
     """
 
     def __init__(
@@ -894,6 +899,8 @@ def _zeropower_via_newtonschulz(
     else:
         original_shape = result.shape
         matrices = result.reshape(-1, *original_shape[-2:])
+        # Batching reduces launch overhead, but bmm/baddbmm and independent
+        # mm/addmm calls can use different BF16 reduction orders.
         for _ in range(ns_steps):
             gram = matrices @ matrices.transpose(-2, -1)
             gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)

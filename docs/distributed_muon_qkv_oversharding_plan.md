@@ -215,8 +215,11 @@ Update `tests/unit_tests/test_distributed_muon.py`:
 
 - Compare split-head computation with plain `torch.optim.Muon` operating on
   one parameter per complete logical head.
-- Compare parameters and momentum after multiple steps, including Nesterov,
-  weight decay, and nonzero momentum.
+- Compare update directions with an explicit BF16 tolerance because batched
+  `bmm`/`baddbmm` and independent `mm`/`addmm` calls are not bitwise
+  equivalent.
+- Compare momentum exactly after multiple steps, including Nesterov, weight
+  decay, and nonzero momentum.
 - Assert that parameters, gradients, and momentum retain the original FSDP2
   `Shard(0)` placement.
 - Assert exactly two `all_to_all_single` calls per communicating bucket.
@@ -282,6 +285,10 @@ Completed coverage includes:
   `dp_shard`, while routed experts compute locally on `(efsdp, ep)`.
 
 Validation results:
+
+- Split-head update directions match the per-matrix `torch.optim.Muon`
+  reference within an explicit BF16 tolerance. Momentum, checkpoint state,
+  layouts, and communication remain exact.
 
 - Focused CPU suites: 26 passed and 13 subtests passed.
 - Distributed Muon suite: 20 passed and 4 subtests passed.
