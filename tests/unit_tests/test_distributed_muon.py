@@ -26,6 +26,7 @@ from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import 
     BucketSpec,
 )
 from torchtitan.components.distributed_optimizers.muon import (
+    _adjust_learning_rate,
     _has_dim0_sharded_storage,
     _has_replicated_storage,
     DistributedMuon,
@@ -36,6 +37,36 @@ from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
     build_distributed_muon,
     MuonComputeSharding,
 )
+
+
+# Allow a few BF16 quantization steps across different GEMM schedules.
+_BATCHED_BF16_DIRECTION_ATOL = 2e-2
+
+
+def _assert_exact(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def _assert_batched_muon_update_close(
+    actual_before: torch.Tensor,
+    actual_after: torch.Tensor,
+    expected_before: torch.Tensor,
+    expected_after: torch.Tensor,
+    *,
+    lr: float,
+    weight_decay: float,
+    compute_matrix_shape: torch.Size,
+) -> None:
+    decay = 1 - lr * weight_decay
+    adjusted_lr = _adjust_learning_rate(lr, None, compute_matrix_shape)
+    actual_update = (actual_before * decay - actual_after) / adjusted_lr
+    expected_update = (expected_before * decay - expected_after) / adjusted_lr
+    torch.testing.assert_close(
+        actual_update,
+        expected_update,
+        rtol=0,
+        atol=_BATCHED_BF16_DIRECTION_ATOL,
+    )
 
 
 class TestDistributedMuonStoragePolicy(unittest.TestCase):
@@ -170,14 +201,25 @@ class _DistributedMuonTestBase(DTensorTestBase):
         reference_optimizer: torch.optim.Muon,
         reference_redistributed: torch.nn.Parameter,
         reference_local_blocks: tuple[torch.nn.Parameter, torch.nn.Parameter],
+        *,
+        local_blocks_before: torch.Tensor,
+        reference_local_blocks_before: tuple[torch.Tensor, torch.Tensor],
     ) -> None:
         rank = self.mesh.get_local_rank()
         expected_redistributed = reference_redistributed.detach().chunk(
             self.world_size, dim=0
         )[rank]
         expected_local_blocks = reference_local_blocks[rank].detach()
-        torch.testing.assert_close(redistributed.to_local(), expected_redistributed)
-        torch.testing.assert_close(local_blocks.to_local(), expected_local_blocks)
+        _assert_exact(redistributed.to_local(), expected_redistributed)
+        _assert_batched_muon_update_close(
+            local_blocks_before,
+            local_blocks.to_local(),
+            reference_local_blocks_before[rank],
+            expected_local_blocks,
+            lr=0.03,
+            weight_decay=0.2,
+            compute_matrix_shape=expected_local_blocks.shape,
+        )
 
         for param in (redistributed, local_blocks):
             self.assertIsInstance(param, DTensor)
@@ -191,7 +233,7 @@ class _DistributedMuonTestBase(DTensorTestBase):
             .detach()
             .chunk(self.world_size, dim=0)[rank]
         )
-        torch.testing.assert_close(
+        _assert_exact(
             redistributed_momentum.to_local(), expected_redistributed_momentum
         )
 
@@ -201,9 +243,7 @@ class _DistributedMuonTestBase(DTensorTestBase):
         expected_local_blocks_momentum = reference_optimizer.state[
             reference_local_blocks[rank]
         ]["momentum_buffer"].detach()
-        torch.testing.assert_close(
-            local_blocks_momentum.to_local(), expected_local_blocks_momentum
-        )
+        _assert_exact(local_blocks_momentum.to_local(), expected_local_blocks_momentum)
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 1, "requires one CUDA device")
@@ -379,7 +419,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                 optimizer.step()
         validation_collective.assert_not_called()
         self.assertEqual(len(optimizer.state), 0)
-        torch.testing.assert_close(redistributed.to_local(), redistributed_before)
+        _assert_exact(redistributed.to_local(), redistributed_before)
         redistributed.grad = None
 
         with self.assertRaisesRegex(ValueError, "must match one bucket"):
@@ -442,8 +482,8 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         local_blocks_before = local_blocks.to_local().clone()
         init_optim_state(optimizer)
         self.assertEqual(len(optimizer.state), 2)
-        torch.testing.assert_close(redistributed.to_local(), redistributed_before)
-        torch.testing.assert_close(local_blocks.to_local(), local_blocks_before)
+        _assert_exact(redistributed.to_local(), redistributed_before)
+        _assert_exact(local_blocks.to_local(), local_blocks_before)
         flat_state = get_flat_optim_state_dict(optimizer)
         self.assertIn("state.layers.0.redistributed.momentum_buffer", flat_state)
         self.assertIn("state.layers.0.local_blocks.momentum_buffer", flat_state)
@@ -512,7 +552,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         target_parameters, target_optimizer = build(("layers.0.a",))
         init_optim_state(target_optimizer)
         load_flat_optim_state_dict(target_optimizer, flat_state_dict)
-        torch.testing.assert_close(
+        _assert_exact(
             target_optimizer.state[target_parameters[0]]["momentum_buffer"].to_local(),
             source_optimizer.state[source_parameters[0]]["momentum_buffer"].to_local(),
         )
@@ -746,8 +786,8 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         momentum = optimizer.state[parameter]["momentum_buffer"]
         self.assertEqual(parameter.placements, placement)
         self.assertEqual(momentum.placements, placement)
-        torch.testing.assert_close(parameter.to_local(), expected_parameter.to_local())
-        torch.testing.assert_close(
+        _assert_exact(parameter.to_local(), expected_parameter.to_local())
+        _assert_exact(
             momentum.to_local(),
             expected_momentum.to_local(),
         )
@@ -815,6 +855,10 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             nesterov=True,
             ns_steps=2,
         )
+        batched_before = batched.to_local().clone()
+        reference_batched_before = torch.stack(
+            [reference.detach().clone() for reference in batched_references]
+        ).view(batched.shape)
         owned_reference.grad = grads[0]
         for reference, grad in zip(
             batched_references,
@@ -846,9 +890,18 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                 ]
             ).view(batched.shape),
         )
-        for param, reference, reference_momentum in zip(
+        _assert_exact(owned.to_local(), reference_values[0])
+        _assert_batched_muon_update_close(
+            batched_before,
+            batched.to_local(),
+            reference_batched_before,
+            reference_values[1],
+            lr=0.03,
+            weight_decay=0.2,
+            compute_matrix_shape=batched_references[0].shape,
+        )
+        for param, reference_momentum in zip(
             (owned, batched),
-            reference_values,
             reference_momenta,
             strict=True,
         ):
@@ -856,8 +909,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             self.assertEqual(param.grad.placements, (Replicate(),))
             momentum = optimizer.state[param]["momentum_buffer"]
             self.assertEqual(momentum.placements, (Replicate(),))
-            torch.testing.assert_close(param.to_local(), reference)
-            torch.testing.assert_close(
+            _assert_exact(
                 momentum.to_local(),
                 reference_momentum,
             )
@@ -912,7 +964,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
 
         collective.assert_not_called()
         self.assertEqual(len(optimizer.state), 0)
-        torch.testing.assert_close(parameter.to_local(), parameter_before)
+        _assert_exact(parameter.to_local(), parameter_before)
 
     @with_comms
     def test_step_matches_plain_muon_and_continues_from_state_dict(self):
@@ -939,6 +991,10 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             momentum=0.8,
             nesterov=True,
             ns_steps=2,
+        )
+        local_blocks_before = local_blocks.to_local().clone()
+        reference_local_blocks_before = tuple(
+            reference.detach().clone() for reference in reference_local_blocks
         )
 
         first_redistributed_grad = (
@@ -976,6 +1032,8 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             reference_optimizer,
             reference_redistributed,
             reference_local_blocks,
+            local_blocks_before=local_blocks_before,
+            reference_local_blocks_before=reference_local_blocks_before,
         )
 
         local_blocks.grad = None
@@ -990,15 +1048,13 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                 for group in state_dict["param_groups"]
             )
         )
-        resumed_redistributed = self._parameter(reference_redistributed.detach())
-        resumed_local_blocks = self._parameter(
-            torch.cat([parameter.detach() for parameter in reference_local_blocks])
-        )
+        resumed_redistributed_value = redistributed.full_tensor().detach()
+        resumed_local_blocks_value = local_blocks.full_tensor().detach()
+        resumed_redistributed = self._parameter(resumed_redistributed_value)
+        resumed_local_blocks = self._parameter(resumed_local_blocks_value)
         changed_view_optimizer = self._optimizer(
-            self._parameter(reference_redistributed.detach()),
-            self._parameter(
-                torch.cat([parameter.detach() for parameter in reference_local_blocks])
-            ),
+            self._parameter(resumed_redistributed_value),
+            self._parameter(resumed_local_blocks_value),
             local_num_matrices=4,
         )
         with self.assertRaisesRegex(ValueError, "compute layout"):
@@ -1011,9 +1067,15 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         )
         init_optim_state(resumed_optimizer)
         load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        _assert_exact(resumed_redistributed.to_local(), redistributed.to_local())
+        _assert_exact(resumed_local_blocks.to_local(), local_blocks.to_local())
 
         second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
         second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()
+        local_blocks_before = resumed_local_blocks.to_local().clone()
+        reference_local_blocks_before = tuple(
+            reference.detach().clone() for reference in reference_local_blocks
+        )
         self._set_grads(
             resumed_redistributed,
             resumed_local_blocks,
@@ -1042,6 +1104,8 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             reference_optimizer,
             reference_redistributed,
             reference_local_blocks,
+            local_blocks_before=local_blocks_before,
+            reference_local_blocks_before=reference_local_blocks_before,
         )
 
 
@@ -1183,29 +1247,38 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
             nesterov=True,
             ns_steps=2,
         )
+        expert_before = expert.to_local().clone()
+        reference_experts_before = torch.stack(
+            [parameter.detach().clone() for parameter in reference_experts]
+        )
 
         optimizer.step()
         reference_optimizer.step()
 
         rank = dense_mesh.get_local_rank()
-        torch.testing.assert_close(
+        _assert_exact(
             dense.to_local(),
             reference_dense.detach().chunk(self.world_size, dim=0)[rank],
         )
-        torch.testing.assert_close(
+        _assert_batched_muon_update_close(
+            expert_before,
             expert.to_local(),
+            reference_experts_before,
             torch.stack([parameter.detach() for parameter in reference_experts]),
+            lr=0.03,
+            weight_decay=0.2,
+            compute_matrix_shape=reference_experts[0].shape,
         )
         dense_momentum = optimizer.state[dense]["momentum_buffer"]
         reference_dense_momentum = reference_optimizer.state[reference_dense][
             "momentum_buffer"
         ]
-        torch.testing.assert_close(
+        _assert_exact(
             dense_momentum.to_local(),
             reference_dense_momentum.chunk(self.world_size, dim=0)[rank],
         )
         expert_momentum = optimizer.state[expert]["momentum_buffer"]
-        torch.testing.assert_close(
+        _assert_exact(
             expert_momentum.to_local(),
             torch.stack(
                 [
@@ -1342,6 +1415,8 @@ class TestDistributedMuonPipeline(_DistributedMuonTestBase):
             torch.nn.Parameter(values[2].clone()),
         ]
         reference = torch.optim.Muon(references, lr=0.03, momentum=0.8, ns_steps=1)
+        local_blocks_before = local_blocks.to_local().clone()
+        reference_local_blocks_before = references[1].detach().clone()
         references[0].grad = grads[0].clone()
         references[1].grad = grads[1].chunk(self.world_size, dim=0)[rank].clone()
         references[2].grad = grads[2].clone()
@@ -1366,11 +1441,19 @@ class TestDistributedMuonPipeline(_DistributedMuonTestBase):
         self.assertEqual(splits[0], splits[1])
         self.assertEqual(splits[2], splits[3])
         self.assertNotEqual(splits[0], splits[2])
-        torch.testing.assert_close(
+        _assert_exact(
             distributed_0.to_local(), references[0].chunk(self.world_size, dim=0)[rank]
         )
-        torch.testing.assert_close(local_blocks.to_local(), references[1])
-        torch.testing.assert_close(
+        _assert_batched_muon_update_close(
+            local_blocks_before,
+            local_blocks.to_local(),
+            reference_local_blocks_before,
+            references[1],
+            lr=0.03,
+            weight_decay=0.1,
+            compute_matrix_shape=references[1].shape,
+        )
+        _assert_exact(
             distributed_2.to_local(), references[2].chunk(self.world_size, dim=0)[rank]
         )
 
