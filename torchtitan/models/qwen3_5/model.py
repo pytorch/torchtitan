@@ -25,6 +25,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
@@ -740,7 +741,7 @@ class Qwen35Model(Decoder):
 
     def multimodal_context(self) -> contextlib.AbstractContextManager[None]:
         """Use local DP typechecking while preparing multimodal inputs."""
-        if get_spmd_backend() == "spmd_types":
+        if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
             return spmd.set_current_mesh(local_axes=("dp",))
         return contextlib.nullcontext()
 

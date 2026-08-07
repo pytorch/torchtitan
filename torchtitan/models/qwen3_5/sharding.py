@@ -34,6 +34,13 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.vision_sharding import (
+    invariant_norm_config,
+    set_vision_transformer_block_sharding_config,
+    vision_colwise_config,
+    vision_invariant_linear_config,
+    vision_scaled_bias_rowwise_config,
+)
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 DP = MeshAxisName.DP
@@ -78,52 +85,6 @@ def annotate_multimodal_input_spmd_types(
     ):
         if tensor is not None:
             spmd.assert_type(tensor, multimodal_type)
-
-
-def _replicate_norm() -> ShardingConfig:
-    """Replicate norm (weight/bias and activations) — used by the vision
-    encoder, which runs without sequence parallelism."""
-    activation = dense_activation_placement(tp=spmd.I)
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.I),
-            "bias": dense_param_placement(tp=spmd.I),
-        },
-        in_src_shardings={"input": activation},
-        in_dst_shardings={"input": activation},
-        out_src_shardings=activation,
-        out_dst_shardings=activation,
-    )
-
-
-def _vision_colwise_config(
-    *, input_tp: spmd.PerMeshAxisSpmdType = spmd.I
-) -> ShardingConfig:
-    activation = dense_activation_placement(tp=input_tp)
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(0)),
-            "bias": dense_param_placement(tp=spmd.S(0)),
-        },
-        in_src_shardings={"input": activation},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
-    )
-
-
-def _vision_scaled_bias_rowwise_config() -> ShardingConfig:
-    input_layout = dense_activation_placement(tp=spmd.S(2))
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=dense_activation_placement(tp=spmd.I),
-        local_map=LocalMapConfig(in_grad_placements=(input_layout,)),
-    )
 
 
 def _qk_norm_sharding() -> ShardingConfig:
@@ -279,57 +240,32 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     Norms are Replicate. pos_embed is Replicate via state_shardings.
     """
     ve_cfg.sharding_config = ShardingConfig(
-        state_shardings={"pos_embed": dense_param_placement(tp=spmd.I)},
+        state_shardings={
+            "pos_embed": SpmdLayout({DP: spmd.R, TP: spmd.I}),
+        },
         # I->R convert to scatter into text embeddings.
         out_src_shardings=SpmdLayout({DP: spmd.V, TP: spmd.I}),
         out_dst_shardings=SpmdLayout({DP: spmd.V, TP: spmd.R}),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
-        state_shardings={"inv_freq": dense_param_placement(tp=spmd.I)},
-        out_src_shardings=dense_param_placement(tp=spmd.I),
-    )
-
-    patch_activation = dense_activation_placement(tp=spmd.I)
-    ve_cfg.patch_embed_proj.sharding_config = ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.I),
-            "bias": dense_param_placement(tp=spmd.I),
+            "inv_freq": SpmdLayout({DP: spmd.R, TP: spmd.I}),
         },
-        in_src_shardings={"input": patch_activation},
-        in_dst_shardings={"input": patch_activation},
-        out_src_shardings=patch_activation,
-        out_dst_shardings=patch_activation,
+        out_src_shardings=SpmdLayout({DP: spmd.R, TP: spmd.I}),
     )
 
-    # Block sub-modules
-    block = ve_cfg.block
-    block.norm1.sharding_config = _replicate_norm()
-    block.norm2.sharding_config = _replicate_norm()
+    ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
 
-    block.attn.sharding_config = ShardingConfig(
-        in_src_shardings={
-            "x": dense_activation_placement(tp=spmd.I),
-            "rope_cache": SpmdLayout({DP: spmd.R, TP: spmd.I}),
-        },
-        in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R),
-            "rope_cache": SpmdLayout({DP: spmd.R, TP: spmd.R}),
-        },
+    set_vision_transformer_block_sharding_config(
+        ve_cfg.block,
+        rope_cache_dp=spmd.R,
     )
-    block.attn.wq.sharding_config = _vision_colwise_config(input_tp=spmd.R)
-    block.attn.wk.sharding_config = _vision_colwise_config(input_tp=spmd.R)
-    block.attn.wv.sharding_config = _vision_colwise_config(input_tp=spmd.R)
-    block.attn.proj.sharding_config = _vision_scaled_bias_rowwise_config()
-    set_gqa_inner_attention_local_map(block.attn.inner_attention)
-
-    block.mlp.fc1.sharding_config = _vision_colwise_config()
-    block.mlp.fc2.sharding_config = _vision_scaled_bias_rowwise_config()
 
     # Merger sub-modules
     merger = ve_cfg.merger
-    merger.norm.sharding_config = _replicate_norm()
-    merger.fc1.sharding_config = _vision_colwise_config()
-    merger.fc2.sharding_config = _vision_scaled_bias_rowwise_config()
+    merger.norm.sharding_config = invariant_norm_config()
+    merger.fc1.sharding_config = vision_colwise_config()
+    merger.fc2.sharding_config = vision_scaled_bias_rowwise_config()
 
 
 def _set_full_attention_sharding(
