@@ -22,8 +22,12 @@ from torch.optim import Optimizer
 
 from .flex_optimizer_reshard import (
     _BucketedRedistributionRuntime,
-    _build_owned_bucket_plans,
+    _build_bucket_plans,
+    _build_owned_redistribution_plan,
     _device_mesh_ranks,
+    _dtensor_storage_blocks,
+    _RedistributionGroup,
+    _RedistributionPlan,
     _validate_bucket_plans_across_ranks,
     assign_balanced_owners,
     BucketSpec,
@@ -114,7 +118,6 @@ class DistributedMuon(Optimizer):
         self._redistribution_runtime.run(
             self._plans,
             local_tensor_spec=self._local_tensor_spec,
-            compute_shape=self._compute_shape,
             prepare=self._prepare_local,
             compute=self._compute_update,
             finalize=self._apply_update,
@@ -228,19 +231,20 @@ class DistributedMuon(Optimizer):
                     local_compute_tensor=local_compute_tensor,
                     local_storage_signature=_local_storage_signature(param.to_local()),
                     compute_placement_key=resolved_compute_placement.fingerprint_key,
-                    compute_locally=resolved_compute_placement.compute_locally,
+                    compute_transition=resolved_compute_placement.compute_transition,
                 )
             )
         return tuple(compute_layouts)
 
     def _initialize_plan(self) -> None:
         compute_layouts = self._build_parameter_compute_layouts()
-        result = _build_owned_bucket_plans(
+        result = _build_bucket_plans(
             compute_layouts,
             self._specs,
             fqn=lambda item: item.fqn,
-            compute_locally=lambda item: item.compute_locally,
+            requires_owner=lambda item: item.requires_owner,
             storage_dtensor=lambda item: item.param,
+            redistribution_plan=_build_compute_redistribution_plan,
         )
         self._plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
@@ -279,7 +283,7 @@ class DistributedMuon(Optimizer):
             str(compute_layout.param.dtype),
             compute_layout.param.to_local().device.type,
             tuple(compute_layout.global_compute_shape),
-            compute_layout.compute_locally,
+            type(compute_layout.compute_transition).__name__,
             compute_layout.compute_view_key,
             compute_layout.compute_placement_key,
             _device_mesh_ranks(compute_layout.param.device_mesh),
@@ -484,12 +488,6 @@ class DistributedMuon(Optimizer):
         tensor = compute_layout.local_compute_tensor
         return tensor.shape, tensor.dtype, tensor.device
 
-    @staticmethod
-    def _compute_shape(
-        compute_layout: _ParameterComputeLayout,
-    ) -> torch.Size:
-        return compute_layout.global_compute_shape
-
 
 _LAYOUT_FINGERPRINT_KEY = "_distributed_muon_layout_fingerprint"
 _LAYOUT_FINGERPRINT_VERSION = 1
@@ -512,13 +510,53 @@ class _ParameterComputeLayout:
     local_compute_tensor: Tensor
     local_storage_signature: tuple[Any, ...]
     compute_placement_key: tuple[Any, ...]
-    compute_locally: bool
+    compute_transition: _ComputeTransition
+
+    @property
+    def compute_locally(self) -> bool:
+        return isinstance(self.compute_transition, _LocalCompute)
+
+    @property
+    def requires_owner(self) -> bool:
+        return isinstance(self.compute_transition, _OwnedCompute)
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalCompute:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedCompute:
+    pass
+
+
+_ComputeTransition = _LocalCompute | _OwnedCompute
 
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedComputePlacement:
     fingerprint_key: tuple[Any, ...]
-    compute_locally: bool
+    compute_transition: _ComputeTransition
+
+
+def _build_compute_redistribution_plan(
+    compute_layout: _ParameterComputeLayout,
+    group: _RedistributionGroup,
+    owner_rank: int | None,
+) -> _RedistributionPlan | None:
+    transition = compute_layout.compute_transition
+    if isinstance(transition, _LocalCompute):
+        return None
+
+    assert isinstance(transition, _OwnedCompute)
+    assert owner_rank is not None
+    return _build_owned_redistribution_plan(
+        _dtensor_storage_blocks(compute_layout.param, group.participants),
+        participants=group.participants,
+        owner=group.participants[owner_rank],
+        logical_shape=tuple(compute_layout.param.shape),
+    )
 
 
 def _resolve_compute_placement(
@@ -558,7 +596,7 @@ def _resolve_compute_placement(
         ):
             return _ResolvedComputePlacement(
                 fingerprint_key=("shard", 0),
-                compute_locally=True,
+                compute_transition=_LocalCompute(),
             )
     elif (
         isinstance(compute_placement, Owned)
@@ -568,12 +606,12 @@ def _resolve_compute_placement(
         if replicated_storage:
             return _ResolvedComputePlacement(
                 fingerprint_key=("owned",),
-                compute_locally=True,
+                compute_transition=_LocalCompute(),
             )
         if _has_owned_sharded_storage(param):
             return _ResolvedComputePlacement(
                 fingerprint_key=("owned",),
-                compute_locally=False,
+                compute_transition=_OwnedCompute(),
             )
     raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
 
