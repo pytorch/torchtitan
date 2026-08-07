@@ -19,13 +19,19 @@ import fsspec
 import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
+from torch_checkpointing.barriers import TCPStoreBarrierConfig
 from torch.utils.data import DataLoader
+from torch_checkpointing.dtensor_resharder import DTensorResharder
 from torchtitan.components.checkpoint import (
+    _torch_checkpointing_item_specs,
     CheckpointManager,
+    DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
     MODEL,
     ModelWrapper,
+    OPTIMIZER,
     purge_thread,
     Terminate,
+    TorchCheckpointingConfig,
 )
 
 
@@ -99,6 +105,60 @@ class DummyAsyncResult(AsyncSaveResponse):
     def __init__(self):
         self.upload_completion = DummyFuture()
         self.staging_completion = DummyFuture()
+
+
+class FakeTorchCheckpointingWriterConfig:
+    def __init__(self):
+        self.barrier_config = None
+        self.checkpoint_write_barrier_timeout_sec = None
+
+
+class FakeTorchCheckpointingSaverConfig:
+    def __init__(self, async_save: bool):
+        self.writer_config = FakeTorchCheckpointingWriterConfig()
+        self.wait_timeout_secs = None
+        if async_save:
+            self.staging_config = SimpleNamespace(
+                use_pinned_memory=True,
+                use_shared_memory=True,
+                use_async_staging=True,
+                use_non_blocking_copy=True,
+            )
+
+
+class FakeTorchCheckpointingCheckpointManager:
+    latest_config = None
+    latest_instance = None
+
+    class Config:
+        def __init__(self, mode: str):
+            self.mode = mode
+            self.save = FakeTorchCheckpointingSaverConfig(
+                async_save=mode == "async"
+            )
+            self.items = {}
+            self.default = None
+
+        @classmethod
+        def with_sync_save(cls):
+            return cls(mode="sync")
+
+        @classmethod
+        def with_async_save(cls):
+            return cls(mode="async")
+
+        def build(self):
+            FakeTorchCheckpointingCheckpointManager.latest_config = self
+            FakeTorchCheckpointingCheckpointManager.latest_instance = (
+                FakeTorchCheckpointingCheckpointManager()
+            )
+            return FakeTorchCheckpointingCheckpointManager.latest_instance
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
 
 def fake_async_save(*args, **kwargs):
@@ -887,6 +947,52 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager.maybe_wait_for_saving()
 
+    @mock.patch(
+        "torchtitan.components.checkpoint.TorchCheckpointingCheckpointManager",
+        FakeTorchCheckpointingCheckpointManager,
+    )
+    def test_torch_checkpointing_backend_builds_manager_with_barrier_config(self):
+        FakeTorchCheckpointingCheckpointManager.latest_config = None
+        FakeTorchCheckpointingCheckpointManager.latest_instance = None
+        cfg = self.trainer_config.checkpoint
+        cfg.save_backend = "torch_checkpointing"
+        cfg.async_mode = "async_with_pinned_mem"
+        cfg.torch_checkpointing.barrier_master_address = " checkpoint-host "
+        cfg.torch_checkpointing.barrier_tcpstore_port = 43007
+        cfg.torch_checkpointing.barrier_init_timeout_sec = 17
+        cfg.torch_checkpointing.barrier_timeout_sec = 23
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        manager_config = FakeTorchCheckpointingCheckpointManager.latest_config
+        self.assertEqual(manager_config.mode, "async")
+        self.assertTrue(manager_config.save.staging_config.use_pinned_memory)
+        self.assertTrue(manager_config.items[MODEL].requires_copy)
+        self.assertIsNotNone(manager_config.items[MODEL].resharder)
+        self.assertTrue(manager_config.items[OPTIMIZER].requires_copy)
+        self.assertIsNotNone(manager_config.items[OPTIMIZER].resharder)
+        self.assertFalse(manager_config.default.requires_copy)
+        self.assertEqual(manager_config.save.wait_timeout_secs, 23)
+        writer_config = manager_config.save.writer_config
+        self.assertEqual(writer_config.checkpoint_write_barrier_timeout_sec, 23)
+        barrier_config = writer_config.barrier_config
+        self.assertIsInstance(barrier_config, TCPStoreBarrierConfig)
+        self.assertEqual(barrier_config.master_address, "checkpoint-host")
+        self.assertEqual(barrier_config.tcpstore_port, 43007)
+        self.assertEqual(barrier_config.timeout_barrier_init_sec, 17)
+        self.assertTrue(barrier_config.use_checkpoint_barrier_tcpstore_libuv)
+
+        manager.close()
+        self.assertTrue(FakeTorchCheckpointingCheckpointManager.latest_instance.closed)
+
 
 class TestConfigPostInit(unittest.TestCase):
     def test_valid_default_config(self):
@@ -896,6 +1002,18 @@ class TestConfigPostInit(unittest.TestCase):
         except Exception as e:
             self.fail(f"Default Config raised {type(e).__name__} unexpectedly!")
 
+    def test_torch_checkpointing_config_defaults(self):
+        cfg = CheckpointManager.Config()
+
+        self.assertEqual(cfg.save_backend, "dcp")
+        self.assertFalse(cfg.torch_checkpointing.enable_prewarm_staging)
+        self.assertEqual(cfg.torch_checkpointing.barrier_master_address, "")
+        self.assertEqual(
+            cfg.torch_checkpointing.barrier_tcpstore_port,
+            DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
+        )
+        self.assertEqual(cfg.torch_checkpointing.barrier_init_timeout_sec, 60)
+        self.assertEqual(cfg.torch_checkpointing.barrier_timeout_sec, 600)
     def test_sanity_and_range_checks(self):
         """Test basic field validation like empty strings and negative numbers."""
         # Folder cannot be empty
@@ -980,6 +1098,21 @@ class TestConfigPostInit(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid async_mode"):
             CheckpointManager.Config(async_mode="invalid_mode")
 
+        with self.assertRaisesRegex(ValueError, "Invalid save_backend"):
+            CheckpointManager.Config(save_backend="invalid")
+
+    def test_torch_checkpointing_barrier_config_validation(self):
+        with self.assertRaisesRegex(ValueError, "barrier_tcpstore_port"):
+            TorchCheckpointingConfig(barrier_tcpstore_port=-1)
+        with self.assertRaisesRegex(ValueError, "barrier_tcpstore_port"):
+            TorchCheckpointingConfig(barrier_tcpstore_port=0)
+        with self.assertRaisesRegex(ValueError, "barrier_tcpstore_port"):
+            TorchCheckpointingConfig(barrier_tcpstore_port=65536)
+        with self.assertRaisesRegex(ValueError, "barrier_init_timeout_sec"):
+            TorchCheckpointingConfig(barrier_init_timeout_sec=0)
+        with self.assertRaisesRegex(ValueError, "barrier_timeout_sec"):
+            TorchCheckpointingConfig(barrier_timeout_sec=0)
+
     @mock.patch("torchtitan.components.checkpoint.logger")
     def test_warnings(self, mock_logger):
         """Test that logical redundancies trigger warnings but don't crash."""
@@ -995,6 +1128,13 @@ class TestConfigPostInit(unittest.TestCase):
         mock_logger.warning.assert_any_call(
             "initial_load_model_only=True has no effect without an initial_load_path."
         )
+
+    def test_torch_checkpointing_rejects_hf_last_save(self):
+        with self.assertRaisesRegex(ValueError, "last_save_in_hf"):
+            CheckpointManager.Config(
+                save_backend="torch_checkpointing",
+                last_save_in_hf=True,
+            )
 
 
 class TestFindLoadStepRemote(unittest.TestCase):
@@ -1119,6 +1259,17 @@ class TestModelWrapper(unittest.TestCase):
         self.assertEqual(sd2["a"].untyped_storage().data_ptr(), ptr_a)
         # ... and the in-place refresh picked up the updated parameter.
         self.assertTrue(torch.all(sd2["a"] == 1.0))
+
+
+class TestTorchCheckpointingSchema(unittest.TestCase):
+    def test_item_specs_own_copy_and_resharding_policy(self):
+        specs = _torch_checkpointing_item_specs()
+
+        self.assertEqual(set(specs), {MODEL, OPTIMIZER})
+        for spec in specs.values():
+            self.assertTrue(spec.requires_copy)
+            self.assertFalse(spec.required)
+            self.assertIsInstance(spec.resharder, DTensorResharder)
 
 
 if __name__ == "__main__":

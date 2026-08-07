@@ -31,6 +31,13 @@ from torch.distributed.checkpoint.state_dict_saver import (
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
+from torch_checkpointing.barriers import TCPStoreBarrierConfig
+from torch_checkpointing.checkpoint_manager import (
+    CheckpointManager as TorchCheckpointingCheckpointManager,
+)
+from torch_checkpointing.config import AsyncCheckpointSaverConfig
+from torch_checkpointing.dtensor_resharder import DTensorResharder
+from torch_checkpointing.schema import ItemSpec
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -46,6 +53,7 @@ OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 
 
 class AsyncMode(str, enum.Enum):
@@ -129,12 +137,70 @@ class ModelWrapper(Stateful):
         self.cached_state_dict = self._get_state_dict()
 
 
+def _torch_checkpointing_item_specs() -> dict[str, ItemSpec]:
+    resharder = DTensorResharder()
+    return {
+        MODEL: ItemSpec(
+            requires_copy=True,
+            resharder=resharder,
+            required=False,
+        ),
+        OPTIMIZER: ItemSpec(
+            requires_copy=True,
+            resharder=resharder,
+            required=False,
+        ),
+    }
+
+
 class Terminate:
     pass
 
 
 class SaveDone:
     pass
+
+
+@dataclass(kw_only=True, slots=True)
+class TorchCheckpointingConfig:
+    enable_prewarm_staging: bool = False
+    """
+    Whether to prewarm staging buffers before the first real
+    `torch_checkpointing` save.
+    """
+
+    barrier_master_address: str = ""
+    """
+    Master address for the `torch_checkpointing` TCPStore checkpoint barrier.
+    If empty, TorchTitan uses `MASTER_ADDR` from the environment, falling back
+    to `localhost`.
+    """
+
+    barrier_tcpstore_port: int = DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT
+    """
+    TCPStore port for the `torch_checkpointing` checkpoint barrier. This is a
+    fixed default to avoid runtime port negotiation; override it if the port
+    collides with another service on the master host.
+    """
+
+    barrier_init_timeout_sec: int = 60
+    """Timeout for initializing the TCPStore checkpoint barrier."""
+
+    barrier_timeout_sec: int = 600
+    """Timeout for each checkpoint write barrier."""
+
+    def __post_init__(self) -> None:
+        self.barrier_master_address = self.barrier_master_address.strip()
+        if not (1 <= self.barrier_tcpstore_port <= 65535):
+            raise ValueError(
+                "torch_checkpointing.barrier_tcpstore_port must be a valid port."
+            )
+        if self.barrier_init_timeout_sec <= 0:
+            raise ValueError(
+                "torch_checkpointing.barrier_init_timeout_sec must be positive."
+            )
+        if self.barrier_timeout_sec <= 0:
+            raise ValueError("torch_checkpointing.barrier_timeout_sec must be positive.")
 
 
 def purge_thread(purge_queue: queue.Queue):
@@ -336,6 +402,14 @@ class CheckpointManager(Configurable):
         "disabled" is the default mode.
         """
 
+        save_backend: Literal["dcp", "torch_checkpointing"] = "dcp"
+        """Checkpoint save backend. `dcp` keeps current behavior."""
+
+        torch_checkpointing: TorchCheckpointingConfig = field(
+            default_factory=TorchCheckpointingConfig
+        )
+        """Options that only apply when `save_backend="torch_checkpointing"`."""
+
         keep_latest_k: int = 10
         """
         Keeps only the latest k checkpoints, and purging older ones. If 0, keep all
@@ -436,6 +510,14 @@ class CheckpointManager(Configurable):
                     f"initial_load_path: {self.initial_load_path}"
                 )
 
+            if self.save_backend not in ("dcp", "torch_checkpointing"):
+                raise ValueError(f"Invalid save_backend: {self.save_backend}")
+            if self.save_backend == "torch_checkpointing" and self.last_save_in_hf:
+                raise ValueError(
+                    "save_backend='torch_checkpointing' does not support "
+                    "last_save_in_hf yet."
+                )
+
             async_lowered = self.async_mode.lower()
             if async_lowered in ("disabled", "async", "async_with_pinned_mem"):
                 self.async_mode = async_lowered
@@ -495,6 +577,9 @@ class CheckpointManager(Configurable):
         self.last_save_model_only = config.last_save_model_only
         self.last_save_in_hf = config.last_save_in_hf
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
+        self.save_backend = config.save_backend
+        self._torch_checkpointing_config = config.torch_checkpointing
+        self._torch_checkpointing_manager: Any | None = None
 
         self.sd_adapter = sd_adapter
         if self.last_save_in_hf and self.sd_adapter is None:
@@ -511,12 +596,20 @@ class CheckpointManager(Configurable):
             ) from e
 
         self.pg: dist.ProcessGroup | None = None
-        if self.async_mode in (AsyncMode.ASYNC, AsyncMode.ASYNC_WITH_PINNED_MEM):
+        if self.save_backend == "dcp" and self.async_mode in (
+            AsyncMode.ASYNC,
+            AsyncMode.ASYNC_WITH_PINNED_MEM,
+        ):
             self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
         self.stager: DefaultStager | None = None
         self.staging_future: Future | None = None
         self.save_future: Future | None = None
+
+        if self.save_backend == "torch_checkpointing":
+            self._torch_checkpointing_manager = (
+                self._build_torch_checkpointing_manager()
+            )
 
         # Retention Policy (Purge)
         self.keep_latest_k = config.keep_latest_k
@@ -548,6 +641,8 @@ class CheckpointManager(Configurable):
 
             if self.stager is not None:
                 self.stager.close()
+            if self._torch_checkpointing_manager is not None:
+                self._torch_checkpointing_manager.close()
 
     @torch.no_grad()
     def dcp_save(
@@ -1143,6 +1238,46 @@ class CheckpointManager(Configurable):
             and dist.get_rank() == 0
             and filesystem.isdir(self.folder)
         )
+
+    def _build_torch_checkpointing_manager(self) -> Any:
+        torch_checkpointing_config = self._torch_checkpointing_config
+        if self.async_mode == AsyncMode.DISABLED:
+            manager_config = TorchCheckpointingCheckpointManager.Config.with_sync_save()
+        else:
+            manager_config = (
+                TorchCheckpointingCheckpointManager.Config.with_async_save()
+            )
+            async_save_config = cast(AsyncCheckpointSaverConfig, manager_config.save)
+            pinned_memory = self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+            async_save_config.staging_config.use_pinned_memory = pinned_memory
+            async_save_config.staging_config.use_shared_memory = True
+            async_save_config.staging_config.use_async_staging = True
+            async_save_config.staging_config.use_non_blocking_copy = pinned_memory
+
+        manager_config.items = _torch_checkpointing_item_specs()
+        manager_config.default = ItemSpec(requires_copy=False)
+
+        writer_config = manager_config.save.writer_config
+        writer_config.barrier_config = TCPStoreBarrierConfig(
+            timeout_barrier_init_sec=(
+                torch_checkpointing_config.barrier_init_timeout_sec
+            ),
+            use_checkpoint_barrier_tcpstore_libuv=True,
+            tcpstore_port=torch_checkpointing_config.barrier_tcpstore_port,
+            master_address=(
+                torch_checkpointing_config.barrier_master_address.strip()
+                or os.environ.get("MASTER_ADDR")
+                or "localhost"
+            ),
+        )
+        writer_config.checkpoint_write_barrier_timeout_sec = (
+            torch_checkpointing_config.barrier_timeout_sec
+        )
+        manager_config.save.wait_timeout_secs = (
+            torch_checkpointing_config.barrier_timeout_sec
+        )
+
+        return manager_config.build()
 
     def _purge_stale_checkpoints(self):
         """Remove older checkpoint directories from storage to maintain
