@@ -60,6 +60,37 @@ logger = logging.getLogger(__name__)
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
 
 
+def _get_spmd_state_dict_layouts(model: torch.nn.Module) -> dict[str, SpmdLayout]:
+    """Map state-dict keys to their declared SPMD layouts."""
+    layouts: dict[str, SpmdLayout] = {}
+
+    for module_fqn, module in model.named_modules():
+        sharding_config = getattr(module, "_sharding_config", None)
+        if sharding_config is not None:
+            for state_name, layout in sharding_config.state_shardings.items():
+                fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
+                layouts[fqn] = layout
+
+            # FusedSwiGLU keeps its sharding on the fused w13 parameter, but
+            # its state dict exposes split w1.weight/w3.weight keys.
+            w13_layout = sharding_config.state_shardings.get("w13")
+            if w13_layout is not None:
+                for proj_name in ("w1", "w3"):
+                    layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
+
+        if isinstance(module, FusedQKVLinear):
+            # FusedQKVLinear exposes split wq/wk/wv state-dict keys while the
+            # sharding layout lives on the fused wqkv parameter.
+            wqkv_sharding_config = getattr(module.wqkv, "_sharding_config", None)
+            if wqkv_sharding_config is None:
+                continue
+            for state_name, layout in wqkv_sharding_config.state_shardings.items():
+                for proj_name in ("wq", "wk", "wv"):
+                    layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
+
+    return layouts
+
+
 @dataclass(kw_only=True, slots=True)
 class _RequestMetricsInputs:
     """Raw inputs needed to build a request's vLLM metrics. Used to pass
@@ -213,7 +244,11 @@ class VLLMCudagraphConfig:
     # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
-        self, *, max_num_seqs: int, max_num_batched_tokens: int | None = None
+        self,
+        *,
+        max_num_seqs: int,
+        max_num_batched_tokens: int | None = None,
+        enable_sequence_parallel: bool = False,
     ) -> CompilationConfig | None:
         """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
         when CUDA graphs are disabled.
@@ -232,9 +267,19 @@ class VLLMCudagraphConfig:
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
         cudagraph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
         also forces ``mode=NONE`` when that env is set) (#3709).
+
+        When ``enable_sequence_parallel`` is true, vLLM's runner pads every
+        scheduled token batch to the TP degree before TorchTitan performs its
+        first sequence reduce-scatter. This returns a ``CompilationConfig`` in
+        ``NONE`` mode even when CUDA graphs are disabled.
         """
         if not self.enable:
-            return None
+            if not enable_sequence_parallel:
+                return None
+            compilation_config = CompilationConfig(mode=CompilationMode.NONE)
+            compilation_config.pass_config.enable_sp = True
+            compilation_config.pass_config.sp_min_token_num = 0
+            return compilation_config
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
         if max_num_batched_tokens is not None:
@@ -262,11 +307,17 @@ class VLLMCudagraphConfig:
                 sizes.append(cap)
             sizes = sorted(sizes)
 
-        return CompilationConfig(
+        compilation_config = CompilationConfig(
             cudagraph_mode=self.mode,
             mode=CompilationMode.NONE,
             cudagraph_capture_sizes=sizes,
         )
+        if enable_sequence_parallel:
+            # vLLM's runner uses enable_sp to pad scheduled token batches to
+            # the TP degree. TorchTitan dense SP requires this for correctness.
+            compilation_config.pass_config.enable_sp = True
+            compilation_config.pass_config.sp_min_token_num = 0
+        return compilation_config
 
 
 @dataclass(kw_only=True, slots=True)
@@ -867,6 +918,7 @@ class VLLMGenerator(Actor, Configurable):
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
+            enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -1273,47 +1325,7 @@ class VLLMGenerator(Actor, Configurable):
         state-dict path, then put the local tensors back before load_state_dict.
         """
 
-        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
-            layouts: dict[str, SpmdLayout] = {}
-
-            for module_fqn, module in model.named_modules():
-                sharding_config = getattr(module, "_sharding_config", None)
-                if sharding_config is not None:
-                    for state_name, layout in sharding_config.state_shardings.items():
-                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
-                        layouts[fqn] = layout
-
-                    # FusedSwiGLU keeps its sharding on the fused w13 parameter,
-                    # but its state dict exposes split w1.weight/w3.weight
-                    # (_split_w13_on_save). Mirror w13's layout onto the split
-                    # keys -- slicing the gate/up dim of an S(0) w13 yields S(0)
-                    # w1/w3, which is what the DTensor path gets implicitly.
-                    w13_layout = sharding_config.state_shardings.get("w13")
-                    if w13_layout is not None:
-                        for proj_name in ("w1", "w3"):
-                            layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
-
-                if isinstance(module, FusedQKVLinear):
-                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
-                    # the sharding layout lives on the fused wqkv parameter.
-                    # TODO: This assumes fused and split QKV layouts stay
-                    # equivalent. The load hook all-gathers anyway, so replace
-                    # this with a less fragile fused-QKV state-dict path.
-                    wqkv_sharding_config = getattr(
-                        module.wqkv, "_sharding_config", None
-                    )
-                    if wqkv_sharding_config is None:
-                        continue
-                    for (
-                        state_name,
-                        layout,
-                    ) in wqkv_sharding_config.state_shardings.items():
-                        for proj_name in ("wq", "wk", "wv"):
-                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
-
-            return layouts
-
-        layouts = _fqn_to_spmd_layout(model.model)
+        layouts = _get_spmd_state_dict_layouts(model.model)
 
         dtensor_model_sd = dict(model_sd)
         with torch.no_grad():

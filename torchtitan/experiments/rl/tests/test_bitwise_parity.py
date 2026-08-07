@@ -61,6 +61,7 @@ from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
+from torchtitan.experiments.rl.actors.generator import _get_spmd_state_dict_layouts
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
@@ -80,6 +81,7 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     VarlenMetadata,
 )
+from torchtitan.protocols.sharding import resolve_placements
 from torchtitan.tools import utils
 
 logging.basicConfig(level=logging.INFO)
@@ -262,6 +264,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -277,21 +280,45 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     wrapper = engine.model_executor.driver_worker.get_model()
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
+    vllm_sd = vllm_model.state_dict()
+    spmd_layouts = (
+        _get_spmd_state_dict_layouts(vllm_model)
+        if wrapper.parallel_dims.spmd_backend == "spmd_types"
+        else {}
+    )
 
     missing = []
-    for name, vparam in vllm_model.state_dict().items():
+    for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
         if tparam is None:
             missing.append(name)
             continue
-        full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
+                full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
                 vparam.copy_(
                     distribute_tensor(full, vparam.device_mesh, vparam.placements)
                 )
-            else:
+            elif (layout := spmd_layouts.get(name)) is not None:
+                full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
+                mesh = wrapper.parallel_dims.resolve_mesh(layout.axes())
+                if mesh is not None:
+                    full = distribute_tensor(
+                        full,
+                        mesh,
+                        resolve_placements(layout, mesh),
+                    ).to_local()
+                assert full.shape == vparam.shape, (
+                    f"SPMD shard shape mismatch for {name}: source "
+                    f"{tuple(full.shape)} vs destination {tuple(vparam.shape)}"
+                )
                 vparam.copy_(full)
+            else:
+                vparam.copy_(tparam)
+
+    # Run state-dict load hooks that merge split state such as wq/wk/wv back
+    # into the generator's fused QKV parameter.
+    vllm_model.load_state_dict(vllm_sd, strict=False)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -829,14 +856,17 @@ def _moe_tp4_varlen_batch_invariant_config() -> Controller.Config:
     config.trainer.parallelism.tensor_parallel_degree = 4
     config.generator.parallelism.data_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 4
+    config.generator.parallelism.enable_sequence_parallel = True
+    config.generator.parallelism.spmd_backend = "spmd_types"
     return config
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     """Test bitwise parity between trainer and vLLM generator with MoE EP.
 
-    On 4 GPUs, both trainer and generator use TP=4 and EP=4. This makes an
-    odd three-request decode batch exercise MoE padding from 3 to 4 tokens.
+    On 4 GPUs, both trainer and generator use TP=4 and EP=4. The generator also
+    uses the SPMD types backend with dense sequence parallelism enabled, so an
+    odd three-request decode batch exercises uneven sequence sharding over TP.
 
     Uses the bundled debug MoE assets by default. Override with
     MOE_HF_ASSETS_PATH if needed.
@@ -855,7 +885,7 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     sync_weights_from_trainer = True
 
     def test_vllm_uneven_decode_tp_padding(self):
-        """Three decode tokens must run correctly with TP=4 MoE sharding."""
+        """Three decode tokens must run with dense SP over four TP ranks."""
         generated_ids, decode_logprobs = vllm_generate(
             self.engine,
             self.prompt_ids,

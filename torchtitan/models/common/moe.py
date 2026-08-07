@@ -413,20 +413,20 @@ class MoE(Module):
         DTensors; the DTensor->local conversion happens at the GroupedExperts
         boundary. GroupedExperts operates on local tensors.
         """
-        # ---------------------------------------------------------------------
         # TODO: Remove this padding once the S(1) -> P conversion supports uneven
         # sequence shards. Pad before routing so every TP rank receives the same
         # local token count and combine can derive its output shape from its input.
         original_L = x_BLD.shape[1]
-        if not isinstance(x_BLD, DTensor) and self.seq_dim_tp_sharded:
-            # Dense SP has already produced equal local sequence shards.
+        if self.seq_dim_tp_sharded or self.expert_sequence_parallel_size == 1:
+            # Dense SP keeps the routed-expert output sequence-sharded, so no
+            # S(1) -> P conversion requires equal local sequence shards here.
+            # EP=1 does not sequence-shard routed tokens over the TP axis.
             seq_pad = 0
         else:
             # This input has not yet been sequence-sharded for the MoE region.
             seq_pad = (-original_L) % self.expert_sequence_parallel_size
             if seq_pad:
                 x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
-        # ---------------------------------------------------------------------
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)

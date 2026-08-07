@@ -357,3 +357,21 @@ def test_cudagraph_full_mode_extends_capture_sizes_to_chunk():
 def test_cudagraph_rejects_nonpositive_max_num_seqs():
     with pytest.raises(ValueError, match="max_num_seqs must be positive"):
         VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=0)
+
+
+def test_inference_sequence_parallelism_configures_model_and_vllm_padding():
+    parallelism = InferenceParallelismConfig(
+        tensor_parallel_degree=4,
+        enable_sequence_parallel=True,
+    )
+
+    assert parallelism.to_training().enable_sequence_parallel
+
+    cfg = VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(
+        max_num_seqs=256,
+        enable_sequence_parallel=parallelism.enable_sequence_parallel,
+    )
+    assert cfg is not None
+    assert int(cfg.mode) == 0
+    assert cfg.pass_config.enable_sp
+    assert cfg.pass_config.sp_min_token_num == 0
