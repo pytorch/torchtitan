@@ -374,27 +374,15 @@ def test_cudagraph_rejects_nonpositive_max_num_seqs():
         VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=0)
 
 
-def test_inference_sequence_parallelism_configures_model_and_vllm_padding():
-    parallelism = InferenceParallelismConfig(
-        tensor_parallel_degree=4,
-        enable_sequence_parallel=True,
-    )
+def test_inference_parallelism_disables_dense_sequence_parallelism():
+    parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
 
-    assert parallelism.to_training().enable_sequence_parallel
-
-    cfg = VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(
-        max_num_seqs=256,
-        enable_sequence_parallel=parallelism.enable_sequence_parallel,
-    )
-    assert cfg is not None
-    assert int(cfg.mode) == 0
-    assert cfg.pass_config.enable_sp
-    assert cfg.pass_config.sp_min_token_num == 0
+    assert not parallelism.to_training().enable_sequence_parallel
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_vllm_uneven_decode_tp_padding(monkeypatch):
-    """Three decode tokens run with dense SP over four TP ranks."""
+def test_vllm_uneven_decode_tp_padding():
+    """Three decode tokens run through EP-internal TP sequence sharding."""
     world_size = (
         dist.get_world_size()
         if dist.is_initialized()
@@ -415,7 +403,6 @@ def test_vllm_uneven_decode_tp_padding(monkeypatch):
     config = rl_grpo_qwen3_moe_debug_varlen()
     config.generator.parallelism.data_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 4
-    config.generator.parallelism.enable_sequence_parallel = True
     config.generator.gpu_memory_limit = 0.5
 
     temporary_dump_folder = None
@@ -434,20 +421,6 @@ def test_vllm_uneven_decode_tp_padding(monkeypatch):
         override=config.generator.override,
     )
 
-    get_compilation_config = VLLMCudagraphConfig.get_vllm_compilation_config
-
-    def _get_sequence_parallel_compilation_config(self, **kwargs):
-        return get_compilation_config(
-            self,
-            enable_sequence_parallel=True,
-            **kwargs,
-        )
-
-    monkeypatch.setattr(
-        VLLMCudagraphConfig,
-        "get_vllm_compilation_config",
-        _get_sequence_parallel_compilation_config,
-    )
     engine = build_inference_engine(config)
     try:
         prompt_ids = _make_prompt_tokens(3, 100, engine.get_tokenizer())

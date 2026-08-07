@@ -166,7 +166,6 @@ def generate() -> None:
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
-        enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config

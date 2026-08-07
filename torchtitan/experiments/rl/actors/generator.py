@@ -217,7 +217,6 @@ class VLLMCudagraphConfig:
         *,
         max_num_seqs: int,
         max_num_batched_tokens: int | None = None,
-        enable_sequence_parallel: bool = False,
     ) -> CompilationConfig | None:
         """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
         when CUDA graphs are disabled.
@@ -237,18 +236,9 @@ class VLLMCudagraphConfig:
         cudagraph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
         also forces ``mode=NONE`` when that env is set) (#3709).
 
-        When ``enable_sequence_parallel`` is true, vLLM's runner pads every
-        scheduled token batch to the TP degree before TorchTitan performs its
-        first sequence reduce-scatter. This returns a ``CompilationConfig`` in
-        ``NONE`` mode even when CUDA graphs are disabled.
         """
         if not self.enable:
-            if not enable_sequence_parallel:
-                return None
-            compilation_config = CompilationConfig(mode=CompilationMode.NONE)
-            compilation_config.pass_config.enable_sp = True
-            compilation_config.pass_config.sp_min_token_num = 0
-            return compilation_config
+            return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
         if max_num_batched_tokens is not None:
@@ -276,17 +266,11 @@ class VLLMCudagraphConfig:
                 sizes.append(cap)
             sizes = sorted(sizes)
 
-        compilation_config = CompilationConfig(
+        return CompilationConfig(
             cudagraph_mode=self.mode,
             mode=CompilationMode.NONE,
             cudagraph_capture_sizes=sizes,
         )
-        if enable_sequence_parallel:
-            # vLLM's runner uses enable_sp to pad scheduled token batches to
-            # the TP degree. TorchTitan dense SP requires this for correctness.
-            compilation_config.pass_config.enable_sp = True
-            compilation_config.pass_config.sp_min_token_num = 0
-        return compilation_config
 
 
 @dataclass(kw_only=True, slots=True)
@@ -887,7 +871,6 @@ class VLLMGenerator(Actor, Configurable):
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
-            enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config

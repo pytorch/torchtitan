@@ -682,7 +682,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
         # EP=1: strip the padding (via _unpermute) to recover expert-sorted
         # order, then apply the local score + scatter_add used by the EP=1
-        # path. Mirrors LocalTokenDispatcher.combine, plus the unpad. The
+        # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
         assert isinstance(metadata, AllToAllDispatchMetadata)
         routed_output_RD = self._unpermute(
             routed_output_RD, metadata.input_shape, metadata.permuted_indices

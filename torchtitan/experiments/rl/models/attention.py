@@ -246,14 +246,12 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             **extra_kwargs,
         )
         if self.out_transform is None:
-            output[num_actual_tokens:].zero_()
-            return output
+            return result
 
         out, lse = result
         out = self.out_transform(out, lse.transpose(0, 1))
         output[:num_actual_tokens].copy_(out)
-        output[num_actual_tokens:].zero_()
-        return output
+        return output[:num_actual_tokens]
 
 
 class VLLMAttentionWrapper(Module):

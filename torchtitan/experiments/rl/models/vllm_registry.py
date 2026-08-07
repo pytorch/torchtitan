@@ -68,10 +68,6 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. 1 means disabled."""
 
-    enable_sequence_parallel: bool = False
-    """Enable dense TP sequence parallelism in TorchTitan and make vLLM pad
-    scheduled token batches to a multiple of the TP degree."""
-
     spmd_backend: Literal["default", "spmd_types"] = "default"
     """SPMD backend used by TorchTitan model parallelization in the generator."""
 
@@ -79,8 +75,8 @@ class InferenceParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
         the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
 
-        Pins the inference-only invariants: no DP replication, no CP/PP, and
-        loss parallel disabled.
+        Pins the inference-only invariants: no DP replication, CP/PP, dense
+        sequence parallelism, or loss parallelism.
         """
         return ParallelismConfig(
             # Carry the vLLM DP factor on dp_shard (not dp_replicate) so the
@@ -95,7 +91,7 @@ class InferenceParallelismConfig:
             data_parallel_replicate_degree=1,
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
-            enable_sequence_parallel=self.enable_sequence_parallel,
+            enable_sequence_parallel=False,
             spmd_backend=self.spmd_backend,
         )
 
