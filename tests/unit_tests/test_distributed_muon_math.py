@@ -85,7 +85,7 @@ class TestDistributedMuonMath(unittest.TestCase):
             "eps": 1e-7,
         }
 
-        for shape in ((4, 3, 5), (4, 5, 3)):
+        for shape in ((8, 3, 4), (8, 4, 3)):
             with self.subTest(shape=shape):
                 generator = torch.Generator().manual_seed(5)
                 prepared = torch.randn(shape, generator=generator)
@@ -101,4 +101,11 @@ class TestDistributedMuonMath(unittest.TestCase):
                     ]
                 )
 
-                self.assertTrue(torch.equal(batched, independent))
+                # Batched and independent matrix multiplications may use
+                # different BF16 reduction orders.
+                torch.testing.assert_close(
+                    batched,
+                    independent,
+                    rtol=0,
+                    atol=2e-2,
+                )
