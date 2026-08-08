@@ -50,7 +50,10 @@ class Configurable:
                 if hasattr(val, "to_dict"):
                     return val.to_dict()
                 elif dataclasses.is_dataclass(val):
-                    return dataclasses.asdict(val)
+                    return {
+                        f.name: _convert(getattr(val, f.name))
+                        for f in dataclasses.fields(val)
+                    }
                 elif isinstance(val, (list, tuple)):
                     return type(val)(_convert(v) for v in val)
                 elif isinstance(val, dict):
