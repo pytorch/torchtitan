@@ -7,6 +7,8 @@
 """Overlap the trainer->generator weight handoff with the next training step."""
 
 import asyncio
+import logging
+import os
 import time
 
 from torchtitan.experiments.rl.components.work_buffer import RolloutGroupWorkBuffer
@@ -15,6 +17,19 @@ from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
 )
 from torchtitan.observability import structured_logger as sl
+
+
+def quiet_torchstore_transport_log() -> None:
+    """Suppress torchstore's per-op transport-resolve INFO line unless asked for it.
+
+    torchstore logs "[ts-transport] resolved=..." on every put/get, far too noisy for a
+    training run, but it is also the only record of which transport a transfer used.
+    Setting the level on this logger explicitly would override any root level, so honor
+    torchstore's own TORCHSTORE_LOG_LEVEL: quiet by default, verbatim when asked.
+    """
+    if "TORCHSTORE_LOG_LEVEL" not in os.environ:
+        logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
+
 
 # dummy no-op for step 0, used in WeightSyncManager
 async def _noop() -> None:

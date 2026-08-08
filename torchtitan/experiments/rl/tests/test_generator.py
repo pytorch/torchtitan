@@ -310,6 +310,23 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
         )
 
 
+@pytest.mark.parametrize("example", ["alphabet_sort", "dapo_math", "search_r1"])
+def test_shipped_configs_do_not_bake_in_manual_cpu_stage_weight_sync(example):
+    # Staging is a fabric property, not a recipe property: a config that baked it in
+    # would change the weight-sync path for every reuser.
+    # importorskip so an example gated behind optional deps (dapo_math) reports as
+    # skipped rather than silently narrowing what this asserts over.
+    config_registry = pytest.importorskip(
+        f"torchtitan.experiments.rl.examples.{example}.config_registry"
+    )
+    for name in dir(config_registry):
+        factory = getattr(config_registry, name)
+        if name.startswith("rl_") and callable(factory):
+            assert (
+                factory().generator.manual_cpu_stage_weight_sync is False
+            ), f"{example}.{name} bakes in manual_cpu_stage_weight_sync"
+
+
 # --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---
 
 

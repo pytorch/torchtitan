@@ -36,6 +36,9 @@ from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
     patch_bmm_for_batch_invariance,
 )
+from torchtitan.experiments.rl.components.weight_sync import (
+    quiet_torchstore_transport_log,
+)
 from torchtitan.experiments.rl.models.vllm_registry import (
     InferenceParallelismConfig,
     register_to_vllm,
@@ -727,6 +730,17 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
+        manual_cpu_stage_weight_sync: bool = False
+        """Land the weight-sync GET in a host state dict and copy H2D, instead of letting
+        torchstore fill vLLM's live GPU params in place. Set this where registering GPU memory
+        as the RDMA destination fails; it costs a full host mirror plus one H2D copy per sync.
+        Only affects transports that register the destination (MonarchRDMA, TorchComms, or
+        "auto" resolving to one) -- see
+        ``torchtitan/experiments/rl/docs/weight_sync_transport.md``.
+
+        TODO: remove once torchstore stages CUDA destinations in the transports that cannot
+        register them, the way GlooTransportBuffer already does."""
+
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -768,8 +782,7 @@ class VLLMGenerator(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
-        # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
-        logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
+        quiet_torchstore_transport_log()
         sl.init_structured_logger(
             source="rl_generator",
             output_dir=output_dir,
@@ -1247,7 +1260,28 @@ class VLLMGenerator(Actor, Configurable):
         model_sd = model.model.state_dict()
         if get_spmd_backend() == "spmd_types":
             await self._get_spmd_state_dict(model_sd, model=model)
+        elif self.config.manual_cpu_stage_weight_sync:
+            cpu_state_dict = {
+                name: torch.empty_like(tensor, device="cpu")
+                for name, tensor in model_sd.items()
+                if isinstance(tensor, torch.Tensor)
+            }
+            await ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=cpu_state_dict,
+                strict=False,
+                direct_rdma=False,
+            )
+            with torch.no_grad():
+                for name, tensor in model_sd.items():
+                    if isinstance(tensor, torch.Tensor):
+                        tensor.copy_(cpu_state_dict[name])
         else:
+            # Direct path (the default): torchstore fills vLLM's live GPU params in
+            # place. Fewer copies and no host mirror, but it makes those params the
+            # RDMA destination, so the NIC has to register GPU memory. Where that
+            # registration fails, pass --generator.manual-cpu-stage-weight-sync (see the
+            # config field's docstring).
             await ts.get_state_dict(
                 "model_state_dict",
                 user_state_dict=model_sd,

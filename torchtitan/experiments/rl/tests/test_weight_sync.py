@@ -4,16 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for WeightSyncManager.
+"""Unit tests for the trainer->generator weight sync: its scheduling and its transport.
 
-It overlaps the trainer->generator weight handoff with the next training step:
+`WeightSyncManager` overlaps the handoff with the next training step:
 `start_async_push_pull` fires push -> pull -> buffer-slot release in the background,
 and the loop joins each leg with `wait_prev_*`. These tests use fakes for the
 trainer actor, generator router, and group buffer (no GPU / Monarch / TorchStore).
+
+The weight_sync_transport tests import the controller and torchstore inside the
+function bodies (as `test_generator.py` does), keeping the controller's import graph
+off module collection.
 """
 
 import asyncio
 import contextlib
+
+import pytest
 
 from torchtitan.experiments.rl.components.weight_sync import WeightSyncManager
 
@@ -226,3 +232,85 @@ def test_push_exception_propagates_through_wait() -> None:
         assert raised
 
     asyncio.run(run())
+
+
+# --- weight-sync transport selection (Controller.Config.weight_sync_transport) ---
+
+
+def _flex_config():
+    from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+        rl_grpo_qwen3_0_6b_flex,
+    )
+
+    return rl_grpo_qwen3_0_6b_flex()
+
+
+def test_weight_sync_transport_defaults_to_auto():
+    # "auto" must stay the field default: it is the converged setting, and it leaves
+    # torchstore free to pick SharedMemory same-host and RDMA cross-host.
+    import dataclasses
+
+    from torchstore.transport import TransportType
+
+    from torchtitan.experiments.rl.controller import _WEIGHT_SYNC_TRANSPORTS, Controller
+
+    fields = {f.name: f for f in dataclasses.fields(Controller.Config)}
+    default = fields["weight_sync_transport"].default
+    assert default == "auto"
+    assert _WEIGHT_SYNC_TRANSPORTS[default] is TransportType.Unset
+
+
+def test_weight_sync_transport_map_covers_exactly_the_supported_values():
+    # Asserting the key set (not just individual entries) makes adding a transport
+    # without a test fail here.
+    from torchstore.transport import TransportType
+
+    from torchtitan.experiments.rl.controller import _WEIGHT_SYNC_TRANSPORTS
+
+    assert _WEIGHT_SYNC_TRANSPORTS == {
+        "auto": TransportType.Unset,
+        "gloo": TransportType.Gloo,
+        "monarch_rdma": TransportType.MonarchRDMA,
+        "monarch_rpc": TransportType.MonarchRPC,
+        "torchcomms": TransportType.TorchComms,
+    }
+
+
+def test_unknown_weight_sync_transport_is_rejected_at_config_construction():
+    # The dial has to fail at config time, not mid-setup after the meshes are spawned.
+    import dataclasses
+
+    with pytest.raises(ValueError, match="Unknown weight_sync_transport"):
+        dataclasses.replace(_flex_config(), weight_sync_transport="rdma")
+
+
+def test_shared_memory_weight_sync_transport_is_rejected():
+    # A plausible-looking value that must not be accepted: torchstore does no
+    # availability check on a pinned transport, so it would silently make every
+    # cross-host transfer wrong.
+    import dataclasses
+
+    with pytest.raises(ValueError, match="shared_memory is not selectable"):
+        dataclasses.replace(_flex_config(), weight_sync_transport="shared_memory")
+
+
+def test_flex_config_keeps_auto_weight_sync_transport():
+    # The flex config is the GB300 multi-node vehicle; the transport dial is a
+    # benchmarking knob and must not silently pin the converged 2-node path.
+    assert _flex_config().weight_sync_transport == "auto"
+
+
+def test_auto_matches_an_unconfigured_local_rank_strategy():
+    # Regression guard: "auto" must be a strict no-op, i.e. passing it explicitly is
+    # indistinguishable from the LocalRankStrategy() call this replaced.
+    from torchstore import LocalRankStrategy
+    from torchstore.transport import TransportType
+
+    from torchtitan.experiments.rl.controller import _WEIGHT_SYNC_TRANSPORTS
+
+    default = LocalRankStrategy()
+    pinned_auto = LocalRankStrategy(
+        default_transport_type=_WEIGHT_SYNC_TRANSPORTS["auto"]
+    )
+    assert default.default_transport_type is TransportType.Unset
+    assert pinned_auto.default_transport_type is default.default_transport_type

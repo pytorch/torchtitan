@@ -104,6 +104,7 @@ import torchstore as ts
 import tyro
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
+from torchstore.transport import TransportType
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
@@ -140,6 +141,19 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
+
+# Config value -> TorchStore transport pin for the trainer->generator weight sync.
+# "torchcomms" is the only pin torchstore checks for availability (it raises
+# RuntimeError); the others resolve through a plain lookup, so an unavailable backend
+# fails later (MonarchRDMA) or silently proceeds (Gloo). SharedMemory is omitted on
+# purpose -- see the ValueError in Config.__post_init__.
+_WEIGHT_SYNC_TRANSPORTS: dict[str, TransportType] = {
+    "auto": TransportType.Unset,
+    "gloo": TransportType.Gloo,
+    "monarch_rdma": TransportType.MonarchRDMA,
+    "monarch_rpc": TransportType.MonarchRPC,
+    "torchcomms": TransportType.TorchComms,
+}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -315,6 +329,16 @@ class Controller(Configurable):
         )
         """PolicyTrainer config. Controls optimizer, training, parallelism."""
 
+        weight_sync_transport: str = "auto"
+        """TorchStore transport for the trainer->generator weight sync.
+
+        "auto" leaves torchstore's per-transfer availability cascade in place:
+        SharedMemory for same-host, then TorchComms, MonarchRDMA, Gloo cross-host.
+        Any other value pins EVERY transfer to that one transport, same-host
+        transfers included, which is what makes a transport comparable in isolation.
+        Valid: "auto", "gloo", "monarch_rdma", "monarch_rpc", "torchcomms".
+        """
+
         # TODO: put generator, num generators and generator router in a separate config
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
@@ -341,6 +365,13 @@ class Controller(Configurable):
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
+                )
+            if self.weight_sync_transport not in _WEIGHT_SYNC_TRANSPORTS:
+                raise ValueError(
+                    f"Unknown weight_sync_transport {self.weight_sync_transport!r}; "
+                    f"valid values are {sorted(_WEIGHT_SYNC_TRANSPORTS)}. "
+                    "shared_memory is not selectable: it is same-host only, and "
+                    "pinning it would route cross-host transfers through it too."
                 )
             if self.generator.checkpoint.enable:
                 raise ValueError(
@@ -625,14 +656,59 @@ class Controller(Configurable):
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
 
+        # The only in-run record of which dials were requested; neither shows up in
+        # torchstore's own logging (see docs/weight_sync_transport.md).
+        logger.info(
+            "[weight-sync] weight_sync_transport=%s manual_cpu_stage_weight_sync=%s",
+            config.weight_sync_transport,
+            config.generator.manual_cpu_stage_weight_sync,
+        )
+        if config.weight_sync_transport != "auto":
+            logger.warning(
+                "weight_sync_transport=%r pins EVERY transfer to one transport, the "
+                "colocated trainer PUT included, so it gives up torchstore's "
+                "SharedMemory fast path and the PUT throughput it reports is not a "
+                "perf figure. Pin only to measure or bisect one transport end to "
+                "end; use 'auto' otherwise.",
+                config.weight_sync_transport,
+            )
+        if config.weight_sync_transport == "monarch_rdma":
+            logger.warning(
+                "weight_sync_transport='monarch_rdma' routes the same-host trainer PUT "
+                "over RDMA too, bypassing SharedMemory. Use 'auto' for the RDMA "
+                "cross-host path with SharedMemory same-host."
+            )
+        # "auto" is excluded on purpose: it resolves per transfer, so it can still land
+        # on MonarchRDMA or TorchComms cross-host, where the staging is load-bearing.
+        if config.generator.manual_cpu_stage_weight_sync and (
+            config.weight_sync_transport in ("gloo", "monarch_rpc")
+        ):
+            logger.warning(
+                "generator.manual_cpu_stage_weight_sync=True has no effect under "
+                "weight_sync_transport=%r -- that transport never registers the "
+                "destination buffer with a NIC. The host mirror and H2D copy are "
+                "pure overhead here; drop the flag, or use 'auto' / 'monarch_rdma' / "
+                "'torchcomms' if you meant to keep the transfer off GPU memory.",
+                config.weight_sync_transport,
+            )
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
         # with the weight source for faster data access in the non-RDMA path.
         # LocalRankStrategy: routes each process to a storage volume based on
         #   LOCAL_RANK, so colocated processes share the same volume.
+        # default_transport_type: rides on every StorageVolumeRef, so this one kwarg
+        #   covers the trainer PUT and every generator GET on every node. Unset
+        #   ("auto") keeps torchstore's per-transfer resolution.
         # https://github.com/meta-pytorch/torchstore
         with sl.log_trace_span("torchstore_init"):
-            await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
+            await ts.initialize(
+                mesh=trainer_mesh,
+                strategy=ts.LocalRankStrategy(
+                    default_transport_type=_WEIGHT_SYNC_TRANSPORTS[
+                        config.weight_sync_transport
+                    ]
+                ),
+            )
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
         # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
