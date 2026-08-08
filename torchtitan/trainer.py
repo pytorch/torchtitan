@@ -188,9 +188,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         def maybe_log(self) -> None:
             if self.debug.print_config:
-                logger.info(
-                    f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
+                ranks = self.debug.print_config_ranks
+                rank = (
+                    torch.distributed.get_rank()
+                    if torch.distributed.is_initialized()
+                    else 0
                 )
+                if not ranks or rank in ranks:
+                    logger.info(
+                        f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
+                    )
 
             if self.debug.save_config_file is not None:
                 config_file = os.path.join(
