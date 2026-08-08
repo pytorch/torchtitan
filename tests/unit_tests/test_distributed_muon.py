@@ -267,7 +267,7 @@ class _DistributedMuonTestBase(DTensorTestBase):
                     ),
                 }
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={},
@@ -404,7 +404,7 @@ class TestDistributedMuonSingleRank(_DistributedMuonTestBase):
                     "compute_sharding": MuonComputeSharding(placement=Owned()),
                 }
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={"layers.0.weight": 0},
@@ -456,7 +456,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         ),
                     }
                 ],
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn=owners,
@@ -469,7 +469,10 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             torch.arange(24, device=self.device).reshape(4, 2, 3).float(), 0
         )
         optimizer = build(local_blocks, "local_blocks", Shard(0))
-        self.assertIs(optimizer._plans[0].local_items[0].param, local_blocks)
+        self.assertIs(
+            optimizer._plans[0].unredistributed_items[0].param,
+            local_blocks,
+        )
         local_blocks.grad = distribute_tensor(
             torch.ones(4, 2, 3, device=self.device),
             mesh,
@@ -577,7 +580,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         ),
                     }
                 ],
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("*.redistributed",),
                         owner_rank_by_fqn={},
@@ -603,7 +606,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         ),
                     }
                 ],
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={},
@@ -658,7 +661,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         "compute_sharding": compute_sharding,
                     }
                 ],
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn=(
@@ -823,7 +826,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     ),
                 }
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={},
@@ -923,7 +926,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         ),
                     }
                 ],
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={"layers.0.first": 0},
@@ -935,7 +938,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         with self.assertRaisesRegex(ValueError, "exactly cover"):
             build_distributed_muon(
                 params,
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={"layers.0.first": 0},
@@ -948,7 +951,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         with self.assertRaisesRegex(ValueError, "outside its process group"):
             build_distributed_muon(
                 params,
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={
@@ -974,7 +977,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         "compute_sharding": MuonComputeSharding(placement=Owned()),
                     }
                 ],
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={"layers.0.redistributed": self.rank},
@@ -992,7 +995,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         "compute_sharding": MuonComputeSharding(placement=Owned()),
                     }
                 ],
-                bucket_spec=[
+                bucket_specs=[
                     BucketSpec(
                         patterns=("layers.0.*",),
                         owner_rank_by_fqn={"layers.0.redistributed": 0},
@@ -1015,7 +1018,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     "compute_sharding": MuonComputeSharding(placement=Owned()),
                 }
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={"layers.0.redistributed": 0},
@@ -1042,7 +1045,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     "compute_sharding": MuonComputeSharding(placement=Owned()),
                 }
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={"layers.0.weight": 1},
@@ -1121,7 +1124,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     ),
                 },
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={},
@@ -1224,7 +1227,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     "compute_sharding": MuonComputeSharding(placement=Owned()),
                 }
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={"layers.0.weight": 0},
@@ -1719,7 +1722,7 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
                 }
                 for param, name in zip(params, names, strict=True)
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=(name,),
                     owner_rank_by_fqn={name: 1},
@@ -1787,7 +1790,7 @@ class TestDistributedMuonPipeline(_DistributedMuonTestBase):
                     ),
                 },
             ],
-            bucket_spec=[
+            bucket_specs=[
                 BucketSpec(
                     patterns=("layers.0.*",),
                     owner_rank_by_fqn={"layers.0.redistributed": 0},
