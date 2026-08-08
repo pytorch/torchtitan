@@ -1228,6 +1228,60 @@ class TestTraceDTensor(unittest.TestCase):
             torch.testing.assert_close(actual, expected)
 
 
+class TestMetadataPropagationUnit(unittest.TestCase):
+    """CPU-only unit tests for _copy_fwd_metadata_to_bw_nodes."""
+
+    def test_only_adjacent_dangling_seq_uses_next_forward_metadata(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+
+        fwd_prev = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        fwd_prev.meta["seq_nr"] = 10
+        fwd_prev.meta["custom"] = {"module_fqn": "prev"}
+
+        fwd_target = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd_prev, 2))
+        fwd_target.meta["seq_nr"] = 12
+        fwd_target.meta["custom"] = {"module_fqn": "loss"}
+        fwd_target.meta["nn_module_stack"] = {"loss": ("loss", "Loss")}
+        fwd_target.meta["stack_trace"] = "loss stack"
+
+        fwd_after = graph.call_function(torch.ops.aten.sub.Tensor, args=(fwd_target, 1))
+        fwd_after.meta["seq_nr"] = 15
+        fwd_after.meta["custom"] = {"module_fqn": "after"}
+
+        bwd_dangling = graph.call_function(
+            torch.ops.aten.neg.default, args=(fwd_after,)
+        )
+        bwd_dangling.meta["seq_nr"] = 11
+        bwd_dangling.meta["autograd_backward"] = True
+
+        bwd_exact = graph.call_function(torch.ops.aten.relu.default, args=(fwd_after,))
+        bwd_exact.meta["seq_nr"] = 12
+        bwd_exact.meta["autograd_backward"] = True
+
+        unmatched_bwd_nodes = []
+        for seq_nr in (9, 13, 14, 16):
+            bwd = graph.call_function(torch.ops.aten.neg.default, args=(fwd_after,))
+            bwd.meta["seq_nr"] = seq_nr
+            bwd.meta["autograd_backward"] = True
+            unmatched_bwd_nodes.append(bwd)
+
+        graph.output((bwd_dangling, bwd_exact, *unmatched_bwd_nodes))
+        gm = torch.fx.GraphModule(nn.Module(), graph)
+
+        _copy_fwd_metadata_to_bw_nodes(gm)
+
+        self.assertEqual(bwd_dangling.meta["custom"]["module_fqn"], "loss")
+        self.assertEqual(
+            bwd_dangling.meta["nn_module_stack"],
+            {"loss": ("loss", "Loss")},
+        )
+        self.assertEqual(bwd_dangling.meta["stack_trace"], "loss stack")
+        self.assertEqual(bwd_exact.meta["custom"]["module_fqn"], "loss")
+        for bwd in unmatched_bwd_nodes:
+            self.assertNotIn("custom", bwd.meta)
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMetadataPropagation(unittest.TestCase):
     """Tests for _copy_fwd_metadata_to_bw_nodes."""
