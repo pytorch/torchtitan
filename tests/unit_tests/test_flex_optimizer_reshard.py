@@ -160,7 +160,8 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         runtime._context = context
 
         plans = tuple(
-            Mock(redistributed_items=(object(),), local_items=()) for _ in range(3)
+            Mock(redistributed_items=(object(),), unredistributed_items=())
+            for _ in range(3)
         )
         plan_names = {plan: f"bucket_{index}" for index, plan in enumerate(plans)}
         events = []
@@ -422,7 +423,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         self.assertEqual(received_owner_ranks, [None])
         self.assertEqual(result.ordered_items, (item,))
         plan = result.plans[0]
-        self.assertEqual(plan.local_items, ())
+        self.assertEqual(plan.unredistributed_items, ())
         self.assertEqual(plan.redistributed_items, (item,))
         self.assertIs(plan.redistribution_plans[0], redistribution_plan)
         self.assertEqual(
@@ -535,7 +536,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             local_participant=13,
         )
         bucket = _BucketPlan(
-            local_items=(),
+            unredistributed_items=(),
             redistributed_items=(item,),
             redistribution_plans=(plan,),
             group=group,
@@ -581,7 +582,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             local_participant=local_participant,
         )
         bucket = _BucketPlan(
-            local_items=(),
+            unredistributed_items=(),
             redistributed_items=(item,),
             redistribution_plans=(redistribution_plan,),
             group=group,

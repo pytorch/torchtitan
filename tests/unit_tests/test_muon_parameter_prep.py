@@ -47,12 +47,12 @@ class TestMuonParameterPrep(unittest.TestCase):
             "param_names": ["layers.0.wkv_a.weight"],
             "compute_sharding": MuonComputeSharding(placement=Owned()),
         }
-        bucket_spec = ()
+        bucket_specs = ()
 
         with mock.patch.object(DistributedMuon, "__init__", return_value=None) as init:
             optimizer = build_distributed_muon(
                 [group, identity_group],
-                bucket_spec=bucket_spec,
+                bucket_specs=bucket_specs,
                 lr=0.1,
             )
 
@@ -61,7 +61,7 @@ class TestMuonParameterPrep(unittest.TestCase):
         prepared = init.call_args.kwargs["_prepared_compute_views"]
         init.assert_called_once_with(
             core_groups,
-            bucket_spec=bucket_spec,
+            bucket_specs=bucket_specs,
             _prepared_compute_views=prepared,
             lr=0.1,
         )
@@ -122,7 +122,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                                 ),
                             }
                         ],
-                        bucket_spec=(),
+                        bucket_specs=(),
                     )
 
         with self.assertRaisesRegex(ValueError, "must be aligned"):
@@ -134,7 +134,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                         "compute_sharding": MuonComputeSharding(placement=Shard(0)),
                     }
                 ],
-                bucket_spec=(),
+                bucket_specs=(),
             )
 
     def test_builder_requires_dtensor_storage(self):
@@ -147,7 +147,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                         "compute_sharding": MuonComputeSharding(placement=Owned()),
                     }
                 ],
-                bucket_spec=(),
+                bucket_specs=(),
             )
 
     def test_builder_validates_all_storage_shards_before_construction(self):
@@ -171,7 +171,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                             ),
                         }
                     ],
-                    bucket_spec=(),
+                    bucket_specs=(),
                 )
 
         param.to_local.assert_not_called()
@@ -197,7 +197,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                         ),
                     }
                 ],
-                bucket_spec=(),
+                bucket_specs=(),
             )
 
 
