@@ -359,17 +359,13 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
-        # TODO(pianpwk): Remove this once MoE combine can derive the local
-        # sequence shape directly from the input layout.
-        input_seq_tp_sharded: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
-        self.input_seq_tp_sharded = config.input_seq_tp_sharded
         # Sequence-shard count used by EP padding/combine. Set in
-        # parallelize(); stays 1 unless both EP and TP/SP are active.
+        # parallelize(); stays 1 unless both EP and TP are active.
         self.expert_sequence_parallel_size = 1
         self.routed_experts = config.routed_experts.build()
         self.router = config.router.build()
@@ -413,18 +409,15 @@ class MoE(Module):
         DTensors; the DTensor->local conversion happens at the GroupedExperts
         boundary. GroupedExperts operates on local tensors.
         """
-        # TODO: Remove this once S(1) -> P supports uneven sequence shards.
         # For MoE-internal sequence sharding, physically pad L to a TP multiple
         # so each TP rank gets the same local token count and combine output shape.
+        # TODO(jessicazhong): Move sequence padding outside the model code; until
+        # then, assume the global sequence length is evenly divisible by the TP
+        # size when dense SP is enabled.
         original_L = x_BLD.shape[1]
-        if self.input_seq_tp_sharded or self.expert_sequence_parallel_size == 1:
-            # Dense SP preserves S(1); EP=1 does not sequence-shard routed tokens.
-            seq_pad = 0
-        else:
-            # This input has not yet been sequence-sharded for the MoE region.
-            seq_pad = (-original_L) % self.expert_sequence_parallel_size
-            if seq_pad:
-                x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
+        seq_pad = (-original_L) % self.expert_sequence_parallel_size
+        if seq_pad:
+            x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
