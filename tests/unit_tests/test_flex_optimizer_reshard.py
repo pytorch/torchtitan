@@ -15,26 +15,36 @@ from torch.distributed.tensor import DTensor, Shard
 from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
     _bind_bucket_configs,
     _BucketedRedistributionRuntime,
-    _BucketPlan,
     _BucketWork,
     _BufferSlot,
     _build_bucket_plans,
-    _build_owned_bucket_plans,
+    _build_replicated_redistribution_plan,
+    _build_single_participant_redistribution_plan,
     _compute_redistributed,
     _finalize_redistributed,
+    _LocalBucketPlan,
     _lower_packed_all_to_all,
     _PackedAllToAllSchedule,
     _ParticipantPartition,
     _prepare_redistributed,
+    _RedistributionBucketPlan,
     _RedistributionGroup,
     _RedistributionPlan,
     _tensor_region_view,
     _TensorRegion,
     _TensorRegionRoute,
-    assign_balanced_owners,
+    _validate_bucket_plans_across_ranks,
     BucketConfig,
     BucketSpec,
 )
+
+
+@dataclass(frozen=True)
+class _BucketBindingItem:
+    fqn: str
+    storage: DTensor
+    requires_redistribution: bool
+    required_storage_mesh_axis: int | None = None
 
 
 def _fragmented_partition_plan(
@@ -229,26 +239,6 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         self.assertEqual(context.slots[0].communication_buffers.call_count, 2)
         self.assertEqual(context.slots[1].communication_buffers.call_count, 1)
 
-    def test_balanced_owner_assignment(self):
-        self.assertEqual(
-            assign_balanced_owners(
-                [("a", "b"), ("c",)],
-                {"a": 8, "b": 4, "c": 4},
-                num_ranks=2,
-                initial_memory_by_rank=(0, 4),
-            ),
-            ({"a": 0, "b": 1}, {"c": 0}),
-        )
-
-        owners = {"a": 0}
-        config = BucketConfig(
-            patterns=("a",),
-            owner_rank_by_fqn=owners,
-            mesh_axes=("optimizer",),
-        )
-        owners["a"] = 1
-        self.assertEqual(config.owner_rank_by_fqn, {"a": 0})
-
     def test_bucket_config_requires_exactly_one_mesh_axis(self):
         for mesh_axes in ((), ("optimizer", "replicate")):
             with self.subTest(mesh_axes=mesh_axes), self.assertRaisesRegex(
@@ -256,7 +246,6 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             ):
                 BucketConfig(
                     patterns=("*",),
-                    owner_rank_by_fqn={},
                     mesh_axes=mesh_axes,
                 )
 
@@ -264,29 +253,245 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         redistributed_mesh = Mock(spec=DeviceMesh)
         redistributed_mesh.ndim = 1
         redistributed_storage_mesh = MagicMock(spec=DeviceMesh)
+        redistributed_storage_mesh.mesh_dim_names = ("optimizer",)
         redistributed_storage_mesh.__getitem__.return_value = redistributed_mesh
         compute_ready_storage_mesh = MagicMock(spec=DeviceMesh)
-        redistributed = Mock(device_mesh=redistributed_storage_mesh)
-        compute_ready = Mock(device_mesh=compute_ready_storage_mesh)
+        compute_ready_storage_mesh.mesh_dim_names = ("expert",)
+        redistributed = Mock(spec=DTensor)
+        redistributed.device_mesh = redistributed_storage_mesh
+        compute_ready = Mock(spec=DTensor)
+        compute_ready.device_mesh = compute_ready_storage_mesh
+        items = (
+            _BucketBindingItem("layers.redistributed", redistributed, True),
+            _BucketBindingItem("layers.compute_ready", compute_ready, False),
+        )
 
         specs = _bind_bucket_configs(
             (
                 BucketConfig(
                     patterns=("layers.*",),
-                    owner_rank_by_fqn={"layers.redistributed": 0},
                     mesh_axes=("optimizer",),
                 ),
             ),
-            {
-                "layers.redistributed": redistributed,
-                "layers.compute_ready": compute_ready,
-            },
+            items,
+            get_fqn=lambda item: item.fqn,
+            get_storage_dtensor=lambda item: item.storage,
+            requires_redistribution=lambda item: item.requires_redistribution,
+            get_required_storage_mesh_axis=lambda item: (
+                item.required_storage_mesh_axis
+            ),
         )
 
         self.assertEqual(len(specs), 1)
         self.assertIs(specs[0].mesh, redistributed_mesh)
         redistributed_storage_mesh.__getitem__.assert_called_once_with(("optimizer",))
         compute_ready_storage_mesh.__getitem__.assert_not_called()
+
+    def test_bucket_config_rejects_inconsistent_redistribution_meshes(self):
+        first_mesh = Mock(spec=DeviceMesh)
+        first_mesh.ndim = 1
+        first_mesh.mesh = torch.tensor([0, 1])
+        second_mesh = Mock(spec=DeviceMesh)
+        second_mesh.ndim = 1
+        second_mesh.mesh = torch.tensor([1, 0])
+        first_storage_mesh = MagicMock(spec=DeviceMesh)
+        first_storage_mesh.mesh_dim_names = ("optimizer",)
+        first_storage_mesh.__getitem__.return_value = first_mesh
+        second_storage_mesh = MagicMock(spec=DeviceMesh)
+        second_storage_mesh.mesh_dim_names = ("optimizer",)
+        second_storage_mesh.__getitem__.return_value = second_mesh
+        first = Mock(spec=DTensor)
+        first.device_mesh = first_storage_mesh
+        second = Mock(spec=DTensor)
+        second.device_mesh = second_storage_mesh
+        items = (
+            _BucketBindingItem("layers.first", first, True),
+            _BucketBindingItem("layers.second", second, True),
+        )
+
+        with self.assertRaisesRegex(ValueError, "inconsistent communication meshes"):
+            _bind_bucket_configs(
+                (
+                    BucketConfig(
+                        patterns=("layers.*",),
+                        mesh_axes=("optimizer",),
+                    ),
+                ),
+                items,
+                get_fqn=lambda item: item.fqn,
+                get_storage_dtensor=lambda item: item.storage,
+                requires_redistribution=lambda item: item.requires_redistribution,
+                get_required_storage_mesh_axis=lambda item: (
+                    item.required_storage_mesh_axis
+                ),
+            )
+        first_storage_mesh.__getitem__.assert_called_once_with(("optimizer",))
+        second_storage_mesh.__getitem__.assert_called_once_with(("optimizer",))
+
+    def test_bucket_config_does_not_bind_mesh_when_none_redistribute(self):
+        storage_meshes = tuple(MagicMock(spec=DeviceMesh) for _ in range(2))
+        for storage_mesh in storage_meshes:
+            storage_mesh.mesh_dim_names = ("unrelated",)
+        storages = tuple(Mock(spec=DTensor) for _ in range(2))
+        for storage, storage_mesh in zip(storages, storage_meshes, strict=True):
+            storage.device_mesh = storage_mesh
+        items = tuple(
+            _BucketBindingItem(f"layers.{index}", storage, False)
+            for index, storage in enumerate(storages)
+        )
+        get_storage_dtensor = Mock(side_effect=lambda item: item.storage)
+        get_required_storage_mesh_axis = Mock(
+            side_effect=lambda item: item.required_storage_mesh_axis
+        )
+
+        specs = _bind_bucket_configs(
+            (
+                BucketConfig(
+                    patterns=("layers.*",),
+                    mesh_axes=("optimizer",),
+                ),
+            ),
+            items,
+            get_fqn=lambda item: item.fqn,
+            get_storage_dtensor=get_storage_dtensor,
+            requires_redistribution=lambda item: item.requires_redistribution,
+            get_required_storage_mesh_axis=get_required_storage_mesh_axis,
+        )
+
+        self.assertEqual(len(specs), 1)
+        self.assertIsNone(specs[0].mesh)
+        get_storage_dtensor.assert_not_called()
+        get_required_storage_mesh_axis.assert_not_called()
+        for storage_mesh in storage_meshes:
+            storage_mesh.__getitem__.assert_not_called()
+
+    def test_local_bucket_plan_has_no_group_or_collective_validation(self):
+        @dataclass(frozen=True)
+        class Item:
+            fqn: str
+            tensor: DTensor
+
+        tensor = Mock(spec=DTensor)
+        item = Item("layers.0.weight", tensor)
+        resolve_plans = Mock()
+
+        with patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "_redistribution_group"
+        ) as redistribution_group:
+            result = _build_bucket_plans(
+                (item,),
+                (
+                    BucketSpec(
+                        patterns=("layers.0.*",),
+                        mesh=None,
+                    ),
+                ),
+                get_fqn=lambda value: value.fqn,
+                get_storage_dtensor=lambda value: value.tensor,
+                requires_redistribution=lambda _value: False,
+                resolve_redistribution_plans=resolve_plans,
+            )
+
+        self.assertEqual(result.ordered_items, (item,))
+        self.assertIsInstance(result.plans[0], _LocalBucketPlan)
+        self.assertEqual(result.plans[0].items, (item,))
+        redistribution_group.assert_not_called()
+        resolve_plans.assert_not_called()
+        with patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "dist.all_gather"
+        ) as all_gather:
+            _validate_bucket_plans_across_ranks(
+                result.plans,
+                item_signature=Mock(),
+            )
+        all_gather.assert_not_called()
+
+    def test_bucket_plan_requires_mesh_for_redistribution(self):
+        @dataclass(frozen=True)
+        class Item:
+            fqn: str
+            tensor: DTensor
+
+        item = Item("layers.0.weight", Mock(spec=DTensor))
+        with self.assertRaisesRegex(ValueError, "requires a communication mesh"):
+            _build_bucket_plans(
+                (item,),
+                (
+                    BucketSpec(
+                        patterns=("layers.0.*",),
+                        mesh=None,
+                    ),
+                ),
+                get_fqn=lambda value: value.fqn,
+                get_storage_dtensor=lambda value: value.tensor,
+                requires_redistribution=lambda _value: True,
+                resolve_redistribution_plans=Mock(),
+            )
+
+    def test_bucket_config_rejects_missing_redistribution_mesh_axis(self):
+        storage_mesh = MagicMock(spec=DeviceMesh)
+        storage_mesh.mesh_dim_names = ("expert",)
+        storage = Mock(spec=DTensor)
+        storage.device_mesh = storage_mesh
+        item = _BucketBindingItem("layers.weight", storage, True)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "mesh axis 'optimizer'.*parameter 'layers.weight'",
+        ):
+            _bind_bucket_configs(
+                (
+                    BucketConfig(
+                        patterns=("layers.*",),
+                        mesh_axes=("optimizer",),
+                    ),
+                ),
+                (item,),
+                get_fqn=lambda value: value.fqn,
+                get_storage_dtensor=lambda value: value.storage,
+                requires_redistribution=lambda value: (value.requires_redistribution),
+                get_required_storage_mesh_axis=lambda value: (
+                    value.required_storage_mesh_axis
+                ),
+            )
+
+        storage_mesh.__getitem__.assert_not_called()
+
+    def test_bucket_config_rejects_mesh_axis_different_from_storage_shard(self):
+        storage_mesh = MagicMock(spec=DeviceMesh)
+        storage_mesh.mesh_dim_names = ("replicate", "optimizer")
+        storage = Mock(spec=DTensor)
+        storage.device_mesh = storage_mesh
+        item = _BucketBindingItem(
+            "layers.weight",
+            storage,
+            True,
+            required_storage_mesh_axis=1,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "mesh axis 'replicate'.*storage shard axis 'optimizer'",
+        ):
+            _bind_bucket_configs(
+                (
+                    BucketConfig(
+                        patterns=("layers.*",),
+                        mesh_axes=("replicate",),
+                    ),
+                ),
+                (item,),
+                get_fqn=lambda value: value.fqn,
+                get_storage_dtensor=lambda value: value.storage,
+                requires_redistribution=lambda value: (value.requires_redistribution),
+                get_required_storage_mesh_axis=lambda value: (
+                    value.required_storage_mesh_axis
+                ),
+            )
+
+        storage_mesh.__getitem__.assert_not_called()
 
     def test_bucket_planner_preserves_empty_local_storage_region(self):
         @dataclass(frozen=True)
@@ -310,31 +515,37 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         mesh = Mock(spec=DeviceMesh)
         mesh.ndim = 1
 
+        redistribution_plan = _build_single_participant_redistribution_plan(
+            regions,
+            participants=group.participants,
+            compute_participant=3,
+            logical_shape=tuple(tensor.shape),
+        )
+
+        def resolve_plans(contexts):
+            self.assertEqual(len(contexts), 1)
+            context = contexts[0]
+            self.assertEqual(context.items, (item,))
+            self.assertIs(context.group, group)
+            return ((redistribution_plan,),)
+
         with patch(
-            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
-            "get_process_group_ranks",
-            return_value=[3, 7],
-        ), patch(
             "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
             "_redistribution_group",
             return_value=group,
-        ), patch(
-            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
-            "_dtensor_storage_regions",
-            return_value=regions,
         ):
-            result = _build_owned_bucket_plans(
+            result = _build_bucket_plans(
                 (item,),
                 (
                     BucketSpec(
                         patterns=("layers.0.*",),
-                        owner_rank_by_fqn={item.fqn: 0},
                         mesh=mesh,
                     ),
                 ),
                 get_fqn=lambda value: value.fqn,
-                storage_is_compute_ready=lambda _value: False,
                 get_storage_dtensor=lambda value: value.tensor,
+                requires_redistribution=lambda _value: True,
+                resolve_redistribution_plans=resolve_plans,
             )
 
         plan = result.plans[0]
@@ -348,7 +559,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             0,
         )
 
-    def test_bucket_planner_accepts_owner_free_redistribution(self):
+    def test_bucket_planner_accepts_optimizer_specific_redistribution(self):
         @dataclass(frozen=True)
         class Item:
             fqn: str
@@ -388,13 +599,13 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         )
         mesh = Mock(spec=DeviceMesh)
         mesh.ndim = 1
-        received_owner_ranks = []
 
-        def build_plan(_item, received_group, owner_rank):
-            self.assertIs(_item, item)
-            self.assertIs(received_group, group)
-            received_owner_ranks.append(owner_rank)
-            return redistribution_plan
+        def resolve_plans(contexts):
+            self.assertEqual(len(contexts), 1)
+            context = contexts[0]
+            self.assertEqual(context.items, (item,))
+            self.assertIs(context.group, group)
+            return ((redistribution_plan,),)
 
         with patch(
             "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
@@ -410,17 +621,15 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 (
                     BucketSpec(
                         patterns=("layers.0.*",),
-                        owner_rank_by_fqn={},
                         mesh=mesh,
                     ),
                 ),
                 get_fqn=lambda value: value.fqn,
-                requires_owner=lambda _value: False,
                 get_storage_dtensor=lambda value: value.tensor,
-                build_redistribution_plan=build_plan,
+                requires_redistribution=lambda _value: True,
+                resolve_redistribution_plans=resolve_plans,
             )
 
-        self.assertEqual(received_owner_ranks, [None])
         self.assertEqual(result.ordered_items, (item,))
         plan = result.plans[0]
         self.assertEqual(plan.unredistributed_items, ())
@@ -535,7 +744,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             participants=participants,
             local_participant=13,
         )
-        bucket = _BucketPlan(
+        bucket = _RedistributionBucketPlan(
             unredistributed_items=(),
             redistributed_items=(item,),
             redistribution_plans=(plan,),
@@ -581,7 +790,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             participants=participants,
             local_participant=local_participant,
         )
-        bucket = _BucketPlan(
+        bucket = _RedistributionBucketPlan(
             unredistributed_items=(),
             redistributed_items=(item,),
             redistribution_plans=(redistribution_plan,),
@@ -672,7 +881,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             (
                 (_TensorRegion((0, 0), (1, 3)),),
                 ValueError,
-                "do not cover",
+                "do not match the participant tensor shape",
             ),
         )
         for regions, error, message in invalid_partitions:
@@ -734,3 +943,67 @@ class TestFlexOptimizerReshard(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "participants must be unique"):
             _TensorRegionRoute(first, first, first, (3, 3), (3,))
+
+    def test_replica_holders_must_match_route_endpoints(self):
+        participants = (3, 7)
+        full = _TensorRegion((0, 0), (2, 3))
+        plan = _build_replicated_redistribution_plan(
+            (((3, 7), full),),
+            participants=participants,
+            logical_shape=full.shape,
+        )
+
+        self.assertEqual(
+            tuple(partition.logical_regions for partition in plan.storage_partitions),
+            ((full,), (full,)),
+        )
+        self.assertEqual(
+            tuple(partition.logical_regions for partition in plan.compute_partitions),
+            ((full,), (full,)),
+        )
+        route = plan.storage_to_compute_routes[0]
+        self.assertEqual(route.source_participants, participants)
+        self.assertEqual(route.destination_participants, participants)
+
+        local_schedule = _lower_packed_all_to_all(
+            (plan,),
+            storage_to_compute=True,
+            process_group=object(),
+            local_participant=3,
+        )
+        self.assertFalse(local_schedule.has_remote_transfers)
+        input_buffer = torch.arange(local_schedule.input_buffer_numel)
+        output_buffer = torch.empty_like(input_buffer)
+        with patch(
+            "torchtitan.components.distributed_optimizers."
+            "flex_optimizer_reshard.dist.all_to_all_single"
+        ) as collective:
+            local_schedule.execute(output_buffer, input_buffer)
+        collective.assert_not_called()
+        torch.testing.assert_close(output_buffer, input_buffer)
+
+        endpoint_cases = (
+            (
+                "source",
+                _TensorRegionRoute(full, full, full, (3,), participants),
+                _TensorRegionRoute(full, full, full, participants, (3,)),
+            ),
+            (
+                "destination",
+                _TensorRegionRoute(full, full, full, participants, (3,)),
+                _TensorRegionRoute(full, full, full, (3,), participants),
+            ),
+        )
+        for endpoint, forward, reverse in endpoint_cases:
+            with self.subTest(endpoint=endpoint), self.assertRaisesRegex(
+                ValueError,
+                "do not cover the participant partition",
+            ):
+                _RedistributionPlan(
+                    participants=participants,
+                    logical_shape=full.shape,
+                    storage_partitions=plan.storage_partitions,
+                    compute_partitions=plan.compute_partitions,
+                    storage_to_compute_routes=(forward,),
+                    compute_to_storage_routes=(reverse,),
+                )

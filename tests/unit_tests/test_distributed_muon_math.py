@@ -8,13 +8,14 @@ import itertools
 import unittest
 
 import torch
-from torchtitan.components.distributed_optimizers.muon import (
-    _adjust_learning_rate,
-    _compute_muon_update,
+from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
+    _apply_muon_update,
+    _compute_muon_direction,
+    _prepare_muon_input,
 )
 
 
-class TestDistributedMuonMath(unittest.TestCase):
+class TestMuonTensorOperations(unittest.TestCase):
     def test_two_steps_match_torch_muon(self):
         optimizer_kwargs = {
             "lr": 0.03,
@@ -47,28 +48,28 @@ class TestDistributedMuonMath(unittest.TestCase):
                     reference_param.grad = gradient.clone()
                     reference.step()
 
-                    actual_momentum.lerp_(gradient, 1 - optimizer_kwargs["momentum"])
-                    prepared = torch.lerp(
+                    prepared = _prepare_muon_input(
                         gradient,
                         actual_momentum,
-                        optimizer_kwargs["momentum"],
+                        momentum=optimizer_kwargs["momentum"],
+                        nesterov=optimizer_kwargs["nesterov"],
+                        out=torch.empty_like(gradient),
                     )
-                    update = _compute_muon_update(
+                    update = _compute_muon_direction(
                         prepared,
                         out=torch.empty_like(prepared),
                         ns_coefficients=optimizer_kwargs["ns_coefficients"],
                         ns_steps=optimizer_kwargs["ns_steps"],
                         eps=optimizer_kwargs["eps"],
                     )
-                    adjusted_lr = _adjust_learning_rate(
-                        optimizer_kwargs["lr"],
-                        optimizer_kwargs["adjust_lr_fn"],
-                        prepared.shape,
+                    _apply_muon_update(
+                        actual_param,
+                        update,
+                        lr=optimizer_kwargs["lr"],
+                        weight_decay=optimizer_kwargs["weight_decay"],
+                        adjust_lr_fn=optimizer_kwargs["adjust_lr_fn"],
+                        compute_matrix_shape=prepared.shape,
                     )
-                    actual_param.mul_(
-                        1 - optimizer_kwargs["lr"] * optimizer_kwargs["weight_decay"]
-                    )
-                    actual_param.add_(update, alpha=-adjusted_lr)
 
                 self.assertTrue(torch.equal(actual_param, reference_param))
                 self.assertTrue(
@@ -89,12 +90,12 @@ class TestDistributedMuonMath(unittest.TestCase):
             with self.subTest(shape=shape):
                 generator = torch.Generator().manual_seed(5)
                 prepared = torch.randn(shape, generator=generator)
-                batched = _compute_muon_update(
+                batched = _compute_muon_direction(
                     prepared, out=torch.empty_like(prepared), **kwargs
                 )
                 independent = torch.stack(
                     [
-                        _compute_muon_update(
+                        _compute_muon_direction(
                             matrix, out=torch.empty_like(matrix), **kwargs
                         )
                         for matrix in prepared
