@@ -11,7 +11,7 @@ from typing import Any
 
 import torch
 import torchstore as ts
-from monarch.actor import Actor, current_rank, endpoint
+from monarch.actor import Actor, concurrent_endpoint, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
@@ -489,7 +489,11 @@ class PolicyTrainer(Actor, Configurable):
         """
         return self.checkpointer.save(step, last_step=last_step)
 
-    @endpoint
+    # Concurrent, not a plain `@endpoint`: the controller fires this in the background
+    # specifically so the weight handoff overlaps the next training step. A plain
+    # endpoint holds the dispatch loop for the whole push, which serializes it against
+    # the next `forward_backward` and cancels that overlap.
+    @concurrent_endpoint
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
         """Stage model weights to a CPU StorageVolume for the generators to pull (TorchStore).
