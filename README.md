@@ -20,6 +20,7 @@
 
 
 ## Latest News
+- [2026/08] [TitanRL](torchtitan/experiments/rl) is a hackable RL stack for scaling and debugging. It reuses TorchTitan model definitions and kernels across training and vLLM generation and supports batch-invariant mode.
 - [2025/11] AMD released an [optimized fork](https://github.com/AMD-AGI/torchtitan-amd/tree/main) of `torchtitan` for AMD GPUs.
 - [2025/10] We released `torchtitan` [v0.2.0](https://github.com/pytorch/torchtitan/releases).
 - [2025/10] SkyPilot now supports `torchtitan`! See the tutorial [here](https://docs.skypilot.co/en/latest/examples/training/torchtitan.html).
@@ -41,8 +42,6 @@ The Guiding Principles when building `torchtitan`
 * Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
 
 `torchtitan` has been showcasing PyTorch's latest distributed training features, via support for pretraining Llama 3.1 LLMs of various sizes.
-
-[TitanRL](torchtitan/experiments/rl) is a hackable stack focused on scaling and debugging. It reuses TorchTitan model definitions and kernels across training and vLLM generation and supports batch-invariant mode.
 
 ## Contributing
 

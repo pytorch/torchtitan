@@ -3,12 +3,12 @@
 TitanRL is a hackable RL library built for scaling and debugging experiments where correctness and numerics are not optional. Main advantages:
 
 - **Unified model definition:** Most RL stacks connect a training model to a separate inference implementation. TitanRL runs the same TorchTitan model inside the trainer and vLLM, so new models and kernels are implemented once. This makes new architecture research easier and removes a major source of potential training/inference mismatch bugs.
-- **Batch invariance:** Batch composition and parallelism can still cause trainer and inference engines to produce different logits. In batch-invariant mode, supported trainer and generator configurations produce **bitwise-identical** log probabilities. This lets developers tell whether a mismatch is a real bug or expected numerical variation.
+- **Batch invariance:** Trainer and inference engines can produce different logits for the same input. In batch-invariant mode, supported configurations produce **bitwise-identical** log probabilities across different data-parallel layouts. This lets developers debug correctness during on-policy training, where numerical differences would otherwise make bugs difficult to isolate.
 - **One stack from pretraining to post-training.** Fork TorchTitan once and reuse its model definitions, kernels, and training components across the model lifecycle. This avoids wiring the same model across different libraries and enables faster development.
 
 Together, the unified model, batch-invariant mode, and single training stack provide a base that developers can verify, reshape, and optimize for their needs.
 
-Note: Unified-model inference is currently about 8% slower than vLLM's native model path. Batch invariance is significantly slower and should be used only for debugging.
+Note: Unified-model performance varies by model, input shape, and parallelism: it can trail native vLLM in inference-only workloads but outperform it end to end in some RL configurations. Batch invariance trades throughput for exact numerics and can be used for debugging or controlled on-policy studies.
 
 [Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
 
@@ -168,7 +168,7 @@ python -m torchtitan.experiments.rl.train \
 
 Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./docs/bitwise_parity.md) for configuration, supported layouts, verification, and limitations.
 
-For background, see [train/inference mismatch in asynchronous RL](https://yichuan-w.github.io/blog/GDN-train-inference-mismatch-asyncRL/), [Defeating Nondeterminism in LLM Inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/), and the [vLLM × TorchTitan bitwise study](https://blog.vllm.ai/2025/11/10/bitwise-consistent-train-inference.html).
+For background, see [train/inference mismatch in asynchronous RL](https://yichuan-w.github.io/blog/GDN-train-inference-mismatch-asyncRL/) and [Defeating Nondeterminism in LLM Inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/).
 
 ## Observability
 
