@@ -6,6 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import gzip
 import json
 import shutil
 import subprocess
@@ -19,6 +20,21 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+
+SUPPORTED_JSONL_PATTERNS = ("*.jsonl", "*.jsonl.gz", "*.jsonl.zst")
+
+
+def _input_files(input_dir: Path, pattern: str | None) -> list[Path]:
+    if pattern is not None:
+        return sorted(input_dir.glob(pattern))
+    return sorted(
+        {
+            path
+            for supported_pattern in SUPPORTED_JSONL_PATTERNS
+            for path in input_dir.glob(supported_pattern)
+        }
+    )
 
 
 def _iter_jsonl_zst(path: Path) -> Iterator[dict]:
@@ -41,9 +57,17 @@ def _iter_jsonl(path: Path) -> Iterator[dict]:
             yield json.loads(line)
 
 
+def _iter_jsonl_gz(path: Path) -> Iterator[dict]:
+    with gzip.open(path, mode="rt") as f:
+        for line in f:
+            yield json.loads(line)
+
+
 def _iter_records(path: Path) -> Iterator[dict]:
     if path.suffix == ".zst":
         yield from _iter_jsonl_zst(path)
+    elif path.suffix == ".gz":
+        yield from _iter_jsonl_gz(path)
     else:
         yield from _iter_jsonl(path)
 
@@ -86,6 +110,31 @@ class TokenBinWriter:
         )
         self.part_idx = int(progress.get("part_idx", len(self.data_files)))
         self.part_token_count = int(progress.get("part_token_count", 0))
+        self.current_tmp_rollback_source_file_idx = progress.get(
+            "current_tmp_rollback_source_file_idx"
+        )
+        self.current_tmp_rollback_record_idx = progress.get(
+            "current_tmp_rollback_record_idx", 0
+        )
+        self.current_tmp_rollback_token_offset = progress.get(
+            "current_tmp_rollback_token_offset", 0
+        )
+        self.current_tmp_rollback_num_documents = progress.get(
+            "current_tmp_rollback_num_documents"
+        )
+        self.current_tmp_rollback_num_tokens = progress.get(
+            "current_tmp_rollback_num_tokens"
+        )
+        if (
+            self.part_token_count > 0
+            and not self.data_files
+            and self.current_tmp_rollback_source_file_idx is None
+        ):
+            self.current_tmp_rollback_source_file_idx = 0
+            self.current_tmp_rollback_record_idx = 0
+            self.current_tmp_rollback_token_offset = 0
+            self.current_tmp_rollback_num_documents = 0
+            self.current_tmp_rollback_num_tokens = 0
 
         current_tmp_file = progress.get("current_tmp_file")
         self.current_path = (
@@ -93,9 +142,21 @@ class TokenBinWriter:
         )
         if self.current_path is not None:
             self.current_path.parent.mkdir(parents=True, exist_ok=True)
-            self.current_path.touch(exist_ok=True)
-            with self.current_path.open("r+b") as f:
-                f.truncate(self.part_token_count * 4)
+            expected_size = self.part_token_count * 4
+            if not self.current_path.exists():
+                if expected_size > 0:
+                    raise ValueError(
+                        f"progress.json points to missing tmp bin "
+                        f"{self.current_path}. Pass --overwrite to restart."
+                    )
+                self.current_path.touch()
+            current_size = self.current_path.stat().st_size
+            if current_size != expected_size:
+                raise ValueError(
+                    f"Tmp bin {self.current_path} size does not match "
+                    f"progress.json ({current_size} bytes vs {expected_size} "
+                    "bytes)."
+                )
 
     def _bin_name(self) -> str:
         return f"{self.output_prefix}-{self.part_idx:06d}.bin"
@@ -103,9 +164,22 @@ class TokenBinWriter:
     def _tmp_name(self) -> str:
         return self._bin_name() + ".tmp"
 
-    def _start_part(self) -> None:
+    def _start_part(
+        self,
+        *,
+        rollback_source_file_idx: int,
+        rollback_record_idx: int,
+        rollback_token_offset: int,
+        rollback_num_documents: int,
+        rollback_num_tokens: int,
+    ) -> None:
         self.current_path = self.output_dir / self._tmp_name()
         self.current_path.touch()
+        self.current_tmp_rollback_source_file_idx = rollback_source_file_idx
+        self.current_tmp_rollback_record_idx = rollback_record_idx
+        self.current_tmp_rollback_token_offset = rollback_token_offset
+        self.current_tmp_rollback_num_documents = rollback_num_documents
+        self.current_tmp_rollback_num_tokens = rollback_num_tokens
 
     def _flush(self) -> None:
         if not self.buffer:
@@ -114,7 +188,15 @@ class TokenBinWriter:
         _append_tokens(self.current_path, self.buffer)
         self.buffer.clear()
 
-    def _finish_part_if_full(self) -> None:
+    def _finish_part_if_full(
+        self,
+        *,
+        end_source_file_idx: int,
+        end_record_idx: int,
+        end_token_offset: int,
+        end_num_documents: int,
+        end_num_tokens: int,
+    ) -> None:
         if self.part_token_count < self.tokens_per_bin:
             return
         self._flush()
@@ -122,17 +204,47 @@ class TokenBinWriter:
         final_name = self._bin_name()
         self.current_path.replace(self.output_dir / final_name)
         self.data_files.append(
-            {"data_file": final_name, "num_tokens": self.part_token_count}
+            {
+                "data_file": final_name,
+                "num_tokens": self.part_token_count,
+                "end_source_file_idx": end_source_file_idx,
+                "end_record_idx": end_record_idx,
+                "end_token_offset": end_token_offset,
+                "end_num_documents": end_num_documents,
+                "end_num_tokens": end_num_tokens,
+            }
         )
         self.part_idx += 1
         self.part_token_count = 0
         self.current_path = None
+        self.current_tmp_rollback_source_file_idx = None
+        self.current_tmp_rollback_record_idx = 0
+        self.current_tmp_rollback_token_offset = 0
+        self.current_tmp_rollback_num_documents = None
+        self.current_tmp_rollback_num_tokens = None
 
-    def append(self, token_ids: list[int]) -> None:
-        offset = 0
+    def append(
+        self,
+        token_ids: list[int],
+        *,
+        source_file_idx: int,
+        record_idx: int,
+        token_offset_start: int,
+        num_documents_before: int,
+        num_tokens_before: int,
+    ) -> None:
+        offset = token_offset_start
         while offset < len(token_ids):
             if self.current_path is None:
-                self._start_part()
+                self._start_part(
+                    rollback_source_file_idx=source_file_idx,
+                    rollback_record_idx=record_idx,
+                    rollback_token_offset=offset,
+                    rollback_num_documents=num_documents_before,
+                    rollback_num_tokens=(
+                        num_tokens_before + offset - token_offset_start
+                    ),
+                )
 
             capacity = self.tokens_per_bin - self.part_token_count
             take = min(capacity, len(token_ids) - offset)
@@ -142,7 +254,17 @@ class TokenBinWriter:
 
             if len(self.buffer) >= self.chunk_size:
                 self._flush()
-            self._finish_part_if_full()
+            self._finish_part_if_full(
+                end_source_file_idx=source_file_idx,
+                end_record_idx=record_idx,
+                end_token_offset=offset,
+                end_num_documents=(
+                    num_documents_before + 1
+                    if offset == len(token_ids)
+                    else num_documents_before
+                ),
+                end_num_tokens=num_tokens_before + offset - token_offset_start,
+            )
 
     def checkpoint_state(self) -> dict[str, Any]:
         self._flush()
@@ -153,6 +275,17 @@ class TokenBinWriter:
             "current_tmp_file": (
                 self.current_path.name if self.current_path is not None else None
             ),
+            "current_tmp_rollback_source_file_idx": (
+                self.current_tmp_rollback_source_file_idx
+            ),
+            "current_tmp_rollback_record_idx": self.current_tmp_rollback_record_idx,
+            "current_tmp_rollback_token_offset": (
+                self.current_tmp_rollback_token_offset
+            ),
+            "current_tmp_rollback_num_documents": (
+                self.current_tmp_rollback_num_documents
+            ),
+            "current_tmp_rollback_num_tokens": self.current_tmp_rollback_num_tokens,
         }
 
     def close(self) -> list[dict[str, int | str]]:
@@ -166,6 +299,9 @@ class TokenBinWriter:
             self.part_idx += 1
             self.part_token_count = 0
             self.current_path = None
+            self.current_tmp_rollback_source_file_idx = None
+            self.current_tmp_rollback_num_documents = None
+            self.current_tmp_rollback_num_tokens = None
         return self.data_files
 
 
@@ -195,7 +331,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("./assets/hf/Olmo-3-1025-7B"),
     )
-    parser.add_argument("--pattern", default="*.jsonl.zst")
+    parser.add_argument(
+        "--pattern",
+        default=None,
+        help=(
+            "Glob for input files. Defaults to all supported JSONL formats: "
+            "*.jsonl, *.jsonl.gz, and *.jsonl.zst."
+        ),
+    )
     parser.add_argument("--text-field", default="text")
     parser.add_argument("--output-prefix", default="part")
     parser.add_argument("--tokens-per-bin", type=int, default=8_000_000_000)
@@ -216,6 +359,116 @@ def _load_progress(progress_path: Path) -> dict[str, Any] | None:
         return json.load(f)
 
 
+def _cursor_from_last_data_file(
+    progress: dict[str, Any],
+) -> tuple[int, int, int, int, int] | None:
+    data_files = progress.get("data_files", [])
+    if not data_files:
+        return None
+
+    last_data_file = data_files[-1]
+    required_keys = (
+        "end_source_file_idx",
+        "end_record_idx",
+        "end_token_offset",
+        "end_num_documents",
+        "end_num_tokens",
+    )
+    if not all(key in last_data_file for key in required_keys):
+        return None
+    return (
+        int(last_data_file["end_source_file_idx"]),
+        int(last_data_file["end_record_idx"]),
+        int(last_data_file["end_token_offset"]),
+        int(last_data_file["end_num_documents"]),
+        int(last_data_file["end_num_tokens"]),
+    )
+
+
+def _current_tmp_rollback_state(
+    progress: dict[str, Any],
+) -> tuple[int, int, int, int, int] | None:
+    rollback_source_file_idx = progress.get("current_tmp_rollback_source_file_idx")
+    rollback_num_documents = progress.get("current_tmp_rollback_num_documents")
+    rollback_num_tokens = progress.get("current_tmp_rollback_num_tokens")
+    if (
+        rollback_source_file_idx is not None
+        and rollback_num_documents is not None
+        and rollback_num_tokens is not None
+    ):
+        return (
+            int(rollback_source_file_idx),
+            int(progress.get("current_tmp_rollback_record_idx", 0)),
+            int(progress.get("current_tmp_rollback_token_offset", 0)),
+            int(rollback_num_documents),
+            int(rollback_num_tokens),
+        )
+    if progress.get("current_tmp_file") is not None and not progress.get("data_files"):
+        return (0, 0, 0, 0, 0)
+    return None
+
+
+def _repair_current_tmp_for_resume(
+    output_dir: Path, progress_path: Path, progress: dict[str, Any]
+) -> dict[str, Any]:
+    current_tmp_file = progress.get("current_tmp_file")
+    if current_tmp_file is None:
+        return progress
+
+    current_path = output_dir / current_tmp_file
+    expected_size = int(progress.get("part_token_count", 0)) * 4
+    current_size = current_path.stat().st_size if current_path.exists() else None
+    if current_size == expected_size:
+        return progress
+
+    rollback_state = _cursor_from_last_data_file(progress)
+    if rollback_state is None:
+        rollback_state = _current_tmp_rollback_state(progress)
+    if rollback_state is None:
+        actual_size = "missing" if current_size is None else f"{current_size} bytes"
+        raise ValueError(
+            f"Tmp bin {current_path} is {actual_size}, but progress.json "
+            f"expects {expected_size} bytes and has no finalized-bin cursor "
+            "or tmp rollback cursor. Pass --overwrite to restart."
+        )
+
+    (
+        rollback_source_file_idx,
+        rollback_record_idx,
+        rollback_token_offset,
+        rollback_num_documents,
+        rollback_num_tokens,
+    ) = rollback_state
+    actual_size = "missing" if current_size is None else f"{current_size} bytes"
+    print(
+        f"Discarding tmp bin {current_path} ({actual_size}; expected "
+        f"{expected_size} bytes) and rewinding to source file "
+        f"{rollback_source_file_idx}, record {rollback_record_idx}, "
+        f"token offset {rollback_token_offset}",
+        flush=True,
+    )
+    current_path.unlink(missing_ok=True)
+
+    repaired_progress = dict(progress)
+    repaired_progress["next_source_file_idx"] = rollback_source_file_idx
+    repaired_progress["next_record_idx"] = rollback_record_idx
+    repaired_progress["next_token_offset"] = rollback_token_offset
+    repaired_progress["num_documents"] = rollback_num_documents
+    repaired_progress["num_tokens"] = rollback_num_tokens
+    repaired_progress["part_idx"] = len(repaired_progress.get("data_files", []))
+    repaired_progress["part_token_count"] = 0
+    repaired_progress["current_tmp_file"] = None
+    repaired_progress["current_tmp_rollback_source_file_idx"] = None
+    repaired_progress["current_tmp_rollback_record_idx"] = 0
+    repaired_progress["current_tmp_rollback_token_offset"] = 0
+    repaired_progress["current_tmp_rollback_num_documents"] = None
+    repaired_progress["current_tmp_rollback_num_tokens"] = None
+    repaired_progress["current_tmp_source_file_start_idx"] = None
+    repaired_progress["current_tmp_source_file_end_idx"] = None
+    _write_json_atomic(progress_path, repaired_progress)
+    return repaired_progress
+
+
 def _cleanup_for_resume(
     output_dir: Path, *, progress: dict[str, Any] | None, overwrite: bool
 ) -> None:
@@ -230,31 +483,40 @@ def _cleanup_for_resume(
         progress_path.unlink(missing_ok=True)
         return
 
-    if metadata_path.exists():
-        raise ValueError(
-            f"Output directory {output_dir} already has metadata.json. "
-            "It looks complete; pass --overwrite to replace it."
-        )
-
     if progress is None:
-        existing = []
+        existing_bins = []
+        existing_tmp_bins = []
         if output_dir.exists():
-            existing.extend(output_dir.glob("*.bin"))
-            existing.extend(output_dir.glob("*.bin.tmp"))
-        if existing:
+            existing_bins.extend(output_dir.glob("*.bin"))
+            existing_tmp_bins.extend(output_dir.glob("*.bin.tmp"))
+        if existing_bins:
             raise ValueError(
                 f"Output directory {output_dir} contains bin files but no "
                 "progress.json. Pass --overwrite to replace them."
             )
+        for path in existing_tmp_bins:
+            print(
+                f"Removing stale tmp bin with no progress.json: {path}",
+                flush=True,
+            )
+            path.unlink()
         return
 
     kept_bins = {entry["data_file"] for entry in progress.get("data_files", [])}
     current_tmp_file = progress.get("current_tmp_file")
     for path in output_dir.glob("*.bin"):
         if path.name not in kept_bins:
+            print(
+                f"Removing stale bin not tracked by progress.json: {path}",
+                flush=True,
+            )
             path.unlink()
     for path in output_dir.glob("*.bin.tmp"):
         if path.name != current_tmp_file:
+            print(
+                f"Removing stale tmp bin not tracked by progress.json: {path}",
+                flush=True,
+            )
             path.unlink()
 
 
@@ -276,6 +538,8 @@ def _make_progress_payload(
         "num_documents": num_documents,
         "tokens_per_bin": args.tokens_per_bin,
         "next_source_file_idx": next_source_file_idx,
+        "next_record_idx": 0,
+        "next_token_offset": 0,
         "num_source_files": len(source_files),
         "source_name": args.input_dir.name,
         "source_dir": str(args.input_dir),
@@ -286,6 +550,17 @@ def _make_progress_payload(
         "add_eos": args.add_eos,
     }
     payload.update(writer.checkpoint_state())
+    if (
+        payload.get("current_tmp_file") is not None
+        and payload.get("current_tmp_rollback_source_file_idx") is not None
+    ):
+        payload["current_tmp_source_file_start_idx"] = payload[
+            "current_tmp_rollback_source_file_idx"
+        ]
+        payload["current_tmp_source_file_end_idx"] = next_source_file_idx
+    else:
+        payload["current_tmp_source_file_start_idx"] = None
+        payload["current_tmp_source_file_end_idx"] = None
     return payload
 
 
@@ -294,8 +569,6 @@ def main() -> None:
 
     if not args.input_dir.is_dir():
         raise ValueError(f"Input directory does not exist: {args.input_dir}")
-    if shutil.which("zstdcat") is None:
-        raise RuntimeError("zstdcat is required to read .zst files")
     if args.tokens_per_bin <= 0:
         raise ValueError("--tokens-per-bin must be positive")
     if args.chunk_size <= 0:
@@ -315,12 +588,30 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / "metadata.json"
     progress_path = output_dir / "progress.json"
+    if metadata_path.exists() and not args.overwrite:
+        print(
+            f"Skipping {args.input_dir.name}: found complete metadata at "
+            f"{metadata_path}. Pass --overwrite to regenerate.",
+            flush=True,
+        )
+        return
     progress = None if args.overwrite else _load_progress(progress_path)
     _cleanup_for_resume(output_dir, progress=progress, overwrite=args.overwrite)
 
-    source_files = sorted(args.input_dir.glob(args.pattern))
+    source_files = _input_files(args.input_dir, args.pattern)
     if not source_files:
-        raise ValueError(f"No files matched {args.pattern!r} under {args.input_dir}")
+        patterns = (
+            [args.pattern] if args.pattern is not None else SUPPORTED_JSONL_PATTERNS
+        )
+        raise ValueError(
+            f"No files matched {patterns!r} under {args.input_dir}"
+        )
+
+    if (
+        any(path.suffix == ".zst" for path in source_files)
+        and shutil.which("zstdcat") is None
+    ):
+        raise RuntimeError("zstdcat is required to read .zst files")
 
     if progress is not None:
         if progress.get("source_files") != [str(path) for path in source_files]:
@@ -333,10 +624,19 @@ def main() -> None:
                 "progress.json tokens_per_bin does not match current args. "
                 "Pass --overwrite to restart."
             )
+        progress = _repair_current_tmp_for_resume(
+            output_dir,
+            progress_path,
+            progress,
+        )
 
     tokenizer = HuggingFaceTokenizer(tokenizer_path=str(args.tokenizer_path))
 
-    start_source_file_idx = int(progress.get("next_source_file_idx", 0)) if progress else 0
+    start_source_file_idx = (
+        int(progress.get("next_source_file_idx", 0)) if progress else 0
+    )
+    start_record_idx = int(progress.get("next_record_idx", 0)) if progress else 0
+    start_token_offset = int(progress.get("next_token_offset", 0)) if progress else 0
     num_documents = int(progress.get("num_documents", 0)) if progress else 0
     num_tokens = int(progress.get("num_tokens", 0)) if progress else 0
 
@@ -349,17 +649,31 @@ def main() -> None:
     )
 
     if progress is not None:
+        current_tmp_file = progress.get("current_tmp_file")
         print(
             f"Resuming {args.input_dir.name} from source file "
-            f"{start_source_file_idx}/{len(source_files)} with "
+            f"{start_source_file_idx}/{len(source_files)}, record "
+            f"{start_record_idx}, token offset {start_token_offset} with "
             f"{num_documents} documents and {num_tokens} tokens",
             flush=True,
         )
+        if current_tmp_file is not None:
+            print(
+                f"Reusing tmp bin {output_dir / current_tmp_file} at "
+                f"{writer.part_token_count} tokens",
+                flush=True,
+            )
 
     stop_after_current_file = False
     for source_file_idx in range(start_source_file_idx, len(source_files)):
         source_file = source_files[source_file_idx]
-        for record in _iter_records(source_file):
+        resume_record_idx = (
+            start_record_idx if source_file_idx == start_source_file_idx else 0
+        )
+        for record_idx, record in enumerate(_iter_records(source_file)):
+            if record_idx < resume_record_idx:
+                continue
+
             text = record.get(args.text_field)
             if not isinstance(text, str):
                 continue
@@ -369,15 +683,33 @@ def main() -> None:
                 add_bos=args.add_bos,
                 add_eos=args.add_eos,
             )
-            writer.append(token_ids)
-            num_documents += 1
-            num_tokens += len(token_ids)
-
-            if args.progress_every > 0 and num_documents % args.progress_every == 0:
-                print(
-                    f"Processed {num_documents} documents and {num_tokens} tokens",
-                    flush=True,
+            token_offset_start = (
+                start_token_offset
+                if (
+                    source_file_idx == start_source_file_idx
+                    and record_idx == start_record_idx
                 )
+                else 0
+            )
+            if token_offset_start > len(token_ids):
+                raise ValueError(
+                    f"Resume token offset {token_offset_start} exceeds "
+                    f"record {record_idx} token count {len(token_ids)} in "
+                    f"{source_file}. Pass --overwrite to restart."
+                )
+            if token_offset_start == len(token_ids):
+                continue
+
+            writer.append(
+                token_ids,
+                source_file_idx=source_file_idx,
+                record_idx=record_idx,
+                token_offset_start=token_offset_start,
+                num_documents_before=num_documents,
+                num_tokens_before=num_tokens,
+            )
+            num_documents += 1
+            num_tokens += len(token_ids) - token_offset_start
 
             if args.max_documents is not None and num_documents >= args.max_documents:
                 stop_after_current_file = True

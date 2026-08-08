@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
-from collections.abc import Callable
 from functools import partial
 
 import torch.nn as nn
@@ -25,7 +24,7 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_gqa_config,
 )
-from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
+from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.utils import validate_converter_order
 
 from torchtitan.protocols.model import ModelConfigConverter
@@ -42,30 +41,23 @@ __all__ = [
 ]
 
 
+_INIT_STD = 0.02
+_OLMO3_WEIGHT_INIT = partial(
+    nn.init.trunc_normal_,
+    mean=0.0,
+    std=_INIT_STD,
+    a=-3 * _INIT_STD,
+    b=3 * _INIT_STD,
+)
 _LINEAR_INIT = {
-    "weight": partial(nn.init.trunc_normal_, std=0.02),
+    "weight": _OLMO3_WEIGHT_INIT,
     "bias": nn.init.zeros_,
 }
 _NORM_INIT = {"weight": nn.init.ones_}
-_EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
+_EMBEDDING_INIT = {"weight": _OLMO3_WEIGHT_INIT}
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
 
 _EPS = 1e-6
-
-
-def _output_linear_init(dim: int) -> dict[str, Callable]:
-    s = dim**-0.5
-    return {
-        "weight": partial(nn.init.trunc_normal_, std=s, a=-3 * s, b=3 * s),
-        "bias": nn.init.zeros_,
-    }
-
-
-def _depth_init(layer_id: int) -> dict[str, Callable]:
-    return {
-        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "bias": nn.init.zeros_,
-    }
 
 
 def _olmo3_norm(dim: int) -> RMSNorm.Config:
@@ -126,7 +118,7 @@ def _build_olmo3_layers(
                     n_kv_heads=n_kv_heads,
                     head_dim=head_dim,
                     wqkv_param_init=_LINEAR_INIT,
-                    wo_param_init=_depth_init(layer_id),
+                    wo_param_init=_LINEAR_INIT,
                     inner_attention=layer_inner_attention,
                     fuse_qkv=fuse_qkv,
                     rope=rope,
@@ -140,7 +132,7 @@ def _build_olmo3_layers(
                     dim=dim,
                     hidden_dim=hidden_dim,
                     w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_depth_init(layer_id),
+                    w2w3_param_init=_LINEAR_INIT,
                 ),
             )
         )
@@ -166,7 +158,7 @@ def _debugmodel(attn_backend: str) -> Olmo3Model.Config:
         ),
         norm=_olmo3_norm(dim),
         lm_head=Linear.Config(
-            in_features=dim, out_features=vocab_size, param_init=_output_linear_init(dim)
+            in_features=dim, out_features=vocab_size, param_init=_LINEAR_INIT
         ),
         layers=_build_olmo3_layers(
             fuse_qkv=True,
@@ -205,7 +197,7 @@ def _7b(attn_backend: str) -> Olmo3Model.Config:
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
-            param_init=_output_linear_init(dim),
+            param_init=_LINEAR_INIT,
         ),
         layers=_build_olmo3_layers(
             fuse_qkv=True,
