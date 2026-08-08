@@ -79,6 +79,31 @@ def _get_dataloader_num_tokens(dataloader: BaseDataLoader) -> int | None:
     return int(num_tokens)
 
 
+def _resolve_training_steps(
+    configured_steps: int,
+    *,
+    dataset_num_tokens: int | None,
+    tokens_per_step: int,
+) -> int:
+    if configured_steps == -1:
+        if dataset_num_tokens is None:
+            raise ValueError(
+                "training.steps=-1 requires a dataloader that exposes its total "
+                "number of tokens"
+            )
+        training_steps = dataset_num_tokens // tokens_per_step
+        if training_steps < 1:
+            raise ValueError(
+                f"Dataset has {dataset_num_tokens} tokens, fewer than the "
+                f"{tokens_per_step} tokens required for one training step"
+            )
+        return training_steps
+
+    if configured_steps < 1:
+        raise ValueError("training.steps must be positive or -1")
+    return configured_steps
+
+
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -506,10 +531,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
             )
-        self.lr_schedulers = config.lr_scheduler.build(
-            optimizers=self.optimizers,
-            training_steps=config.training.steps,
-        )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
 
@@ -536,11 +557,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         tokens_per_step = global_batch_size * config.training.seq_len
+        dataset_num_tokens = _get_dataloader_num_tokens(self.dataloader)
+        configured_steps = config.training.steps
+        config.training.steps = _resolve_training_steps(
+            configured_steps,
+            dataset_num_tokens=dataset_num_tokens,
+            tokens_per_step=tokens_per_step,
+        )
+        if configured_steps == -1:
+            logger.info(
+                "Resolved training.steps=-1 to %s full dataset steps",
+                f"{config.training.steps:,}",
+            )
+
+        self.lr_schedulers = config.lr_scheduler.build(
+            optimizers=self.optimizers,
+            training_steps=config.training.steps,
+        )
+
         configured_training_tokens = tokens_per_step * config.training.steps
         configured_training_flops = (
             configured_training_tokens * self.metrics_processor.num_flops_per_token
         )
-        dataset_num_tokens = _get_dataloader_num_tokens(self.dataloader)
         scaling_ladder_prefix = f"{color.blue}[Sclaing-Ladder Info]"
         if dataset_num_tokens is None:
             logger.info(
