@@ -24,24 +24,25 @@ original FSDP2 row shards
 Here `H` is the number of logical heads, `R` is the number of rows per head,
 and `C` is the matrix column count.
 
-## Current limitation
+## Original limitation
 
 `BatchedMatrixComputeView` describes the correct logical transformation from
 `[H * R, C]` to `[H, R, C]`, and `Shard(0)` means sharding the logical head
-axis. The current implementation, however, only supports this placement when
-every FSDP2 shard already contains complete heads.
+axis. The baseline implementation only supported this placement when
+every FSDP2 shard already contained complete heads.
 
-The split-head case is rejected because:
+The split-head case was rejected because:
 
-- `muon_parameter_prep.py` requires every local row count and global row offset
+- `muon/prep_parameters.py` required every local row count and global row offset
   to be a multiple of `R`.
-- Preparation eagerly views each local storage shard as a batch of complete
+- Preparation eagerly viewed each local storage shard as a batch of complete
   matrices.
-- `muon.py` treats `Shard(0)` as a local-compute-only placement.
-- `flex_optimizer_reshard.py` only supports local computation or redistribution
+- The original distributed Muon implementation treated `Shard(0)` as a
+  local-compute-only placement.
+- `flex_optimizer_reshard.py` only supported local computation or redistribution
   of a complete tensor to one `Owned` rank.
-- The reshard runtime assumes one input and output span per redistributed
-  parameter and assumes every compute destination receives the full tensor.
+- The reshard runtime assumed one input and output span per redistributed
+  parameter and that every compute destination received the full tensor.
 
 Removing the alignment validation alone would be incorrect. NS normalization
 and matrix products must cover the complete `[R, C]` head matrix.
@@ -68,14 +69,25 @@ Its contract becomes:
   `Shard.local_shard_size_and_offset(num_heads, world_size, rank)` so the
   behavior matches PyTorch `Shard(0)` semantics, including empty partitions.
 
-No owner entry is required for communicated `Shard(0)` parameters.
-`owner_rank_by_fqn` remains specific to `Owned` compute placement.
+Buckets describe execution grouping. A bucket binds a communication mesh only
+when at least one resolved parameter transition requires redistribution; an
+entirely compute-ready bucket remains mesh-free. Muon balances single-rank
+`Owned` compute from the resolved parameter sizes, then immediately lowers
+those choices to endpoint routes. `Shard(0)` and `Replicate` compute do not
+require single-rank assignments. The generic `assign_balanced_work` utility
+accepts opaque work, weights, and stable keys; the distributed Muon adapter
+uses parameter FQNs only as deterministic keys.
+
+`muon/distributed_muon.py` owns the optimizer runtime and its private Tensor-level
+Muon operations. `muon/prep_parameters.py` is the trainer-facing adapter for
+parameter views and groups, while `muon/storage_to_compute.py` owns transition
+policy and route construction.
 
 ## Implementation plan
 
 ### 1. Separate storage metadata from the compute view
 
-Update `torchtitan/components/distributed_optimizers/muon_parameter_prep.py`:
+Update `torchtitan/components/distributed_optimizers/muon/prep_parameters.py`:
 
 - Continue validating the global 2D shape and resolving `H`, `R`, and `C`.
 - Continue requiring supported, contiguous storage layouts.
@@ -90,15 +102,17 @@ Update `torchtitan/components/distributed_optimizers/muon_parameter_prep.py`:
 
 ### 2. Resolve an explicit storage-to-compute transition
 
-Update `torchtitan/components/distributed_optimizers/muon.py`:
+Update `muon/storage_to_compute.py` for placement planning and
+`muon/distributed_muon.py` for the optimizer runtime:
 
 - Represent storage-to-compute behavior with explicit transitions: no
-  redistribution, whole-tensor `Owned` redistribution, or batched-matrix
-  repartition.
-- Keep the logical placement fingerprint as `("shard", 0)` for both aligned
-  and redistributed cases.
-- Do not include generated routes, world size, or storage alignment in the
-  checkpoint fingerprint.
+  redistribution, whole-tensor single-participant or replicated compute, or
+  dimension-0 sharded compute with view-aware repartitioning.
+- Fingerprint the mathematical matrix view: FQN, global storage shape, compute
+  view, and global compute shape. Do not fingerprint `Owned`, `Replicate`, or
+  `Shard` execution distribution.
+- Do not include generated routes, participant choices, world size, buckets,
+  or storage alignment in the checkpoint fingerprint.
 - Keep gradients and momentum in their original FSDP2 DTensor layout.
 - Update momentum and prepare the Nesterov direction before redistribution,
   because these operations are elementwise and commute with repartitioning.
@@ -111,6 +125,8 @@ Update
 `torchtitan/components/distributed_optimizers/flex_optimizer_reshard.py`:
 
 - Generalize the bucket planner beyond local and whole-tensor `Owned` work.
+- Keep optimizer-specific compute placement and balancing outside the generic
+  bucket and transport layer.
 - Build the storage partition from the exact FSDP2 row ranges.
 - Build the compute partition by sharding `H`, then map each head range back to
   `[H * R, C]` storage rows.
@@ -127,8 +143,11 @@ Update
 - Continue validating rank-stable plan digests before runtime communication.
 
 The existing packed variable-size `all_to_all_single` lowerer should remain the
-transport. All parameters in a bucket should still share one forward and one
+transport. All parameters in a bucket should share at most one forward and one
 reverse collective.
+
+When every transfer in one direction selects a local replica, execute that
+packed direction as a local copy and skip the collective launch.
 
 ### 4. Support multiple fragments in the runtime
 
@@ -159,7 +178,7 @@ compute current bucket
 
 The new path should require two collectives per communicating bucket, not per
 parameter or per head. It should not all-gather a full projection on every
-rank or gather the full projection to one owner.
+rank or gather the full projection to one compute participant.
 
 Long-lived parameter and optimizer state remain FSDP2-sharded. Additional peak
 memory should be bounded by exchange buffers, one reusable local storage
@@ -170,9 +189,10 @@ allocate the full QKV projection solely for this transition.
 
 The first implementation should support:
 
-- one exact FSDP2 communication mesh axis;
+- one exact FSDP2 communication mesh axis, with `Replicate` on every other
+  storage mesh axis;
 - the Kimi recipe's `dp_shard` axis;
-- contiguous 2D storage with exact `Shard(0)`;
+- contiguous 2D storage with exact `Shard(0)` or `Replicate`;
 - independent execution within each data-parallel replica.
 
 The following remain out of scope:
@@ -191,7 +211,7 @@ These layouts should continue to fail with explicit validation errors.
 
 ### CPU planning and validation tests
 
-Update `tests/unit_tests/test_muon_parameter_prep.py` and
+Update `tests/unit_tests/test_muon_prep_parameters.py` and
 `tests/unit_tests/test_flex_optimizer_reshard.py`:
 
 - Replace the split-head construction rejection with successful route
@@ -265,13 +285,14 @@ Update `tests/unit_tests/test_distributed_muon.py`:
 
 ## Completion status
 
-Status: complete as of 2026-08-06.
+Status: complete as of 2026-08-07.
 
 The implementation now supports exact one-dimensional FSDP2 `Shard(0)`
 storage whose row boundaries split logical QKV heads. It keeps aligned heads
 on the local fast path and redistributes split heads through the existing
-packed all-to-all transport. `Owned` redistribution and the optimizer state
-fingerprint remain independent of generated routes and world size.
+packed all-to-all transport. The optimizer state fingerprint describes the
+mathematical matrix view and remains independent of execution distribution,
+generated routes, buckets, and world size.
 
 Completed coverage includes:
 
@@ -290,9 +311,11 @@ Validation results:
   reference within an explicit BF16 tolerance. Momentum, checkpoint state,
   layouts, and communication remain exact.
 
-- Focused CPU suites: 26 passed and 13 subtests passed.
-- Distributed Muon suite: 20 passed and 4 subtests passed.
-- `pre-commit run --all-files`: all hooks passed.
+- Focused CPU suites: 25 passed and 9 subtests passed.
+- Distributed Muon suite: 26 passed and 7 subtests passed.
+- Formatting, lint, documentation, spelling, and link hooks passed. The local
+  Pyrefly hook reports five baseline `torch.version.hip` stub errors in
+  unchanged files.
 - The aligned fast path produced bitwise-identical parameter and momentum
   hashes on both ranks before and after this change, using the same two-step
   deterministic input from the baseline commit.

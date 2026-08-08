@@ -10,11 +10,17 @@ from unittest import mock
 import torch
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
-from torchtitan.components.distributed_optimizers.muon import DistributedMuon, Owned
-from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
+from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
+    BucketConfig,
+)
+from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
+    DistributedMuon,
+)
+from torchtitan.components.distributed_optimizers.muon.prep_parameters import (
     BatchedMatrixComputeView,
     build_distributed_muon,
     MuonComputeSharding,
+    Owned,
 )
 
 
@@ -69,6 +75,7 @@ class TestMuonParameterPrep(unittest.TestCase):
         init.assert_called_once_with(
             core_groups,
             bucket_specs=bucket_specs,
+            _bucket_configs=None,
             _prepared_compute_views=prepared,
             lr=0.1,
         )
@@ -123,6 +130,28 @@ class TestMuonParameterPrep(unittest.TestCase):
             replicated_storage,
         )
 
+    def test_builder_defers_bucket_config_binding(self):
+        storage = torch.empty(2, 2)
+        config = BucketConfig(
+            patterns=("layers.*",),
+            mesh_axes=("optimizer",),
+        )
+
+        with mock.patch.object(DistributedMuon, "__init__", return_value=None) as init:
+            build_distributed_muon(
+                [
+                    {
+                        "params": [storage],
+                        "param_names": ["layers.weight"],
+                        "compute_sharding": MuonComputeSharding(placement=Owned()),
+                    }
+                ],
+                bucket_configs=[config],
+            )
+
+        self.assertIsNone(init.call_args.kwargs["bucket_specs"])
+        self.assertEqual(init.call_args.kwargs["_bucket_configs"], (config,))
+
     def test_builder_validates_global_shape_and_aligned_names(self):
         for shape in ((2, 3, 4), (5, 4)):
             with self.subTest(shape=shape):
@@ -142,6 +171,23 @@ class TestMuonParameterPrep(unittest.TestCase):
                         ],
                         bucket_specs=(),
                     )
+
+        for shape in ((4,), (2, 3, 4, 5)):
+            with self.subTest(shape=shape), self.assertRaisesRegex(
+                ValueError, "must be 2D or batch-first 3D"
+            ):
+                build_distributed_muon(
+                    [
+                        {
+                            "params": [torch.empty(shape)],
+                            "param_names": ["layers.0.weight"],
+                            "compute_sharding": MuonComputeSharding(
+                                placement=Replicate()
+                            ),
+                        }
+                    ],
+                    bucket_specs=(),
+                )
 
         with self.assertRaisesRegex(ValueError, "must be aligned"):
             build_distributed_muon(

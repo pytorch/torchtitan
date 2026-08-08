@@ -23,7 +23,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
+from torchtitan.components.distributed_optimizers.muon.prep_parameters import (
     build_distributed_muon,
 )
 from torchtitan.config import Configurable
