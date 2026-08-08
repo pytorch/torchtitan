@@ -67,7 +67,7 @@ class DistributedMuon(Optimizer):
         self,
         params: Iterable[dict[str, Any]],
         *,
-        bucket_spec: Sequence[BucketSpec],
+        bucket_specs: Sequence[BucketSpec],
         _prepared_compute_views: Mapping[str, _PreparedParameterComputeView],
         lr: float = 1e-3,
         weight_decay: float = 0.1,
@@ -98,7 +98,7 @@ class DistributedMuon(Optimizer):
             group_compute_placements.append(compute_placement)
         self._group_compute_placements = tuple(group_compute_placements)
 
-        self._specs = tuple(bucket_spec)
+        self._specs = tuple(bucket_specs)
         self._validate_groups()
         self._initialize_plan()
         self._validate_plan_across_ranks()

@@ -97,19 +97,19 @@ class MuonComputeSharding:
 def build_distributed_muon(
     params: Iterable[dict[str, Any]],
     *,
-    bucket_spec: Sequence[BucketSpec] | None = None,
+    bucket_specs: Sequence[BucketSpec] | None = None,
     bucket_configs: Sequence[BucketConfig] | None = None,
     **kwargs: Any,
 ) -> DistributedMuon:
     """Prepare named DTensor parameter groups and construct DistributedMuon.
 
     Every group must provide aligned ``params`` and ``param_names`` plus one
-    ``compute_sharding`` contract. Exactly one of ``bucket_spec`` or
+    ``compute_sharding`` contract. Exactly one of ``bucket_specs`` or
     ``bucket_configs`` is required. Parameter groups and layouts are frozen
     after construction because optimizer state and collectives depend on them.
     """
-    if (bucket_spec is None) == (bucket_configs is None):
-        raise ValueError("provide exactly one of bucket_spec or bucket_configs")
+    if (bucket_specs is None) == (bucket_configs is None):
+        raise ValueError("provide exactly one of bucket_specs or bucket_configs")
 
     prepared_params = []
     parameters_to_prepare = []
@@ -141,10 +141,10 @@ def build_distributed_muon(
         }
         if len(storage_by_fqn) != len(parameters_to_prepare):
             raise TypeError("bucket_configs require named DTensor parameters")
-        bucket_spec = _bind_bucket_configs(bucket_configs, storage_by_fqn)
+        bucket_specs = _bind_bucket_configs(bucket_configs, storage_by_fqn)
     else:
-        assert bucket_spec is not None
-        bucket_spec = tuple(bucket_spec)
+        assert bucket_specs is not None
+        bucket_specs = tuple(bucket_specs)
 
     prepared_compute_views = {}
     for param, fqn, compute_view in parameters_to_prepare:
@@ -170,14 +170,14 @@ def build_distributed_muon(
                     )
                 )
         local_storage = param.to_local() if isinstance(param, DTensor) else param
-        compute_storage = (
+        local_storage_for_compute_view = (
             local_storage.detach() if isinstance(param, DTensor) else local_storage
         )
         local_storage_shape = torch.Size(local_storage.shape)
         if compute_view is None:
             compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
-            local_storage_view = compute_storage
+            local_storage_view = local_storage_for_compute_view
         else:
             compute_view_key = (
                 "batched_matrix",
@@ -193,7 +193,9 @@ def build_distributed_muon(
                 )
             )
             local_storage_view = (
-                compute_storage.view(resolved_view.compute_shape(local_storage_shape))
+                local_storage_for_compute_view.view(
+                    resolved_view.compute_shape(local_storage_shape)
+                )
                 if storage_shards_are_matrix_aligned
                 else None
             )
@@ -205,7 +207,7 @@ def build_distributed_muon(
 
     return DistributedMuon(
         prepared_params,
-        bucket_spec=bucket_spec,
+        bucket_specs=bucket_specs,
         _prepared_compute_views=prepared_compute_views,
         **kwargs,
     )

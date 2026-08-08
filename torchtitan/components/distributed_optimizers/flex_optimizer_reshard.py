@@ -650,7 +650,7 @@ class _RedistributionGroup:
 
 @dataclass(slots=True)
 class _BucketPlan(Generic[_ItemT]):
-    local_items: tuple[_ItemT, ...]
+    unredistributed_items: tuple[_ItemT, ...]
     redistributed_items: tuple[_ItemT, ...]
     redistribution_plans: tuple[_RedistributionPlan, ...]
     group: _RedistributionGroup
@@ -672,39 +672,39 @@ class _BucketWork(Generic[_ItemT]):
     slot: _BufferSlot
     storage_buffer: Tensor
     compute_fragment_buffer: Tensor
-    forward_ready: torch.Event | None = None
+    compute_input_ready: torch.Event | None = None
     compute_done: torch.Event | None = None
     done: torch.Event | None = None
 
 
 @dataclass(slots=True)
 class _BufferSlot:
-    storage_exchange_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+    storage_exchange_buffers: dict[tuple[torch.device, torch.dtype], Tensor] = field(
         default_factory=dict
     )
-    compute_exchange_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+    compute_exchange_buffers: dict[tuple[torch.device, torch.dtype], Tensor] = field(
         default_factory=dict
     )
-    compute_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+    compute_buffers: dict[tuple[torch.device, torch.dtype], Tensor] = field(
         default_factory=dict
     )
-    storage_partition_storage: dict[tuple[torch.device, torch.dtype], Tensor] = field(
+    storage_partition_buffers: dict[tuple[torch.device, torch.dtype], Tensor] = field(
         default_factory=dict
     )
 
     @staticmethod
     def _ensure_capacity(
-        storage: dict[tuple[torch.device, torch.dtype], Tensor],
+        buffers: dict[tuple[torch.device, torch.dtype], Tensor],
         *,
         numel: int,
         dtype: torch.dtype,
         device: torch.device,
     ) -> Tensor:
         key = (device, dtype)
-        buffer = storage.get(key)
+        buffer = buffers.get(key)
         if buffer is None or buffer.numel() < numel:
             buffer = torch.empty(numel, dtype=dtype, device=device)
-            storage[key] = buffer
+            buffers[key] = buffer
         return buffer[:numel]
 
     def communication_buffers(self, plan: _BucketPlan[Any]) -> tuple[Tensor, Tensor]:
@@ -712,7 +712,7 @@ class _BufferSlot:
         to_storage = plan.compute_to_storage_schedule
         return (
             self._ensure_capacity(
-                self.storage_exchange_storage,
+                self.storage_exchange_buffers,
                 numel=max(
                     to_compute.input_buffer_numel,
                     to_storage.output_buffer_numel,
@@ -721,7 +721,7 @@ class _BufferSlot:
                 device=plan.device,
             ),
             self._ensure_capacity(
-                self.compute_exchange_storage,
+                self.compute_exchange_buffers,
                 numel=max(
                     to_compute.output_buffer_numel,
                     to_storage.input_buffer_numel,
@@ -739,7 +739,7 @@ class _BufferSlot:
         device: torch.device,
     ) -> Tensor:
         return self._ensure_capacity(
-            self.compute_storage,
+            self.compute_buffers,
             numel=math.prod(shape),
             dtype=dtype,
             device=device,
@@ -753,7 +753,7 @@ class _BufferSlot:
         device: torch.device,
     ) -> Tensor:
         return self._ensure_capacity(
-            self.storage_partition_storage,
+            self.storage_partition_buffers,
             numel=math.prod(shape),
             dtype=dtype,
             device=device,
@@ -817,7 +817,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 slot = context.slots[redistributed_index % 2]
                 if not plan.redistributed_items:
                     with handle.stream(caller):
-                        self._compute_local(
+                        self._compute_without_redistribution(
                             plan,
                             slot,
                             local_tensor_spec=local_tensor_spec,
@@ -888,8 +888,8 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 output=compute_fragment_buffer,
                 input=storage_buffer,
             )
-            work.forward_ready = handle.Event()
-            work.forward_ready.record(transfer)
+            work.compute_input_ready = handle.Event()
+            work.compute_input_ready.record(transfer)
         return work
 
     @staticmethod
@@ -906,10 +906,10 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         compute: Callable[[_ItemT, Tensor], None],
         finalize: Callable[[_ItemT, Tensor], None],
     ) -> None:
-        assert work.forward_ready is not None
+        assert work.compute_input_ready is not None
         handle = context.device_handle
         with handle.stream(caller_stream):
-            _BucketedRedistributionRuntime._compute_local(
+            _BucketedRedistributionRuntime._compute_without_redistribution(
                 work.plan,
                 slot,
                 local_tensor_spec=local_tensor_spec,
@@ -917,7 +917,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 compute=compute,
                 finalize=finalize,
             )
-            caller_stream.wait_event(work.forward_ready)
+            caller_stream.wait_event(work.compute_input_ready)
             _compute_redistributed(
                 work,
                 slot,
@@ -952,7 +952,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         caller_stream.wait_event(work.done)
 
     @staticmethod
-    def _compute_local(
+    def _compute_without_redistribution(
         plan: _BucketPlan[_ItemT],
         slot: _BufferSlot,
         *,
@@ -963,7 +963,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         compute: Callable[[_ItemT, Tensor], None],
         finalize: Callable[[_ItemT, Tensor], None],
     ) -> None:
-        for item in plan.local_items:
+        for item in plan.unredistributed_items:
             shape, dtype, device = local_tensor_spec(item)
             prepared = slot.compute_buffer(shape, dtype=dtype, device=device)
             prepare(item, prepared)
@@ -1098,7 +1098,7 @@ def _resolve_routes_to_transfers(
 
 
 def _packed_spans_by_parameter(
-    indexed_spans: list[tuple[int, _PackedSpan]], parameter_count: int
+    indexed_spans: list[tuple[int, _PackedSpan]], num_parameters: int
 ) -> tuple[tuple[_PackedSpan, ...], ...]:
     return tuple(
         tuple(
@@ -1106,7 +1106,7 @@ def _packed_spans_by_parameter(
             for span_parameter_index, span in indexed_spans
             if span_parameter_index == parameter_index
         )
-        for parameter_index in range(parameter_count)
+        for parameter_index in range(num_parameters)
     )
 
 
@@ -1266,7 +1266,7 @@ def _build_bucket_plans(
         _RedistributionPlan | None,
     ],
 ) -> _BucketPlanningResult[_ItemT]:
-    """Build ordered local and redistributed optimizer bucket plans.
+    """Build ordered optimizer bucket plans with and without redistribution.
 
     ``build_redistribution_plan`` receives a mesh-local owner rank exactly when
     ``requires_owner`` is true. It returns ``None`` when storage is already
@@ -1295,7 +1295,7 @@ def _build_bucket_plans(
                 f"extra={sorted(provided_owners - expected_owners)}"
             )
 
-        local_items_list = []
+        unredistributed_items_list = []
         redistributed_items_list = []
         redistribution_plans = []
         for item in sorted_bucket:
@@ -1309,7 +1309,7 @@ def _build_bucket_plans(
                 )
             item_plan = build_redistribution_plan(item, group, owner_rank)
             if item_plan is None:
-                local_items_list.append(item)
+                unredistributed_items_list.append(item)
                 continue
             if item_plan.participants != group.participants:
                 raise ValueError(
@@ -1325,13 +1325,13 @@ def _build_bucket_plans(
             redistributed_items_list.append(item)
             redistribution_plans.append(item_plan)
 
-        local_items = tuple(local_items_list)
+        unredistributed_items = tuple(unredistributed_items_list)
         redistributed_items = tuple(redistributed_items_list)
         # Size-one sharded storage may normalize to Replicate. In that case a
         # static rank-0 owner entry is equivalent to the resolved local compute.
         redundant_owners = {
             get_fqn(item)
-            for item in local_items
+            for item in unredistributed_items
             if len(group.participants) == 1
             and spec.owner_rank_by_fqn.get(get_fqn(item)) == 0
         }
@@ -1343,14 +1343,14 @@ def _build_bucket_plans(
                 f"missing={sorted(expected_owners - effective_provided_owners)}, "
                 f"extra={sorted(effective_provided_owners - expected_owners)}"
             )
-        ordered_items.extend(local_items)
+        ordered_items.extend(unredistributed_items)
         ordered_items.extend(redistributed_items)
 
         if not redistributed_items:
-            tensor = get_storage_dtensor(local_items[0]).to_local()
+            tensor = get_storage_dtensor(unredistributed_items[0]).to_local()
             plans.append(
                 _BucketPlan(
-                    local_items=local_items,
+                    unredistributed_items=unredistributed_items,
                     redistributed_items=(),
                     redistribution_plans=(),
                     group=group,
@@ -1374,7 +1374,7 @@ def _build_bucket_plans(
         redistribution_plans_tuple = tuple(redistribution_plans)
         plans.append(
             _BucketPlan(
-                local_items=local_items,
+                unredistributed_items=unredistributed_items,
                 redistributed_items=redistributed_items,
                 redistribution_plans=redistribution_plans_tuple,
                 group=group,
@@ -1457,7 +1457,7 @@ def _validate_bucket_plans_across_ranks(
             ),
             [
                 item_signature(item)
-                for item in plan.local_items + plan.redistributed_items
+                for item in plan.unredistributed_items + plan.redistributed_items
             ],
         )
         digest = hashlib.sha256(repr(description).encode()).digest()
