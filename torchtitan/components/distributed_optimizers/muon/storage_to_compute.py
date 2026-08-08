@@ -16,7 +16,6 @@ import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
-from torchtitan.distributed.work_assignment import assign_balanced_work
 
 from ..flex_optimizer_reshard import (
     _BucketPlanningContext,
@@ -29,6 +28,7 @@ from ..flex_optimizer_reshard import (
     _TensorRegion,
     _TensorRegionRoute,
 )
+from ..work_assignment import assign_balanced_work
 
 
 __all__ = ["Owned"]

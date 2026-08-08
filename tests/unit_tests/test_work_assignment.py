@@ -7,7 +7,9 @@
 import unittest
 from dataclasses import dataclass
 
-from torchtitan.distributed import assign_balanced_work
+from torchtitan.components.distributed_optimizers.work_assignment import (
+    assign_balanced_work,
+)
 
 
 @dataclass(frozen=True)

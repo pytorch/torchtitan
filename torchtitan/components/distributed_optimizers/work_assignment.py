@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Deterministic weighted work assignment utilities."""
+"""Deterministic weighted work assignment for distributed optimizers."""
 
 from __future__ import annotations
 
