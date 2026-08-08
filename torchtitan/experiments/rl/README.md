@@ -2,7 +2,7 @@
 
 TitanRL is a hackable RL library built for scaling and debugging experiments where correctness and numerics are not optional. Main advantages:
 
-- **Unified model definition:** Most RL stacks connect a training model to a separate inference implementation. TitanRL runs the same TorchTitan model inside the trainer and vLLM, so new models and kernels are implemented once. This makes new architecture research easier and removes a major source of potential training/inference mismatch bugs.
+- **Unified model definition:** Most RL stacks connect a training model to a separate inference implementation. TitanRL runs (mostly) the same TorchTitan model inside the trainer and vLLM (the attention modules differ, but use the same underlying kernels), so new models and kernels generally need to be implemented only once. This makes new architecture research easier and removes a major source of potential training/inference mismatch bugs.
 - **Batch invariance:** Trainer and inference engines can produce different logits for the same input. In batch-invariant mode, supported configurations produce **bitwise-identical** log probabilities across different data-parallel layouts. This lets developers debug correctness during on-policy training, where numerical differences would otherwise make bugs difficult to isolate.
 - **One stack from pretraining to post-training.** Fork TorchTitan once and reuse its model definitions, kernels, and training components across the model lifecycle. This avoids wiring the same model across different libraries and enables faster development.
 
