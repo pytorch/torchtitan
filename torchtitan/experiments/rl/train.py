@@ -41,6 +41,7 @@ from torchtitan.config import ConfigManager, ParallelismConfig
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.observability import structured_logger as sl
+from torchtitan.tools.logging import init_logger
 
 
 logger = logging.getLogger(__name__)
@@ -278,18 +279,31 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
-async def main():
-    # Monarch is making breaking changes to its message dispatching mechanism.
-    # The recommended way to maintain the current behavior, which is what we want,
-    # is to use @concurrent_endpoint. But that decorator is not available in
-    # monarch's stable release yet. So we pin this env var for now, until the
-    # new release is cut. More details can be found in:
-    # https://github.com/meta-pytorch/monarch/pull/4243
-    # https://github.com/meta-pytorch/monarch/pull/4211
-    os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
+async def run(
+    config: Controller.Config,
+    *,
+    trainer_world_size: int,
+    per_generator_world_size: int,
+    host_meshes: HostMeshes | None,
+) -> None:
+    """Drive training given already-resolved world sizes and host meshes.
 
-    config = ConfigManager().parse_args()
-    assert isinstance(config, Controller.Config)
+    ``host_meshes=None`` means single-node: partition ``this_host()`` between
+    the trainer and generators via ``CUDA_VISIBLE_DEVICES``. A non-None
+    ``HostMeshes`` places each role on its own hosts (e.g. the SLURM launcher).
+    Launcher-agnostic: local, SLURM, and MAST runs all funnel through here.
+    """
+    # The controller is a plain client process, not a monarch actor, so nothing
+    # else configures its logging -- the actors each call init_logger() in their
+    # own __init__. Without this the root logger has no handler and sits at
+    # WARNING, so every controller logger.info (the per-step console metrics and
+    # the [weight-sync] dial line below) is dropped and warnings fall through to
+    # logging.lastResort on stderr. It used to work only by accident: torchstore
+    # installs a root handler at import, but only when
+    # HYPERACTOR_CODEC_MAX_FRAME_LENGTH is unset -- and the batch launcher sets
+    # that var in the submitting process, which sbatch then exports to the job.
+    init_logger()
+
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
@@ -300,14 +314,10 @@ async def main():
 
     rl_trainer: Controller = config.build()
     try:
-        trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
-        per_generator_world_size = _compute_generator_world_size(
-            config.generator.parallelism
-        )
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             per_generator_world_size,
-            host_meshes=None,
+            host_meshes=host_meshes,
             num_generators=config.num_generators,
             generator_env=breakable_cudagraph_env(config.generator),
         )
@@ -320,6 +330,21 @@ async def main():
         logger.info("Interrupted; attempting graceful shutdown...")
     finally:
         await rl_trainer.close()
+
+
+async def main():
+    config = ConfigManager().parse_args()
+    assert isinstance(config, Controller.Config)
+    trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
+    per_generator_world_size = _compute_generator_world_size(
+        config.generator.parallelism
+    )
+    await run(
+        config,
+        trainer_world_size=trainer_world_size,
+        per_generator_world_size=per_generator_world_size,
+        host_meshes=None,
+    )
 
 
 if __name__ == "__main__":

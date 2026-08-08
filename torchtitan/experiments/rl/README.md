@@ -86,6 +86,23 @@ python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grp
 
 We use a unified model definition from torchtitan for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
+## Multi-node on SLURM
+
+Configurations whose total GPU footprint exceeds a single node (e.g.
+`rl_grpo_qwen3_14b`: trainer TP=8 + generator TP=8 = 16 GPUs) run through the
+`slurm_launcher` entry point, which submits one sbatch covering the trainer plus
+one mesh per generator on disjoint nodes:
+
+```bash
+RL_SLURM_PARTITION=h100 RL_SLURM_GPUS_PER_NODE=8 \
+python -m torchtitan.experiments.rl.slurm_launcher \
+    --module alphabet_sort --config rl_grpo_qwen3_14b
+```
+
+See [docs/multinode_slurm.md](docs/multinode_slurm.md) for the rest of the
+`RL_SLURM_*` variables, which process the controller runs in (`RL_SLURM_BATCH`),
+and where the logs land.
+
 ## Reproducibility
 
 We provide two independent tools for debugging and reproducibility. They address different sources of non-determinism and can be used separately or together.
