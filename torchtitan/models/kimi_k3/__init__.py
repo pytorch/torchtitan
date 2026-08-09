@@ -31,7 +31,6 @@ from .model import (
     KimiMLAAttention,
     KimiRMSNorm,
     KimiRMSNormGated,
-    SituAndMul,
 )
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
@@ -134,7 +133,8 @@ def _feed_forward_config(
         w1=_linear(dim, hidden_dim),
         w2=_linear(hidden_dim, dim),
         w3=_linear(dim, hidden_dim),
-        activation=SituAndMul.Config(beta=4.0, linear_beta=25.0),
+        beta=4.0,
+        linear_beta=25.0,
     )
 
 
