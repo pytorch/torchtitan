@@ -39,7 +39,6 @@ def parallelize_kimi_k3(
     unsupported_parallelisms = [
         name
         for name, enabled in (
-            ("hybrid sharded data parallel", parallel_dims.dp_replicate_enabled),
             ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
             ("context parallel", parallel_dims.cp_enabled),
