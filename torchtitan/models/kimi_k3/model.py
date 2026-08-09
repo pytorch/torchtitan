@@ -25,6 +25,7 @@ from torchtitan.distributed.fsdp import add_zero_valued_dependency
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
@@ -89,50 +90,29 @@ class KimiRMSNormGated(Module):
         return (x_float * torch.sigmoid(gate.float())).to(input_dtype)
 
 
-class SituAndMul(Module):
-    """Kimi's SiTU activation applied to concatenated gate/up projections."""
+class KimiFeedForward(FeedForward):
+    """FeedForward with Kimi's SiTU activation"""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(FeedForward.Config):
         beta: float = 1.0
         linear_beta: float | None = None
 
     def __init__(self, config: Config):
-        super().__init__()
+        super().__init__(config)
         self.beta = config.beta
         self.linear_beta = config.linear_beta
 
-    def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
-        gate, up = gate_up.chunk(2, dim=-1)
-        input_dtype = gate_up.dtype
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = self.w1(x)
+        up = self.w3(x)
+        input_dtype = gate.dtype
         gate = gate.float()
         up = up.float()
         gate = self.beta * torch.tanh(gate / self.beta) * torch.sigmoid(gate)
         if self.linear_beta is not None:
             up = self.linear_beta * torch.tanh(up / self.linear_beta)
-        return (gate * up).to(input_dtype)
-
-
-class KimiFeedForward(Module):
-    """Three-projection feed-forward network using SiTU."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        w1: Linear.Config
-        w2: Linear.Config
-        w3: Linear.Config
-        activation: SituAndMul.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.w1 = config.w1.build()
-        self.w2 = config.w2.build()
-        self.w3 = config.w3.build()
-        self.activation = config.activation.build()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up = torch.cat((self.w1(x), self.w3(x)), dim=-1)
-        return self.w2(self.activation(gate_up))
+        return self.w2((gate * up).to(input_dtype))
 
 
 class KimiMLAAttention(Module):
