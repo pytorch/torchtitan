@@ -1183,6 +1183,9 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             completed = True
         finally:
             if not completed and transfer_stream is not None:
+                # This fatal-only cleanup intentionally has no isolated mock-stream
+                # test to keep the unit-test footprint minimal. An exception makes
+                # the optimizer and training job unrecoverable.
                 # Preserve allocator lifetime ordering for work already queued
                 # on either stream without suppressing the active exception.
                 transfer_stream.wait_stream(caller)
