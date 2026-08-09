@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, cast, NoReturn
 
 import torch
 from torch import Tensor
@@ -24,10 +24,12 @@ from ..flex_optimizer_reshard import (
     _ParticipantPartition,
     _RedistributionGroup,
     _RedistributionPlan,
+    _require_valid_plan,
+    _RouteEndpoint,
     _TensorRegion,
     _TensorRegionRoute,
 )
-from ..work_assignment import assign_balanced_work
+from .load_balancing import balance_loads_across_partitions
 
 
 __all__ = ["Owned"]
@@ -164,12 +166,9 @@ def _assign_balanced_single_participants(
         for index, layout in enumerate(compute_layouts)
         if isinstance(layout.compute_distribution, _SingleRankCompute)
     )
-    candidate_partitions, updated_cumulative_loads = assign_balanced_work(
-        candidates,
-        num_partitions=len(participants),
-        initial_loads=cumulative_loads,
-        get_weight=lambda indexed_layout: indexed_layout[1].param.numel(),
-        get_stable_key=lambda indexed_layout: indexed_layout[1].fqn,
+    candidate_partitions, updated_cumulative_loads = balance_loads_across_partitions(
+        tuple((layout.param.numel(), layout.fqn) for _index, layout in candidates),
+        initial_partition_loads=cumulative_loads,
     )
     for (index, _layout), partition in zip(
         candidates,
@@ -232,8 +231,10 @@ def _build_replicated_to_dim0_shard_plan(
         offsets=(0,) * len(logical_shape),
         shape=logical_shape,
     )
-    if tuple(storage_regions) != ((participants, full_region),):
-        raise ValueError("dim-0 sharded compute requires replicated storage")
+    _require_valid_plan(
+        tuple(storage_regions) == ((participants, full_region),),
+        "dim-0 sharded compute requires replicated storage",
+    )
 
     storage_partitions = tuple(
         _ParticipantPartition(
@@ -245,7 +246,6 @@ def _build_replicated_to_dim0_shard_plan(
     )
     compute_partitions = []
     storage_to_compute_routes = []
-    compute_to_storage_routes = []
     for participant_index, participant in enumerate(participants):
         local_dim0, dim0_offset = Shard.local_shard_size_and_offset(
             logical_shape[0],
@@ -273,19 +273,8 @@ def _build_replicated_to_dim0_shard_plan(
         storage_to_compute_routes.append(
             _TensorRegionRoute(
                 logical_region=logical_region,
-                source_region=logical_region,
-                destination_region=tensor_region,
-                source_participants=participants,
-                destination_participants=(participant,),
-            )
-        )
-        compute_to_storage_routes.append(
-            _TensorRegionRoute(
-                logical_region=logical_region,
-                source_region=tensor_region,
-                destination_region=logical_region,
-                source_participants=(participant,),
-                destination_participants=participants,
+                source=_RouteEndpoint(logical_region, participants),
+                destination=_RouteEndpoint(tensor_region, (participant,)),
             )
         )
 
@@ -295,7 +284,6 @@ def _build_replicated_to_dim0_shard_plan(
         storage_partitions=storage_partitions,
         compute_partitions=tuple(compute_partitions),
         storage_to_compute_routes=tuple(storage_to_compute_routes),
-        compute_to_storage_routes=tuple(compute_to_storage_routes),
     )
 
 
@@ -307,41 +295,42 @@ def _build_batched_matrix_redistribution_plan(
     compute_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
     """Map flat row storage to sharded matrix batches."""
-    if (
-        len(storage_shape) != 2
-        or len(compute_shape) != 3
-        or storage_shape[0] != compute_shape[0] * compute_shape[1]
-        or storage_shape[1] != compute_shape[2]
-    ):
-        raise ValueError("matrix-batch redistribution requires a flattened 2D view")
+    _require_valid_plan(
+        len(storage_shape) == 2
+        and len(compute_shape) == 3
+        and storage_shape[0] == compute_shape[0] * compute_shape[1]
+        and storage_shape[1] == compute_shape[2],
+        "matrix-batch redistribution requires a flattened 2D view",
+    )
 
     num_matrices, matrix_rows, matrix_columns = compute_shape
     storage_by_participant = {}
     storage_endpoints = []
     for holders, logical_region in storage_regions:
-        if (
-            not holders
-            or len(logical_region.shape) != 2
-            or logical_region.offsets[1] != 0
-            or logical_region.shape[1] != matrix_columns
-        ):
-            raise ValueError(
-                "matrix-batch redistribution requires row-sharded 2D storage"
-            )
+        _require_valid_plan(
+            bool(holders)
+            and len(logical_region.shape) == 2
+            and logical_region.offsets[1] == 0
+            and logical_region.shape[1] == matrix_columns,
+            "matrix-batch redistribution requires row-sharded 2D storage",
+        )
         tensor_region = _TensorRegion(
             offsets=(0, 0),
             shape=logical_region.shape,
         )
         storage_endpoints.append((holders, logical_region, tensor_region))
         for participant in holders:
-            if participant not in participants or participant in storage_by_participant:
-                raise ValueError(
-                    "matrix-batch storage holders must partition participants"
-                )
+            _require_valid_plan(
+                participant in participants
+                and participant not in storage_by_participant,
+                "matrix-batch storage holders must partition participants",
+            )
             storage_by_participant[participant] = (logical_region, tensor_region)
 
-    if set(storage_by_participant) != set(participants):
-        raise ValueError("matrix-batch storage must cover every participant")
+    _require_valid_plan(
+        set(storage_by_participant) == set(participants),
+        "matrix-batch storage must cover every participant",
+    )
 
     storage_partitions = tuple(
         _ParticipantPartition(
@@ -375,7 +364,6 @@ def _build_batched_matrix_redistribution_plan(
     compute_partitions = tuple(compute_partitions_list)
 
     storage_to_compute_routes = []
-    compute_to_storage_routes = []
     for source_holders, storage_region, storage_tensor_base in storage_endpoints:
         storage_row_offset = storage_region.offsets[0]
         storage_row_end = storage_row_offset + storage_region.shape[0]
@@ -420,19 +408,14 @@ def _build_batched_matrix_redistribution_plan(
                 storage_to_compute_routes.append(
                     _TensorRegionRoute(
                         logical_region=logical_region,
-                        source_region=storage_tensor_region,
-                        destination_region=compute_tensor_region,
-                        source_participants=source_holders,
-                        destination_participants=destination_holders,
-                    )
-                )
-                compute_to_storage_routes.append(
-                    _TensorRegionRoute(
-                        logical_region=logical_region,
-                        source_region=compute_tensor_region,
-                        destination_region=storage_tensor_region,
-                        source_participants=destination_holders,
-                        destination_participants=source_holders,
+                        source=_RouteEndpoint(
+                            storage_tensor_region,
+                            source_holders,
+                        ),
+                        destination=_RouteEndpoint(
+                            compute_tensor_region,
+                            destination_holders,
+                        ),
                     )
                 )
 
@@ -442,7 +425,6 @@ def _build_batched_matrix_redistribution_plan(
         storage_partitions=storage_partitions,
         compute_partitions=compute_partitions,
         storage_to_compute_routes=tuple(storage_to_compute_routes),
-        compute_to_storage_routes=tuple(compute_to_storage_routes),
     )
 
 
@@ -461,7 +443,7 @@ def _resolve_storage_to_compute_transition(
         or param.ndim < 2
         or not local.is_contiguous()
     ):
-        raise ValueError(f"Muon parameter {fqn!r} has unsupported shape or storage")
+        _raise_unsupported_layout(fqn)
 
     replicated_storage = _has_replicated_storage(param)
     storage_can_redistribute, storage_shard_axis = _redistribution_storage_shard_axis(
@@ -505,6 +487,10 @@ def _resolve_storage_to_compute_transition(
                 ),
                 redistribution_storage_mesh_axis=storage_shard_axis,
             )
+    _raise_unsupported_layout(fqn)
+
+
+def _raise_unsupported_layout(fqn: str) -> NoReturn:
     raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
 
 

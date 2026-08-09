@@ -118,7 +118,6 @@ class _KimiMuonConfigTests:
         per_head = MuonComputeSharding(
             view_before_placement=BatchedMatrixComputeView(
                 num_matrices=self.num_heads,
-                matrices_flattened_into_dim=0,
             ),
             placement=Shard(0),
         )
@@ -189,7 +188,7 @@ class _KimiMuonConfigTests:
                 "layers." + "-".join(map(str, layer_ids)),
             )
             self.assertEqual(bucket.patterns, expected)
-            self.assertEqual(bucket.mesh_axes, ("dp_shard",))
+            self.assertEqual(bucket.mesh_axis, "dp_shard")
 
         parallelism = self.config.parallelism
         self.assertEqual(parallelism.data_parallel_replicate_degree, 1)

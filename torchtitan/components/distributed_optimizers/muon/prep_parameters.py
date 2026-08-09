@@ -36,7 +36,6 @@ class BatchedMatrixComputeView:
     """View 2D storage as matrices with batch and rows flattened into dim 0."""
 
     num_matrices: int
-    matrices_flattened_into_dim: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -45,8 +44,6 @@ class BatchedMatrixComputeView:
             or self.num_matrices <= 0
         ):
             raise ValueError("num_matrices must be a positive integer")
-        if self.matrices_flattened_into_dim != 0:
-            raise ValueError("only matrices_flattened_into_dim=0 is supported")
 
     def _resolve(self, storage_shape: torch.Size) -> _ResolvedBatchedMatrixView:
         if (
@@ -165,7 +162,7 @@ def build_distributed_muon(
             compute_view_key = (
                 "batched_matrix",
                 compute_view.num_matrices,
-                compute_view.matrices_flattened_into_dim,
+                0,
             )
             assert resolved_view is not None
             global_compute_shape = torch.Size(
@@ -203,14 +200,13 @@ class _ResolvedBatchedMatrixView:
     matrix_columns: int
 
     def compute_shape(self, storage_shape: torch.Size) -> torch.Size:
-        if (
-            len(storage_shape) != 2
-            or storage_shape[0] % self.matrix_rows
-            or storage_shape[1] != self.matrix_columns
+        if not (
+            len(storage_shape) == 2
+            and not storage_shape[0] % self.matrix_rows
+            and storage_shape[1] == self.matrix_columns
         ):
-            raise ValueError(
-                f"storage shape {tuple(storage_shape)} is not aligned to "
-                f"matrix shape {(self.matrix_rows, self.matrix_columns)}"
+            raise RuntimeError(
+                "prepared batched-matrix view is internally inconsistent"
             )
         return torch.Size(
             (
