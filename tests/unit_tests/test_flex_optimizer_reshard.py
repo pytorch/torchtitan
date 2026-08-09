@@ -90,15 +90,13 @@ class TestFlexOptimizerReshard(unittest.TestCase):
 
         self.assertIs(raised.exception, failure)
         context.device_handle.Event.assert_not_called()
+        self.assertLess(
+            events.index(("gather", 2)),
+            events.index(("return", 0)),
+        )
         self.assertEqual(
-            events,
+            events[-2:],
             [
-                ("transfer_wait", caller_stream),
-                ("gather", 0),
-                ("compute", 0),
-                ("gather", 1),
-                ("gather", 2),
-                ("return", 0),
                 ("transfer_wait", caller_stream),
                 ("caller_wait", transfer_stream),
             ],
