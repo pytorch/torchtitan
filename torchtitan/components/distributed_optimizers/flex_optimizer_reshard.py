@@ -623,18 +623,20 @@ class _PackedAllToAllSchedule:
     output_split_sizes: list[int]
     input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
     output_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
+    input_buffer_numel: int = field(init=False)
+    output_buffer_numel: int = field(init=False)
 
-    @property
-    def input_buffer_numel(self) -> int:
-        return sum(self.input_split_sizes)
-
-    @property
-    def output_buffer_numel(self) -> int:
-        return sum(self.output_split_sizes)
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "input_buffer_numel", sum(self.input_split_sizes))
+        object.__setattr__(self, "output_buffer_numel", sum(self.output_split_sizes))
+        if (
+            not self.has_remote_transfers
+            and self.input_buffer_numel != self.output_buffer_numel
+        ):
+            raise RuntimeError("local all-to-all schedule has mismatched buffers")
 
     def execute(self, output: Tensor, input: Tensor) -> None:
         if not self.has_remote_transfers:
-            assert self.input_buffer_numel == self.output_buffer_numel
             output[: self.output_buffer_numel].copy_(input[: self.input_buffer_numel])
             return
         dist.all_to_all_single(

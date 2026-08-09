@@ -216,6 +216,8 @@ class DistributedMuon(Optimizer):
                     compute_view_key=prepared.compute_view_key,
                     global_compute_shape=global_compute_shape,
                     local_storage_view=local_storage_view,
+                    storage_mesh_ranks=_device_mesh_ranks(param.device_mesh),
+                    storage_layout_signature=_storage_layout_signature(param),
                     local_storage_signature=_local_storage_signature(param.to_local()),
                     compute_distribution=resolved_transition.compute_distribution,
                     storage_to_compute_transition=resolved_transition.storage_to_compute_transition,
@@ -312,38 +314,54 @@ class DistributedMuon(Optimizer):
         escapes. Do not add a validation collective to the optimizer hot path.
         """
         initialize_state = not self._first_step_validated
-        missing_gradients = [
-            compute_layout.fqn
-            for compute_layout in self._parameter_compute_layouts
-            if compute_layout.param.grad is None
-        ]
+        missing_gradients = []
+        changed_parameter_storage_fqn = None
+        changed_gradient_storage_fqn = None
+        gradients = [] if initialize_state else None
+        for compute_layout in self._parameter_compute_layouts:
+            if (
+                changed_parameter_storage_fqn is None
+                and compute_layout.storage_is_compute_ready
+                and _local_storage_signature(compute_layout.param.to_local())
+                != compute_layout.local_storage_signature
+            ):
+                changed_parameter_storage_fqn = compute_layout.fqn
+
+            grad = compute_layout.param.grad
+            if grad is None:
+                missing_gradients.append(compute_layout.fqn)
+            elif not isinstance(grad, DTensor) or not self._has_storage_layout(
+                grad, compute_layout
+            ):
+                if changed_gradient_storage_fqn is None:
+                    changed_gradient_storage_fqn = compute_layout.fqn
+            elif gradients is not None:
+                gradients.append((compute_layout, grad))
+
         if missing_gradients:
             raise RuntimeError(
                 "DistributedMuon requires every configured gradient before "
                 f"step(); missing gradients: {missing_gradients}"
             )
+        if changed_parameter_storage_fqn is not None:
+            raise RuntimeError(
+                f"parameter local storage changed for "
+                f"{changed_parameter_storage_fqn!r}; "
+                "rebuild DistributedMuon"
+            )
+        if changed_gradient_storage_fqn is not None:
+            raise RuntimeError(
+                f"gradient storage layout changed for {changed_gradient_storage_fqn!r}"
+            )
 
-        for compute_layout in self._parameter_compute_layouts:
-            if (
-                compute_layout.storage_is_compute_ready
-                and _local_storage_signature(compute_layout.param.to_local())
-                != compute_layout.local_storage_signature
-            ):
-                raise RuntimeError(
-                    f"parameter local storage changed for {compute_layout.fqn!r}; "
-                    "rebuild DistributedMuon"
-                )
-        gradients = []
-        for compute_layout in self._parameter_compute_layouts:
-            grad = self._gradient(compute_layout)
-            gradients.append((compute_layout, grad))
-            if initialize_state:
+        if gradients is not None:
+            for compute_layout, _grad in gradients:
                 self._validate_momentum(compute_layout)
 
         # State creation happens only after every gradient and existing state
         # tensor has passed validation, so a deterministic input error cannot
         # partially update an earlier bucket.
-        if initialize_state:
+        if gradients is not None:
             for compute_layout, grad in gradients:
                 self._momentum(compute_layout, grad)
             self._first_step_validated = True
@@ -352,30 +370,14 @@ class DistributedMuon(Optimizer):
     def _has_storage_layout(
         tensor: DTensor, compute_layout: _ParameterComputeLayout
     ) -> bool:
-        local = tensor.to_local()
-        param_local = compute_layout.param.to_local()
-        return (
-            tensor.shape == compute_layout.param.shape
-            and tensor.stride() == compute_layout.param.stride()
-            and _device_mesh_ranks(tensor.device_mesh)
-            == _device_mesh_ranks(compute_layout.param.device_mesh)
-            and tensor.placements == compute_layout.param.placements
-            and local.shape == param_local.shape
-            and local.stride() == param_local.stride()
-            and local.dtype == param_local.dtype
-            and local.device == param_local.device
-            and local.is_contiguous()
+        mesh_matches = (
+            tensor.device_mesh is compute_layout.param.device_mesh
+            or _device_mesh_ranks(tensor.device_mesh)
+            == compute_layout.storage_mesh_ranks
         )
-
-    def _gradient(self, compute_layout: _ParameterComputeLayout) -> DTensor:
-        grad = compute_layout.param.grad
-        if not isinstance(grad, DTensor) or not self._has_storage_layout(
-            grad, compute_layout
-        ):
-            raise RuntimeError(
-                f"gradient storage layout changed for {compute_layout.fqn!r}"
-            )
-        return grad
+        return mesh_matches and (
+            _storage_layout_signature(tensor) == compute_layout.storage_layout_signature
+        )
 
     def _validate_momentum(self, compute_layout: _ParameterComputeLayout) -> None:
         state = self.state.get(compute_layout.param, {})
@@ -639,6 +641,7 @@ def _validate_layout_fingerprints_on_load(
 
 def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon = cast(DistributedMuon, optimizer)
+    muon._validate_groups()
     muon._initialize_plan(muon._parameter_compute_layouts)
     muon._validate_plan_across_ranks()
     muon._redistribution_runtime.reserve_buffers(
@@ -669,4 +672,18 @@ def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:
         tuple(tensor.stride()),
         tensor.dtype,
         tensor.device,
+    )
+
+
+def _storage_layout_signature(tensor: DTensor) -> tuple[Any, ...]:
+    local = tensor.to_local()
+    return (
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.placements,
+        tuple(local.shape),
+        tuple(local.stride()),
+        local.dtype,
+        local.device,
+        local.is_contiguous(),
     )
