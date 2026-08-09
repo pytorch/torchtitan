@@ -127,6 +127,8 @@ class _ResolvedStorageToComputeTransition:
 
 def _resolve_muon_redistribution_plans(
     contexts: tuple[_BucketPlanningContext[_ParameterComputeLayout], ...],
+    *,
+    ns_steps_by_group: Sequence[int],
 ) -> tuple[tuple[_RedistributionPlan | None, ...], ...]:
     """Resolve Muon compute placements directly into transport plans."""
     cumulative_loads_by_participants: dict[tuple[int, ...], tuple[int, ...]] = {}
@@ -141,6 +143,7 @@ def _resolve_muon_redistribution_plans(
             context.items,
             participants=participants,
             cumulative_loads=initial_loads,
+            ns_steps_by_group=ns_steps_by_group,
         )
         cumulative_loads_by_participants[participants] = cumulative_loads
         plans_by_bucket.append(
@@ -165,6 +168,7 @@ def _assign_balanced_single_participants(
     *,
     participants: tuple[int, ...],
     cumulative_loads: Sequence[int],
+    ns_steps_by_group: Sequence[int],
 ) -> tuple[tuple[int | None, ...], tuple[int, ...]]:
     """Balance single-participant compute within and across ordered buckets."""
     assignments: list[int | None] = [None] * len(compute_layouts)
@@ -174,8 +178,18 @@ def _assign_balanced_single_participants(
         if isinstance(layout.compute_distribution, _SingleRankCompute)
     )
     candidate_partitions, updated_cumulative_loads = balance_loads_across_partitions(
-        tuple((layout.param.numel(), layout.fqn) for _index, layout in candidates),
-        initial_partition_loads=cumulative_loads,
+        tuple(
+            (
+                _estimate_muon_compute_cost(
+                    layout.global_compute_shape,
+                    ns_steps_by_group[layout.group_index],
+                ),
+                layout.param.numel() * layout.param.element_size(),
+                layout.fqn,
+            )
+            for _index, layout in candidates
+        ),
+        initial_cumulative_primary_loads=cumulative_loads,
     )
     for (index, _layout), partition in zip(
         candidates,
@@ -184,6 +198,16 @@ def _assign_balanced_single_participants(
     ):
         assignments[index] = participants[partition]
     return tuple(assignments), updated_cumulative_loads
+
+
+def _estimate_muon_compute_cost(
+    matrix_shape: torch.Size,
+    ns_steps: int,
+) -> int:
+    rows, columns = matrix_shape
+    short_dim, long_dim = sorted((rows, columns))
+    # Each NS step has two s^2 * l matmuls and one s^3 matmul.
+    return ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
 
 
 def _build_parameter_redistribution_plan(

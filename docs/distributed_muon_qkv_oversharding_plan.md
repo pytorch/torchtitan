@@ -72,11 +72,13 @@ Its contract becomes:
 Buckets describe execution grouping. A bucket binds a communication mesh only
 when at least one resolved parameter transition requires redistribution; an
 entirely compute-ready bucket remains mesh-free. Muon balances single-rank
-`Owned` compute from the resolved parameter sizes, then immediately converts
-those choices to endpoint routes. Neither `Shard(0)` nor `Replicate` compute
-requires a single-rank assignment. The Muon-local
-`balance_loads_across_partitions` helper accepts `(load, stable key)` pairs;
-the adapter uses parameter sizes as loads and FQNs only as deterministic keys.
+`Owned` compute with estimated Newton-Schulz work as the primary load and
+tensor bytes as the secondary load, then immediately converts those choices to
+endpoint routes. Cumulative compute load breaks exact per-bucket ties. Neither
+`Shard(0)` nor `Replicate` compute requires a single-rank assignment. The
+Muon-local `balance_loads_across_partitions` helper accepts
+`(primary load, secondary load, stable key)` triples; the adapter supplies the
+Muon-specific costs and FQNs as deterministic keys.
 
 `muon/distributed_muon.py` owns the optimizer runtime and its private Tensor-level
 Muon operations. `muon/prep_parameters.py` is the trainer-facing adapter for
