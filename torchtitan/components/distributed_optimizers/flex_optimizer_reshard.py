@@ -618,8 +618,8 @@ class _PackedAllToAllSchedule:
     participants: tuple[int, ...]
     local_participant: int
     has_remote_transfers: bool
-    input_split_sizes: tuple[int, ...]
-    output_split_sizes: tuple[int, ...]
+    input_split_sizes: list[int]
+    output_split_sizes: list[int]
     input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
     output_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
 
@@ -639,8 +639,8 @@ class _PackedAllToAllSchedule:
         dist.all_to_all_single(
             output[: self.output_buffer_numel],
             input[: self.input_buffer_numel],
-            output_split_sizes=list(self.output_split_sizes),
-            input_split_sizes=list(self.input_split_sizes),
+            output_split_sizes=self.output_split_sizes,
+            input_split_sizes=self.input_split_sizes,
             group=self.process_group,
         )
 
@@ -685,70 +685,151 @@ class _BucketPlanningResult(Generic[_ItemT]):
     ordered_items: tuple[_ItemT, ...]
 
 
+_BufferKey: TypeAlias = tuple[torch.device, torch.dtype]
+
+
 @dataclass(slots=True)
-class _BucketWork(Generic[_ItemT]):
-    plan: _RedistributionBucketPlan[_ItemT]
-    slot: _BufferSlot
-    storage_buffer: Tensor
-    compute_fragment_buffer: Tensor
-    compute_input_ready: torch.Event | None = None
-    compute_done: torch.Event | None = None
-    done: torch.Event | None = None
+class _BufferRequirements:
+    storage_exchange_numel: int | None = None
+    compute_exchange_numel: int | None = None
+    compute_scratch_numel: int | None = None
+    storage_scratch_numel: int | None = None
+
+    def include_communication(
+        self,
+        *,
+        storage_exchange_numel: int,
+        compute_exchange_numel: int,
+    ) -> None:
+        self.storage_exchange_numel = max(
+            self.storage_exchange_numel or 0,
+            storage_exchange_numel,
+        )
+        self.compute_exchange_numel = max(
+            self.compute_exchange_numel or 0,
+            compute_exchange_numel,
+        )
+
+    def include_compute_scratch(self, numel: int) -> None:
+        self.compute_scratch_numel = max(self.compute_scratch_numel or 0, numel)
+
+    def include_storage_scratch(self, numel: int) -> None:
+        self.storage_scratch_numel = max(self.storage_scratch_numel or 0, numel)
+
+
+@dataclass(slots=True)
+class _ReservedBuffers:
+    storage_exchange: Tensor | None = None
+    compute_exchange: Tensor | None = None
+    # These remain separate because transfer-stream preparation/finalization
+    # can overlap caller-stream compute within the same pipeline slot.
+    compute_scratch: Tensor | None = None
+    storage_scratch: Tensor | None = None
+
+
+def _reserve_tensor(
+    tensor: Tensor | None,
+    *,
+    numel: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> Tensor:
+    if tensor is None or tensor.numel() < numel:
+        return torch.empty(numel, dtype=dtype, device=device)
+    return tensor
+
+
+def _reserved_view(tensor: Tensor | None, numel: int) -> Tensor:
+    assert tensor is not None and tensor.numel() >= numel
+    return tensor[:numel]
 
 
 @dataclass(slots=True)
 class _BufferSlot:
-    storage_exchange_buffers: dict[tuple[torch.device, torch.dtype], Tensor] = field(
-        default_factory=dict
-    )
-    compute_exchange_buffers: dict[tuple[torch.device, torch.dtype], Tensor] = field(
-        default_factory=dict
-    )
-    compute_buffers: dict[tuple[torch.device, torch.dtype], Tensor] = field(
-        default_factory=dict
-    )
-    storage_partition_buffers: dict[tuple[torch.device, torch.dtype], Tensor] = field(
-        default_factory=dict
-    )
+    buffers: dict[_BufferKey, _ReservedBuffers] = field(default_factory=dict)
+    _recorded_compute_streams: set[torch.Stream] = field(default_factory=set)
 
-    @staticmethod
-    def _ensure_capacity(
-        buffers: dict[tuple[torch.device, torch.dtype], Tensor],
+    def reserve(
+        self,
+        requirements: dict[_BufferKey, _BufferRequirements],
         *,
-        numel: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> Tensor:
-        key = (device, dtype)
-        buffer = buffers.get(key)
-        if buffer is None or buffer.numel() < numel:
-            buffer = torch.empty(numel, dtype=dtype, device=device)
-            buffers[key] = buffer
-        return buffer[:numel]
+        device_handle: ModuleType,
+        compute_stream: torch.Stream,
+        transfer_stream: torch.Stream | None,
+    ) -> None:
+        if transfer_stream is not None:
+            with device_handle.stream(transfer_stream):
+                for (device, dtype), required in requirements.items():
+                    reserved = self.buffers.setdefault(
+                        (device, dtype), _ReservedBuffers()
+                    )
+                    if required.storage_exchange_numel is not None:
+                        reserved.storage_exchange = _reserve_tensor(
+                            reserved.storage_exchange,
+                            numel=required.storage_exchange_numel,
+                            dtype=dtype,
+                            device=device,
+                        )
+                    if required.compute_exchange_numel is not None:
+                        reserved.compute_exchange = _reserve_tensor(
+                            reserved.compute_exchange,
+                            numel=required.compute_exchange_numel,
+                            dtype=dtype,
+                            device=device,
+                        )
+                    if required.storage_scratch_numel is not None:
+                        reserved.storage_scratch = _reserve_tensor(
+                            reserved.storage_scratch,
+                            numel=required.storage_scratch_numel,
+                            dtype=dtype,
+                            device=device,
+                        )
+
+        with device_handle.stream(compute_stream):
+            for (device, dtype), required in requirements.items():
+                if required.compute_scratch_numel is None:
+                    continue
+                reserved = self.buffers.setdefault((device, dtype), _ReservedBuffers())
+                reserved.compute_scratch = _reserve_tensor(
+                    reserved.compute_scratch,
+                    numel=required.compute_scratch_numel,
+                    dtype=dtype,
+                    device=device,
+                )
+        self._recorded_compute_streams.clear()
+        self.record_compute_stream(compute_stream)
+
+    def record_compute_stream(self, stream: torch.Stream) -> None:
+        # Construction or checkpoint load may reserve on a different stream
+        # from the later optimizer step. Record each caller stream only once.
+        if stream in self._recorded_compute_streams:
+            return
+        for reserved in self.buffers.values():
+            compute_scratch = reserved.compute_scratch
+            if compute_scratch is not None and compute_scratch.device.type != "cpu":
+                compute_scratch.record_stream(stream)
+        self._recorded_compute_streams.add(stream)
 
     def communication_buffers(
         self, plan: _RedistributionBucketPlan[Any]
     ) -> tuple[Tensor, Tensor]:
         to_compute = plan.storage_to_compute_schedule
         to_storage = plan.compute_to_storage_schedule
+        reserved = self.buffers[(plan.device, plan.dtype)]
         return (
-            self._ensure_capacity(
-                self.storage_exchange_buffers,
-                numel=max(
+            _reserved_view(
+                reserved.storage_exchange,
+                max(
                     to_compute.input_buffer_numel,
                     to_storage.output_buffer_numel,
                 ),
-                dtype=plan.dtype,
-                device=plan.device,
             ),
-            self._ensure_capacity(
-                self.compute_exchange_buffers,
-                numel=max(
+            _reserved_view(
+                reserved.compute_exchange,
+                max(
                     to_compute.output_buffer_numel,
                     to_storage.input_buffer_numel,
                 ),
-                dtype=plan.dtype,
-                device=plan.device,
             ),
         )
 
@@ -759,12 +840,8 @@ class _BufferSlot:
         dtype: torch.dtype,
         device: torch.device,
     ) -> Tensor:
-        return self._ensure_capacity(
-            self.compute_buffers,
-            numel=math.prod(shape),
-            dtype=dtype,
-            device=device,
-        ).view(shape)
+        reserved = self.buffers[(device, dtype)]
+        return _reserved_view(reserved.compute_scratch, math.prod(shape)).view(shape)
 
     def storage_partition_buffer(
         self,
@@ -773,33 +850,69 @@ class _BufferSlot:
         dtype: torch.dtype,
         device: torch.device,
     ) -> Tensor:
-        return self._ensure_capacity(
-            self.storage_partition_buffers,
-            numel=math.prod(shape),
-            dtype=dtype,
-            device=device,
-        ).view(shape)
+        reserved = self.buffers[(device, dtype)]
+        return _reserved_view(reserved.storage_scratch, math.prod(shape)).view(shape)
+
+
+@dataclass(slots=True)
+class _PipelineSlot:
+    buffers: _BufferSlot
+    compute_input_ready: torch.Event
+    compute_done: torch.Event
+    done: torch.Event
+
+
+@dataclass(slots=True)
+class _BucketWork(Generic[_ItemT]):
+    plan: _RedistributionBucketPlan[_ItemT]
+    slot: _PipelineSlot
+    storage_buffer: Tensor
+    compute_fragment_buffer: Tensor
 
 
 @dataclass(slots=True)
 class _CommunicationContext:
     device_handle: ModuleType
     transfer_stream: torch.Stream
-    slots: tuple[_BufferSlot, _BufferSlot]
+    slots: tuple[_PipelineSlot, _PipelineSlot]
 
     @classmethod
     def create(cls, device: torch.device) -> _CommunicationContext:
         device_handle = torch.get_device_module(device)
         transfer_stream = device_handle.Stream(device=device, priority=0)
+
+        def create_slot() -> _PipelineSlot:
+            return _PipelineSlot(
+                buffers=_BufferSlot(),
+                compute_input_ready=device_handle.Event(),
+                compute_done=device_handle.Event(),
+                done=device_handle.Event(),
+            )
+
         return cls(
             device_handle=device_handle,
             transfer_stream=transfer_stream,
-            slots=(_BufferSlot(), _BufferSlot()),
+            slots=(create_slot(), create_slot()),
         )
+
+
+def _include_compute_scratch_requirement(
+    requirements: dict[_BufferKey, _BufferRequirements],
+    item: _ItemT,
+    local_tensor_spec: Callable[[_ItemT], tuple[torch.Size, torch.dtype, torch.device]],
+) -> None:
+    shape, dtype, device = local_tensor_spec(item)
+    requirements.setdefault(
+        (device, dtype), _BufferRequirements()
+    ).include_compute_scratch(math.prod(shape))
 
 
 class _BucketedRedistributionRuntime(Generic[_ItemT]):
     """Execute bucket plans with one-bucket-ahead communication prefetch.
+
+    ``reserve_buffers`` must be called after planning and after any replan. It
+    eagerly grows two alternating buffer slots and creates their stream events,
+    so ``run`` only reuses already-reserved communication resources.
 
     ``prepare`` writes a Muon input into runtime-owned scratch, ``compute``
     updates its runtime-owned input in place, and ``finalize`` consumes a
@@ -817,6 +930,102 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         self._device = device
         self._context: _CommunicationContext | None = None
         self._local_slot = _BufferSlot()
+
+    def reserve_buffers(
+        self,
+        plans: Sequence[_BucketPlan[_ItemT]],
+        *,
+        local_tensor_spec: Callable[
+            [_ItemT], tuple[torch.Size, torch.dtype, torch.device]
+        ],
+    ) -> None:
+        """Eagerly grow runtime-owned tensors to the plans' maximum sizes."""
+        context = self._context
+        created_context = False
+        if context is None and any(
+            isinstance(plan, _RedistributionBucketPlan) for plan in plans
+        ):
+            context = _CommunicationContext.create(self._device)
+            created_context = True
+
+        device_handle = (
+            context.device_handle
+            if context is not None
+            else torch.get_device_module(self._device)
+        )
+        compute_stream = device_handle.current_stream(self._device)
+        local_requirements: dict[_BufferKey, _BufferRequirements] = {}
+        slot_requirements: tuple[
+            dict[_BufferKey, _BufferRequirements],
+            dict[_BufferKey, _BufferRequirements],
+        ] = ({}, {})
+        redistributed_index = 0
+        for plan in plans:
+            if isinstance(plan, _LocalBucketPlan):
+                for item in plan.items:
+                    _include_compute_scratch_requirement(
+                        local_requirements,
+                        item,
+                        local_tensor_spec,
+                    )
+                continue
+
+            assert context is not None
+            requirements = slot_requirements[redistributed_index % 2]
+            redistributed_index += 1
+            to_compute = plan.storage_to_compute_schedule
+            to_storage = plan.compute_to_storage_schedule
+            plan_requirements = requirements.setdefault(
+                (plan.device, plan.dtype), _BufferRequirements()
+            )
+            plan_requirements.include_communication(
+                storage_exchange_numel=max(
+                    to_compute.input_buffer_numel,
+                    to_storage.output_buffer_numel,
+                ),
+                compute_exchange_numel=max(
+                    to_compute.output_buffer_numel,
+                    to_storage.input_buffer_numel,
+                ),
+            )
+            participant = plan.group.local_participant
+            for redistribution_plan in plan.redistribution_plans:
+                storage_partition = redistribution_plan.storage_partition(participant)
+                plan_requirements.include_storage_scratch(
+                    math.prod(storage_partition.tensor_shape)
+                )
+                compute_partition = redistribution_plan.compute_partition(participant)
+                if compute_numel := math.prod(compute_partition.tensor_shape):
+                    plan_requirements.include_compute_scratch(compute_numel)
+            for item in plan.unredistributed_items:
+                _include_compute_scratch_requirement(
+                    requirements,
+                    item,
+                    local_tensor_spec,
+                )
+
+        self._local_slot.reserve(
+            local_requirements,
+            device_handle=device_handle,
+            compute_stream=compute_stream,
+            transfer_stream=None,
+        )
+        if context is not None:
+            for slot, requirements in zip(
+                context.slots, slot_requirements, strict=True
+            ):
+                slot.buffers.reserve(
+                    requirements,
+                    device_handle=device_handle,
+                    compute_stream=compute_stream,
+                    transfer_stream=context.transfer_stream,
+                )
+            if created_context:
+                for slot in context.slots:
+                    slot.compute_input_ready.record(context.transfer_stream)
+                    slot.compute_done.record(compute_stream)
+                    slot.done.record(context.transfer_stream)
+            self._context = context
 
     def run(
         self,
@@ -836,6 +1045,10 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             else torch.get_device_module(self._device)
         )
         caller = handle.current_stream(self._device)
+        self._local_slot.record_compute_stream(caller)
+        if context is not None:
+            for slot in context.slots:
+                slot.buffers.record_compute_stream(caller)
 
         transfer_stream: torch.Stream | None = None
         completed = False
@@ -855,9 +1068,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                         )
                     continue
 
-                if context is None:
-                    context = _CommunicationContext.create(self._device)
-                    self._context = context
+                assert context is not None
                 if transfer_stream is None:
                     context.transfer_stream.wait_stream(caller)
                     transfer_stream = context.transfer_stream
@@ -905,7 +1116,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     @staticmethod
     def _enqueue_storage_to_compute(
         plan: _RedistributionBucketPlan[_ItemT],
-        slot: _BufferSlot,
+        slot: _PipelineSlot,
         context: _CommunicationContext,
         *,
         prepare: Callable[[_ItemT, Tensor], None],
@@ -913,11 +1124,14 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         handle = context.device_handle
         transfer = context.transfer_stream
         with handle.stream(transfer):
-            storage_buffer, compute_fragment_buffer = slot.communication_buffers(plan)
+            (
+                storage_buffer,
+                compute_fragment_buffer,
+            ) = slot.buffers.communication_buffers(plan)
             work = _BucketWork(plan, slot, storage_buffer, compute_fragment_buffer)
             _prepare_redistributed(
                 plan,
-                slot,
+                slot.buffers,
                 storage_buffer,
                 prepare=prepare,
             )
@@ -925,14 +1139,13 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 output=compute_fragment_buffer,
                 input=storage_buffer,
             )
-            work.compute_input_ready = handle.Event()
-            work.compute_input_ready.record(transfer)
+            slot.compute_input_ready.record(transfer)
         return work
 
     @staticmethod
     def _compute_bucket(
         work: _BucketWork[_ItemT],
-        slot: _BufferSlot,
+        slot: _PipelineSlot,
         caller_stream: torch.Stream,
         context: _CommunicationContext,
         *,
@@ -943,25 +1156,23 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         compute: Callable[[_ItemT, Tensor], None],
         finalize: Callable[[_ItemT, Tensor], None],
     ) -> None:
-        assert work.compute_input_ready is not None
         handle = context.device_handle
         with handle.stream(caller_stream):
             _BucketedRedistributionRuntime._compute_without_redistribution(
                 work.plan.unredistributed_items,
-                slot,
+                slot.buffers,
                 local_tensor_spec=local_tensor_spec,
                 prepare=prepare,
                 compute=compute,
                 finalize=finalize,
             )
-            caller_stream.wait_event(work.compute_input_ready)
+            caller_stream.wait_event(slot.compute_input_ready)
             _compute_redistributed(
                 work,
-                slot,
+                slot.buffers,
                 compute=compute,
             )
-            work.compute_done = handle.Event()
-            work.compute_done.record(caller_stream)
+            slot.compute_done.record(caller_stream)
 
     @staticmethod
     def _enqueue_compute_to_storage(
@@ -970,23 +1181,20 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         *,
         finalize: Callable[[_ItemT, Tensor], None],
     ) -> None:
-        assert work.compute_done is not None
         handle = context.device_handle
         transfer = context.transfer_stream
         with handle.stream(transfer):
-            transfer.wait_event(work.compute_done)
+            transfer.wait_event(work.slot.compute_done)
             work.plan.compute_to_storage_schedule.execute(
                 output=work.storage_buffer,
                 input=work.compute_fragment_buffer,
             )
-            _finalize_redistributed(work, work.slot, finalize=finalize)
-            work.done = handle.Event()
-            work.done.record(transfer)
+            _finalize_redistributed(work, work.slot.buffers, finalize=finalize)
+            work.slot.done.record(transfer)
 
     @staticmethod
     def _release(work: _BucketWork[_ItemT], caller_stream: torch.Stream) -> None:
-        assert work.done is not None
-        caller_stream.wait_event(work.done)
+        caller_stream.wait_event(work.slot.done)
 
     @staticmethod
     def _compute_without_redistribution(
@@ -1216,8 +1424,8 @@ def _build_packed_all_to_all_schedule(
             for transfers in transfers_by_parameter
             for source, destination, _source_region, _destination_region in transfers
         ),
-        input_split_sizes=tuple(input_split_sizes),
-        output_split_sizes=tuple(output_split_sizes),
+        input_split_sizes=input_split_sizes,
+        output_split_sizes=output_split_sizes,
         input_spans_by_parameter=_packed_spans_by_parameter(
             input_spans, len(redistribution_plans)
         ),

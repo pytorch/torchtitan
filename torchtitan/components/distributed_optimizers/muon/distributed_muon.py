@@ -106,6 +106,10 @@ class DistributedMuon(Optimizer):
         self._redistribution_runtime = _BucketedRedistributionRuntime[
             _ParameterComputeLayout
         ](tensor_device)
+        self._redistribution_runtime.reserve_buffers(
+            self._plans,
+            local_tensor_spec=self._local_tensor_spec,
+        )
         self._set_checkpoint_layout_fingerprints()
         self.register_state_dict_post_hook(_add_layout_fingerprints_to_state_dict)
         self.register_load_state_dict_pre_hook(_validate_layout_fingerprints_on_load)
@@ -634,6 +638,10 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon = cast(DistributedMuon, optimizer)
     muon._initialize_plan(muon._parameter_compute_layouts)
     muon._validate_plan_across_ranks()
+    muon._redistribution_runtime.reserve_buffers(
+        muon._plans,
+        local_tensor_spec=muon._local_tensor_spec,
+    )
     muon._first_step_validated = False
 
 
