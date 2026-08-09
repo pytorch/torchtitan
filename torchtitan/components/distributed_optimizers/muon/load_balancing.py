@@ -17,12 +17,12 @@ def balance_loads_across_partitions(
     *,
     initial_partition_loads: Sequence[int],
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Greedily balance keyed loads across partitions.
+    """Balance keyed loads with a deterministic LPT heuristic.
 
     ``loads`` contains ``(load, stable_key)`` pairs. Assignments are partition
-    indices aligned with those pairs. Within one call, newly assigned load is
-    the primary balancing key. ``initial_partition_loads`` breaks ties across
-    a sequence of calls, and each stable key makes ordering deterministic.
+    indices aligned with those pairs. Each call balances its own loads first;
+    ``initial_partition_loads`` breaks ties across a sequence of calls. Stable
+    keys make ordering deterministic. This is not an exact partition optimum.
     """
     num_partitions = len(initial_partition_loads)
     if not num_partitions:
