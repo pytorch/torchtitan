@@ -644,21 +644,6 @@ def _build_single_participant_redistribution_plan(
     )
 
 
-def _build_replicated_redistribution_plan(
-    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
-    *,
-    participants: tuple[int, ...],
-    logical_shape: tuple[int, ...],
-) -> _RedistributionPlan:
-    """Build mirrored routes to whole-tensor compute on every participant."""
-    return _build_whole_tensor_redistribution_plan(
-        storage_regions,
-        participants=participants,
-        compute_participants=participants,
-        logical_shape=logical_shape,
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class _PackedSpan:
     """Physical packed-buffer location for an endpoint tensor region."""

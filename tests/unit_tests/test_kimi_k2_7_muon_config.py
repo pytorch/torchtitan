@@ -9,7 +9,7 @@ import unittest
 
 import torch
 from torch.distributed.tensor import Shard
-from torchtitan.components.distributed_optimizers.muon.prep_parameters import (
+from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
     MuonComputeSharding,
     Owned,

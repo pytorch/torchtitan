@@ -623,12 +623,16 @@ class DistributedMuon(Optimizer):
 
 
 _LAYOUT_FINGERPRINT_KEY = "_distributed_muon_layout_fingerprint"
+_LAYOUT_FINGERPRINT_VERSION = 1
 
 
-def _layout_fingerprint(descriptor: tuple[Any, ...]) -> bytes:
+def _layout_fingerprint(descriptor: tuple[Any, ...]) -> tuple[int, bytes]:
     # Optimizer.load_state_dict rebuilds iterable state values via
     # type(value)(generator), which round-trips bytes but not strings.
-    return hashlib.sha256(repr(descriptor).encode()).digest()
+    return (
+        _LAYOUT_FINGERPRINT_VERSION,
+        hashlib.sha256(repr(descriptor).encode()).digest(),
+    )
 
 
 def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:

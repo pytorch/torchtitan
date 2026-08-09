@@ -12,7 +12,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
     BucketConfig,
 )
-from torchtitan.components.distributed_optimizers.muon.prep_parameters import (
+from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
     MuonComputeSharding,
     Owned,

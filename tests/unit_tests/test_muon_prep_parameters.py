@@ -13,12 +13,10 @@ from torch.distributed.tensor.placement_types import _StridedShard
 from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
     BucketConfig,
 )
-from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
-    DistributedMuon,
-)
-from torchtitan.components.distributed_optimizers.muon.prep_parameters import (
+from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
     build_distributed_muon,
+    DistributedMuon,
     MuonComputeSharding,
     Owned,
 )
@@ -53,18 +51,11 @@ class TestMuonParameterPrep(unittest.TestCase):
             "param_names": ["layers.0.wkv_a.weight"],
             "compute_sharding": MuonComputeSharding(placement=Owned()),
         }
-        replicated_storage = torch.empty(3, 2)
-        replicated_compute_sharding = MuonComputeSharding(placement=Replicate())
-        replicated_group = {
-            "params": [replicated_storage],
-            "param_names": ["layers.0.replicated.weight"],
-            "compute_sharding": replicated_compute_sharding,
-        }
         bucket_specs = ()
 
         with mock.patch.object(DistributedMuon, "__init__", return_value=None) as init:
             optimizer = build_distributed_muon(
-                [group, identity_group, replicated_group],
+                [group, identity_group],
                 bucket_specs=bucket_specs,
                 lr=0.1,
             )
@@ -81,13 +72,10 @@ class TestMuonParameterPrep(unittest.TestCase):
         )
         self.assertIsNot(core_groups[0], group)
         self.assertIsNot(core_groups[1], identity_group)
-        self.assertIsNot(core_groups[2], replicated_group)
         self.assertIs(group["compute_sharding"], compute_sharding)
-        self.assertIs(replicated_group["compute_sharding"], replicated_compute_sharding)
         self.assertNotIn("compute_sharding", core_groups[0])
         self.assertEqual(core_groups[0]["_compute_placement"], Shard(0))
         self.assertEqual(core_groups[1]["_compute_placement"], Owned())
-        self.assertEqual(core_groups[2]["_compute_placement"], Replicate())
         self.assertFalse(any(value is view for value in core_groups[0].values()))
         self.assertEqual(
             prepared["layers.0.wq.weight"].global_compute_shape,
@@ -120,14 +108,6 @@ class TestMuonParameterPrep(unittest.TestCase):
         self.assertIs(
             prepared["layers.0.wkv_a.weight"].local_storage_view,
             identity_storage,
-        )
-        self.assertEqual(
-            prepared["layers.0.replicated.weight"].global_compute_shape,
-            replicated_storage.shape,
-        )
-        self.assertIs(
-            prepared["layers.0.replicated.weight"].local_storage_view,
-            replicated_storage,
         )
 
     def test_builder_defers_bucket_config_binding(self):
@@ -181,9 +161,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                         {
                             "params": [torch.empty(shape)],
                             "param_names": ["layers.0.weight"],
-                            "compute_sharding": MuonComputeSharding(
-                                placement=Replicate()
-                            ),
+                            "compute_sharding": MuonComputeSharding(placement=Owned()),
                         }
                     ],
                     bucket_specs=(),

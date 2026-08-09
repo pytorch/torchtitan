@@ -18,7 +18,6 @@ from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import 
     _BucketWork,
     _BufferSlot,
     _build_bucket_plans,
-    _build_replicated_redistribution_plan,
     _build_single_participant_redistribution_plan,
     _compute_redistributed,
     _finalize_redistributed,
@@ -943,67 +942,3 @@ class TestFlexOptimizerReshard(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "participants must be unique"):
             _TensorRegionRoute(first, first, first, (3, 3), (3,))
-
-    def test_replica_holders_must_match_route_endpoints(self):
-        participants = (3, 7)
-        full = _TensorRegion((0, 0), (2, 3))
-        plan = _build_replicated_redistribution_plan(
-            (((3, 7), full),),
-            participants=participants,
-            logical_shape=full.shape,
-        )
-
-        self.assertEqual(
-            tuple(partition.logical_regions for partition in plan.storage_partitions),
-            ((full,), (full,)),
-        )
-        self.assertEqual(
-            tuple(partition.logical_regions for partition in plan.compute_partitions),
-            ((full,), (full,)),
-        )
-        route = plan.storage_to_compute_routes[0]
-        self.assertEqual(route.source_participants, participants)
-        self.assertEqual(route.destination_participants, participants)
-
-        local_schedule = _lower_packed_all_to_all(
-            (plan,),
-            storage_to_compute=True,
-            process_group=object(),
-            local_participant=3,
-        )
-        self.assertFalse(local_schedule.has_remote_transfers)
-        input_buffer = torch.arange(local_schedule.input_buffer_numel)
-        output_buffer = torch.empty_like(input_buffer)
-        with patch(
-            "torchtitan.components.distributed_optimizers."
-            "flex_optimizer_reshard.dist.all_to_all_single"
-        ) as collective:
-            local_schedule.execute(output_buffer, input_buffer)
-        collective.assert_not_called()
-        torch.testing.assert_close(output_buffer, input_buffer)
-
-        endpoint_cases = (
-            (
-                "source",
-                _TensorRegionRoute(full, full, full, (3,), participants),
-                _TensorRegionRoute(full, full, full, participants, (3,)),
-            ),
-            (
-                "destination",
-                _TensorRegionRoute(full, full, full, participants, (3,)),
-                _TensorRegionRoute(full, full, full, (3,), participants),
-            ),
-        )
-        for endpoint, forward, reverse in endpoint_cases:
-            with self.subTest(endpoint=endpoint), self.assertRaisesRegex(
-                ValueError,
-                "do not cover the participant partition",
-            ):
-                _RedistributionPlan(
-                    participants=participants,
-                    logical_shape=full.shape,
-                    storage_partitions=plan.storage_partitions,
-                    compute_partitions=plan.compute_partitions,
-                    storage_to_compute_routes=(forward,),
-                    compute_to_storage_routes=(reverse,),
-                )

@@ -27,15 +27,15 @@ from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import 
     BucketConfig,
     BucketSpec,
 )
-from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
-    _adjust_muon_learning_rate,
-    DistributedMuon,
-)
-from torchtitan.components.distributed_optimizers.muon.prep_parameters import (
+from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
     build_distributed_muon,
+    DistributedMuon,
     MuonComputeSharding,
     Owned,
+)
+from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
+    _adjust_muon_learning_rate,
 )
 from torchtitan.components.distributed_optimizers.muon.storage_to_compute import (
     _has_dim0_sharded_storage,
@@ -1487,8 +1487,8 @@ class TestDistributedMuon(_DistributedMuonTestBase):
 
         all_to_all_single = dist.all_to_all_single
         with patch(
-            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
-            "all_to_all_single",
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "dist.all_to_all_single",
             wraps=all_to_all_single,
         ) as collective:
             optimizer.step()
@@ -1522,34 +1522,27 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             ],
         )
         equivalent_layout_optimizer.load_state_dict(state_dict)
-
-        fingerprint_key = "_distributed_muon_layout_fingerprint"
-        loaded_fingerprint = equivalent_layout_optimizer.state[parameter][
-            fingerprint_key
-        ]
-        self.assertIsInstance(loaded_fingerprint, bytes)
         self.assertEqual(
-            loaded_fingerprint,
+            equivalent_layout_optimizer.state[parameter][
+                "_distributed_muon_layout_fingerprint"
+            ],
             equivalent_layout_optimizer._layout_fingerprints_by_fqn["layers.0.matrix"],
         )
 
     @with_comms
-    def test_batched_state_dict_loads_across_compute_distributions(self):
-        value = torch.arange(1, 13, device=self.device).reshape(4, 3).float().div_(10)
-        compute_view = BatchedMatrixComputeView(num_matrices=2)
+    def test_constructor_rejects_replicated_compute_for_sharded_storage(self):
+        parameter = self._parameter(
+            torch.arange(12, device=self.device).reshape(4, 3).float()
+        )
 
-        def build(compute_placement):
-            parameter = torch.nn.Parameter(
-                distribute_tensor(value.clone(), self.mesh, (Replicate(),))
-            )
-            optimizer = build_distributed_muon(
+        with self.assertRaisesRegex(ValueError, "storage-to-compute layout"):
+            build_distributed_muon(
                 [
                     {
                         "params": [parameter],
-                        "param_names": ["layers.0.matrix"],
+                        "param_names": ["layers.0.weight"],
                         "compute_sharding": MuonComputeSharding(
-                            view_before_placement=compute_view,
-                            placement=compute_placement,
+                            placement=Replicate(),
                         ),
                     }
                 ],
@@ -1559,93 +1552,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         mesh=self.mesh,
                     )
                 ],
-                ns_steps=2,
             )
-            return parameter, optimizer
-
-        source_parameter, source_optimizer = build(Replicate())
-        init_optim_state(source_optimizer)
-        state_dict = source_optimizer.state_dict()
-
-        target_parameter, target_optimizer = build(Shard(0))
-        target_optimizer.load_state_dict(state_dict)
-        _assert_exact(
-            target_optimizer.state[target_parameter]["momentum_buffer"].to_local(),
-            source_optimizer.state[source_parameter]["momentum_buffer"].to_local(),
-        )
-
-    @with_comms
-    def test_sharded_storage_redistributes_to_replicated_compute(self):
-        value = torch.arange(1, 13, device=self.device).reshape(4, 3).float().div_(10)
-        parameter = self._parameter(value)
-        optimizer = build_distributed_muon(
-            [
-                {
-                    "params": [parameter],
-                    "param_names": ["layers.0.weight"],
-                    "compute_sharding": MuonComputeSharding(
-                        placement=Replicate(),
-                    ),
-                }
-            ],
-            bucket_specs=[
-                BucketSpec(
-                    patterns=("layers.0.*",),
-                    mesh=self.mesh,
-                )
-            ],
-            lr=0.03,
-            weight_decay=0.2,
-            momentum=0.8,
-            nesterov=True,
-            ns_steps=2,
-        )
-        redistribution = optimizer._plans[0].redistribution_plans[0]
-        self.assertEqual(
-            tuple(
-                partition.tensor_shape
-                for partition in redistribution.compute_partitions
-            ),
-            ((4, 3), (4, 3)),
-        )
-
-        grad = value.flip(0).contiguous()
-        parameter.grad = distribute_tensor(grad.clone(), self.mesh, (Shard(0),))
-        reference = torch.nn.Parameter(value.clone())
-        reference.grad = grad.clone()
-        reference_optimizer = torch.optim.Muon(
-            [reference],
-            lr=0.03,
-            weight_decay=0.2,
-            momentum=0.8,
-            nesterov=True,
-            ns_steps=2,
-        )
-
-        all_to_all_single = dist.all_to_all_single
-        with patch(
-            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard.dist."
-            "all_to_all_single",
-            wraps=all_to_all_single,
-        ) as collective:
-            optimizer.step()
-        reference_optimizer.step()
-
-        self.assertEqual(collective.call_count, 1)
-        expected_parameter = distribute_tensor(
-            reference.detach(), self.mesh, (Shard(0),)
-        )
-        momentum = optimizer.state[parameter]["momentum_buffer"]
-        expected_momentum = distribute_tensor(
-            reference_optimizer.state[reference]["momentum_buffer"],
-            self.mesh,
-            (Shard(0),),
-        )
-        self.assertEqual(parameter.placements, (Shard(0),))
-        self.assertEqual(parameter.grad.placements, (Shard(0),))
-        self.assertEqual(momentum.placements, (Shard(0),))
-        _assert_exact(parameter.to_local(), expected_parameter.to_local())
-        _assert_exact(momentum.to_local(), expected_momentum.to_local())
 
     @with_comms
     def test_step_rejects_gradient_with_reordered_mesh(self):

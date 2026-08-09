@@ -69,7 +69,9 @@ class MuonComputeSharding:
     """Define the logical Muon tensor and its compute placement.
 
     ``Owned`` balances complete 2D matrices across bucket participants.
-    ``Shard(0)`` partitions rank-3 matrix batches along the batch dimension.
+    ``Shard(0)`` partitions rank-3 matrix batches along
+    the matrix-batch dimension. Aligned storage computes locally; otherwise an
+    exact one-dimensional ``Shard(0)`` storage layout is repartitioned.
     ``Replicate`` computes the complete logical tensor on every participant.
     Storage is redistributed when it does not already match the requested
     compute placement.

@@ -19,7 +19,6 @@ from torch.distributed.tensor.placement_types import _StridedShard
 
 from ..flex_optimizer_reshard import (
     _BucketPlanningContext,
-    _build_replicated_redistribution_plan,
     _build_single_participant_redistribution_plan,
     _dtensor_storage_regions,
     _ParticipantPartition,
@@ -77,11 +76,6 @@ class _OwnedRedistributionTransition:
 
 
 @dataclass(frozen=True, slots=True)
-class _ReplicatedRedistributionTransition:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
 class _ShardedRedistributionTransition:
     pass
 
@@ -89,7 +83,6 @@ class _ShardedRedistributionTransition:
 _StorageToComputeTransition = (
     _NoRedistributionTransition
     | _OwnedRedistributionTransition
-    | _ReplicatedRedistributionTransition
     | _ShardedRedistributionTransition
 )
 
@@ -219,23 +212,6 @@ def _build_parameter_redistribution_plan(
         )
 
     assert compute_participant is None
-    if isinstance(transition, _ReplicatedRedistributionTransition):
-        if tuple(compute_layout.global_compute_shape) == tuple(
-            compute_layout.param.shape
-        ):
-            return _build_replicated_redistribution_plan(
-                storage_regions,
-                participants=group.participants,
-                logical_shape=tuple(compute_layout.param.shape),
-            )
-        return _build_batched_matrix_redistribution_plan(
-            storage_regions,
-            participants=group.participants,
-            storage_shape=tuple(compute_layout.param.shape),
-            compute_shape=tuple(compute_layout.global_compute_shape),
-            replicate_compute=True,
-        )
-
     assert isinstance(transition, _ShardedRedistributionTransition)
     if tuple(compute_layout.global_compute_shape) == tuple(compute_layout.param.shape):
         return _build_replicated_to_dim0_shard_plan(
@@ -249,7 +225,6 @@ def _build_parameter_redistribution_plan(
         participants=group.participants,
         storage_shape=tuple(compute_layout.param.shape),
         compute_shape=tuple(compute_layout.global_compute_shape),
-        replicate_compute=False,
     )
 
 
@@ -337,9 +312,8 @@ def _build_batched_matrix_redistribution_plan(
     participants: tuple[int, ...],
     storage_shape: tuple[int, ...],
     compute_shape: tuple[int, ...],
-    replicate_compute: bool,
 ) -> _RedistributionPlan:
-    """Map flat row storage to sharded or replicated matrix batches."""
+    """Map flat row storage to sharded matrix batches."""
     if (
         len(storage_shape) != 2
         or len(compute_shape) != 3
@@ -386,40 +360,26 @@ def _build_batched_matrix_redistribution_plan(
     )
 
     compute_endpoints = []
-    if replicate_compute:
-        full_region = _TensorRegion(offsets=(0, 0), shape=storage_shape)
-        compute_partitions = tuple(
+    compute_partitions_list = []
+    for mesh_rank, participant in enumerate(participants):
+        local_num_matrices, matrix_offset = Shard.local_shard_size_and_offset(
+            num_matrices,
+            len(participants),
+            mesh_rank,
+        )
+        logical_region = _TensorRegion(
+            offsets=(matrix_offset * matrix_rows, 0),
+            shape=(local_num_matrices * matrix_rows, matrix_columns),
+        )
+        compute_endpoints.append(((participant,), matrix_offset, local_num_matrices))
+        compute_partitions_list.append(
             _ParticipantPartition(
                 participant=participant,
-                tensor_shape=compute_shape,
-                logical_regions=(full_region,),
+                tensor_shape=(local_num_matrices, matrix_rows, matrix_columns),
+                logical_regions=(logical_region,),
             )
-            for participant in participants
         )
-        compute_endpoints.append((participants, 0, num_matrices))
-    else:
-        compute_partitions_list = []
-        for mesh_rank, participant in enumerate(participants):
-            local_num_matrices, matrix_offset = Shard.local_shard_size_and_offset(
-                num_matrices,
-                len(participants),
-                mesh_rank,
-            )
-            logical_region = _TensorRegion(
-                offsets=(matrix_offset * matrix_rows, 0),
-                shape=(local_num_matrices * matrix_rows, matrix_columns),
-            )
-            compute_endpoints.append(
-                ((participant,), matrix_offset, local_num_matrices)
-            )
-            compute_partitions_list.append(
-                _ParticipantPartition(
-                    participant=participant,
-                    tensor_shape=(local_num_matrices, matrix_rows, matrix_columns),
-                    logical_regions=(logical_region,),
-                )
-            )
-        compute_partitions = tuple(compute_partitions_list)
+    compute_partitions = tuple(compute_partitions_list)
 
     storage_to_compute_routes = []
     compute_to_storage_routes = []
@@ -515,23 +475,12 @@ def _resolve_storage_to_compute_transition(
         param
     )
     mesh_size = param.device_mesh.size()
-    if isinstance(compute_placement, Replicate):
-        if replicated_storage or (
-            storage_can_redistribute
-            and storage_shard_axis is not None
-            and param.device_mesh.size(storage_shard_axis) == 1
-        ):
-            return _ResolvedStorageToComputeTransition(
-                compute_distribution=_ReplicatedCompute(),
-                storage_to_compute_transition=_NoRedistributionTransition(),
-            )
-        if storage_can_redistribute and storage_shard_axis is not None:
-            return _ResolvedStorageToComputeTransition(
-                compute_distribution=_ReplicatedCompute(),
-                storage_to_compute_transition=_ReplicatedRedistributionTransition(),
-                redistribution_storage_mesh_axis=storage_shard_axis,
-            )
-    elif isinstance(compute_placement, Shard):
+    if isinstance(compute_placement, Replicate) and replicated_storage:
+        return _ResolvedStorageToComputeTransition(
+            compute_distribution=_ReplicatedCompute(),
+            storage_to_compute_transition=_NoRedistributionTransition(),
+        )
+    if isinstance(compute_placement, Shard):
         if len(global_compute_shape) == 3 and (
             _normalize_dim(compute_placement.dim, len(global_compute_shape)) == 0
         ):

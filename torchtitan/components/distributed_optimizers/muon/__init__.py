@@ -5,3 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 """Distributed Muon optimizer, parameter preparation, and redistribution."""
+
+from .distributed_muon import DistributedMuon
+from .prep_parameters import (
+    BatchedMatrixComputeView,
+    build_distributed_muon,
+    MuonComputeSharding,
+    Owned,
+)
+
+
+__all__ = [
+    "BatchedMatrixComputeView",
+    "build_distributed_muon",
+    "DistributedMuon",
+    "MuonComputeSharding",
+    "Owned",
+]
