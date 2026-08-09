@@ -199,11 +199,6 @@ def validate_fp8_graph_config(compile_config: GraphTrainerCompileConfig) -> None
             "--compile.fp8.enabled requires --compile.inductor_compilation full "
             "or regional"
         )
-    if "cudagraph_pass" not in compile_config.disable_passes:
-        raise ValueError(
-            "--compile.fp8.enabled requires cudagraph_pass in "
-            "--compile.disable_passes until dense FP8 CUDA Graph capture is validated"
-        )
     if (
         compile_config.precompile_artifact_dir
         and compile_config.inductor_compilation != "regional"

@@ -297,6 +297,11 @@ def annotate_complete_fp8_regions_for_regional_inductor_pass(
     placeholder is a valid local boundary. The node-count check still protects
     against graph rewrites between identification and tagging. Other regional
     annotations are not modified.
+
+    Each tagged node gets ``compile_with_inductor["inductor_region"]`` set to
+    its ``regional_region_id``. PyTorch's ``regional_inductor`` uses that key
+    to keep separately identified FP8 regions from being scooped into one
+    giant default partition.
     """
     del example_inputs
     regions: dict[tuple[str, str, int], list[torch.fx.Node]] = defaultdict(list)
@@ -330,8 +335,11 @@ def annotate_complete_fp8_regions_for_regional_inductor_pass(
             for node in nodes
         ):
             continue
+        _, _, region_id = region_key
         for node in nodes:
-            node.meta.setdefault("custom", {}).setdefault("compile_with_inductor", {})
+            custom = node.meta.setdefault("custom", {})
+            compile_annotation = custom.setdefault("compile_with_inductor", {})
+            compile_annotation["inductor_region"] = region_id
             num_tagged_nodes += 1
 
     if incomplete_regions:

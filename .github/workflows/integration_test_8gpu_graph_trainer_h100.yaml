@@ -98,6 +98,9 @@ jobs:
         # Run the MoE numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "moe"
 
+        # Run dense FP8 full/regional Inductor and CUDA Graph numerics tests.
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerFP8Numerics -v
+
         # Run precompile integration tests (DSv3 with EP; Llama3 runs in default workflow)
         NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests $RUNNER_TEMP/artifacts-to-be-uploaded/precompile --ngpu 8 --test_name aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep
 

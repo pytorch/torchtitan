@@ -38,7 +38,6 @@ def graph_trainer_llama3_debugmodel_float8() -> GraphTrainer.Config:
     config.compile = GraphTrainerCompileConfig(
         enable=True,
         inductor_compilation="full",
-        disable_passes=["cudagraph_pass"],
         fp8=FP8GraphConfig(enabled=True),
     )
     return config
@@ -51,7 +50,6 @@ def graph_trainer_llama3_debugmodel_float8_regional() -> GraphTrainer.Config:
     config.compile = GraphTrainerCompileConfig(
         enable=True,
         inductor_compilation="regional",
-        disable_passes=["cudagraph_pass"],
         fp8=FP8GraphConfig(enabled=True),
     )
     return config

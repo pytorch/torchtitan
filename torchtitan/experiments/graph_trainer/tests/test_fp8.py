@@ -24,6 +24,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _QUANTIZATION_KIND,
     annotate_module_fqns,
 )
+from torchtitan.experiments.graph_trainer.cudagraph import (
+    CUDAGraphWrapper,
+    cudagraph_pass,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     minimal_fx_tracer,
@@ -45,6 +49,7 @@ from torchtitan.experiments.graph_trainer.inductor_passes import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
+    construct_default_graph_passes,
     final_inductor_compile_passes,
     graph_pp_pre_partition_fp8_passes,
 )
@@ -83,14 +88,13 @@ class TestFP8GraphConfig(TestCase):
         with self.assertRaisesRegex(ValueError, "enable_passes"):
             validate_fp8_graph_config(config)
 
-    def test_fp8_requires_cudagraph_to_be_disabled(self) -> None:
+    def test_fp8_allows_cudagraph(self) -> None:
         config = GraphTrainerCompileConfig(
             enable=True,
             inductor_compilation="full",
             fp8=FP8GraphConfig(enabled=True),
         )
-        with self.assertRaisesRegex(ValueError, "cudagraph_pass"):
-            validate_fp8_graph_config(config)
+        validate_fp8_graph_config(config)
 
     def test_fp8_precompile_requires_regional_inductor(self) -> None:
         config = GraphTrainerCompileConfig(
@@ -353,8 +357,9 @@ class TestFP8RegionalAnnotation(TestCase):
         annotate_complete_fp8_regions_for_regional_inductor_pass(gm)
 
         self.assertEqual(gm.meta["fp8_regional_summary"]["num_regions"], 1)
-        self.assertEqual(cast.meta["custom"]["compile_with_inductor"], {})
-        self.assertEqual(gemm.meta["custom"]["compile_with_inductor"], {})
+        expected = {"inductor_region": 0}
+        self.assertEqual(cast.meta["custom"]["compile_with_inductor"], expected)
+        self.assertEqual(gemm.meta["custom"]["compile_with_inductor"], expected)
 
     def test_grouped_experts_are_rejected(self) -> None:
         graph = torch.fx.Graph()
@@ -416,8 +421,9 @@ class TestFP8RegionalAnnotation(TestCase):
 
         annotate_complete_fp8_regions_for_regional_inductor_pass(gm)
 
-        self.assertEqual(cast.meta["custom"]["compile_with_inductor"], {})
-        self.assertEqual(compute.meta["custom"]["compile_with_inductor"], {})
+        expected = {"inductor_region": 3}
+        self.assertEqual(cast.meta["custom"]["compile_with_inductor"], expected)
+        self.assertEqual(compute.meta["custom"]["compile_with_inductor"], expected)
         self.assertEqual(
             other.meta["custom"]["compile_with_inductor"],
             {"source": "flex"},
@@ -518,7 +524,10 @@ class TestFP8RegionalAnnotation(TestCase):
         self.assertEqual(
             compute.meta["custom"]["fp8"]["regional_region_num_nodes"], 1
         )
-        self.assertEqual(compute.meta["custom"]["compile_with_inductor"], {})
+        self.assertEqual(
+            compute.meta["custom"]["compile_with_inductor"],
+            {"inductor_region": 0},
+        )
 
 
 @unittest.skipUnless(
@@ -568,6 +577,57 @@ class TestFP8RegionalCompilation(TestCase):
         for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
             torch.testing.assert_close(actual_tensor, expected_tensor)
 
+    def test_float8_regional_inductor_cudagraph_replays_dynamic_inputs_and_state(
+        self,
+    ) -> None:
+        converter = Float8LinearConverter(
+            Float8LinearConverter.Config(model_compile_enabled=True)
+        )
+        linear_config = converter.convert(
+            Linear.Config(in_features=16, out_features=16, bias=False)
+        )
+        model = nn.Sequential(linear_config.build()).to(
+            device="cuda", dtype=torch.bfloat16
+        )
+        annotate_module_fqns(model)
+
+        def train_step(x: torch.Tensor) -> list[torch.Tensor]:
+            output = model(x)
+            loss = output.float().square().mean()
+            grads = torch.autograd.grad(loss, tuple(model.parameters()))
+            return [loss, *grads]
+
+        inputs = [
+            torch.randn(16, 16, device="cuda", dtype=torch.bfloat16)
+            for _ in range(3)
+        ]
+        traced = minimal_fx_tracer(train_step, module=model)(inputs[0])
+        annotate_fp8_regions_for_regional_inductor_pass(traced.gm, strict=True)
+        annotate_complete_fp8_regions_for_regional_inductor_pass(traced.gm)
+        traced.gm = regional_inductor_pass(traced.gm, traced.example_inputs)
+        traced.gm = cudagraph_pass(
+            traced.gm,
+            traced.example_inputs,
+            static_input_indices=tuple(range(traced.num_static_inputs)),
+            tensor_input_indices=traced.tensor_input_indices,
+        )
+        self.assertIsInstance(traced.gm.forward, CUDAGraphWrapper)
+        compiled_step = run_traced(traced, module=model)
+
+        # Call 1 warms up, call 2 captures, and call 3 replays with both new
+        # activation values and updated parameter contents at stable addresses.
+        for index, input_tensor in enumerate(inputs):
+            expected = train_step(input_tensor)
+            actual = compiled_step(input_tensor)
+            self.assertEqual(len(actual), len(expected))
+            for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+                torch.testing.assert_close(actual_tensor, expected_tensor)
+            if index == 1:
+                with torch.no_grad():
+                    for parameter in model.parameters():
+                        parameter.add_(0.125)
+        self.assertIsNotNone(traced.gm.forward._cudagraph)
+
 
 @dataclass
 class _FingerprintParallelDims:
@@ -615,6 +675,33 @@ class TestFP8PrecompileFingerprint(TestCase):
 
 
 class TestFP8PassOrdering(TestCase):
+    def test_full_inductor_precedes_cudagraph(self) -> None:
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(
+                inductor_compilation="full",
+                fp8=FP8GraphConfig(enabled=True),
+            ),
+            loss=CrossEntropyLoss.Config(),
+            model_spec=SimpleNamespace(model=SimpleNamespace(layers=[0])),
+            parallelism=SimpleNamespace(enable_async_tensor_parallel=False),
+        )
+        traced_result = SimpleNamespace(
+            state_fqns=[],
+            num_static_inputs=1,
+            tensor_input_indices=[0, 1],
+        )
+
+        passes = construct_default_graph_passes(traced_result, config)
+        pass_names = [
+            pass_fn.func.__name__ if hasattr(pass_fn, "func") else pass_fn.__name__
+            for pass_fn in passes
+        ]
+
+        self.assertLess(
+            pass_names.index("full_inductor_compilation_pass"),
+            pass_names.index("cudagraph_pass"),
+        )
+
     def test_full_terminal_fp8_pass_inclusion(self) -> None:
         config = GraphTrainerCompileConfig(
             inductor_compilation="full",

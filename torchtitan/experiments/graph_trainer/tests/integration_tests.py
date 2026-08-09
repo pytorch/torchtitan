@@ -706,9 +706,60 @@ def _build_autoparallel_h100_tests() -> list[OverrideDefinitions]:
     ]
 
 
+def _build_fp8_h100_tests() -> list[OverrideDefinitions]:
+    """Dense FP8 compile and CUDA Graph coverage for H100 runners."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel_float8",
+                    "--training.steps 10",
+                ],
+            ],
+            "aot_fx_trace llama3 FP8 full Inductor with CUDA Graph",
+            "aot_fx_trace_llama3_fp8_full_cudagraph",
+            ngpu=1,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel_float8_regional",
+                    "--compile.disable_passes cudagraph_pass",
+                    "--training.steps 10",
+                ],
+            ],
+            "aot_fx_trace llama3 FP8 regional Inductor",
+            "aot_fx_trace_llama3_fp8_regional",
+            ngpu=1,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel_float8_regional",
+                    "--training.steps 10",
+                ],
+            ],
+            "aot_fx_trace llama3 FP8 regional Inductor with CUDA Graph",
+            "aot_fx_trace_llama3_fp8_regional_cudagraph",
+            ngpu=1,
+            skip_rocm_test=True,
+        ),
+    ]
+
+
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
-    """DeepSeek-v3 + Qwen3 + async_tp tests (for H100 machines)."""
-    return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
+    """DeepSeek-v3, Qwen3, FP8, and async TP tests for H100 machines."""
+    return (
+        _build_deepseek_v3_tests()
+        + _build_qwen3_tests()
+        + _build_fp8_h100_tests()
+        + _build_async_tp_tests()
+    )
 
 
 def build_graph_trainer_autoparallel_test_list() -> list[OverrideDefinitions]:
