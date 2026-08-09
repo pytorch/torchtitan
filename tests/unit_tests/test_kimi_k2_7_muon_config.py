@@ -9,13 +9,10 @@ import unittest
 
 import torch
 from torch.distributed.tensor import Shard
-from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
-    assign_balanced_owners,
-)
-from torchtitan.components.distributed_optimizers.muon import Owned
-from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
+from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
     MuonComputeSharding,
+    Owned,
 )
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -29,7 +26,7 @@ class _KimiMuonConfigTests:
     config_factory = None
     num_layers = 0
     num_heads = 0
-    num_owner_ranks = 0
+    num_data_parallel_shard_ranks = 0
     expert_parallel_degree = 0
     attention_projections: tuple[str, ...] = ()
     owned_attention_projections: frozenset[str] = frozenset()
@@ -161,11 +158,8 @@ class _KimiMuonConfigTests:
             for first_layer_id in range(1, self.num_layers, 2)
         )
         self.assertEqual(len(bucket_configs), len(bucket_layer_ids))
-        expected_bucket_patterns = []
-        expected_owned_fqns = set()
         for layer_ids, bucket in zip(bucket_layer_ids, bucket_configs, strict=True):
             expected = ()
-            expected_owners = set()
             for layer_id in layer_ids:
                 prefix = f"layers.{layer_id}"
                 attention_fqns = tuple(
@@ -173,17 +167,12 @@ class _KimiMuonConfigTests:
                     for projection in self.attention_projections
                 )
                 expected += attention_fqns
-                expected_owners.update(
-                    f"{prefix}.attention.{projection}.weight"
-                    for projection in self.owned_attention_projections
-                )
                 if not layer_id:
                     dense_fqns = tuple(
                         f"{prefix}.feed_forward.{projection}.weight"
                         for projection in ("w1", "w2", "w3")
                     )
                     expected += dense_fqns
-                    expected_owners.update(dense_fqns)
                 else:
                     expert_fqns = tuple(
                         f"{prefix}.moe.routed_experts.inner_experts.{projection}"
@@ -195,46 +184,18 @@ class _KimiMuonConfigTests:
                         for projection in ("w1", "w2", "w3")
                     )
                     expected += expert_fqns + (router_fqn,) + shared_fqns
-                    expected_owners.update((router_fqn, *shared_fqns))
             self.assertEqual(
                 bucket.name,
                 "layers." + "-".join(map(str, layer_ids)),
             )
             self.assertEqual(bucket.patterns, expected)
             self.assertEqual(bucket.mesh_axes, ("dp_shard",))
-            self.assertEqual(
-                set(bucket.owner_rank_by_fqn),
-                expected_owners,
-            )
-            expected_bucket_patterns.append(expected)
-            expected_owned_fqns.update(expected_owners)
-            self.assertTrue(
-                all(
-                    rank in range(self.num_owner_ranks)
-                    for rank in bucket.owner_rank_by_fqn.values()
-                )
-            )
-
-        parameter_numel_by_fqn = {
-            fqn: parameter.numel()
-            for fqn, parameter in self.model.named_parameters()
-            if fqn in expected_owned_fqns
-        }
-        self.assertEqual(set(parameter_numel_by_fqn), expected_owned_fqns)
-        self.assertEqual(
-            tuple(dict(bucket.owner_rank_by_fqn) for bucket in bucket_configs),
-            assign_balanced_owners(
-                expected_bucket_patterns,
-                parameter_numel_by_fqn,
-                num_ranks=self.num_owner_ranks,
-            ),
-        )
 
         parallelism = self.config.parallelism
         self.assertEqual(parallelism.data_parallel_replicate_degree, 1)
         self.assertEqual(
             parallelism.data_parallel_shard_degree,
-            self.num_owner_ranks,
+            self.num_data_parallel_shard_ranks,
         )
         self.assertEqual(
             parallelism.expert_parallel_degree,
@@ -255,7 +216,7 @@ class TestKimiK25MuonConfig(_KimiMuonConfigTests, unittest.TestCase):
     config_factory = staticmethod(kimi_k2_5_muon)
     num_layers = 61
     num_heads = 64
-    num_owner_ranks = 64
+    num_data_parallel_shard_ranks = 64
     expert_parallel_degree = 8
     attention_projections = ("wq_a", "wq_b", "wkv_a", "wkv_b", "wo")
     owned_attention_projections = frozenset(("wq_a", "wkv_a", "wo"))
@@ -265,7 +226,7 @@ class TestMoonlightMuonConfig(_KimiMuonConfigTests, unittest.TestCase):
     config_factory = staticmethod(moonlight_16b_a3b_muon)
     num_layers = 27
     num_heads = 16
-    num_owner_ranks = 8
+    num_data_parallel_shard_ranks = 8
     expert_parallel_degree = 4
     attention_projections = ("wq", "wkv_a", "wkv_b", "wo")
     owned_attention_projections = frozenset(("wkv_a", "wo"))

@@ -33,15 +33,12 @@ every FSDP2 shard already contains complete heads.
 
 The split-head case is rejected because:
 
-- `muon_parameter_prep.py` requires every local row count and global row offset
+- `muon/prep_parameters.py` requires every local row count and global row offset
   to be a multiple of `R`.
 - Preparation eagerly views each local storage shard as a batch of complete
   matrices.
-- `muon.py` treats `Shard(0)` as a local-compute-only placement.
-- `flex_optimizer_reshard.py` only supports local computation or redistribution
-  of a complete tensor to one `Owned` rank.
-- The reshard runtime assumes one input and output span per redistributed
-  parameter and assumes every compute destination receives the full tensor.
+- `muon/storage_to_compute.py` does not yet emit a redistribution plan for
+  split-head `Shard(0)` storage.
 
 Removing the alignment validation alone would be incorrect. NS normalization
 and matrix products must cover the complete `[R, C]` head matrix.
@@ -68,14 +65,14 @@ Its contract becomes:
   `Shard.local_shard_size_and_offset(num_heads, world_size, rank)` so the
   behavior matches PyTorch `Shard(0)` semantics, including empty partitions.
 
-No owner entry is required for communicated `Shard(0)` parameters.
-`owner_rank_by_fqn` remains specific to `Owned` compute placement.
+Communicated `Shard(0)` parameters remain owner-free. Single-participant
+assignment remains specific to `Owned` and is resolved by the optimizer.
 
 ## Implementation plan
 
 ### 1. Separate storage metadata from the compute view
 
-Update `torchtitan/components/distributed_optimizers/muon_parameter_prep.py`:
+Update `torchtitan/components/distributed_optimizers/muon/prep_parameters.py`:
 
 - Continue validating the global 2D shape and resolving `H`, `R`, and `C`.
 - Continue requiring supported, contiguous storage layouts.
@@ -90,7 +87,7 @@ Update `torchtitan/components/distributed_optimizers/muon_parameter_prep.py`:
 
 ### 2. Resolve an explicit storage-to-compute transition
 
-Update `torchtitan/components/distributed_optimizers/muon.py`:
+Update `torchtitan/components/distributed_optimizers/muon/storage_to_compute.py`:
 
 - Represent storage-to-compute behavior with explicit transitions: no
   redistribution, whole-tensor `Owned` redistribution, or batched-matrix
@@ -110,7 +107,7 @@ Update `torchtitan/components/distributed_optimizers/muon.py`:
 Update
 `torchtitan/components/distributed_optimizers/flex_optimizer_reshard.py`:
 
-- Generalize the bucket planner beyond local and whole-tensor `Owned` work.
+- Use the transport-neutral bucket planner for head-aware routes.
 - Build the storage partition from the exact FSDP2 row ranges.
 - Build the compute partition by sharding `H`, then map each head range back to
   `[H * R, C]` storage rows.
@@ -191,7 +188,7 @@ These layouts should continue to fail with explicit validation errors.
 
 ### CPU planning and validation tests
 
-Update `tests/unit_tests/test_muon_parameter_prep.py` and
+Update `tests/unit_tests/test_muon_prep_parameters.py` and
 `tests/unit_tests/test_flex_optimizer_reshard.py`:
 
 - Replace the split-head construction rejection with successful route

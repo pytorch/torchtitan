@@ -23,9 +23,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
-    build_distributed_muon,
-)
+from torchtitan.components.distributed_optimizers.muon import build_distributed_muon
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger

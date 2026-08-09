@@ -10,37 +10,35 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
-import heapq
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 
 import torch
 import torch.distributed as dist
 from torch import Tensor
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 
-__all__ = ["BucketConfig", "BucketSpec", "assign_balanced_owners"]
+__all__ = ["BucketConfig", "BucketSpec"]
+_ItemT = TypeVar("_ItemT")
 
 
 @dataclass(frozen=True, slots=True)
 class BucketConfig:
     """Static bucket configuration resolved after runtime meshes exist.
 
-    ``mesh_axes`` contains exactly one storage mesh axis name. When
-    ``owner_rank_by_fqn`` is nonempty, its redistributed parameters determine
-    the resolved mesh; otherwise all parameters matching ``patterns`` do. For
-    DistributedMuon, owner-assigned parameters use ``Owned``. An owner-free
-    parameter may compute locally or redistribute on the resolved bucket mesh
-    without a designated owner.
+    ``mesh_axes`` contains exactly one storage mesh axis name. Compute
+    distributions and any single-rank assignments come from the optimizer's
+    parameter metadata. Parameters requiring redistribution determine the
+    concrete communication mesh. An entirely local bucket does not bind a
+    communication mesh.
     """
 
     patterns: tuple[str, ...]
-    owner_rank_by_fqn: Mapping[str, int]
     mesh_axes: tuple[str, ...]
     name: str = ""
 
@@ -51,13 +49,11 @@ class BucketConfig:
                 "BucketConfig mesh_axes must contain exactly one mesh axis"
             )
         object.__setattr__(self, "patterns", tuple(self.patterns))
-        object.__setattr__(self, "owner_rank_by_fqn", dict(self.owner_rank_by_fqn))
         object.__setattr__(self, "mesh_axes", mesh_axes)
 
-    def bind(self, mesh: DeviceMesh) -> BucketSpec:
+    def bind(self, mesh: DeviceMesh | None) -> BucketSpec:
         return BucketSpec(
             patterns=self.patterns,
-            owner_rank_by_fqn=self.owner_rank_by_fqn,
             mesh=mesh,
             name=self.name,
         )
@@ -69,78 +65,76 @@ class BucketSpec:
 
     Patterns use case-sensitive ``fnmatch`` syntax. Every optimizer FQN must
     match exactly one bucket, and sequence order controls execution order.
-    ``mesh`` is the bucket's exact one-dimensional communication mesh.
-    ``owner_rank_by_fqn`` must exactly cover parameters whose compute transition
-    requires a designated owner and uses mesh-local ranks. Owner-free
-    transitions have no entry whether they compute locally or redistribute. A
-    redundant rank-0 entry is accepted for a local transition on a one-rank
-    mesh, where sharded storage may normalize to replication.
-    ``name`` is diagnostic metadata only.
+    ``mesh`` is the bucket's exact one-dimensional communication mesh, or
+    ``None`` when every matched parameter is already compute-ready. ``name`` is
+    diagnostic metadata only.
     """
 
     patterns: tuple[str, ...]
-    owner_rank_by_fqn: Mapping[str, int]
-    mesh: DeviceMesh
+    mesh: DeviceMesh | None
     name: str = ""
 
     def __post_init__(self) -> None:
-        if self.mesh.ndim != 1:
+        if self.mesh is not None and self.mesh.ndim != 1:
             raise ValueError("BucketSpec mesh must be one-dimensional")
         object.__setattr__(self, "patterns", tuple(self.patterns))
-        object.__setattr__(self, "owner_rank_by_fqn", dict(self.owner_rank_by_fqn))
-
-
-def assign_balanced_owners(
-    bucket_fqns: Sequence[Sequence[str]],
-    memory_estimate_by_fqn: Mapping[str, int],
-    *,
-    num_ranks: int,
-    initial_memory_by_rank: Sequence[int] | None = None,
-) -> tuple[dict[str, int], ...]:
-    """Greedily balance selected FQNs across group-local rank indices.
-
-    Only FQNs present in ``memory_estimate_by_fqn`` receive owners. One running
-    load vector balances cumulatively across buckets; FQN and rank ordering
-    make equal-load assignments deterministic.
-    """
-    initial_memory_by_rank = initial_memory_by_rank or (0,) * num_ranks
-    rank_loads = list(zip(initial_memory_by_rank, range(num_ranks), strict=True))
-    heapq.heapify(rank_loads)
-    owners_by_bucket = []
-    for bucket in bucket_fqns:
-        bucket_owners = {}
-        candidates = (fqn for fqn in bucket if fqn in memory_estimate_by_fqn)
-        for fqn in sorted(
-            candidates, key=lambda name: (-memory_estimate_by_fqn[name], name)
-        ):
-            load, rank = heapq.heappop(rank_loads)
-            bucket_owners[fqn] = rank
-            heapq.heappush(rank_loads, (load + memory_estimate_by_fqn[fqn], rank))
-        owners_by_bucket.append(bucket_owners)
-    return tuple(owners_by_bucket)
-
-
-_ItemT = TypeVar("_ItemT")
 
 
 def _bind_bucket_configs(
     configs: Sequence[BucketConfig],
-    storage_by_fqn: Mapping[str, DTensor],
+    items: Sequence[_ItemT],
+    *,
+    get_fqn: Callable[[_ItemT], str],
+    get_storage_dtensor: Callable[[_ItemT], DTensor],
+    requires_redistribution: Callable[[_ItemT], bool],
+    get_required_storage_mesh_axis: Callable[[_ItemT], int | None],
 ) -> tuple[BucketSpec, ...]:
-    """Bind static configs to storage meshes after model parallelization."""
+    """Bind configs after each item's redistribution requirement is resolved.
+
+    Redistributed items determine the communication mesh. An entirely local
+    bucket remains mesh-free.
+    """
     specs = []
     for config in configs:
-        candidates = tuple(config.owner_rank_by_fqn) or tuple(
-            fqn
-            for fqn in storage_by_fqn
-            if any(fnmatch.fnmatchcase(fqn, pattern) for pattern in config.patterns)
+        matched_items = tuple(
+            item
+            for item in items
+            if any(
+                fnmatch.fnmatchcase(get_fqn(item), pattern)
+                for pattern in config.patterns
+            )
         )
-        if not candidates:
+        redistributed_items = tuple(
+            item for item in matched_items if requires_redistribution(item)
+        )
+        if not matched_items:
+            continue
+        if not redistributed_items:
+            specs.append(config.bind(None))
             continue
 
+        mesh_axis = config.mesh_axes[0]
         meshes = []
-        for fqn in candidates:
-            storage_mesh = storage_by_fqn[fqn].device_mesh
+        for item in redistributed_items:
+            storage_mesh = get_storage_dtensor(item).device_mesh
+            mesh_axis_names = storage_mesh.mesh_dim_names
+            if mesh_axis_names is None or mesh_axis not in mesh_axis_names:
+                raise ValueError(
+                    f"bucket {config.name!r} mesh axis {mesh_axis!r} is not present "
+                    f"in the storage mesh for parameter {get_fqn(item)!r}"
+                )
+            storage_mesh_axis = mesh_axis_names.index(mesh_axis)
+            required_storage_mesh_axis = get_required_storage_mesh_axis(item)
+            if (
+                required_storage_mesh_axis is not None
+                and storage_mesh_axis != required_storage_mesh_axis
+            ):
+                required_mesh_axis = mesh_axis_names[required_storage_mesh_axis]
+                raise ValueError(
+                    f"bucket {config.name!r} mesh axis {mesh_axis!r} does not "
+                    f"match storage shard axis {required_mesh_axis!r} for "
+                    f"parameter {get_fqn(item)!r}"
+                )
             meshes.append(storage_mesh[config.mesh_axes])
 
         mesh = meshes[0]
@@ -260,15 +254,12 @@ class _RedistributionPlan:
                 raise ValueError(
                     f"{name} partitions must follow the redistribution participants"
                 )
-            _validate_tensor_region_partition(
-                tuple(
-                    region
-                    for partition in partitions
-                    for region in partition.logical_regions
-                ),
-                self.logical_shape,
-                direction=f"{name} logical partition",
-            )
+            for partition in partitions:
+                _validate_participant_logical_partition(
+                    partition,
+                    self.logical_shape,
+                    direction=f"{name} logical partition {partition.participant}",
+                )
 
         all_routes = self.storage_to_compute_routes + self.compute_to_storage_routes
         if any(
@@ -404,19 +395,19 @@ class _RedistributionPlan:
         )
 
 
-def _validate_tensor_region_partition(
+def _validate_disjoint_regions_in_bounds(
     regions: tuple[_TensorRegion, ...],
-    logical_shape: tuple[int, ...],
+    bounds_shape: tuple[int, ...],
     *,
     direction: str,
 ) -> None:
-    if any(size < 0 for size in logical_shape) or any(
-        len(region.offsets) != len(logical_shape)
-        or len(region.shape) != len(logical_shape)
+    if any(size < 0 for size in bounds_shape) or any(
+        len(region.offsets) != len(bounds_shape)
+        or len(region.shape) != len(bounds_shape)
         or any(
-            offset < 0 or size < 0 or offset + size > logical_size
-            for offset, size, logical_size in zip(
-                region.offsets, region.shape, logical_shape, strict=True
+            offset < 0 or size < 0 or offset + size > bounds_size
+            for offset, size, bounds_size in zip(
+                region.offsets, region.shape, bounds_shape, strict=True
             )
         )
         for region in regions
@@ -444,8 +435,40 @@ def _validate_tensor_region_partition(
                     "overlapping logical tensor regions are not supported"
                 )
 
+
+def _validate_tensor_region_partition(
+    regions: tuple[_TensorRegion, ...],
+    logical_shape: tuple[int, ...],
+    *,
+    direction: str,
+) -> None:
+    _validate_disjoint_regions_in_bounds(
+        regions,
+        logical_shape,
+        direction=direction,
+    )
+
     if sum(region.numel for region in regions) != math.prod(logical_shape):
         raise ValueError(f"{direction} regions do not cover the logical tensor")
+
+
+def _validate_participant_logical_partition(
+    partition: _ParticipantPartition,
+    logical_shape: tuple[int, ...],
+    *,
+    direction: str,
+) -> None:
+    _validate_disjoint_regions_in_bounds(
+        partition.logical_regions,
+        logical_shape,
+        direction=direction,
+    )
+    if sum(region.numel for region in partition.logical_regions) != math.prod(
+        partition.tensor_shape
+    ):
+        raise ValueError(
+            f"{direction} regions do not match the participant tensor shape"
+        )
 
 
 def _tensor_region_intersection_numel(
@@ -478,32 +501,19 @@ def _validate_regions_cover_partition(
     direction: str,
 ) -> None:
     """Validate that nonoverlapping regions exactly cover an expected partition."""
-    if any(
-        len(region.offsets) != len(logical_shape)
-        or len(region.shape) != len(logical_shape)
-        or any(
-            offset < 0 or size < 0 or offset + size > logical_size
-            for offset, size, logical_size in zip(
-                region.offsets, region.shape, logical_shape, strict=True
-            )
-        )
-        for region in regions
-    ):
-        raise ValueError(f"{direction} regions must be in bounds")
-
-    positive_regions = tuple(region for region in regions if region.numel)
-    for index, first in enumerate(positive_regions):
-        for second in positive_regions[index + 1 :]:
-            if _tensor_region_intersection_numel(first, second):
-                raise NotImplementedError(
-                    "overlapping logical tensor regions are not supported"
-                )
+    _validate_disjoint_regions_in_bounds(
+        regions,
+        logical_shape,
+        direction=direction,
+    )
 
     if sum(region.numel for region in regions) != sum(
         region.numel for region in expected
     ):
         raise ValueError(f"{direction} regions do not cover the participant partition")
-    for region in positive_regions:
+    for region in regions:
+        if not region.numel:
+            continue
         if (
             sum(
                 _tensor_region_intersection_numel(region, expected_region)
@@ -514,74 +524,123 @@ def _validate_regions_cover_partition(
             raise ValueError(f"{direction} regions leave the participant partition")
 
 
-def _build_owned_redistribution_plan(
+def _build_whole_tensor_redistribution_plan(
     storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
     *,
     participants: tuple[int, ...],
-    owner: int,
+    compute_participants: tuple[int, ...],
     logical_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
-    """Build mirrored routes from one canonical region-to-holders mapping."""
-    storage_partitions = []
+    """Build whole-tensor compute from a canonical region-to-holders mapping."""
+    participants = tuple(participants)
+    compute_participants = tuple(compute_participants)
+    participant_set = set(participants)
+    if (
+        not compute_participants
+        or len(set(compute_participants)) != len(compute_participants)
+        or any(
+            participant not in participant_set for participant in compute_participants
+        )
+    ):
+        raise ValueError(
+            "compute participants must be unique redistribution participants"
+        )
+
+    storage_mappings = []
     storage_mapping_by_participant = {}
-    for holders, logical_region in storage_regions:
-        if len(holders) != 1:
-            raise NotImplementedError(
-                "redistributed optimizer storage requires one holder per region"
+    for raw_holders, logical_region in storage_regions:
+        holders = tuple(raw_holders)
+        if (
+            not holders
+            or len(set(holders)) != len(holders)
+            or any(holder not in participant_set for holder in holders)
+        ):
+            raise ValueError(
+                "storage region holders must be unique redistribution participants"
             )
-        participant = holders[0]
         tensor_region = _TensorRegion(
             offsets=(0,) * len(logical_region.shape),
             shape=logical_region.shape,
         )
-        storage_mapping_by_participant[participant] = (logical_region, tensor_region)
-    for participant in participants:
-        logical_region, tensor_region = storage_mapping_by_participant[participant]
-        storage_partitions.append(
-            _ParticipantPartition(
-                participant=participant,
-                tensor_shape=tensor_region.shape,
-                logical_regions=(logical_region,),
-            )
+        storage_mappings.append((holders, logical_region, tensor_region))
+        for holder in holders:
+            if holder in storage_mapping_by_participant:
+                raise NotImplementedError(
+                    "multiple storage regions per participant are not supported"
+                )
+            storage_mapping_by_participant[holder] = (logical_region, tensor_region)
+    if set(storage_mapping_by_participant) != participant_set:
+        raise ValueError("storage regions must cover every redistribution participant")
+
+    storage_partitions = tuple(
+        _ParticipantPartition(
+            participant=participant,
+            tensor_shape=storage_mapping_by_participant[participant][1].shape,
+            logical_regions=(storage_mapping_by_participant[participant][0],),
         )
+        for participant in participants
+    )
 
     full_region = _TensorRegion(
         offsets=(0,) * len(logical_shape),
         shape=logical_shape,
     )
+    compute_participant_set = set(compute_participants)
     compute_partitions = tuple(
         _ParticipantPartition(
             participant=participant,
-            tensor_shape=logical_shape if participant == owner else (0,),
-            logical_regions=(full_region,) if participant == owner else (),
+            tensor_shape=(
+                logical_shape if participant in compute_participant_set else (0,)
+            ),
+            logical_regions=(
+                (full_region,) if participant in compute_participant_set else ()
+            ),
         )
         for participant in participants
+    )
+    storage_to_compute_routes = tuple(
+        _TensorRegionRoute(
+            logical_region=logical_region,
+            source_region=tensor_region,
+            destination_region=logical_region,
+            source_participants=holders,
+            destination_participants=compute_participants,
+        )
+        for holders, logical_region, tensor_region in storage_mappings
+    )
+    compute_to_storage_routes = tuple(
+        _TensorRegionRoute(
+            logical_region=route.logical_region,
+            source_region=route.destination_region,
+            destination_region=route.source_region,
+            source_participants=route.destination_participants,
+            destination_participants=route.source_participants,
+        )
+        for route in storage_to_compute_routes
     )
     return _RedistributionPlan(
         participants=participants,
         logical_shape=logical_shape,
-        storage_partitions=tuple(storage_partitions),
+        storage_partitions=storage_partitions,
         compute_partitions=compute_partitions,
-        storage_to_compute_routes=tuple(
-            _TensorRegionRoute(
-                logical_region=logical_region,
-                source_region=storage_mapping_by_participant[holders[0]][1],
-                destination_region=logical_region,
-                source_participants=holders,
-                destination_participants=(owner,),
-            )
-            for holders, logical_region in storage_regions
-        ),
-        compute_to_storage_routes=tuple(
-            _TensorRegionRoute(
-                logical_region=logical_region,
-                source_region=logical_region,
-                destination_region=storage_mapping_by_participant[holders[0]][1],
-                source_participants=(owner,),
-                destination_participants=holders,
-            )
-            for holders, logical_region in storage_regions
-        ),
+        storage_to_compute_routes=storage_to_compute_routes,
+        compute_to_storage_routes=compute_to_storage_routes,
+    )
+
+
+def _build_single_participant_redistribution_plan(
+    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
+    *,
+    participants: tuple[int, ...],
+    compute_participant: int,
+    logical_shape: tuple[int, ...],
+) -> _RedistributionPlan:
+    """Build mirrored routes to one whole-tensor compute participant."""
+    return _build_whole_tensor_redistribution_plan(
+        storage_regions,
+        participants=participants,
+        compute_participants=(compute_participant,),
+        logical_shape=logical_shape,
     )
 
 
@@ -602,6 +661,7 @@ class _PackedAllToAllSchedule:
     process_group: dist.ProcessGroup
     participants: tuple[int, ...]
     local_participant: int
+    has_remote_transfers: bool
     input_split_sizes: tuple[int, ...]
     output_split_sizes: tuple[int, ...]
     input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...]
@@ -616,6 +676,10 @@ class _PackedAllToAllSchedule:
         return sum(self.output_split_sizes)
 
     def execute(self, output: Tensor, input: Tensor) -> None:
+        if not self.has_remote_transfers:
+            assert self.input_buffer_numel == self.output_buffer_numel
+            output[: self.output_buffer_numel].copy_(input[: self.input_buffer_numel])
+            return
         dist.all_to_all_single(
             output[: self.output_buffer_numel],
             input[: self.input_buffer_numel],
@@ -626,38 +690,37 @@ class _PackedAllToAllSchedule:
 
 
 @dataclass(frozen=True, slots=True)
-class _LocalSchedule:
-    participants: tuple[int, ...] = ()
-    local_participant: int = -1
-    input_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...] = ()
-    output_spans_by_parameter: tuple[tuple[_PackedSpan, ...], ...] = ()
-    input_buffer_numel: int = 0
-    output_buffer_numel: int = 0
-
-    def execute(self, output: Tensor, input: Tensor) -> None:
-        output[: self.output_buffer_numel].copy_(input[: self.input_buffer_numel])
-
-
-_CommunicationSchedule = _PackedAllToAllSchedule | _LocalSchedule
-
-
-@dataclass(frozen=True, slots=True)
 class _RedistributionGroup:
     process_group: dist.ProcessGroup
     participants: tuple[int, ...]
     local_participant: int
 
 
+@dataclass(frozen=True, slots=True)
+class _BucketPlanningContext(Generic[_ItemT]):
+    items: tuple[_ItemT, ...]
+    group: _RedistributionGroup
+    name: str
+
+
 @dataclass(slots=True)
-class _BucketPlan(Generic[_ItemT]):
+class _LocalBucketPlan(Generic[_ItemT]):
+    items: tuple[_ItemT, ...]
+
+
+@dataclass(slots=True)
+class _RedistributionBucketPlan(Generic[_ItemT]):
     unredistributed_items: tuple[_ItemT, ...]
     redistributed_items: tuple[_ItemT, ...]
     redistribution_plans: tuple[_RedistributionPlan, ...]
     group: _RedistributionGroup
-    storage_to_compute_schedule: _CommunicationSchedule
-    compute_to_storage_schedule: _CommunicationSchedule
+    storage_to_compute_schedule: _PackedAllToAllSchedule
+    compute_to_storage_schedule: _PackedAllToAllSchedule
     dtype: torch.dtype
     device: torch.device
+
+
+_BucketPlan: TypeAlias = _LocalBucketPlan[_ItemT] | _RedistributionBucketPlan[_ItemT]
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,7 +731,7 @@ class _BucketPlanningResult(Generic[_ItemT]):
 
 @dataclass(slots=True)
 class _BucketWork(Generic[_ItemT]):
-    plan: _BucketPlan[_ItemT]
+    plan: _RedistributionBucketPlan[_ItemT]
     slot: _BufferSlot
     storage_buffer: Tensor
     compute_fragment_buffer: Tensor
@@ -707,7 +770,9 @@ class _BufferSlot:
             buffers[key] = buffer
         return buffer[:numel]
 
-    def communication_buffers(self, plan: _BucketPlan[Any]) -> tuple[Tensor, Tensor]:
+    def communication_buffers(
+        self, plan: _RedistributionBucketPlan[Any]
+    ) -> tuple[Tensor, Tensor]:
         to_compute = plan.storage_to_compute_schedule
         to_storage = plan.compute_to_storage_schedule
         return (
@@ -791,6 +856,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         # pyrefly: ignore [read-only]
         self._device = device
         self._context: _CommunicationContext | None = None
+        self._local_slot = _BufferSlot()
 
     def run(
         self,
@@ -803,23 +869,24 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         compute: Callable[[_ItemT, Tensor], None],
         finalize: Callable[[_ItemT, Tensor], None],
     ) -> None:
-        if self._context is None:
-            self._context = _CommunicationContext.create(self._device)
         context = self._context
-        handle = context.device_handle
+        handle = (
+            context.device_handle
+            if context is not None
+            else torch.get_device_module(self._device)
+        )
         caller = handle.current_stream(self._device)
-        context.transfer_stream.wait_stream(caller)
 
+        communication_started = False
         previous: _BucketWork[_ItemT] | None = None
         redistributed_index = 0
         try:
             for plan in plans:
-                slot = context.slots[redistributed_index % 2]
-                if not plan.redistributed_items:
+                if isinstance(plan, _LocalBucketPlan):
                     with handle.stream(caller):
                         self._compute_without_redistribution(
-                            plan,
-                            slot,
+                            plan.items,
+                            self._local_slot,
                             local_tensor_spec=local_tensor_spec,
                             prepare=prepare,
                             compute=compute,
@@ -827,6 +894,13 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                         )
                     continue
 
+                if context is None:
+                    context = _CommunicationContext.create(self._device)
+                    self._context = context
+                if not communication_started:
+                    context.transfer_stream.wait_stream(caller)
+                    communication_started = True
+                slot = context.slots[redistributed_index % 2]
                 work = self._enqueue_storage_to_compute(
                     plan,
                     slot,
@@ -856,18 +930,21 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 previous = work
 
             if previous is not None:
+                assert context is not None
                 self._enqueue_compute_to_storage(previous, context, finalize=finalize)
                 self._release(previous, caller)
         except Exception:
             # Preserve allocator lifetime ordering for work already enqueued on
             # either stream. This is an error-path drain, not synchronization.
-            context.transfer_stream.wait_stream(caller)
-            caller.wait_stream(context.transfer_stream)
+            if communication_started:
+                assert context is not None
+                context.transfer_stream.wait_stream(caller)
+                caller.wait_stream(context.transfer_stream)
             raise
 
     @staticmethod
     def _enqueue_storage_to_compute(
-        plan: _BucketPlan[_ItemT],
+        plan: _RedistributionBucketPlan[_ItemT],
         slot: _BufferSlot,
         context: _CommunicationContext,
         *,
@@ -910,7 +987,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         handle = context.device_handle
         with handle.stream(caller_stream):
             _BucketedRedistributionRuntime._compute_without_redistribution(
-                work.plan,
+                work.plan.unredistributed_items,
                 slot,
                 local_tensor_spec=local_tensor_spec,
                 prepare=prepare,
@@ -953,7 +1030,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
 
     @staticmethod
     def _compute_without_redistribution(
-        plan: _BucketPlan[_ItemT],
+        items: Sequence[_ItemT],
         slot: _BufferSlot,
         *,
         local_tensor_spec: Callable[
@@ -963,7 +1040,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         compute: Callable[[_ItemT, Tensor], None],
         finalize: Callable[[_ItemT, Tensor], None],
     ) -> None:
-        for item in plan.unredistributed_items:
+        for item in items:
             shape, dtype, device = local_tensor_spec(item)
             prepared = slot.compute_buffer(shape, dtype=dtype, device=device)
             prepare(item, prepared)
@@ -972,7 +1049,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
 
 
 def _prepare_redistributed(
-    plan: _BucketPlan[_ItemT],
+    plan: _RedistributionBucketPlan[_ItemT],
     slot: _BufferSlot,
     storage_buffer: Tensor,
     *,
@@ -1176,6 +1253,11 @@ def _lower_packed_all_to_all(
         process_group=process_group,
         participants=participants,
         local_participant=local_participant,
+        has_remote_transfers=any(
+            source != destination
+            for transfers in transfers_by_parameter
+            for source, destination, _source_region, _destination_region in transfers
+        ),
         input_split_sizes=tuple(input_split_sizes),
         output_split_sizes=tuple(output_split_sizes),
         input_spans_by_parameter=_packed_spans_by_parameter(
@@ -1218,9 +1300,12 @@ def _dtensor_storage_region_for_participant(
     local_shape = list(tensor.shape)
     global_offsets = [0] * tensor.ndim
     for mesh_axis, placement in enumerate(tensor.placements):
+        if type(placement) is Replicate:
+            continue
         if type(placement) is not Shard:
             raise ValueError(
-                "redistributed optimizer storage requires exact Shard placements"
+                "redistributed optimizer storage requires exact Shard or "
+                "Replicate placements"
             )
         tensor_dim = placement.dim % tensor.ndim
         local_size, global_offset = Shard.local_shard_size_and_offset(
@@ -1239,18 +1324,66 @@ def _dtensor_storage_region_for_participant(
 def _dtensor_storage_regions(
     tensor: DTensor,
     participants: tuple[int, ...],
+    *,
+    required_storage_mesh_axis: int | None,
 ) -> tuple[tuple[tuple[int, ...], _TensorRegion], ...]:
-    storage_participants = _device_mesh_ranks(tensor.device_mesh)
-    if storage_participants != participants:
+    storage_mesh = tensor.device_mesh
+    storage_ranks = storage_mesh.mesh
+    reference_locations = (storage_ranks == participants[0]).nonzero()
+    if tuple(reference_locations.shape) != (1, storage_mesh.ndim):
         raise ValueError(
-            "bucket mesh participants must match redistributed DTensor storage"
+            "bucket mesh participants must belong to the DTensor storage mesh"
         )
+
+    reference_coordinate = reference_locations[0].tolist()
+    matching_storage_mesh_axes = []
+    participant_set = set(participants)
+    for storage_mesh_axis in range(storage_mesh.ndim):
+        coordinate = list(reference_coordinate)
+        coordinate[storage_mesh_axis] = slice(None)
+        axis_participants = tuple(storage_ranks[tuple(coordinate)].flatten().tolist())
+        if (
+            len(axis_participants) == len(participants)
+            and set(axis_participants) == participant_set
+        ):
+            matching_storage_mesh_axes.append(storage_mesh_axis)
+
+    if required_storage_mesh_axis is not None:
+        if required_storage_mesh_axis not in matching_storage_mesh_axes:
+            raise ValueError(
+                "bucket mesh participants do not match the parameter storage "
+                "shard axis"
+            )
+        storage_mesh_axis = required_storage_mesh_axis
+    elif len(matching_storage_mesh_axes) == 1:
+        storage_mesh_axis = matching_storage_mesh_axes[0]
+    elif len(participants) == 1 and matching_storage_mesh_axes:
+        storage_mesh_axis = matching_storage_mesh_axes[0]
+    else:
+        raise ValueError(
+            "bucket mesh participants must match exactly one DTensor storage "
+            "mesh axis"
+        )
+
+    for mesh_axis, placement in enumerate(tensor.placements):
+        if mesh_axis == storage_mesh_axis:
+            if type(placement) not in (Replicate, Shard):
+                raise ValueError(
+                    "redistributed optimizer storage requires exact Shard or "
+                    "Replicate on the communication mesh axis"
+                )
+        elif type(placement) is not Replicate:
+            raise ValueError(
+                "redistributed optimizer storage requires Replicate outside "
+                "the communication mesh axis"
+            )
+
+    holders_by_region: dict[_TensorRegion, list[int]] = {}
+    for participant in participants:
+        region = _dtensor_storage_region_for_participant(tensor, participant)
+        holders_by_region.setdefault(region, []).append(participant)
     return tuple(
-        (
-            (participant,),
-            _dtensor_storage_region_for_participant(tensor, participant),
-        )
-        for participant in participants
+        (tuple(holders), region) for region, holders in holders_by_region.items()
     )
 
 
@@ -1259,108 +1392,114 @@ def _build_bucket_plans(
     specs: Sequence[BucketSpec],
     *,
     get_fqn: Callable[[_ItemT], str],
-    requires_owner: Callable[[_ItemT], bool],
     get_storage_dtensor: Callable[[_ItemT], DTensor],
-    build_redistribution_plan: Callable[
-        [_ItemT, _RedistributionGroup, int | None],
-        _RedistributionPlan | None,
+    requires_redistribution: Callable[[_ItemT], bool],
+    resolve_redistribution_plans: Callable[
+        [tuple[_BucketPlanningContext[_ItemT], ...]],
+        Sequence[Sequence[_RedistributionPlan | None]],
     ],
 ) -> _BucketPlanningResult[_ItemT]:
     """Build ordered optimizer bucket plans with and without redistribution.
 
-    ``build_redistribution_plan`` receives a mesh-local owner rank exactly when
-    ``requires_owner`` is true. It returns ``None`` when storage is already
-    compute-ready or a transport-neutral plan for redistribution. This keeps
-    bucket ordering, owner validation, dtype validation, and packed
-    communication independent of a particular optimizer compute placement.
+    ``requires_redistribution`` is resolved before communication groups.
+    Entirely local buckets bypass optimizer-specific redistribution planning.
+    For every other bucket, ``resolve_redistribution_plans`` owns compute
+    placement and returns ``None`` for compute-ready items or a
+    transport-neutral plan for items requiring redistribution. Bucket
+    membership and redistribution requirements must be rank-stable within
+    every potential communication group.
     """
     resolved = _resolve_buckets(items, specs, get_fqn=get_fqn)
-    plans = []
-    ordered_items = []
+    buckets = []
     for spec, bucket in zip(specs, resolved, strict=True):
         if not bucket:
             continue
-        group = _redistribution_group(spec.mesh)
         sorted_bucket = tuple(sorted(bucket, key=get_fqn))
-        expected_owners = {
-            get_fqn(item) for item in sorted_bucket if requires_owner(item)
-        }
-        provided_owners = set(spec.owner_rank_by_fqn)
-        missing_owners = expected_owners - provided_owners
-        if missing_owners:
+        redistribution_requirements = tuple(
+            requires_redistribution(item) for item in sorted_bucket
+        )
+        buckets.append((spec, sorted_bucket, redistribution_requirements))
+    contexts_list = []
+    for spec, bucket, redistribution_requirements in buckets:
+        if not any(redistribution_requirements):
+            continue
+        if spec.mesh is None:
             raise ValueError(
-                f"bucket {spec.name!r} owner assignment must exactly cover "
-                "owner-requiring parameters; "
-                f"missing={sorted(missing_owners)}, "
-                f"extra={sorted(provided_owners - expected_owners)}"
+                f"bucket {spec.name!r} requires a communication mesh for "
+                "redistribution"
             )
+        contexts_list.append(
+            _BucketPlanningContext(
+                items=bucket,
+                group=_redistribution_group(spec.mesh),
+                name=spec.name,
+            )
+        )
+    contexts = tuple(contexts_list)
+    item_plans_by_bucket = (
+        tuple(resolve_redistribution_plans(contexts)) if contexts else ()
+    )
+    if len(item_plans_by_bucket) != len(contexts):
+        raise ValueError("redistribution planning must return one entry per bucket")
+
+    plans = []
+    ordered_items = []
+    redistribution_bucket_index = 0
+    for _spec, bucket, redistribution_requirements in buckets:
+        if not any(redistribution_requirements):
+            plans.append(_LocalBucketPlan(items=bucket))
+            ordered_items.extend(bucket)
+            continue
+
+        context = contexts[redistribution_bucket_index]
+        raw_item_plans = item_plans_by_bucket[redistribution_bucket_index]
+        redistribution_bucket_index += 1
+        item_plans = tuple(raw_item_plans)
+        if len(item_plans) != len(context.items):
+            raise ValueError("redistribution planning must return one entry per item")
+        group = context.group
 
         unredistributed_items_list = []
         redistributed_items_list = []
         redistribution_plans = []
-        for item in sorted_bucket:
-            needs_owner = requires_owner(item)
-            owner_rank = spec.owner_rank_by_fqn[get_fqn(item)] if needs_owner else None
-            if owner_rank is not None and owner_rank not in range(
-                len(group.participants)
-            ):
-                raise ValueError(
-                    f"bucket {spec.name!r} has owner outside its process group"
-                )
-            item_plan = build_redistribution_plan(item, group, owner_rank)
+        for item, requires_item_redistribution, item_plan in zip(
+            context.items,
+            redistribution_requirements,
+            item_plans,
+            strict=True,
+        ):
             if item_plan is None:
+                if requires_item_redistribution:
+                    raise ValueError(
+                        f"bucket {context.name!r} did not plan required "
+                        f"redistribution for parameter {get_fqn(item)!r}"
+                    )
                 unredistributed_items_list.append(item)
                 continue
+            if not requires_item_redistribution:
+                raise ValueError(
+                    f"bucket {context.name!r} planned redistribution for "
+                    f"compute-ready parameter {get_fqn(item)!r}"
+                )
             if item_plan.participants != group.participants:
                 raise ValueError(
-                    f"bucket {spec.name!r} redistribution participants do not "
+                    f"bucket {context.name!r} redistribution participants do not "
                     "match its process group"
                 )
             local_tensor = get_storage_dtensor(item).to_local()
             storage_partition = item_plan.storage_partition(group.local_participant)
             if tuple(local_tensor.shape) != storage_partition.tensor_shape:
                 raise ValueError(
-                    f"bucket {spec.name!r} storage partition does not match its mesh"
+                    f"bucket {context.name!r} storage partition does not match its mesh"
                 )
             redistributed_items_list.append(item)
             redistribution_plans.append(item_plan)
 
         unredistributed_items = tuple(unredistributed_items_list)
         redistributed_items = tuple(redistributed_items_list)
-        # Size-one sharded storage may normalize to Replicate. In that case a
-        # static rank-0 owner entry is equivalent to the resolved local compute.
-        redundant_owners = {
-            get_fqn(item)
-            for item in unredistributed_items
-            if len(group.participants) == 1
-            and spec.owner_rank_by_fqn.get(get_fqn(item)) == 0
-        }
-        effective_provided_owners = provided_owners - redundant_owners
-        if effective_provided_owners != expected_owners:
-            raise ValueError(
-                f"bucket {spec.name!r} owner assignment must exactly cover "
-                "owner-requiring parameters; "
-                f"missing={sorted(expected_owners - effective_provided_owners)}, "
-                f"extra={sorted(effective_provided_owners - expected_owners)}"
-            )
         ordered_items.extend(unredistributed_items)
         ordered_items.extend(redistributed_items)
-
-        if not redistributed_items:
-            tensor = get_storage_dtensor(unredistributed_items[0]).to_local()
-            plans.append(
-                _BucketPlan(
-                    unredistributed_items=unredistributed_items,
-                    redistributed_items=(),
-                    redistribution_plans=(),
-                    group=group,
-                    storage_to_compute_schedule=_LocalSchedule(),
-                    compute_to_storage_schedule=_LocalSchedule(),
-                    dtype=tensor.dtype,
-                    device=tensor.device,
-                )
-            )
-            continue
+        assert redistributed_items
 
         storage_dtensors = [get_storage_dtensor(item) for item in redistributed_items]
         local_tensors = [tensor.to_local() for tensor in storage_dtensors]
@@ -1369,11 +1508,11 @@ def _build_bucket_plans(
         if any(
             tensor.dtype != dtype or tensor.device != device for tensor in local_tensors
         ):
-            raise ValueError(f"bucket {spec.name!r} mixes dtype or device")
+            raise ValueError(f"bucket {context.name!r} mixes dtype or device")
 
         redistribution_plans_tuple = tuple(redistribution_plans)
         plans.append(
-            _BucketPlan(
+            _RedistributionBucketPlan(
                 unredistributed_items=unredistributed_items,
                 redistributed_items=redistributed_items,
                 redistribution_plans=redistribution_plans_tuple,
@@ -1401,53 +1540,21 @@ def _build_bucket_plans(
     )
 
 
-def _build_owned_bucket_plans(
-    items: Sequence[_ItemT],
-    specs: Sequence[BucketSpec],
-    *,
-    get_fqn: Callable[[_ItemT], str],
-    storage_is_compute_ready: Callable[[_ItemT], bool],
-    get_storage_dtensor: Callable[[_ItemT], DTensor],
-) -> _BucketPlanningResult[_ItemT]:
-    """Compatibility wrapper for local and whole-tensor-owned compute."""
-
-    def build_owned_redistribution_plan(
-        item: _ItemT,
-        group: _RedistributionGroup,
-        owner_rank: int | None,
-    ) -> _RedistributionPlan | None:
-        if storage_is_compute_ready(item):
-            return None
-        assert owner_rank is not None
-        tensor = get_storage_dtensor(item)
-        return _build_owned_redistribution_plan(
-            _dtensor_storage_regions(tensor, group.participants),
-            participants=group.participants,
-            owner=group.participants[owner_rank],
-            logical_shape=tuple(tensor.shape),
-        )
-
-    return _build_bucket_plans(
-        items,
-        specs,
-        get_fqn=get_fqn,
-        requires_owner=lambda item: not storage_is_compute_ready(item),
-        get_storage_dtensor=get_storage_dtensor,
-        build_redistribution_plan=build_owned_redistribution_plan,
-    )
-
-
 def _validate_bucket_plans_across_ranks(
     plans: Sequence[_BucketPlan[_ItemT]],
     *,
     item_signature: Callable[[_ItemT], tuple[Any, ...]],
 ) -> None:
-    """Collectively verify rank-stable plans before runtime communication.
+    """Collectively verify rank-stable redistribution plans.
 
-    Every rank must provide the same plan count and process-group order so all
-    workers enter these validation collectives in the same sequence.
+    Entirely local plans cannot desynchronize a runtime collective and do not
+    require a process group. Every rank must provide redistribution plans in
+    the same process-group order so all workers enter these validation
+    collectives in the same sequence.
     """
     for plan in plans:
+        if isinstance(plan, _LocalBucketPlan):
+            continue
         description = (
             str(plan.dtype),
             plan.device.type,

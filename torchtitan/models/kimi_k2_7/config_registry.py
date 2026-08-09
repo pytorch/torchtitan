@@ -10,13 +10,12 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
-    assign_balanced_owners,
     BucketConfig,
 )
-from torchtitan.components.distributed_optimizers.muon import Owned
-from torchtitan.components.distributed_optimizers.muon_parameter_prep import (
+from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
     MuonComputeSharding,
+    Owned,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -70,10 +69,8 @@ def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
 def _kimi_text_distributed_muon_optimizer(
     *,
     num_layers: int,
-    num_owner_ranks: int,
     lr: float,
     attention_shardings: Mapping[str, MuonComputeSharding],
-    owned_parameter_numel_by_suffix: Mapping[str, int],
 ) -> OptimizersContainer.Config:
     muon_kwargs = {
         "lr": lr,
@@ -173,27 +170,15 @@ def _kimi_text_distributed_muon_optimizer(
         tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
         for layer_ids in bucket_layer_ids
     )
-    owner_rank_by_bucket = assign_balanced_owners(
-        bucket_fqns,
-        {
-            f"layers.{layer_id}.{suffix}": numel
-            for layer_id, fqns in enumerate(layer_bucket_fqns)
-            for suffix, numel in owned_parameter_numel_by_suffix.items()
-            if f"layers.{layer_id}.{suffix}" in fqns
-        },
-        num_ranks=num_owner_ranks,
-    )
     bucket_configs = tuple(
         BucketConfig(
             name="layers." + "-".join(map(str, layer_ids)),
             patterns=fqns,
-            owner_rank_by_fqn=owners,
             mesh_axes=("dp_shard",),
         )
-        for layer_ids, fqns, owners in zip(
+        for layer_ids, fqns in zip(
             bucket_layer_ids,
             bucket_fqns,
-            owner_rank_by_bucket,
             strict=True,
         )
     )
@@ -208,13 +193,10 @@ def _kimi_text_distributed_muon_optimizer(
     )
 
 
-def _moonlight_distributed_muon_optimizer(
-    *, num_owner_ranks: int
-) -> OptimizersContainer.Config:
+def _moonlight_distributed_muon_optimizer() -> OptimizersContainer.Config:
     per_head = _per_head_muon_sharding(num_heads=16)
     return _kimi_text_distributed_muon_optimizer(
         num_layers=27,
-        num_owner_ranks=num_owner_ranks,
         lr=3e-4,
         attention_shardings={
             "wq": per_head,
@@ -222,27 +204,13 @@ def _moonlight_distributed_muon_optimizer(
             "wkv_b": per_head,
             "wo": MuonComputeSharding(placement=Owned()),
         },
-        owned_parameter_numel_by_suffix={
-            "attention.wkv_a.weight": 576 * 2048,
-            "attention.wo.weight": 2048 * 2048,
-            "feed_forward.w1.weight": 11264 * 2048,
-            "feed_forward.w2.weight": 2048 * 11264,
-            "feed_forward.w3.weight": 11264 * 2048,
-            "moe.router.gate.weight": 64 * 2048,
-            "moe.shared_experts.w1.weight": 2816 * 2048,
-            "moe.shared_experts.w2.weight": 2048 * 2816,
-            "moe.shared_experts.w3.weight": 2816 * 2048,
-        },
     )
 
 
-def _kimi_k2_5_distributed_muon_optimizer(
-    *, num_owner_ranks: int
-) -> OptimizersContainer.Config:
+def _kimi_k2_5_distributed_muon_optimizer() -> OptimizersContainer.Config:
     per_head = _per_head_muon_sharding(num_heads=64)
     return _kimi_text_distributed_muon_optimizer(
         num_layers=61,
-        num_owner_ranks=num_owner_ranks,
         lr=2.2e-4,
         attention_shardings={
             "wq_a": MuonComputeSharding(placement=Owned()),
@@ -250,18 +218,6 @@ def _kimi_k2_5_distributed_muon_optimizer(
             "wkv_a": MuonComputeSharding(placement=Owned()),
             "wkv_b": per_head,
             "wo": MuonComputeSharding(placement=Owned()),
-        },
-        owned_parameter_numel_by_suffix={
-            "attention.wq_a.weight": 1536 * 7168,
-            "attention.wkv_a.weight": 576 * 7168,
-            "attention.wo.weight": 7168 * 8192,
-            "feed_forward.w1.weight": 18432 * 7168,
-            "feed_forward.w2.weight": 7168 * 18432,
-            "feed_forward.w3.weight": 18432 * 7168,
-            "moe.router.gate.weight": 384 * 7168,
-            "moe.shared_experts.w1.weight": 2048 * 7168,
-            "moe.shared_experts.w2.weight": 7168 * 2048,
-            "moe.shared_experts.w3.weight": 2048 * 7168,
         },
     )
 
@@ -337,13 +293,11 @@ def moonlight_16b_a3b() -> Trainer.Config:
 def moonlight_16b_a3b_muon() -> Trainer.Config:
     """Moonlight 16B-A3B with DistributedMuon for matrix parameters."""
     config = moonlight_16b_a3b()
-    num_owner_ranks = 8
-    config.optimizer = _moonlight_distributed_muon_optimizer(
-        num_owner_ranks=num_owner_ranks
-    )
+    num_data_parallel_shard_ranks = 8
+    config.optimizer = _moonlight_distributed_muon_optimizer()
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=num_owner_ranks,
+        data_parallel_shard_degree=num_data_parallel_shard_ranks,
         tensor_parallel_degree=1,
         context_parallel_degree=1,
         pipeline_parallel_degree=1,
@@ -432,13 +386,11 @@ def kimi_k2_5() -> Trainer.Config:
 def kimi_k2_5_muon() -> Trainer.Config:
     """Full Kimi K2.5 with DistributedMuon for text-tower matrices."""
     config = kimi_k2_5()
-    num_owner_ranks = 64
-    config.optimizer = _kimi_k2_5_distributed_muon_optimizer(
-        num_owner_ranks=num_owner_ranks,
-    )
+    num_data_parallel_shard_ranks = 64
+    config.optimizer = _kimi_k2_5_distributed_muon_optimizer()
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=num_owner_ranks,
+        data_parallel_shard_degree=num_data_parallel_shard_ranks,
         tensor_parallel_degree=1,
         context_parallel_degree=1,
         pipeline_parallel_degree=1,
