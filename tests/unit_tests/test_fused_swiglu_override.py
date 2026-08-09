@@ -5,9 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
+import torch.nn.functional as F
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe import GroupedExperts
@@ -26,6 +28,12 @@ from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 _DIM = 16
 _HIDDEN = 32
 _E = 4
+
+
+def _grad_float(tensor: torch.Tensor) -> torch.Tensor:
+    grad = tensor.grad
+    assert grad is not None
+    return grad.float()
 
 
 def _build_fused_grouped_experts() -> FusedGroupedExperts:
@@ -133,6 +141,67 @@ class TestFusedGroupedExperts(unittest.TestCase):
         self.assertIs(sc.state_shardings["w2_EDF"], rowwise)
         self.assertIs(sc.in_src_shardings, base_sharding.in_src_shardings)
         self.assertIs(sc.local_map, base_sharding.local_map)
+
+    def test_router_scores_match_dense_reference_forward_and_backward_on_cpu(self):
+        torch.manual_seed(42)
+        fused = _build_fused_grouped_experts()
+        with torch.no_grad():
+            fused.w13.mul_(0.1)
+            fused.w2_EDF.mul_(0.1)
+        counts_E = torch.tensor([2, 1, 1, 1])
+        rows = int(counts_E.sum())
+        x_RD = torch.randn(rows, _DIM, dtype=torch.bfloat16, requires_grad=True)
+        scores_R = torch.tensor([0.25, 0.5, 0.75, 1.0, 0.625], requires_grad=True)
+        loss_weight_RD = torch.arange(1, rows * _DIM + 1, dtype=torch.float32).reshape(
+            rows, _DIM
+        )
+
+        def silu_and_mul_reference(gate, up, offsets):
+            self.assertEqual(int(offsets[-1]), gate.shape[0])
+            return F.silu(gate) * up
+
+        with patch(
+            "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
+            side_effect=silu_and_mul_reference,
+        ):
+            output_RD = fused(x_RD, counts_E, routed_scores_R=scores_R)
+
+        x_ref_RD = x_RD.detach().clone().requires_grad_()
+        scores_ref_R = scores_R.detach().clone().requires_grad_()
+        w13_ref = fused.w13.detach().bfloat16().requires_grad_()
+        w2_ref = fused.w2_EDF.detach().bfloat16().requires_grad_()
+        reference_rows = []
+        row_start = 0
+        for expert_index, count in enumerate(counts_E.tolist()):
+            rows_for_expert = x_ref_RD[row_start : row_start + count]
+            gate = rows_for_expert @ w13_ref[expert_index, :, 0].transpose(-2, -1)
+            up = rows_for_expert @ w13_ref[expert_index, :, 1].transpose(-2, -1)
+            hidden = F.silu(gate) * up
+            hidden = hidden * scores_ref_R[
+                row_start : row_start + count
+            ].bfloat16().reshape(-1, 1)
+            reference_rows.append(hidden @ w2_ref[expert_index].transpose(-2, -1))
+            row_start += count
+        reference_RD = torch.cat(reference_rows)
+
+        torch.testing.assert_close(output_RD, reference_RD, rtol=0.03, atol=0.03)
+        (output_RD.float() * loss_weight_RD).sum().backward()
+        (reference_RD.float() * loss_weight_RD).sum().backward()
+        torch.testing.assert_close(
+            _grad_float(x_RD), _grad_float(x_ref_RD), rtol=0.03, atol=0.03
+        )
+        torch.testing.assert_close(
+            scores_R.grad, scores_ref_R.grad, rtol=0.03, atol=0.03
+        )
+        torch.testing.assert_close(
+            _grad_float(fused.w13), _grad_float(w13_ref), rtol=0.03, atol=0.03
+        )
+        torch.testing.assert_close(
+            _grad_float(fused.w2_EDF),
+            _grad_float(w2_ref),
+            rtol=0.03,
+            atol=0.03,
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
