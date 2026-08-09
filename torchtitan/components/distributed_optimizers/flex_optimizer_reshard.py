@@ -13,8 +13,9 @@ import hashlib
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from types import ModuleType
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Any, cast, Generic, TypeAlias, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -31,7 +32,7 @@ _ItemT = TypeVar("_ItemT")
 class BucketConfig:
     """Static bucket configuration resolved after runtime meshes exist.
 
-    ``mesh_axes`` contains exactly one storage mesh axis name. Compute
+    ``mesh_axis`` is the storage mesh axis used for redistribution. Compute
     distributions and any single-rank assignments come from the optimizer's
     parameter metadata. Parameters requiring redistribution determine the
     concrete communication mesh. An entirely local bucket does not bind a
@@ -39,17 +40,11 @@ class BucketConfig:
     """
 
     patterns: tuple[str, ...]
-    mesh_axes: tuple[str, ...]
+    mesh_axis: str
     name: str = ""
 
     def __post_init__(self) -> None:
-        mesh_axes = tuple(self.mesh_axes)
-        if len(mesh_axes) != 1:
-            raise ValueError(
-                "BucketConfig mesh_axes must contain exactly one mesh axis"
-            )
         object.__setattr__(self, "patterns", tuple(self.patterns))
-        object.__setattr__(self, "mesh_axes", mesh_axes)
 
     def bind(self, mesh: DeviceMesh | None) -> BucketSpec:
         return BucketSpec(
@@ -113,7 +108,7 @@ def _bind_bucket_configs(
             specs.append(config.bind(None))
             continue
 
-        mesh_axis = config.mesh_axes[0]
+        mesh_axis = config.mesh_axis
         meshes = []
         for item in redistributed_items:
             storage_mesh = get_storage_dtensor(item).device_mesh
@@ -135,7 +130,7 @@ def _bind_bucket_configs(
                     f"match storage shard axis {required_mesh_axis!r} for "
                     f"parameter {get_fqn(item)!r}"
                 )
-            meshes.append(storage_mesh[config.mesh_axes])
+            meshes.append(storage_mesh[config.mesh_axis])
 
         mesh = meshes[0]
         if any(not torch.equal(candidate.mesh, mesh.mesh) for candidate in meshes[1:]):
@@ -189,8 +184,17 @@ class _ParticipantPartition:
     def __post_init__(self) -> None:
         object.__setattr__(self, "tensor_shape", tuple(self.tensor_shape))
         object.__setattr__(self, "logical_regions", tuple(self.logical_regions))
-        if any(size < 0 for size in self.tensor_shape):
-            raise ValueError("participant tensor shape must be nonnegative")
+
+
+@dataclass(frozen=True, slots=True)
+class _RouteEndpoint:
+    """One route endpoint's local tensor region and participants."""
+
+    tensor_region: _TensorRegion
+    participants: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "participants", tuple(self.participants))
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,26 +202,25 @@ class _TensorRegionRoute:
     """Map one logical region between differently shaped endpoint tensors."""
 
     logical_region: _TensorRegion
-    source_region: _TensorRegion
-    destination_region: _TensorRegion
-    source_participants: tuple[int, ...]
-    destination_participants: tuple[int, ...]
+    source: _RouteEndpoint
+    destination: _RouteEndpoint
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "source_participants", tuple(self.source_participants))
-        object.__setattr__(
-            self, "destination_participants", tuple(self.destination_participants)
+    def inverse(self) -> _TensorRegionRoute:
+        return _TensorRegionRoute(
+            logical_region=self.logical_region,
+            source=self.destination,
+            destination=self.source,
         )
-        if not (
-            self.logical_region.numel
-            == self.source_region.numel
-            == self.destination_region.numel
-        ):
-            raise ValueError("route endpoint regions must have equal numel")
-        if len(set(self.source_participants)) != len(self.source_participants) or len(
-            set(self.destination_participants)
-        ) != len(self.destination_participants):
-            raise ValueError("route endpoint participants must be unique")
+
+
+class _RedistributionDirection(Enum):
+    STORAGE_TO_COMPUTE = "storage-to-compute"
+    COMPUTE_TO_STORAGE = "compute-to-storage"
+
+    def routes(self, plan: _RedistributionPlan) -> tuple[_TensorRegionRoute, ...]:
+        if self is _RedistributionDirection.STORAGE_TO_COMPUTE:
+            return plan.storage_to_compute_routes
+        return plan.compute_to_storage_routes
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +232,7 @@ class _RedistributionPlan:
     storage_partitions: tuple[_ParticipantPartition, ...]
     compute_partitions: tuple[_ParticipantPartition, ...]
     storage_to_compute_routes: tuple[_TensorRegionRoute, ...]
-    compute_to_storage_routes: tuple[_TensorRegionRoute, ...]
+    compute_to_storage_routes: tuple[_TensorRegionRoute, ...] = field(init=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "participants", tuple(self.participants))
@@ -240,145 +243,11 @@ class _RedistributionPlan:
             self, "storage_to_compute_routes", tuple(self.storage_to_compute_routes)
         )
         object.__setattr__(
-            self, "compute_to_storage_routes", tuple(self.compute_to_storage_routes)
+            self,
+            "compute_to_storage_routes",
+            tuple(route.inverse() for route in self.storage_to_compute_routes),
         )
-        if len(set(self.participants)) != len(self.participants):
-            raise ValueError("redistribution participants must be unique")
-        for name, partitions in (
-            ("storage", self.storage_partitions),
-            ("compute", self.compute_partitions),
-        ):
-            if tuple(partition.participant for partition in partitions) != tuple(
-                self.participants
-            ):
-                raise ValueError(
-                    f"{name} partitions must follow the redistribution participants"
-                )
-            for partition in partitions:
-                _validate_participant_logical_partition(
-                    partition,
-                    self.logical_shape,
-                    direction=f"{name} logical partition {partition.participant}",
-                )
-
-        all_routes = self.storage_to_compute_routes + self.compute_to_storage_routes
-        if any(
-            not route.source_participants or not route.destination_participants
-            for route in all_routes
-        ):
-            raise ValueError("redistribution routes require sources and destinations")
-        participant_set = set(self.participants)
-        if any(
-            participant not in participant_set
-            for route in all_routes
-            for participant in (
-                route.source_participants + route.destination_participants
-            )
-        ):
-            raise ValueError("redistribution route references an unknown participant")
-
-        def route_key(route: _TensorRegionRoute) -> tuple[Any, ...]:
-            return (
-                route.logical_region.offsets,
-                route.logical_region.shape,
-                route.source_region.offsets,
-                route.source_region.shape,
-                route.destination_region.offsets,
-                route.destination_region.shape,
-                route.source_participants,
-                route.destination_participants,
-            )
-
-        mirrored_forward_keys = sorted(
-            (
-                route.logical_region.offsets,
-                route.logical_region.shape,
-                route.destination_region.offsets,
-                route.destination_region.shape,
-                route.source_region.offsets,
-                route.source_region.shape,
-                route.destination_participants,
-                route.source_participants,
-            )
-            for route in self.storage_to_compute_routes
-        )
-        reverse_keys = sorted(map(route_key, self.compute_to_storage_routes))
-        if mirrored_forward_keys != reverse_keys:
-            raise ValueError(
-                "compute-to-storage routes must exactly invert storage-to-compute"
-            )
-        for direction, routes in (
-            ("storage-to-compute", self.storage_to_compute_routes),
-            ("compute-to-storage", self.compute_to_storage_routes),
-        ):
-            _validate_tensor_region_partition(
-                tuple(route.logical_region for route in routes),
-                self.logical_shape,
-                direction=direction,
-            )
-
-        storage_by_participant = {
-            partition.participant: partition for partition in self.storage_partitions
-        }
-        compute_by_participant = {
-            partition.participant: partition for partition in self.compute_partitions
-        }
-        for participant in self.participants:
-            storage = storage_by_participant[participant]
-            compute = compute_by_participant[participant]
-            endpoint_specs = (
-                (
-                    "storage-to-compute source",
-                    self.storage_to_compute_routes,
-                    "source_participants",
-                    "source_region",
-                    storage,
-                ),
-                (
-                    "storage-to-compute destination",
-                    self.storage_to_compute_routes,
-                    "destination_participants",
-                    "destination_region",
-                    compute,
-                ),
-                (
-                    "compute-to-storage source",
-                    self.compute_to_storage_routes,
-                    "source_participants",
-                    "source_region",
-                    compute,
-                ),
-                (
-                    "compute-to-storage destination",
-                    self.compute_to_storage_routes,
-                    "destination_participants",
-                    "destination_region",
-                    storage,
-                ),
-            )
-            for (
-                direction,
-                routes,
-                participants_attr,
-                region_attr,
-                partition,
-            ) in endpoint_specs:
-                participant_routes = tuple(
-                    route
-                    for route in routes
-                    if participant in getattr(route, participants_attr)
-                )
-                _validate_regions_cover_partition(
-                    tuple(route.logical_region for route in participant_routes),
-                    partition.logical_regions,
-                    self.logical_shape,
-                    direction=f"{direction} {participant}",
-                )
-                _validate_tensor_region_partition(
-                    tuple(getattr(route, region_attr) for route in participant_routes),
-                    partition.tensor_shape,
-                    direction=f"{direction} tensor {participant}",
-                )
+        _validate_redistribution_plan(self)
 
     def storage_partition(self, participant: int) -> _ParticipantPartition:
         return next(
@@ -395,45 +264,145 @@ class _RedistributionPlan:
         )
 
 
+def _require_valid_plan(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(f"invalid redistribution plan: {message}")
+
+
+def _validate_redistribution_plan(plan: _RedistributionPlan) -> None:
+    """Validate the complete internal plan once, before building schedules."""
+    participant_set = set(plan.participants)
+    _require_valid_plan(
+        len(participant_set) == len(plan.participants),
+        "participants must be unique",
+    )
+
+    for name, partitions in (
+        ("storage", plan.storage_partitions),
+        ("compute", plan.compute_partitions),
+    ):
+        _require_valid_plan(
+            tuple(partition.participant for partition in partitions)
+            == plan.participants,
+            f"{name} partitions must follow the redistribution participants",
+        )
+        for partition in partitions:
+            _validate_participant_logical_partition(
+                partition,
+                plan.logical_shape,
+                direction=f"{name} logical partition {partition.participant}",
+            )
+
+    routes = plan.storage_to_compute_routes
+    for route in routes:
+        _require_valid_plan(
+            bool(route.source.participants and route.destination.participants),
+            "routes require source and destination participants",
+        )
+        _require_valid_plan(
+            len(set(route.source.participants)) == len(route.source.participants)
+            and len(set(route.destination.participants))
+            == len(route.destination.participants),
+            "route endpoint participants must be unique",
+        )
+        _require_valid_plan(
+            set(route.source.participants) <= participant_set
+            and set(route.destination.participants) <= participant_set,
+            "route references an unknown participant",
+        )
+        _require_valid_plan(
+            route.logical_region.numel
+            == route.source.tensor_region.numel
+            == route.destination.tensor_region.numel,
+            "route endpoint regions must have equal numel",
+        )
+
+    _validate_tensor_region_partition(
+        tuple(route.logical_region for route in routes),
+        plan.logical_shape,
+        direction=_RedistributionDirection.STORAGE_TO_COMPUTE.value,
+    )
+
+    storage_by_participant = {
+        partition.participant: partition for partition in plan.storage_partitions
+    }
+    compute_by_participant = {
+        partition.participant: partition for partition in plan.compute_partitions
+    }
+    for participant in plan.participants:
+        source_routes = tuple(
+            route for route in routes if participant in route.source.participants
+        )
+        _validate_regions_cover_partition(
+            tuple(route.logical_region for route in source_routes),
+            storage_by_participant[participant].logical_regions,
+            plan.logical_shape,
+            direction=f"storage source {participant}",
+        )
+        _validate_tensor_region_partition(
+            tuple(route.source.tensor_region for route in source_routes),
+            storage_by_participant[participant].tensor_shape,
+            direction=f"storage source tensor {participant}",
+        )
+
+        destination_routes = tuple(
+            route for route in routes if participant in route.destination.participants
+        )
+        _validate_regions_cover_partition(
+            tuple(route.logical_region for route in destination_routes),
+            compute_by_participant[participant].logical_regions,
+            plan.logical_shape,
+            direction=f"compute destination {participant}",
+        )
+        _validate_tensor_region_partition(
+            tuple(route.destination.tensor_region for route in destination_routes),
+            compute_by_participant[participant].tensor_shape,
+            direction=f"compute destination tensor {participant}",
+        )
+
+
 def _validate_disjoint_regions_in_bounds(
     regions: tuple[_TensorRegion, ...],
     bounds_shape: tuple[int, ...],
     *,
     direction: str,
 ) -> None:
-    if any(size < 0 for size in bounds_shape) or any(
-        len(region.offsets) != len(bounds_shape)
-        or len(region.shape) != len(bounds_shape)
-        or any(
-            offset < 0 or size < 0 or offset + size > bounds_size
-            for offset, size, bounds_size in zip(
-                region.offsets, region.shape, bounds_shape, strict=True
+    _require_valid_plan(
+        not any(size < 0 for size in bounds_shape)
+        and not any(
+            len(region.offsets) != len(bounds_shape)
+            or len(region.shape) != len(bounds_shape)
+            or any(
+                offset < 0 or size < 0 or offset + size > bounds_size
+                for offset, size, bounds_size in zip(
+                    region.offsets, region.shape, bounds_shape, strict=True
+                )
             )
-        )
-        for region in regions
-    ):
-        raise ValueError(f"{direction} regions must be in bounds")
+            for region in regions
+        ),
+        f"{direction} regions must be in bounds",
+    )
 
     positive_regions = tuple(region for region in regions if region.numel)
     for index, first in enumerate(positive_regions):
         for second in positive_regions[index + 1 :]:
-            if all(
-                max(first_offset, second_offset)
-                < min(
-                    first_offset + first_size,
-                    second_offset + second_size,
-                )
-                for first_offset, first_size, second_offset, second_size in zip(
-                    first.offsets,
-                    first.shape,
-                    second.offsets,
-                    second.shape,
-                    strict=True,
-                )
-            ):
-                raise NotImplementedError(
-                    "overlapping logical tensor regions are not supported"
-                )
+            _require_valid_plan(
+                not all(
+                    max(first_offset, second_offset)
+                    < min(
+                        first_offset + first_size,
+                        second_offset + second_size,
+                    )
+                    for first_offset, first_size, second_offset, second_size in zip(
+                        first.offsets,
+                        first.shape,
+                        second.offsets,
+                        second.shape,
+                        strict=True,
+                    )
+                ),
+                "overlapping logical tensor regions are not supported",
+            )
 
 
 def _validate_tensor_region_partition(
@@ -448,8 +417,10 @@ def _validate_tensor_region_partition(
         direction=direction,
     )
 
-    if sum(region.numel for region in regions) != math.prod(logical_shape):
-        raise ValueError(f"{direction} regions do not cover the logical tensor")
+    _require_valid_plan(
+        sum(region.numel for region in regions) == math.prod(logical_shape),
+        f"{direction} regions do not cover the logical tensor",
+    )
 
 
 def _validate_participant_logical_partition(
@@ -463,12 +434,11 @@ def _validate_participant_logical_partition(
         logical_shape,
         direction=direction,
     )
-    if sum(region.numel for region in partition.logical_regions) != math.prod(
-        partition.tensor_shape
-    ):
-        raise ValueError(
-            f"{direction} regions do not match the participant tensor shape"
-        )
+    _require_valid_plan(
+        sum(region.numel for region in partition.logical_regions)
+        == math.prod(partition.tensor_shape),
+        f"{direction} regions do not match the participant tensor shape",
+    )
 
 
 def _tensor_region_intersection_numel(
@@ -507,21 +477,22 @@ def _validate_regions_cover_partition(
         direction=direction,
     )
 
-    if sum(region.numel for region in regions) != sum(
-        region.numel for region in expected
-    ):
-        raise ValueError(f"{direction} regions do not cover the participant partition")
+    _require_valid_plan(
+        sum(region.numel for region in regions)
+        == sum(region.numel for region in expected),
+        f"{direction} regions do not cover the participant partition",
+    )
     for region in regions:
         if not region.numel:
             continue
-        if (
+        _require_valid_plan(
             sum(
                 _tensor_region_intersection_numel(region, expected_region)
                 for expected_region in expected
             )
-            != region.numel
-        ):
-            raise ValueError(f"{direction} regions leave the participant partition")
+            == region.numel,
+            f"{direction} regions leave the participant partition",
+        )
 
 
 def _build_whole_tensor_redistribution_plan(
@@ -535,42 +506,38 @@ def _build_whole_tensor_redistribution_plan(
     participants = tuple(participants)
     compute_participants = tuple(compute_participants)
     participant_set = set(participants)
-    if (
-        not compute_participants
-        or len(set(compute_participants)) != len(compute_participants)
-        or any(
-            participant not in participant_set for participant in compute_participants
-        )
-    ):
-        raise ValueError(
-            "compute participants must be unique redistribution participants"
-        )
+    _require_valid_plan(
+        bool(compute_participants)
+        and len(set(compute_participants)) == len(compute_participants)
+        and all(participant in participant_set for participant in compute_participants),
+        "compute participants must be unique redistribution participants",
+    )
 
     storage_mappings = []
     storage_mapping_by_participant = {}
     for raw_holders, logical_region in storage_regions:
         holders = tuple(raw_holders)
-        if (
-            not holders
-            or len(set(holders)) != len(holders)
-            or any(holder not in participant_set for holder in holders)
-        ):
-            raise ValueError(
-                "storage region holders must be unique redistribution participants"
-            )
+        _require_valid_plan(
+            bool(holders)
+            and len(set(holders)) == len(holders)
+            and all(holder in participant_set for holder in holders),
+            "storage region holders must be unique redistribution participants",
+        )
         tensor_region = _TensorRegion(
             offsets=(0,) * len(logical_region.shape),
             shape=logical_region.shape,
         )
         storage_mappings.append((holders, logical_region, tensor_region))
         for holder in holders:
-            if holder in storage_mapping_by_participant:
-                raise NotImplementedError(
-                    "multiple storage regions per participant are not supported"
-                )
+            _require_valid_plan(
+                holder not in storage_mapping_by_participant,
+                "multiple storage regions per participant are not supported",
+            )
             storage_mapping_by_participant[holder] = (logical_region, tensor_region)
-    if set(storage_mapping_by_participant) != participant_set:
-        raise ValueError("storage regions must cover every redistribution participant")
+    _require_valid_plan(
+        set(storage_mapping_by_participant) == participant_set,
+        "storage regions must cover every redistribution participant",
+    )
 
     storage_partitions = tuple(
         _ParticipantPartition(
@@ -601,22 +568,10 @@ def _build_whole_tensor_redistribution_plan(
     storage_to_compute_routes = tuple(
         _TensorRegionRoute(
             logical_region=logical_region,
-            source_region=tensor_region,
-            destination_region=logical_region,
-            source_participants=holders,
-            destination_participants=compute_participants,
+            source=_RouteEndpoint(tensor_region, holders),
+            destination=_RouteEndpoint(logical_region, compute_participants),
         )
         for holders, logical_region, tensor_region in storage_mappings
-    )
-    compute_to_storage_routes = tuple(
-        _TensorRegionRoute(
-            logical_region=route.logical_region,
-            source_region=route.destination_region,
-            destination_region=route.source_region,
-            source_participants=route.destination_participants,
-            destination_participants=route.source_participants,
-        )
-        for route in storage_to_compute_routes
     )
     return _RedistributionPlan(
         participants=participants,
@@ -624,7 +579,6 @@ def _build_whole_tensor_redistribution_plan(
         storage_partitions=storage_partitions,
         compute_partitions=compute_partitions,
         storage_to_compute_routes=storage_to_compute_routes,
-        compute_to_storage_routes=compute_to_storage_routes,
     )
 
 
@@ -850,6 +804,10 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     runtime-owned result before reuse. Callbacks run under the stream selected
     by the runtime and must not retain tensors, synchronize, or call
     ``Tensor.record_stream()``.
+
+    Any exception is fatal: parameters or optimizer state may already be
+    updated and communication may be in flight, so callers must not reuse this
+    runtime or optimizer.
     """
 
     def __init__(self, device: torch.device) -> None:
@@ -877,7 +835,8 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         )
         caller = handle.current_stream(self._device)
 
-        communication_started = False
+        transfer_stream: torch.Stream | None = None
+        completed = False
         previous: _BucketWork[_ItemT] | None = None
         redistributed_index = 0
         try:
@@ -897,9 +856,9 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 if context is None:
                     context = _CommunicationContext.create(self._device)
                     self._context = context
-                if not communication_started:
+                if transfer_stream is None:
                     context.transfer_stream.wait_stream(caller)
-                    communication_started = True
+                    transfer_stream = context.transfer_stream
                 slot = context.slots[redistributed_index % 2]
                 work = self._enqueue_storage_to_compute(
                     plan,
@@ -933,14 +892,13 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 assert context is not None
                 self._enqueue_compute_to_storage(previous, context, finalize=finalize)
                 self._release(previous, caller)
-        except Exception:
-            # Preserve allocator lifetime ordering for work already enqueued on
-            # either stream. This is an error-path drain, not synchronization.
-            if communication_started:
-                assert context is not None
-                context.transfer_stream.wait_stream(caller)
-                caller.wait_stream(context.transfer_stream)
-            raise
+            completed = True
+        finally:
+            if not completed and transfer_stream is not None:
+                # Preserve allocator lifetime ordering for work already queued
+                # on either stream without suppressing the active exception.
+                transfer_stream.wait_stream(caller)
+                caller.wait_stream(transfer_stream)
 
     @staticmethod
     def _enqueue_storage_to_compute(
@@ -1164,12 +1122,17 @@ def _resolve_routes_to_transfers(
     transfers = []
     for route in routes:
         sources = tuple(
-            sorted(route.source_participants, key=participant_order.__getitem__)
+            sorted(route.source.participants, key=participant_order.__getitem__)
         )
-        for destination in route.destination_participants:
+        for destination in route.destination.participants:
             source = destination if destination in sources else sources[0]
             transfers.append(
-                (source, destination, route.source_region, route.destination_region)
+                (
+                    source,
+                    destination,
+                    route.source.tensor_region,
+                    route.destination.tensor_region,
+                )
             )
     return tuple(transfers)
 
@@ -1187,23 +1150,16 @@ def _packed_spans_by_parameter(
     )
 
 
-def _lower_packed_all_to_all(
+def _build_packed_all_to_all_schedule(
     redistribution_plans: tuple[_RedistributionPlan, ...],
     *,
-    storage_to_compute: bool,
+    direction: _RedistributionDirection,
     process_group: dist.ProcessGroup,
     local_participant: int,
 ) -> _PackedAllToAllSchedule:
-    """Lower nonempty plans with one shared participant order to packed A2A."""
+    """Build this participant's packed all-to-all schedule from route plans."""
     participants = redistribution_plans[0].participants
-    if storage_to_compute:
-        routes_by_parameter = tuple(
-            plan.storage_to_compute_routes for plan in redistribution_plans
-        )
-    else:
-        routes_by_parameter = tuple(
-            plan.compute_to_storage_routes for plan in redistribution_plans
-        )
+    routes_by_parameter = tuple(direction.routes(plan) for plan in redistribution_plans)
     transfers_by_parameter = tuple(
         _resolve_routes_to_transfers(routes, participants)
         for routes in routes_by_parameter
@@ -1302,11 +1258,11 @@ def _dtensor_storage_region_for_participant(
     for mesh_axis, placement in enumerate(tensor.placements):
         if type(placement) is Replicate:
             continue
-        if type(placement) is not Shard:
-            raise ValueError(
-                "redistributed optimizer storage requires exact Shard or "
-                "Replicate placements"
-            )
+        _require_valid_plan(
+            type(placement) is Shard,
+            "storage placement must be exact Shard or Replicate",
+        )
+        placement = cast(Shard, placement)
         tensor_dim = placement.dim % tensor.ndim
         local_size, global_offset = Shard.local_shard_size_and_offset(
             tensor.shape[tensor_dim],
@@ -1387,6 +1343,11 @@ def _dtensor_storage_regions(
     )
 
 
+def _require_valid_planner_result(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(f"invalid redistribution planner result: {message}")
+
+
 def _build_bucket_plans(
     items: Sequence[_ItemT],
     specs: Sequence[BucketSpec],
@@ -1439,8 +1400,10 @@ def _build_bucket_plans(
     item_plans_by_bucket = (
         tuple(resolve_redistribution_plans(contexts)) if contexts else ()
     )
-    if len(item_plans_by_bucket) != len(contexts):
-        raise ValueError("redistribution planning must return one entry per bucket")
+    _require_valid_planner_result(
+        len(item_plans_by_bucket) == len(contexts),
+        "expected one entry per bucket",
+    )
 
     plans = []
     ordered_items = []
@@ -1455,8 +1418,10 @@ def _build_bucket_plans(
         raw_item_plans = item_plans_by_bucket[redistribution_bucket_index]
         redistribution_bucket_index += 1
         item_plans = tuple(raw_item_plans)
-        if len(item_plans) != len(context.items):
-            raise ValueError("redistribution planning must return one entry per item")
+        _require_valid_planner_result(
+            len(item_plans) == len(context.items),
+            f"bucket {context.name!r} expected one entry per item",
+        )
         group = context.group
 
         unredistributed_items_list = []
@@ -1469,29 +1434,28 @@ def _build_bucket_plans(
             strict=True,
         ):
             if item_plan is None:
-                if requires_item_redistribution:
-                    raise ValueError(
-                        f"bucket {context.name!r} did not plan required "
-                        f"redistribution for parameter {get_fqn(item)!r}"
-                    )
+                _require_valid_planner_result(
+                    not requires_item_redistribution,
+                    f"bucket {context.name!r} omitted required redistribution "
+                    f"for parameter {get_fqn(item)!r}",
+                )
                 unredistributed_items_list.append(item)
                 continue
-            if not requires_item_redistribution:
-                raise ValueError(
-                    f"bucket {context.name!r} planned redistribution for "
-                    f"compute-ready parameter {get_fqn(item)!r}"
-                )
-            if item_plan.participants != group.participants:
-                raise ValueError(
-                    f"bucket {context.name!r} redistribution participants do not "
-                    "match its process group"
-                )
+            _require_valid_planner_result(
+                requires_item_redistribution,
+                f"bucket {context.name!r} planned redistribution for "
+                f"compute-ready parameter {get_fqn(item)!r}",
+            )
+            _require_valid_planner_result(
+                item_plan.participants == group.participants,
+                f"bucket {context.name!r} participants do not match its process group",
+            )
             local_tensor = get_storage_dtensor(item).to_local()
             storage_partition = item_plan.storage_partition(group.local_participant)
-            if tuple(local_tensor.shape) != storage_partition.tensor_shape:
-                raise ValueError(
-                    f"bucket {context.name!r} storage partition does not match its mesh"
-                )
+            _require_valid_planner_result(
+                tuple(local_tensor.shape) == storage_partition.tensor_shape,
+                f"bucket {context.name!r} storage partition does not match its mesh",
+            )
             redistributed_items_list.append(item)
             redistribution_plans.append(item_plan)
 
@@ -1517,15 +1481,15 @@ def _build_bucket_plans(
                 redistributed_items=redistributed_items,
                 redistribution_plans=redistribution_plans_tuple,
                 group=group,
-                storage_to_compute_schedule=_lower_packed_all_to_all(
+                storage_to_compute_schedule=_build_packed_all_to_all_schedule(
                     redistribution_plans_tuple,
-                    storage_to_compute=True,
+                    direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
                     process_group=group.process_group,
                     local_participant=group.local_participant,
                 ),
-                compute_to_storage_schedule=_lower_packed_all_to_all(
+                compute_to_storage_schedule=_build_packed_all_to_all_schedule(
                     redistribution_plans_tuple,
-                    storage_to_compute=False,
+                    direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
                     process_group=group.process_group,
                     local_participant=group.local_participant,
                 ),
@@ -1604,12 +1568,12 @@ def _redistribution_plan_key(plan: _RedistributionPlan) -> tuple[Any, ...]:
         return (
             route.logical_region.offsets,
             route.logical_region.shape,
-            route.source_region.offsets,
-            route.source_region.shape,
-            route.destination_region.offsets,
-            route.destination_region.shape,
-            route.source_participants,
-            route.destination_participants,
+            route.source.tensor_region.offsets,
+            route.source.tensor_region.shape,
+            route.destination.tensor_region.offsets,
+            route.destination.tensor_region.shape,
+            route.source.participants,
+            route.destination.participants,
         )
 
     return (
@@ -1618,5 +1582,4 @@ def _redistribution_plan_key(plan: _RedistributionPlan) -> tuple[Any, ...]:
         tuple(map(partition_key, plan.storage_partitions)),
         tuple(map(partition_key, plan.compute_partitions)),
         tuple(map(route_key, plan.storage_to_compute_routes)),
-        tuple(map(route_key, plan.compute_to_storage_routes)),
     )
