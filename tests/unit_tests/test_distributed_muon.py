@@ -672,6 +672,7 @@ class TestDistributedMuonPipeline(_DistributedMuonTestBase):
                     mesh_axis="dp_shard",
                 ),
             ],
+            num_pipeline_slots=3,
             lr=0.03,
             momentum=0.8,
             ns_steps=1,

@@ -18,20 +18,23 @@ from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import 
 
 class TestFlexOptimizerReshard(unittest.TestCase):
     def test_runtime_enqueues_return_before_next_compute(self):
-        runtime = _BucketedRedistributionRuntime(torch.device("cuda"))
+        runtime = _BucketedRedistributionRuntime(
+            torch.device("cuda"),
+            num_pipeline_slots=3,
+        )
         caller_stream = Mock()
         transfer_stream = Mock()
         device_handle = Mock()
         device_handle.current_stream.return_value = caller_stream
         device_handle.Stream.return_value = transfer_stream
         device_handle.stream.side_effect = lambda _stream: nullcontext()
-        events_by_slot = tuple(tuple(Mock() for _ in range(3)) for _ in range(2))
+        events_by_slot = tuple(tuple(Mock() for _ in range(3)) for _ in range(3))
         device_handle.Event.side_effect = (
             event for slot_events in events_by_slot for event in slot_events
         )
 
         plans = []
-        for size in (4, 3, 8):
+        for size in (4, 3, 8, 6, 10):
             storage_to_compute = Mock(
                 input_buffer_numel=size,
                 output_buffer_numel=size + 1,
@@ -68,7 +71,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             runtime.reserve_buffers(plans, local_tensor_spec=Mock())
         context = runtime._context
         self.assertIsNotNone(context)
-        self.assertEqual(device_handle.Event.call_count, 6)
+        self.assertEqual(device_handle.Event.call_count, 9)
         for slot, (input_ready, compute_done, done) in zip(
             context.slots, events_by_slot, strict=True
         ):
@@ -86,12 +89,19 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         key = (torch.device("cpu"), torch.float32)
         slot_0_buffers = context.slots[0].buffers.buffers[key]
         slot_1_buffers = context.slots[1].buffers.buffers[key]
-        self.assertEqual(slot_0_buffers.storage_exchange.numel(), 10)
-        self.assertEqual(slot_0_buffers.compute_exchange.numel(), 11)
-        self.assertEqual(slot_0_buffers.compute_scratch.numel(), 8)
-        self.assertEqual(slot_0_buffers.storage_scratch.numel(), 8)
-        self.assertEqual(slot_1_buffers.storage_exchange.numel(), 5)
-        self.assertEqual(slot_1_buffers.compute_exchange.numel(), 6)
+        slot_2_buffers = context.slots[2].buffers.buffers[key]
+        self.assertEqual(slot_0_buffers.storage_exchange.numel(), 8)
+        self.assertEqual(slot_0_buffers.compute_exchange.numel(), 9)
+        self.assertEqual(slot_0_buffers.compute_scratch.numel(), 6)
+        self.assertEqual(slot_0_buffers.storage_scratch.numel(), 6)
+        self.assertEqual(slot_1_buffers.storage_exchange.numel(), 12)
+        self.assertEqual(slot_1_buffers.compute_exchange.numel(), 13)
+        self.assertEqual(slot_1_buffers.compute_scratch.numel(), 10)
+        self.assertEqual(slot_1_buffers.storage_scratch.numel(), 10)
+        self.assertEqual(slot_2_buffers.storage_exchange.numel(), 10)
+        self.assertEqual(slot_2_buffers.compute_exchange.numel(), 11)
+        self.assertEqual(slot_2_buffers.compute_scratch.numel(), 8)
+        self.assertEqual(slot_2_buffers.storage_scratch.numel(), 8)
         self.assertNotEqual(
             slot_0_buffers.compute_scratch.data_ptr(),
             slot_0_buffers.storage_scratch.data_ptr(),
@@ -160,43 +170,63 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 ("gather", "bucket_0"),
                 ("compute", "bucket_0"),
                 ("gather", "bucket_1"),
+                ("gather", "bucket_2"),
                 ("return", "bucket_0"),
                 ("compute", "bucket_1"),
                 ("release", "bucket_0"),
-                ("gather", "bucket_2"),
+                ("gather", "bucket_3"),
                 ("return", "bucket_1"),
                 ("compute", "bucket_2"),
                 ("release", "bucket_1"),
+                ("gather", "bucket_4"),
                 ("return", "bucket_2"),
+                ("compute", "bucket_3"),
                 ("release", "bucket_2"),
+                ("return", "bucket_3"),
+                ("compute", "bucket_4"),
+                ("release", "bucket_3"),
+                ("return", "bucket_4"),
+                ("release", "bucket_4"),
             ],
         )
         self.assertEqual(context.slots[0].compute_input_ready.record.call_count, 2)
-        self.assertEqual(context.slots[1].compute_input_ready.record.call_count, 1)
+        self.assertEqual(context.slots[1].compute_input_ready.record.call_count, 2)
+        self.assertEqual(context.slots[2].compute_input_ready.record.call_count, 1)
         self.assertEqual(context.slots[0].done.record.call_count, 2)
-        self.assertEqual(context.slots[1].done.record.call_count, 1)
+        self.assertEqual(context.slots[1].done.record.call_count, 2)
+        self.assertEqual(context.slots[2].done.record.call_count, 1)
         context.transfer_stream.wait_stream.assert_called_once_with(caller_stream)
         caller_stream.wait_stream.assert_not_called()
 
     def test_runtime_orders_streams_when_finalize_raises(self):
-        runtime = _BucketedRedistributionRuntime(torch.device("cuda"))
+        runtime = _BucketedRedistributionRuntime(
+            torch.device("cuda"),
+            num_pipeline_slots=3,
+        )
         caller_stream = Mock()
         transfer_stream = Mock()
         context = Mock()
         context.transfer_stream = transfer_stream
         context.device_handle.current_stream.return_value = caller_stream
         context.device_handle.stream.side_effect = lambda _stream: nullcontext()
-        first_slot = _PipelineSlot(
-            buffers=Mock(),
-            compute_input_ready=Mock(),
-            compute_done=Mock(),
-            done=Mock(),
+        context.slots = tuple(
+            _PipelineSlot(
+                buffers=Mock(),
+                compute_input_ready=Mock(),
+                compute_done=Mock(),
+                done=Mock(),
+            )
+            for _ in range(3)
         )
-        first_slot.buffers.communication_buffers.return_value = (object(), object())
-        context.slots = (first_slot, Mock())
+        for slot in context.slots:
+            slot.buffers.communication_buffers.return_value = (object(), object())
         runtime._context = context
 
-        plan = Mock(redistributed_items=(object(),), unredistributed_items=())
+        plans = tuple(
+            Mock(redistributed_items=(object(),), unredistributed_items=())
+            for _ in range(3)
+        )
+        plan_names = {plan: index for index, plan in enumerate(plans)}
         events = []
         transfer_stream.wait_stream.side_effect = lambda stream: events.append(
             ("transfer_wait", stream)
@@ -204,12 +234,17 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         caller_stream.wait_stream.side_effect = lambda stream: events.append(
             ("caller_wait", stream)
         )
-        plan.storage_to_compute_schedule.execute.side_effect = (
-            lambda **_kwargs: events.append(("gather",))
-        )
-        plan.compute_to_storage_schedule.execute.side_effect = (
-            lambda **_kwargs: events.append(("return",))
-        )
+        for plan in plans:
+            plan.storage_to_compute_schedule.execute.side_effect = (
+                lambda *, _plan=plan, **_kwargs: events.append(
+                    ("gather", plan_names[_plan])
+                )
+            )
+            plan.compute_to_storage_schedule.execute.side_effect = (
+                lambda *, _plan=plan, **_kwargs: events.append(
+                    ("return", plan_names[_plan])
+                )
+            )
         failure = RuntimeError("finalize failed")
 
         with patch(
@@ -217,7 +252,10 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             "flex_optimizer_reshard._prepare_redistributed"
         ), patch(
             "torchtitan.components.distributed_optimizers."
-            "flex_optimizer_reshard._compute_redistributed"
+            "flex_optimizer_reshard._compute_redistributed",
+            side_effect=lambda work, *_args, **_kwargs: events.append(
+                ("compute", plan_names[work.plan])
+            ),
         ), patch(
             "torchtitan.components.distributed_optimizers."
             "flex_optimizer_reshard._finalize_redistributed",
@@ -225,7 +263,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError) as raised:
                 runtime.run(
-                    (plan,),
+                    plans,
                     local_tensor_spec=Mock(),
                     prepare=Mock(),
                     compute=Mock(),
@@ -238,8 +276,11 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             events,
             [
                 ("transfer_wait", caller_stream),
-                ("gather",),
-                ("return",),
+                ("gather", 0),
+                ("compute", 0),
+                ("gather", 1),
+                ("gather", 2),
+                ("return", 0),
                 ("transfer_wait", caller_stream),
                 ("caller_wait", transfer_stream),
             ],
