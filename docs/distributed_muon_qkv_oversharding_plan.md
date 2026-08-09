@@ -183,8 +183,11 @@ parameter or per head. It should not all-gather a full projection on every
 rank or gather the full projection to one compute participant.
 
 Long-lived parameter and optimizer state remain FSDP2-sharded. Additional peak
-memory should be bounded by exchange buffers, one reusable local storage
-scratch tensor, and one rank-local complete-head compute tensor. No rank should
+memory is bounded by two alternating pipeline slots plus one local-only compute
+scratch buffer. Per device and dtype, each pipeline slot eagerly reserves
+storage- and compute-side exchange buffers plus separate reusable storage and
+compute scratch buffers sized to its largest bucket. Keeping the scratch
+buffers separate preserves transfer- and caller-stream overlap. No rank should
 allocate the full QKV projection solely for this transition.
 
 ## Mesh scope
