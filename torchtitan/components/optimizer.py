@@ -23,6 +23,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
+from torchtitan.components.distributed_optimizers.muon import build_distributed_muon
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -105,6 +106,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         regex pattern and a self-contained optimizer setup.
         Patterns are checked in order; first match wins."""
 
+        optimizer_init_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+        """Programmatic optimizer-wide constructor arguments keyed by name.
+
+        Use this for instance-wide objects such as communication bucket specs;
+        parameter-group hyperparameters belong in ``ParamGroupConfig``.
+        """
+
         implementation: Literal[
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
@@ -127,14 +135,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     model_parts: list[nn.Module]
 
     @staticmethod
-    def _resolve_optimizer_cls(name: str) -> type:
-        optimizer_classes = {
+    def _resolve_optimizer_factory(name: str) -> Callable[..., Optimizer]:
+        optimizer_factories: dict[str, Callable[..., Optimizer]] = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
+            "DistributedMuon": build_distributed_muon,
         }
-        if name not in optimizer_classes:
+        if name not in optimizer_factories:
             raise NotImplementedError(f"Optimizer {name} not added.")
-        return optimizer_classes[name]
+        return optimizer_factories[name]
 
     @staticmethod
     def _build_impl_kwargs(config: Config) -> dict[str, Any]:
@@ -214,8 +223,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
-                optimizer = self._resolve_optimizer_cls(opt_name)(opt_param_groups)
-                self.optimizers.append(optimizer)
+                optimizer = self._resolve_optimizer_factory(opt_name)(
+                    opt_param_groups,
+                    **config.optimizer_init_kwargs.get(opt_name, {}),
+                )
+                self.optimizers.append(cast(T, optimizer))
                 self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
