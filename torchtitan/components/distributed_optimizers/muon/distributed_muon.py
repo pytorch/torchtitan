@@ -58,6 +58,7 @@ class DistributedMuon(Optimizer):
         *,
         _bucket_configs: Sequence[BucketConfig],
         _prepared_compute_views: Mapping[str, _PreparedParameterComputeView],
+        _num_pipeline_slots: int,
         lr: float = 1e-3,
         weight_decay: float = 0.1,
         momentum: float = 0.95,
@@ -79,6 +80,7 @@ class DistributedMuon(Optimizer):
         }
         self._first_step_validated = False
         self._prepared_compute_views = dict(_prepared_compute_views)
+        self._num_pipeline_slots = _num_pipeline_slots
         super().__init__(params, defaults)
         tensor_device = self._validate_parameter_storage()
         group_compute_placements = []
@@ -105,7 +107,7 @@ class DistributedMuon(Optimizer):
         self._validate_plan_across_ranks()
         self._redistribution_runtime = _BucketedRedistributionRuntime[
             _ParameterComputeLayout
-        ](tensor_device)
+        ](tensor_device, num_pipeline_slots=self._num_pipeline_slots)
         self._redistribution_runtime.reserve_buffers(
             self._plans,
             local_tensor_spec=self._local_tensor_spec,
@@ -260,6 +262,7 @@ class DistributedMuon(Optimizer):
         _validate_bucket_plans_across_ranks(
             self._plans,
             item_signature=self._plan_item_signature,
+            runtime_signature=(self._num_pipeline_slots,),
         )
 
     def _plan_item_signature(

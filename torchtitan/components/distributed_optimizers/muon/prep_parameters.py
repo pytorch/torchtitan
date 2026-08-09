@@ -96,6 +96,7 @@ def build_distributed_muon(
     params: Iterable[dict[str, Any]],
     *,
     bucket_configs: Sequence[BucketConfig],
+    num_pipeline_slots: int = 2,
     **kwargs: Any,
 ) -> DistributedMuon:
     """Prepare named DTensor parameter groups and construct DistributedMuon.
@@ -103,8 +104,12 @@ def build_distributed_muon(
     Every group must provide aligned ``params`` and ``param_names`` plus one
     ``compute_sharding`` contract. Parameter groups, bucket configuration, and
     layouts are frozen after construction because optimizer state and
-    collectives depend on them.
+    collectives depend on them. ``num_pipeline_slots`` bounds the number of
+    redistributed buckets held in the rolling prefetch window.
     """
+    if type(num_pipeline_slots) is not int or num_pipeline_slots < 1:
+        raise ValueError("num_pipeline_slots must be a positive integer")
+
     prepared_params = []
     parameters_to_prepare = []
     for param_group in params:
@@ -194,6 +199,7 @@ def build_distributed_muon(
         prepared_params,
         _bucket_configs=tuple(bucket_configs),
         _prepared_compute_views=prepared_compute_views,
+        _num_pipeline_slots=num_pipeline_slots,
         **kwargs,
     )
 
