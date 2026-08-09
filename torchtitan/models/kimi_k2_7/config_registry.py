@@ -269,7 +269,7 @@ def moonlight_16b_a3b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Moonlight-16B-A3B",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=default_adamw(lr=3e-4),
+        optimizer=_moonlight_distributed_muon_optimizer(),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -282,29 +282,18 @@ def moonlight_16b_a3b() -> Trainer.Config:
             steps=10000,
         ),
         parallelism=ParallelismConfig(
-            expert_parallel_degree=8,
+            data_parallel_replicate_degree=1,
+            data_parallel_shard_degree=8,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+            expert_parallel_degree=4,
+            enable_sequence_parallel=False,
+            spmd_backend="spmd_types",
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
     )
-
-
-def moonlight_16b_a3b_muon() -> Trainer.Config:
-    """Moonlight 16B-A3B with DistributedMuon for matrix parameters."""
-    config = moonlight_16b_a3b()
-    num_data_parallel_shard_ranks = 8
-    config.optimizer = _moonlight_distributed_muon_optimizer()
-    config.parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=num_data_parallel_shard_ranks,
-        tensor_parallel_degree=1,
-        context_parallel_degree=1,
-        pipeline_parallel_degree=1,
-        expert_parallel_degree=4,
-        enable_sequence_parallel=False,
-        spmd_backend="spmd_types",
-    )
-    return config
 
 
 def kimi_vl_a3b() -> Trainer.Config:
@@ -360,7 +349,7 @@ def kimi_k2_5() -> Trainer.Config:
         hf_assets_path="./assets/hf/Kimi-K2.5",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=default_adamw(lr=2.2e-4),
+        optimizer=_kimi_k2_5_distributed_muon_optimizer(),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -373,28 +362,16 @@ def kimi_k2_5() -> Trainer.Config:
             steps=10000,
         ),
         parallelism=ParallelismConfig(
-            pipeline_parallel_schedule="Interleaved1F1B",
+            data_parallel_replicate_degree=1,
+            data_parallel_shard_degree=64,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
             expert_parallel_degree=8,
+            enable_sequence_parallel=False,
+            spmd_backend="spmd_types",
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
         compile=compile_config,
     )
-
-
-def kimi_k2_5_muon() -> Trainer.Config:
-    """Full Kimi K2.5 with DistributedMuon for text-tower matrices."""
-    config = kimi_k2_5()
-    num_data_parallel_shard_ranks = 64
-    config.optimizer = _kimi_k2_5_distributed_muon_optimizer()
-    config.parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=num_data_parallel_shard_ranks,
-        tensor_parallel_degree=1,
-        context_parallel_degree=1,
-        pipeline_parallel_degree=1,
-        expert_parallel_degree=8,
-        enable_sequence_parallel=False,
-        spmd_backend="spmd_types",
-    )
-    return config

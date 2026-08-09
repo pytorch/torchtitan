@@ -14,18 +14,13 @@ from torchtitan.components.distributed_optimizers.muon import (
     Owned,
 )
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.models.kimi_k2_7.config_registry import (
-    kimi_k2_5_muon,
-    moonlight_16b_a3b_muon,
-)
+from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5, moonlight_16b_a3b
 
 
 class _KimiMuonConfigTests:
     config_factory = None
     num_layers = 0
     num_heads = 0
-    num_data_parallel_shard_ranks = 0
-    expert_parallel_degree = 0
     attention_projections: tuple[str, ...] = ()
     owned_attention_projections: frozenset[str] = frozenset()
 
@@ -142,21 +137,17 @@ class _KimiMuonConfigTests:
 
 
 class TestKimiK25MuonConfig(_KimiMuonConfigTests, unittest.TestCase):
-    config_factory = staticmethod(kimi_k2_5_muon)
+    config_factory = staticmethod(kimi_k2_5)
     num_layers = 61
     num_heads = 64
-    num_data_parallel_shard_ranks = 64
-    expert_parallel_degree = 8
     attention_projections = ("wq_a", "wq_b", "wkv_a", "wkv_b", "wo")
     owned_attention_projections = frozenset(("wq_a", "wkv_a", "wo"))
 
 
 class TestMoonlightMuonConfig(_KimiMuonConfigTests, unittest.TestCase):
-    config_factory = staticmethod(moonlight_16b_a3b_muon)
+    config_factory = staticmethod(moonlight_16b_a3b)
     num_layers = 27
     num_heads = 16
-    num_data_parallel_shard_ranks = 8
-    expert_parallel_degree = 4
     attention_projections = ("wq", "wkv_a", "wkv_b", "wo")
     owned_attention_projections = frozenset(("wkv_a", "wo"))
 
