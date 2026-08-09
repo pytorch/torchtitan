@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from functools import partial
 from typing import Any, cast, overload
 
 import torch
@@ -223,13 +224,17 @@ class DistributedMuon(Optimizer):
         self,
         compute_layouts: Sequence[_ParameterComputeLayout],
     ) -> None:
+        ns_steps_by_group = tuple(group["ns_steps"] for group in self.param_groups)
         result = _build_bucket_plans(
             compute_layouts,
             self._specs,
             get_fqn=lambda item: item.fqn,
             get_storage_dtensor=lambda item: item.param,
             requires_redistribution=lambda item: (not item.storage_is_compute_ready),
-            resolve_redistribution_plans=_resolve_muon_redistribution_plans,
+            resolve_redistribution_plans=partial(
+                _resolve_muon_redistribution_plans,
+                ns_steps_by_group=ns_steps_by_group,
+            ),
         )
         self._plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
@@ -627,6 +632,7 @@ def _validate_layout_fingerprints_on_load(
 
 def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon = cast(DistributedMuon, optimizer)
+    muon._initialize_plan(muon._parameter_compute_layouts)
     muon._validate_plan_across_ranks()
     muon._first_step_validated = False
 
