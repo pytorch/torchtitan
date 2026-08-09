@@ -182,7 +182,6 @@ class _DistributedMuonTestBase(DTensorTestBase):
                     "compute_sharding": MuonComputeSharding(
                         view_before_placement=BatchedMatrixComputeView(
                             num_matrices=local_num_matrices,
-                            matrices_flattened_into_dim=0,
                         ),
                         placement=Shard(0),
                     ),
@@ -191,7 +190,7 @@ class _DistributedMuonTestBase(DTensorTestBase):
             bucket_configs=[
                 BucketConfig(
                     patterns=("layers.0.*",),
-                    mesh_axes=("dp_shard",),
+                    mesh_axis="dp_shard",
                     name="layers.0",
                 )
             ],
@@ -283,7 +282,6 @@ class _DistributedMuonTestBase(DTensorTestBase):
                     "compute_sharding": MuonComputeSharding(
                         view_before_placement=BatchedMatrixComputeView(
                             num_matrices=num_heads,
-                            matrices_flattened_into_dim=0,
                         ),
                         placement=Shard(0),
                     ),
@@ -538,7 +536,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                 bucket_configs=[
                     BucketConfig(
                         patterns=("layers.0.*",),
-                        mesh_axes=("not_present",),
+                        mesh_axis="not_present",
                     )
                 ],
                 ns_steps=1,
@@ -666,7 +664,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         self.assertEqual(len(optimizer.state), 0)
         redistribution = optimizer._plans[0].redistribution_plans[0]
         compute_participants = {
-            route.destination_participants
+            route.destination.participants
             for route in redistribution.storage_to_compute_routes
         }
         self.assertEqual(len(compute_participants), 1)
@@ -698,7 +696,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         ],
                         "compute_sharding": MuonComputeSharding(
                             view_before_placement=BatchedMatrixComputeView(
-                                num_matrices=2, matrices_flattened_into_dim=0
+                                num_matrices=2
                             ),
                             placement=Shard(0),
                         ),
@@ -723,7 +721,7 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                         ],
                         "compute_sharding": MuonComputeSharding(
                             view_before_placement=BatchedMatrixComputeView(
-                                num_matrices=2, matrices_flattened_into_dim=0
+                                num_matrices=2
                             ),
                             placement=Shard(0),
                         ),
@@ -1387,8 +1385,8 @@ class TestDistributedMuon(_DistributedMuonTestBase):
         )
         self.assertTrue(
             all(
-                route.source_participants == participants
-                and len(route.destination_participants) == 1
+                route.source.participants == participants
+                and len(route.destination.participants) == 1
                 for route in redistribution.storage_to_compute_routes
             )
         )
@@ -1870,7 +1868,7 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
             bucket_configs=[
                 BucketConfig(
                     patterns=("layers.0.*",),
-                    mesh_axes=("dp_shard",),
+                    mesh_axis="dp_shard",
                     name="layers.0",
                 )
             ],
@@ -1912,7 +1910,7 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
             bucket_configs=[
                 BucketConfig(
                     patterns=("layers.0.*",),
-                    mesh_axes=("dp_shard",),
+                    mesh_axis="dp_shard",
                     name="layers.0",
                 )
             ],
@@ -2032,7 +2030,7 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
             bucket_configs=[
                 BucketConfig(
                     patterns=("layers.0.*",),
-                    mesh_axes=("dp_shard",),
+                    mesh_axis="dp_shard",
                     name="layers.0",
                 )
             ],
@@ -2206,7 +2204,7 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
         for plan, mesh in zip(optimizer._plans, meshes, strict=True):
             participants = tuple(dist.get_process_group_ranks(mesh.get_group()))
             compute_participants = {
-                route.destination_participants
+                route.destination.participants
                 for route in plan.redistribution_plans[0].storage_to_compute_routes
             }
             self.assertEqual(len(compute_participants), 1)
@@ -2248,9 +2246,7 @@ class TestDistributedMuonPipeline(_DistributedMuonTestBase):
                     "params": [local_blocks],
                     "param_names": ["layers.1.local_blocks"],
                     "compute_sharding": MuonComputeSharding(
-                        view_before_placement=BatchedMatrixComputeView(
-                            num_matrices=2, matrices_flattened_into_dim=0
-                        ),
+                        view_before_placement=BatchedMatrixComputeView(num_matrices=2),
                         placement=Shard(0),
                     ),
                 },

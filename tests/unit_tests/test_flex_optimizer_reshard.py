@@ -18,17 +18,19 @@ from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import 
     _BucketWork,
     _BufferSlot,
     _build_bucket_plans,
+    _build_packed_all_to_all_schedule,
     _build_single_participant_redistribution_plan,
     _compute_redistributed,
     _finalize_redistributed,
     _LocalBucketPlan,
-    _lower_packed_all_to_all,
     _PackedAllToAllSchedule,
     _ParticipantPartition,
     _prepare_redistributed,
     _RedistributionBucketPlan,
+    _RedistributionDirection,
     _RedistributionGroup,
     _RedistributionPlan,
+    _RouteEndpoint,
     _tensor_region_view,
     _TensorRegion,
     _TensorRegionRoute,
@@ -44,6 +46,20 @@ class _BucketBindingItem:
     storage: DTensor
     requires_redistribution: bool
     required_storage_mesh_axis: int | None = None
+
+
+def _route(
+    logical_region: _TensorRegion,
+    source_region: _TensorRegion,
+    destination_region: _TensorRegion,
+    source_participants: tuple[int, ...],
+    destination_participants: tuple[int, ...],
+) -> _TensorRegionRoute:
+    return _TensorRegionRoute(
+        logical_region=logical_region,
+        source=_RouteEndpoint(source_region, source_participants),
+        destination=_RouteEndpoint(destination_region, destination_participants),
+    )
 
 
 def _fragmented_partition_plan(
@@ -84,7 +100,6 @@ def _fragmented_partition_plan(
 
     storage_partitions = []
     forward_routes = []
-    reverse_routes = []
     for storage_rank, participant in enumerate(participants):
         num_local_rows, storage_offset = Shard.local_shard_size_and_offset(
             num_compute_units * compute_unit_rows,
@@ -119,21 +134,12 @@ def _fragmented_partition_plan(
             compute_participant = participants[compute_rank]
             logical_regions.append(logical_region)
             forward_routes.append(
-                _TensorRegionRoute(
-                    logical_region=logical_region,
-                    source_region=storage_region,
-                    destination_region=compute_region,
-                    source_participants=(participant,),
-                    destination_participants=(compute_participant,),
-                )
-            )
-            reverse_routes.append(
-                _TensorRegionRoute(
-                    logical_region=logical_region,
-                    source_region=compute_region,
-                    destination_region=storage_region,
-                    source_participants=(compute_participant,),
-                    destination_participants=(participant,),
+                _route(
+                    logical_region,
+                    storage_region,
+                    compute_region,
+                    (participant,),
+                    (compute_participant,),
                 )
             )
             fragment_start += num_rows
@@ -151,7 +157,6 @@ def _fragmented_partition_plan(
         storage_partitions=tuple(storage_partitions),
         compute_partitions=compute_partitions,
         storage_to_compute_routes=tuple(forward_routes),
-        compute_to_storage_routes=tuple(reverse_routes),
     )
 
 
@@ -238,16 +243,6 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         self.assertEqual(context.slots[0].communication_buffers.call_count, 2)
         self.assertEqual(context.slots[1].communication_buffers.call_count, 1)
 
-    def test_bucket_config_requires_exactly_one_mesh_axis(self):
-        for mesh_axes in ((), ("optimizer", "replicate")):
-            with self.subTest(mesh_axes=mesh_axes), self.assertRaisesRegex(
-                ValueError, "exactly one mesh axis"
-            ):
-                BucketConfig(
-                    patterns=("*",),
-                    mesh_axes=mesh_axes,
-                )
-
     def test_bucket_config_uses_redistributed_parameters_to_resolve_mesh(self):
         redistributed_mesh = Mock(spec=DeviceMesh)
         redistributed_mesh.ndim = 1
@@ -269,7 +264,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             (
                 BucketConfig(
                     patterns=("layers.*",),
-                    mesh_axes=("optimizer",),
+                    mesh_axis="optimizer",
                 ),
             ),
             items,
@@ -283,7 +278,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
 
         self.assertEqual(len(specs), 1)
         self.assertIs(specs[0].mesh, redistributed_mesh)
-        redistributed_storage_mesh.__getitem__.assert_called_once_with(("optimizer",))
+        redistributed_storage_mesh.__getitem__.assert_called_once_with("optimizer")
         compute_ready_storage_mesh.__getitem__.assert_not_called()
 
     def test_bucket_config_rejects_inconsistent_redistribution_meshes(self):
@@ -313,7 +308,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 (
                     BucketConfig(
                         patterns=("layers.*",),
-                        mesh_axes=("optimizer",),
+                        mesh_axis="optimizer",
                     ),
                 ),
                 items,
@@ -324,8 +319,8 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                     item.required_storage_mesh_axis
                 ),
             )
-        first_storage_mesh.__getitem__.assert_called_once_with(("optimizer",))
-        second_storage_mesh.__getitem__.assert_called_once_with(("optimizer",))
+        first_storage_mesh.__getitem__.assert_called_once_with("optimizer")
+        second_storage_mesh.__getitem__.assert_called_once_with("optimizer")
 
     def test_bucket_config_does_not_bind_mesh_when_none_redistribute(self):
         storage_meshes = tuple(MagicMock(spec=DeviceMesh) for _ in range(2))
@@ -347,7 +342,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             (
                 BucketConfig(
                     patterns=("layers.*",),
-                    mesh_axes=("optimizer",),
+                    mesh_axis="optimizer",
                 ),
             ),
             items,
@@ -444,7 +439,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 (
                     BucketConfig(
                         patterns=("layers.*",),
-                        mesh_axes=("optimizer",),
+                        mesh_axis="optimizer",
                     ),
                 ),
                 (item,),
@@ -478,7 +473,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 (
                     BucketConfig(
                         patterns=("layers.*",),
-                        mesh_axes=("replicate",),
+                        mesh_axis="replicate",
                     ),
                 ),
                 (item,),
@@ -580,12 +575,8 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 _ParticipantPartition(7, (1, 2), (first,)),
             ),
             storage_to_compute_routes=(
-                _TensorRegionRoute(first, local, local, (3,), (7,)),
-                _TensorRegionRoute(second, local, local, (7,), (3,)),
-            ),
-            compute_to_storage_routes=(
-                _TensorRegionRoute(first, local, local, (7,), (3,)),
-                _TensorRegionRoute(second, local, local, (3,), (7,)),
+                _route(first, local, local, (3,), (7,)),
+                _route(second, local, local, (7,), (3,)),
             ),
         )
         tensor = Mock(spec=DTensor)
@@ -643,7 +634,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             (0, 2),
         )
 
-    def test_transport_neutral_routes_lower_to_packed_all_to_all(self):
+    def test_builds_packed_all_to_all_schedule_from_transport_neutral_routes(self):
         first = _TensorRegion(offsets=(0, 0), shape=(2, 3))
         second = _TensorRegion(offsets=(2, 0), shape=(2, 3))
         local = _TensorRegion(offsets=(0, 0), shape=(2, 3))
@@ -660,12 +651,8 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 _ParticipantPartition(7, (4, 3), (full,)),
             ),
             storage_to_compute_routes=(
-                _TensorRegionRoute(first, local, first, (3,), (7,)),
-                _TensorRegionRoute(second, local, second, (7,), (7,)),
-            ),
-            compute_to_storage_routes=(
-                _TensorRegionRoute(first, first, local, (7,), (3,)),
-                _TensorRegionRoute(second, second, local, (7,), (7,)),
+                _route(first, local, first, (3,), (7,)),
+                _route(second, local, second, (7,), (7,)),
             ),
         )
 
@@ -674,15 +661,15 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             "get_process_group_ranks",
             return_value=[3, 7],
         ):
-            forward = _lower_packed_all_to_all(
+            forward = _build_packed_all_to_all_schedule(
                 (plan,),
-                storage_to_compute=True,
+                direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
                 process_group=object(),
                 local_participant=7,
             )
-            reverse = _lower_packed_all_to_all(
+            reverse = _build_packed_all_to_all_schedule(
                 (plan,),
-                storage_to_compute=False,
+                direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
                 process_group=object(),
                 local_participant=7,
             )
@@ -701,6 +688,35 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             (local,),
         )
 
+    def test_derived_reverse_schedule_returns_to_every_storage_replica(self):
+        participants = (3, 7)
+        full = _TensorRegion(offsets=(0, 0), shape=(2, 2))
+        plan = _RedistributionPlan(
+            participants=participants,
+            logical_shape=full.shape,
+            storage_partitions=tuple(
+                _ParticipantPartition(participant, full.shape, (full,))
+                for participant in participants
+            ),
+            compute_partitions=(
+                _ParticipantPartition(3, full.shape, (full,)),
+                _ParticipantPartition(7, (0,), ()),
+            ),
+            storage_to_compute_routes=(_route(full, full, full, participants, (3,)),),
+        )
+
+        reverse_route = plan.compute_to_storage_routes[0]
+        self.assertEqual(reverse_route.destination.participants, participants)
+        reverse = _build_packed_all_to_all_schedule(
+            (plan,),
+            direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
+            process_group=object(),
+            local_participant=7,
+        )
+        self.assertEqual(reverse.input_split_sizes, (0, 0))
+        self.assertEqual(reverse.output_split_sizes, (4, 0))
+        self.assertEqual(reverse.output_spans_by_parameter[0][0].region, full)
+
     def test_partitioned_compute_supports_fragmented_storage_and_empty_participant(
         self,
     ):
@@ -713,21 +729,21 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         self.assertEqual(plan.compute_partition(13).logical_regions, ())
         self.assertTrue(
             any(
-                len(route.source_region.shape) == 2
-                and len(route.destination_region.shape) == 3
+                len(route.source.tensor_region.shape) == 2
+                and len(route.destination.tensor_region.shape) == 3
                 for route in plan.storage_to_compute_routes
             )
         )
 
-        forward = _lower_packed_all_to_all(
+        forward = _build_packed_all_to_all_schedule(
             (plan,),
-            storage_to_compute=True,
+            direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
             process_group=object(),
             local_participant=13,
         )
-        reverse = _lower_packed_all_to_all(
+        reverse = _build_packed_all_to_all_schedule(
             (plan,),
-            storage_to_compute=False,
+            direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
             process_group=object(),
             local_participant=13,
         )
@@ -771,15 +787,15 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         participants = (3, 7, 11, 13)
         redistribution_plan = _fragmented_partition_plan(participants)
         local_participant = 7
-        forward = _lower_packed_all_to_all(
+        forward = _build_packed_all_to_all_schedule(
             (redistribution_plan,),
-            storage_to_compute=True,
+            direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
             process_group=object(),
             local_participant=local_participant,
         )
-        reverse = _lower_packed_all_to_all(
+        reverse = _build_packed_all_to_all_schedule(
             (redistribution_plan,),
-            storage_to_compute=False,
+            direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
             process_group=object(),
             local_participant=local_participant,
         )
@@ -845,8 +861,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
     def test_routes_require_an_exact_nonoverlapping_partition(self):
         def plan(regions):
             routes = tuple(
-                _TensorRegionRoute(region, region, region, (3,), (3,))
-                for region in regions
+                _route(region, region, region, (3,), (3,)) for region in regions
             )
             return _RedistributionPlan(
                 participants=(3, 7),
@@ -860,13 +875,11 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                     _ParticipantPartition(7, (0,), ()),
                 ),
                 storage_to_compute_routes=routes,
-                compute_to_storage_routes=routes,
             )
 
         invalid_partitions = (
             (
                 (_TensorRegion((0, 0), (3, 3)),),
-                ValueError,
                 "in bounds",
             ),
             (
@@ -874,25 +887,25 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                     _TensorRegion((0, 0), (2, 3)),
                     _TensorRegion((0, 0), (2, 3)),
                 ),
-                NotImplementedError,
                 "overlapping",
             ),
             (
                 (_TensorRegion((0, 0), (1, 3)),),
-                ValueError,
                 "do not match the participant tensor shape",
             ),
         )
-        for regions, error, message in invalid_partitions:
-            with self.subTest(message=message), self.assertRaisesRegex(error, message):
+        for regions, message in invalid_partitions:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                RuntimeError, f"invalid redistribution plan: .*{message}"
+            ):
                 plan(regions)
 
         first = _TensorRegion((0, 0), (1, 3))
         second = _TensorRegion((1, 0), (1, 3))
         local = _TensorRegion((0, 0), (1, 3))
         split_routes = (
-            _TensorRegionRoute(first, local, local, (3,), (3,)),
-            _TensorRegionRoute(second, local, local, (7,), (7,)),
+            _route(first, local, local, (3,), (3,)),
+            _route(second, local, local, (7,), (7,)),
         )
         split_plan = _RedistributionPlan(
             participants=(3, 7),
@@ -906,7 +919,6 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 _ParticipantPartition(7, (1, 3), (second,)),
             ),
             storage_to_compute_routes=split_routes,
-            compute_to_storage_routes=split_routes,
         )
         self.assertEqual(
             tuple(
@@ -914,17 +926,13 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             ),
             ((1, 3), (1, 3)),
         )
+        self.assertEqual(
+            split_plan.compute_to_storage_routes,
+            tuple(route.inverse() for route in split_routes),
+        )
 
         full = _TensorRegion((0, 0), (2, 3))
-        forward_routes = (
-            _TensorRegionRoute(first, first, first, (3,), (3,)),
-            _TensorRegionRoute(second, second, second, (3,), (3,)),
-        )
-        swapped_reverse_routes = (
-            _TensorRegionRoute(first, second, first, (3,), (3,)),
-            _TensorRegionRoute(second, first, second, (3,), (3,)),
-        )
-        with self.assertRaisesRegex(ValueError, "must exactly invert"):
+        with self.assertRaisesRegex(RuntimeError, "participants must be unique"):
             _RedistributionPlan(
                 participants=(3, 7),
                 logical_shape=(2, 3),
@@ -936,9 +944,28 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                     _ParticipantPartition(3, (2, 3), (full,)),
                     _ParticipantPartition(7, (0,), ()),
                 ),
-                storage_to_compute_routes=forward_routes,
-                compute_to_storage_routes=swapped_reverse_routes,
+                storage_to_compute_routes=(_route(full, full, full, (3, 3), (3,)),),
             )
 
-        with self.assertRaisesRegex(ValueError, "participants must be unique"):
-            _TensorRegionRoute(first, first, first, (3, 3), (3,))
+        for source, destination, message in (
+            ((7,), (3,), "storage source"),
+            ((3,), (7,), "compute destination"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                RuntimeError, message
+            ):
+                _RedistributionPlan(
+                    participants=(3, 7),
+                    logical_shape=(2, 3),
+                    storage_partitions=(
+                        _ParticipantPartition(3, (2, 3), (full,)),
+                        _ParticipantPartition(7, (0,), ()),
+                    ),
+                    compute_partitions=(
+                        _ParticipantPartition(3, (2, 3), (full,)),
+                        _ParticipantPartition(7, (0,), ()),
+                    ),
+                    storage_to_compute_routes=(
+                        _route(full, full, full, source, destination),
+                    ),
+                )

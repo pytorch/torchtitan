@@ -60,7 +60,6 @@ def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
     return MuonComputeSharding(
         view_before_placement=BatchedMatrixComputeView(
             num_matrices=num_heads,
-            matrices_flattened_into_dim=0,
         ),
         placement=Shard(0),
     )
@@ -174,7 +173,7 @@ def _kimi_text_distributed_muon_optimizer(
         BucketConfig(
             name="layers." + "-".join(map(str, layer_ids)),
             patterns=fqns,
-            mesh_axes=("dp_shard",),
+            mesh_axis="dp_shard",
         )
         for layer_ids, fqns in zip(
             bucket_layer_ids,
