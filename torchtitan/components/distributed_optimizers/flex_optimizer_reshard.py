@@ -11,6 +11,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import math
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -874,10 +875,14 @@ class _BucketWork(Generic[_ItemT]):
 class _CommunicationContext:
     device_handle: ModuleType
     transfer_stream: torch.Stream
-    slots: tuple[_PipelineSlot, _PipelineSlot]
+    slots: tuple[_PipelineSlot, ...]
 
     @classmethod
-    def create(cls, device: torch.device) -> _CommunicationContext:
+    def create(
+        cls,
+        device: torch.device,
+        num_pipeline_slots: int,
+    ) -> _CommunicationContext:
         device_handle = torch.get_device_module(device)
         transfer_stream = device_handle.Stream(device=device, priority=0)
 
@@ -892,7 +897,7 @@ class _CommunicationContext:
         return cls(
             device_handle=device_handle,
             transfer_stream=transfer_stream,
-            slots=(create_slot(), create_slot()),
+            slots=tuple(create_slot() for _ in range(num_pipeline_slots)),
         )
 
 
@@ -908,26 +913,36 @@ def _include_compute_scratch_requirement(
 
 
 class _BucketedRedistributionRuntime(Generic[_ItemT]):
-    """Execute bucket plans with one-bucket-ahead communication prefetch.
+    """Execute bucket plans with a rolling communication prefetch window.
 
     ``reserve_buffers`` must be called after planning and after any replan. It
-    eagerly grows two alternating buffer slots and creates their stream events,
-    so ``run`` only reuses already-reserved communication resources.
+    eagerly grows ``num_pipeline_slots`` rolling buffer slots and creates
+    their stream events, so ``run`` only reuses reserved communication
+    resources. One slot holds the current bucket and the remaining slots
+    prefetch later redistributed buckets.
 
     ``prepare`` writes a Muon input into runtime-owned scratch, ``compute``
     updates its runtime-owned input in place, and ``finalize`` consumes a
     runtime-owned result before reuse. Callbacks run under the stream selected
     by the runtime and must not retain tensors, synchronize, or call
-    ``Tensor.record_stream()``.
+    ``Tensor.record_stream()``. Local-only buckets are prefetch barriers, so
+    no later redistributed ``prepare`` runs before an intervening local bucket.
 
     Any exception is fatal: parameters or optimizer state may already be
     updated and communication may be in flight, so callers must not reuse this
     runtime or optimizer.
     """
 
-    def __init__(self, device: torch.device) -> None:
+    def __init__(
+        self,
+        device: torch.device,
+        *,
+        num_pipeline_slots: int = 2,
+    ) -> None:
+        assert type(num_pipeline_slots) is int and num_pipeline_slots > 0
         # pyrefly: ignore [read-only]
         self._device = device
+        self._num_pipeline_slots = num_pipeline_slots
         self._context: _CommunicationContext | None = None
         self._local_slot = _BufferSlot()
 
@@ -945,7 +960,10 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         if context is None and any(
             isinstance(plan, _RedistributionBucketPlan) for plan in plans
         ):
-            context = _CommunicationContext.create(self._device)
+            context = _CommunicationContext.create(
+                self._device,
+                self._num_pipeline_slots,
+            )
             created_context = True
 
         device_handle = (
@@ -955,10 +973,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         )
         compute_stream = device_handle.current_stream(self._device)
         local_requirements: dict[_BufferKey, _BufferRequirements] = {}
-        slot_requirements: tuple[
-            dict[_BufferKey, _BufferRequirements],
-            dict[_BufferKey, _BufferRequirements],
-        ] = ({}, {})
+        slot_requirements = tuple({} for _ in context.slots) if context else ()
         redistributed_index = 0
         for plan in plans:
             if isinstance(plan, _LocalBucketPlan):
@@ -971,7 +986,9 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 continue
 
             assert context is not None
-            requirements = slot_requirements[redistributed_index % 2]
+            requirements = slot_requirements[
+                redistributed_index % len(slot_requirements)
+            ]
             redistributed_index += 1
             to_compute = plan.storage_to_compute_schedule
             to_storage = plan.compute_to_storage_schedule
@@ -1053,10 +1070,30 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         transfer_stream: torch.Stream | None = None
         completed = False
         previous: _BucketWork[_ItemT] | None = None
+        prefetched: deque[_BucketWork[_ItemT]] = deque()
+        next_plan_to_prefetch = 0
         redistributed_index = 0
+
+        def prefetch_next(slot: _PipelineSlot) -> _BucketWork[_ItemT] | None:
+            nonlocal next_plan_to_prefetch
+            if next_plan_to_prefetch >= len(plans):
+                return None
+            next_plan = plans[next_plan_to_prefetch]
+            if isinstance(next_plan, _LocalBucketPlan):
+                return None
+            next_plan_to_prefetch += 1
+            assert context is not None and transfer_stream is not None
+            return self._enqueue_storage_to_compute(
+                next_plan,
+                slot,
+                context,
+                prepare=prepare,
+            )
+
         try:
-            for plan in plans:
+            for plan_index, plan in enumerate(plans):
                 if isinstance(plan, _LocalBucketPlan):
+                    assert not prefetched
                     with handle.stream(caller):
                         self._compute_without_redistribution(
                             plan.items,
@@ -1066,30 +1103,49 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                             compute=compute,
                             finalize=finalize,
                         )
+                    next_plan_to_prefetch = plan_index + 1
                     continue
 
                 assert context is not None
                 if transfer_stream is None:
                     context.transfer_stream.wait_stream(caller)
                     transfer_stream = context.transfer_stream
-                slot = context.slots[redistributed_index % 2]
-                work = self._enqueue_storage_to_compute(
-                    plan,
-                    slot,
-                    context,
-                    prepare=prepare,
-                )
-                redistributed_index += 1
-                # Keep collective launches ahead of redistributed work:
-                # gather(current) -> return(previous) -> compute(current).
-                if previous is not None:
+                previous_work = previous
+                if prefetched:
+                    assert previous_work is not None
+                    work = prefetched.popleft()
+                    assert work.plan is plan
                     self._enqueue_compute_to_storage(
-                        previous, context, finalize=finalize
+                        previous_work, context, finalize=finalize
                     )
+                else:
+                    slot = context.slots[redistributed_index % len(context.slots)]
+                    if previous_work is not None and slot is previous_work.slot:
+                        self._enqueue_compute_to_storage(
+                            previous_work, context, finalize=finalize
+                        )
+                        work = self._enqueue_storage_to_compute(
+                            plan,
+                            slot,
+                            context,
+                            prepare=prepare,
+                        )
+                    else:
+                        work = self._enqueue_storage_to_compute(
+                            plan,
+                            slot,
+                            context,
+                            prepare=prepare,
+                        )
+                        if previous_work is not None:
+                            self._enqueue_compute_to_storage(
+                                previous_work, context, finalize=finalize
+                            )
+                    next_plan_to_prefetch = plan_index + 1
 
                 self._compute_bucket(
                     work,
-                    slot,
+                    work.slot,
                     caller,
                     context,
                     local_tensor_spec=local_tensor_spec,
@@ -1097,10 +1153,21 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                     compute=compute,
                     finalize=finalize,
                 )
-                if previous is not None:
-                    self._release(previous, caller)
+                if previous_work is not None:
+                    self._release(previous_work, caller)
                 previous = work
+                redistributed_index += 1
 
+                while len(prefetched) < len(context.slots) - 1:
+                    slot = context.slots[
+                        (redistributed_index + len(prefetched)) % len(context.slots)
+                    ]
+                    if future_work := prefetch_next(slot):
+                        prefetched.append(future_work)
+                    else:
+                        break
+
+            assert not prefetched
             if previous is not None:
                 assert context is not None
                 self._enqueue_compute_to_storage(previous, context, finalize=finalize)
@@ -1718,6 +1785,7 @@ def _validate_bucket_plans_across_ranks(
     plans: Sequence[_BucketPlan[_ItemT]],
     *,
     item_signature: Callable[[_ItemT], tuple[Any, ...]],
+    runtime_signature: tuple[Any, ...],
 ) -> None:
     """Collectively verify rank-stable redistribution plans.
 
@@ -1730,6 +1798,7 @@ def _validate_bucket_plans_across_ranks(
         if isinstance(plan, _LocalBucketPlan):
             continue
         description = (
+            runtime_signature,
             str(plan.dtype),
             plan.device.type,
             tuple(
