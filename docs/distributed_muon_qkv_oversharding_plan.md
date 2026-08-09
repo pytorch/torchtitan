@@ -209,26 +209,6 @@ These layouts should continue to fail with explicit validation errors.
 
 ## Test plan
 
-### CPU planning and validation tests
-
-Update `tests/unit_tests/test_muon_prep_parameters.py` and
-`tests/unit_tests/test_flex_optimizer_reshard.py`:
-
-- Replace the split-head construction rejection with successful route
-  construction.
-- Test 3 heads with 4 rows per head over 2 ranks. The middle storage boundary
-  cuts a head.
-- Test 5 heads with 3 rows per head over 4 ranks. Canonical head counts are
-  `[2, 2, 1, 0]`.
-- Test 2 heads over 4 ranks so ranks with no compute heads still have valid
-  send and return routes.
-- Validate exact, non-overlapping storage and compute coverage.
-- Reject missing, overlapping, out-of-bounds, or non-invertible routes.
-- Keep invalid global shape, dimension-1 storage sharding, `_StridedShard`, and
-  inconsistent mesh tests.
-- Test a bucket containing aligned local work, `Owned` work, and split-head
-  `Shard(0)` work.
-
 ### Distributed numerical tests
 
 Update `tests/unit_tests/test_distributed_muon.py`:
