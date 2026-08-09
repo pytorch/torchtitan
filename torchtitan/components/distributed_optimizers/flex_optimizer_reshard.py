@@ -25,7 +25,6 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 
 
 __all__ = ["BucketConfig", "BucketSpec"]
-_ItemT = TypeVar("_ItemT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +72,9 @@ class BucketSpec:
         if self.mesh is not None and self.mesh.ndim != 1:
             raise ValueError("BucketSpec mesh must be one-dimensional")
         object.__setattr__(self, "patterns", tuple(self.patterns))
+
+
+_ItemT = TypeVar("_ItemT")
 
 
 def _bind_bucket_configs(

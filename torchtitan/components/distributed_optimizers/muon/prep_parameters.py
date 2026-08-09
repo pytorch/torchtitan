@@ -18,7 +18,7 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
 
-from ..flex_optimizer_reshard import BucketConfig, BucketSpec
+from ..flex_optimizer_reshard import BucketConfig
 from .distributed_muon import DistributedMuon
 from .storage_to_compute import _PreparedParameterComputeView, Owned
 
@@ -93,20 +93,16 @@ class MuonComputeSharding:
 def build_distributed_muon(
     params: Iterable[dict[str, Any]],
     *,
-    bucket_specs: Sequence[BucketSpec] | None = None,
-    bucket_configs: Sequence[BucketConfig] | None = None,
+    bucket_configs: Sequence[BucketConfig],
     **kwargs: Any,
 ) -> DistributedMuon:
     """Prepare named DTensor parameter groups and construct DistributedMuon.
 
     Every group must provide aligned ``params`` and ``param_names`` plus one
-    ``compute_sharding`` contract. Exactly one of ``bucket_specs`` or
-    ``bucket_configs`` is required. Parameter groups and layouts are frozen
-    after construction because optimizer state and collectives depend on them.
+    ``compute_sharding`` contract. Parameter groups, bucket configuration, and
+    layouts are frozen after construction because optimizer state and
+    collectives depend on them.
     """
-    if (bucket_specs is None) == (bucket_configs is None):
-        raise ValueError("provide exactly one of bucket_specs or bucket_configs")
-
     prepared_params = []
     parameters_to_prepare = []
     for param_group in params:
@@ -187,8 +183,7 @@ def build_distributed_muon(
         )
     return DistributedMuon(
         prepared_params,
-        bucket_specs=None if bucket_specs is None else tuple(bucket_specs),
-        _bucket_configs=(None if bucket_configs is None else tuple(bucket_configs)),
+        _bucket_configs=tuple(bucket_configs),
         _prepared_compute_views=prepared_compute_views,
         **kwargs,
     )

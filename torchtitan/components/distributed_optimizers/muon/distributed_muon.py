@@ -25,7 +25,6 @@ from ..flex_optimizer_reshard import (
     _device_mesh_ranks,
     _validate_bucket_plans_across_ranks,
     BucketConfig,
-    BucketSpec,
 )
 from .storage_to_compute import (
     _compute_distribution_key,
@@ -37,119 +36,6 @@ from .storage_to_compute import (
 
 
 __all__ = ["DistributedMuon"]
-
-
-def _adjust_muon_learning_rate(
-    lr: float,
-    adjust_lr_fn: str | None,
-    compute_matrix_shape: torch.Size | tuple[int, ...],
-) -> float:
-    """Adjust Muon's learning rate for the matrix aspect ratio."""
-    rows, columns = compute_matrix_shape[-2:]
-    if adjust_lr_fn is None or adjust_lr_fn == "original":
-        ratio = math.sqrt(max(1.0, rows / columns))
-    elif adjust_lr_fn == "match_rms_adamw":
-        ratio = 0.2 * math.sqrt(max(rows, columns))
-    elif adjust_lr_fn == "spectral_unclamped":
-        ratio = math.sqrt(rows / columns)
-    else:
-        raise ValueError(f"unsupported adjust_lr_fn {adjust_lr_fn!r}")
-    return lr * ratio
-
-
-def _prepare_muon_input(
-    gradient: Tensor,
-    momentum_buffer: Tensor,
-    *,
-    momentum: float,
-    nesterov: bool,
-    out: Tensor,
-) -> Tensor:
-    """Update momentum and prepare the Tensor passed to Muon computation."""
-    momentum_buffer.lerp_(gradient, 1 - momentum)
-    if nesterov:
-        torch.lerp(
-            gradient,
-            momentum_buffer,
-            momentum,
-            out=out,
-        )
-    else:
-        out.copy_(momentum_buffer)
-    return out
-
-
-def _compute_muon_direction(
-    prepared: Tensor,
-    *,
-    ns_coefficients: tuple[float, float, float],
-    ns_steps: int,
-    eps: float,
-    out: Tensor,
-) -> Tensor:
-    """Compute Muon's approximate orthogonal update direction."""
-    direction = _zeropower_via_newtonschulz(
-        prepared,
-        ns_coefficients=ns_coefficients,
-        ns_steps=ns_steps,
-        eps=eps,
-    )
-    out.copy_(direction)
-    return out
-
-
-def _apply_muon_update(
-    parameter: Tensor,
-    direction: Tensor,
-    *,
-    lr: float,
-    weight_decay: float,
-    adjust_lr_fn: str | None,
-    compute_matrix_shape: torch.Size | tuple[int, ...],
-) -> Tensor:
-    """Apply decoupled weight decay and a computed Muon direction."""
-    adjusted_lr = _adjust_muon_learning_rate(
-        lr,
-        adjust_lr_fn,
-        compute_matrix_shape,
-    )
-    parameter.mul_(1 - lr * weight_decay)
-    parameter.add_(direction, alpha=-adjusted_lr)
-    return parameter
-
-
-def _zeropower_via_newtonschulz(
-    update: Tensor,
-    *,
-    ns_coefficients: tuple[float, float, float],
-    ns_steps: int,
-    eps: float,
-) -> Tensor:
-    """Compute Muon's approximate polar factor without optimizer state."""
-    a, b, c = ns_coefficients
-    result = update.to(dtype=torch.bfloat16, copy=True)
-    transposed = result.shape[-2] > result.shape[-1]
-    if transposed:
-        result = result.transpose(-2, -1)
-    result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
-
-    if result.ndim == 2:
-        for _ in range(ns_steps):
-            gram = result @ result.T
-            gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
-            result = torch.addmm(result, gram_update, result, beta=a)
-    else:
-        original_shape = result.shape
-        matrices = result.reshape(-1, *original_shape[-2:])
-        # Batched kernels and independent matrix calls can use different BF16
-        # reduction orders.
-        for _ in range(ns_steps):
-            gram = matrices @ matrices.transpose(-2, -1)
-            gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
-            matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
-        result = matrices.reshape(original_shape)
-
-    return result.transpose(-2, -1) if transposed else result
 
 
 class DistributedMuon(Optimizer):
@@ -169,8 +55,7 @@ class DistributedMuon(Optimizer):
         self,
         params: Iterable[dict[str, Any]],
         *,
-        bucket_specs: Sequence[BucketSpec] | None,
-        _bucket_configs: Sequence[BucketConfig] | None,
+        _bucket_configs: Sequence[BucketConfig],
         _prepared_compute_views: Mapping[str, _PreparedParameterComputeView],
         lr: float = 1e-3,
         weight_decay: float = 0.1,
@@ -191,8 +76,6 @@ class DistributedMuon(Optimizer):
             "ns_steps": ns_steps,
             "adjust_lr_fn": adjust_lr_fn,
         }
-        if (bucket_specs is None) == (_bucket_configs is None):
-            raise ValueError("provide exactly one of bucket_specs or bucket_configs")
         self._first_step_validated = False
         self._prepared_compute_views = dict(_prepared_compute_views)
         super().__init__(params, defaults)
@@ -205,28 +88,27 @@ class DistributedMuon(Optimizer):
 
         self._validate_groups()
         compute_layouts = self._build_parameter_compute_layouts()
-        if _bucket_configs is None:
-            assert bucket_specs is not None
-            self._specs = tuple(bucket_specs)
-        else:
-            self._specs = _bind_bucket_configs(
-                _bucket_configs,
-                compute_layouts,
-                get_fqn=lambda layout: layout.fqn,
-                get_storage_dtensor=lambda layout: layout.param,
-                requires_redistribution=lambda layout: (
-                    not layout.storage_is_compute_ready
-                ),
-                get_required_storage_mesh_axis=lambda layout: (
-                    layout.redistribution_storage_mesh_axis
-                ),
-            )
+        self._specs = _bind_bucket_configs(
+            _bucket_configs,
+            compute_layouts,
+            get_fqn=lambda layout: layout.fqn,
+            get_storage_dtensor=lambda layout: layout.param,
+            requires_redistribution=lambda layout: (
+                not layout.storage_is_compute_ready
+            ),
+            get_required_storage_mesh_axis=lambda layout: (
+                layout.redistribution_storage_mesh_axis
+            ),
+        )
         self._initialize_plan(compute_layouts)
         self._validate_plan_across_ranks()
         self._redistribution_runtime = _BucketedRedistributionRuntime[
             _ParameterComputeLayout
         ](tensor_device)
         self._set_checkpoint_layout_fingerprints()
+        self.register_state_dict_post_hook(_add_layout_fingerprints_to_state_dict)
+        self.register_load_state_dict_pre_hook(_validate_layout_fingerprints_on_load)
+        self.register_load_state_dict_post_hook(_after_load_state_dict)
 
     @overload
     def step(self, closure: None = None) -> None:
@@ -257,37 +139,6 @@ class DistributedMuon(Optimizer):
         if hasattr(self, "_plans"):
             raise RuntimeError("DistributedMuon parameter groups are frozen")
         super().add_param_group(param_group)
-
-    def state_dict(self) -> dict[str, Any]:
-        state_dict = super().state_dict()
-        for saved_group, current_group in zip(
-            state_dict["param_groups"], self.param_groups, strict=True
-        ):
-            for param_id, fqn in zip(
-                saved_group["params"], current_group["param_names"], strict=True
-            ):
-                state_dict["state"].setdefault(param_id, {})[
-                    _LAYOUT_FINGERPRINT_KEY
-                ] = self._layout_fingerprints_by_fqn[fqn]
-        return state_dict
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        saved_groups = state_dict.get("param_groups", ())
-        saved_state = state_dict.get("state", {})
-        for saved_group, current_group in zip(
-            saved_groups, self.param_groups, strict=True
-        ):
-            for param_id, fqn in zip(
-                saved_group["params"], current_group["param_names"], strict=True
-            ):
-                fingerprint = saved_state.get(param_id, {}).get(_LAYOUT_FINGERPRINT_KEY)
-                if fingerprint != self._layout_fingerprints_by_fqn[fqn]:
-                    raise ValueError(
-                        "checkpoint changed DistributedMuon's compute layout"
-                    )
-        super().load_state_dict(state_dict)
-        self._validate_plan_across_ranks()
-        self._first_step_validated = False
 
     def _validate_groups(self) -> None:
         for group_index, group in enumerate(self.param_groups):
@@ -620,6 +471,164 @@ class DistributedMuon(Optimizer):
         tensor = compute_layout.local_storage_view
         assert tensor is not None
         return tensor.shape, tensor.dtype, tensor.device
+
+
+def _adjust_muon_learning_rate(
+    lr: float,
+    adjust_lr_fn: str | None,
+    compute_matrix_shape: torch.Size | tuple[int, ...],
+) -> float:
+    """Adjust Muon's learning rate for the matrix aspect ratio."""
+    rows, columns = compute_matrix_shape[-2:]
+    if adjust_lr_fn is None or adjust_lr_fn == "original":
+        ratio = math.sqrt(max(1.0, rows / columns))
+    elif adjust_lr_fn == "match_rms_adamw":
+        ratio = 0.2 * math.sqrt(max(rows, columns))
+    elif adjust_lr_fn == "spectral_unclamped":
+        ratio = math.sqrt(rows / columns)
+    else:
+        raise ValueError(f"unsupported adjust_lr_fn {adjust_lr_fn!r}")
+    return lr * ratio
+
+
+def _prepare_muon_input(
+    gradient: Tensor,
+    momentum_buffer: Tensor,
+    *,
+    momentum: float,
+    nesterov: bool,
+    out: Tensor,
+) -> Tensor:
+    """Update momentum and prepare the Tensor passed to Muon computation."""
+    momentum_buffer.lerp_(gradient, 1 - momentum)
+    if nesterov:
+        torch.lerp(
+            gradient,
+            momentum_buffer,
+            momentum,
+            out=out,
+        )
+    else:
+        out.copy_(momentum_buffer)
+    return out
+
+
+def _compute_muon_direction(
+    prepared: Tensor,
+    *,
+    ns_coefficients: tuple[float, float, float],
+    ns_steps: int,
+    eps: float,
+    out: Tensor,
+) -> Tensor:
+    """Compute Muon's approximate orthogonal update direction."""
+    direction = _zeropower_via_newtonschulz(
+        prepared,
+        ns_coefficients=ns_coefficients,
+        ns_steps=ns_steps,
+        eps=eps,
+    )
+    out.copy_(direction)
+    return out
+
+
+def _apply_muon_update(
+    parameter: Tensor,
+    direction: Tensor,
+    *,
+    lr: float,
+    weight_decay: float,
+    adjust_lr_fn: str | None,
+    compute_matrix_shape: torch.Size | tuple[int, ...],
+) -> Tensor:
+    """Apply decoupled weight decay and a computed Muon direction."""
+    adjusted_lr = _adjust_muon_learning_rate(
+        lr,
+        adjust_lr_fn,
+        compute_matrix_shape,
+    )
+    parameter.mul_(1 - lr * weight_decay)
+    parameter.add_(direction, alpha=-adjusted_lr)
+    return parameter
+
+
+def _zeropower_via_newtonschulz(
+    update: Tensor,
+    *,
+    ns_coefficients: tuple[float, float, float],
+    ns_steps: int,
+    eps: float,
+) -> Tensor:
+    """Compute Muon's approximate polar factor without optimizer state."""
+    a, b, c = ns_coefficients
+    result = update.to(dtype=torch.bfloat16, copy=True)
+    transposed = result.shape[-2] > result.shape[-1]
+    if transposed:
+        result = result.transpose(-2, -1)
+    result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
+
+    if result.ndim == 2:
+        for _ in range(ns_steps):
+            gram = result @ result.T
+            gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+            result = torch.addmm(result, gram_update, result, beta=a)
+    else:
+        original_shape = result.shape
+        matrices = result.reshape(-1, *original_shape[-2:])
+        # Batched kernels and independent matrix calls can use different BF16
+        # reduction orders.
+        for _ in range(ns_steps):
+            gram = matrices @ matrices.transpose(-2, -1)
+            gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+            matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
+        result = matrices.reshape(original_shape)
+
+    return result.transpose(-2, -1) if transposed else result
+
+
+def _add_layout_fingerprints_to_state_dict(
+    optimizer: Optimizer,
+    state_dict: dict[str, Any],
+) -> None:
+    muon = cast(DistributedMuon, optimizer)
+    for saved_group, current_group in zip(
+        state_dict["param_groups"], muon.param_groups, strict=True
+    ):
+        for param_id, fqn in zip(
+            saved_group["params"], current_group["param_names"], strict=True
+        ):
+            state_dict["state"].setdefault(param_id, {})[
+                _LAYOUT_FINGERPRINT_KEY
+            ] = muon._layout_fingerprints_by_fqn[fqn]
+
+
+def _validate_layout_fingerprints_on_load(
+    optimizer: Optimizer,
+    state_dict: dict[str, Any],
+) -> dict[str, Any]:
+    muon = cast(DistributedMuon, optimizer)
+    saved_groups = state_dict.get("param_groups", ())
+    saved_state = state_dict.get("state", {})
+    normalized_groups = []
+    for saved_group, current_group in zip(saved_groups, muon.param_groups, strict=True):
+        for param_id, fqn in zip(
+            saved_group["params"], current_group["param_names"], strict=True
+        ):
+            fingerprint = saved_state.get(param_id, {}).get(_LAYOUT_FINGERPRINT_KEY)
+            if fingerprint != muon._layout_fingerprints_by_fqn[fqn]:
+                raise ValueError("checkpoint changed DistributedMuon's compute layout")
+        normalized_group = dict(saved_group)
+        # Optimizer.load_state_dict otherwise replaces canonical current FQNs
+        # with checkpoint param_names after positional state matching.
+        normalized_group.pop("param_names", None)
+        normalized_groups.append(normalized_group)
+    return {**state_dict, "param_groups": normalized_groups}
+
+
+def _after_load_state_dict(optimizer: Optimizer) -> None:
+    muon = cast(DistributedMuon, optimizer)
+    muon._validate_plan_across_ranks()
+    muon._first_step_validated = False
 
 
 _LAYOUT_FINGERPRINT_KEY = "_distributed_muon_layout_fingerprint"

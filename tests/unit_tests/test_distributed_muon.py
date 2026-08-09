@@ -24,7 +24,6 @@ from torchtitan.components.checkpoint_utils import (
 from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
     _LocalBucketPlan,
     BucketConfig,
-    BucketSpec,
 )
 from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
@@ -235,10 +234,10 @@ class TestDistributedMuon(_DistributedMuonTestBase):
                     ),
                 },
             ],
-            bucket_specs=[
-                BucketSpec(
+            bucket_configs=[
+                BucketConfig(
                     patterns=("layers.0.*",),
-                    mesh=self.mesh,
+                    mesh_axis="dp_shard",
                 )
             ],
             lr=0.03,
@@ -659,18 +658,18 @@ class TestDistributedMuonPipeline(_DistributedMuonTestBase):
                     ),
                 },
             ],
-            bucket_specs=[
-                BucketSpec(
+            bucket_configs=[
+                BucketConfig(
                     patterns=("layers.0.*",),
-                    mesh=self.mesh,
+                    mesh_axis="dp_shard",
                 ),
-                BucketSpec(
+                BucketConfig(
                     patterns=("layers.1.*",),
-                    mesh=self.mesh,
+                    mesh_axis="dp_shard",
                 ),
-                BucketSpec(
+                BucketConfig(
                     patterns=("layers.2.*",),
-                    mesh=self.mesh,
+                    mesh_axis="dp_shard",
                 ),
             ],
             lr=0.03,
