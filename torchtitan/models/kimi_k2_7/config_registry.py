@@ -37,6 +37,25 @@ from torchtitan.trainer import Trainer
 from . import KIMI_K2_5_SPECIAL_TOKENS, model_registry
 
 
+def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
+    return MMDataLoader.Config(
+        dataset=dataset,
+        max_images_per_batch=128,
+        patch_size=14,
+        temporal_patch_size=1,
+        spatial_merge_size=2,
+        patch_order="raster",
+        resize_fn=resize_to_patch_budget,
+        max_patches=16384,
+        max_patches_per_side=512,
+        min_pixels=65536,
+        max_pixels=16777216,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        **kwargs,
+    )
+
+
 def kimi_k2_5_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
     return Trainer.Config(
@@ -180,30 +199,11 @@ def kimi_k2_5() -> Trainer.Config:
     )
 
 
-def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
-    return MMDataLoader.Config(
-        dataset=dataset,
-        max_images_per_batch=128,
-        patch_size=14,
-        temporal_patch_size=1,
-        spatial_merge_size=2,
-        patch_order="raster",
-        resize_fn=resize_to_patch_budget,
-        max_patches=16384,
-        max_patches_per_side=512,
-        min_pixels=65536,
-        max_pixels=16777216,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        **kwargs,
-    )
-
-
-def _moonlight_distributed_muon_optimizer() -> OptimizersContainer.Config:
+def _kimi_k2_5_debug_distributed_muon_optimizer() -> OptimizersContainer.Config:
     per_head = _per_head_muon_sharding(num_heads=16)
     return _kimi_text_distributed_muon_optimizer(
-        num_layers=27,
-        lr=3e-4,
+        num_layers=6,
+        lr=8e-4,
         attention_shardings={
             "wq": per_head,
             "wkv_a": MuonComputeSharding(placement=Owned()),
@@ -213,11 +213,11 @@ def _moonlight_distributed_muon_optimizer() -> OptimizersContainer.Config:
     )
 
 
-def _kimi_k2_5_debug_distributed_muon_optimizer() -> OptimizersContainer.Config:
+def _moonlight_distributed_muon_optimizer() -> OptimizersContainer.Config:
     per_head = _per_head_muon_sharding(num_heads=16)
     return _kimi_text_distributed_muon_optimizer(
-        num_layers=6,
-        lr=8e-4,
+        num_layers=27,
+        lr=3e-4,
         attention_shardings={
             "wq": per_head,
             "wkv_a": MuonComputeSharding(placement=Owned()),
