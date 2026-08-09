@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast, NoReturn
@@ -29,7 +30,6 @@ from ..flex_optimizer_reshard import (
     _TensorRegion,
     _TensorRegionRoute,
 )
-from .load_balancing import balance_loads_across_partitions
 
 
 __all__ = ["Owned"]
@@ -55,6 +55,8 @@ class _ParameterComputeLayout:
     compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
     local_storage_view: Tensor | None
+    storage_mesh_ranks: tuple[int, ...]
+    storage_layout_signature: tuple[Any, ...]
     local_storage_signature: tuple[Any, ...]
     compute_distribution: _ComputeDistribution
     storage_to_compute_transition: _StorageToComputeTransition
@@ -177,7 +179,7 @@ def _assign_balanced_single_participants(
         for index, layout in enumerate(compute_layouts)
         if isinstance(layout.compute_distribution, _SingleRankCompute)
     )
-    candidate_partitions, updated_cumulative_loads = balance_loads_across_partitions(
+    candidate_partitions, updated_cumulative_loads = _balance_loads_across_partitions(
         tuple(
             (
                 _estimate_muon_compute_cost(
@@ -208,6 +210,57 @@ def _estimate_muon_compute_cost(
     short_dim, long_dim = sorted((rows, columns))
     # Each NS step has two s^2 * l matmuls and one s^3 matmul.
     return ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
+
+
+def _balance_loads_across_partitions(
+    loads: Sequence[tuple[int, int, str]],
+    *,
+    initial_cumulative_primary_loads: Sequence[int],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Balance keyed loads with a deterministic LPT heuristic.
+
+    Each load is ``(primary, secondary, stable_key)``. Assignments are
+    partition indices aligned with those loads. Each call balances its primary
+    and then secondary loads before cumulative primary load. Stable keys make
+    ordering deterministic. This is not an exact partition optimum.
+    """
+    num_partitions = len(initial_cumulative_primary_loads)
+    assignments = [0] * len(loads)
+    partition_loads = [
+        (0, 0, cumulative_load, partition)
+        for partition, cumulative_load in enumerate(initial_cumulative_primary_loads)
+    ]
+    heapq.heapify(partition_loads)
+    ordered_loads = sorted(
+        enumerate(loads),
+        key=lambda indexed_load: (
+            -indexed_load[1][0],
+            -indexed_load[1][1],
+            indexed_load[1][2],
+        ),
+    )
+    for load_index, (primary, secondary, _stable_key) in ordered_loads:
+        (
+            current_primary,
+            current_secondary,
+            cumulative_primary,
+            partition,
+        ) = heapq.heappop(partition_loads)
+        assignments[load_index] = partition
+        heapq.heappush(
+            partition_loads,
+            (
+                current_primary + primary,
+                current_secondary + secondary,
+                cumulative_primary + primary,
+                partition,
+            ),
+        )
+
+    updated_cumulative_primary_loads = [0] * num_partitions
+    for _primary, _secondary, cumulative_primary, partition in partition_loads:
+        updated_cumulative_primary_loads[partition] = cumulative_primary
+    return tuple(assignments), tuple(updated_cumulative_primary_loads)
 
 
 def _build_parameter_redistribution_plan(
