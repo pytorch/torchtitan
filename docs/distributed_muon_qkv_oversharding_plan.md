@@ -76,7 +76,7 @@ entirely compute-ready bucket remains mesh-free. Muon balances single-rank
 tensor bytes as the secondary load, then immediately converts those choices to
 endpoint routes. Cumulative compute load breaks exact per-bucket ties.
 `Shard(0)` compute does not require a single-rank assignment. The Muon-local
-`balance_loads_across_partitions` helper accepts
+`_balance_loads_across_partitions` helper accepts
 `(primary load, secondary load, stable key)` triples; the adapter supplies the
 Muon-specific costs and FQNs as deterministic keys.
 
