@@ -801,8 +801,9 @@ class _BufferSlot:
         self.record_compute_stream(compute_stream)
 
     def record_compute_stream(self, stream: torch.Stream) -> None:
-        # Construction or checkpoint load may reserve on a different stream
-        # from the later optimizer step. Record each caller stream only once.
+        # Pipeline exchange buffers stay alive and use explicit slot events.
+        # Compute scratch also serves local-only work, so record each distinct
+        # caller for safe destruction or growth after queued compute.
         if stream in self._recorded_compute_streams:
             return
         for reserved in self.buffers.values():
@@ -857,9 +858,14 @@ class _BufferSlot:
 
 @dataclass(slots=True)
 class _PipelineSlot:
+    """Persistent buffer keepalive and reusable cross-stream handoff events."""
+
     buffers: _BufferSlot
+    # Transfer producer -> compute consumer.
     compute_input_ready: torch.Event
+    # Compute consumer -> transfer return/reuse.
     compute_done: torch.Event
+    # Transfer finalization -> subsequent caller work.
     done: torch.Event
 
 
