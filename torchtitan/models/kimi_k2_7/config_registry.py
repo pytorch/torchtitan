@@ -4,11 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Mapping
+
+from torch.distributed.tensor import Shard
+
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
+    BucketConfig,
+)
+from torchtitan.components.distributed_optimizers.muon import (
+    BatchedMatrixComputeView,
+    MuonComputeSharding,
+    Owned,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import (
+    default_adamw,
+    OptimizersContainer,
+    ParamGroupConfig,
+)
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -37,6 +53,172 @@ def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
         image_mean=(0.5, 0.5, 0.5),
         image_std=(0.5, 0.5, 0.5),
         **kwargs,
+    )
+
+
+def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
+    return MuonComputeSharding(
+        view_before_placement=BatchedMatrixComputeView(
+            num_matrices=num_heads,
+            matrices_flattened_into_dim=0,
+        ),
+        placement=Shard(0),
+    )
+
+
+def _kimi_text_distributed_muon_optimizer(
+    *,
+    num_layers: int,
+    lr: float,
+    attention_shardings: Mapping[str, MuonComputeSharding],
+) -> OptimizersContainer.Config:
+    muon_kwargs = {
+        "lr": lr,
+        "weight_decay": 0.1,
+        "foreach": False,
+        # Kimi K2's MuonClip recipe uses 0.2 * sqrt(max(rows, columns))
+        # for shape-consistent AdamW-scale updates instead of Muon's original
+        # aspect-ratio scaling.
+        "adjust_lr_fn": "match_rms_adamw",
+    }
+    adamw_kwargs = {
+        "lr": lr,
+        "betas": (0.9, 0.95),
+        "eps": 1e-8,
+        "weight_decay": 0.1,
+    }
+    expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
+    param_groups = [
+        ParamGroupConfig(
+            pattern=rf"attention\.{projection}\.weight$",
+            optimizer_name="DistributedMuon",
+            optimizer_kwargs={
+                **muon_kwargs,
+                "compute_sharding": compute_sharding,
+            },
+        )
+        for projection, compute_sharding in attention_shardings.items()
+    ]
+    for projection in expert_projections:
+        param_groups.append(
+            ParamGroupConfig(
+                pattern=rf"routed_experts\.inner_experts\.{projection}$",
+                optimizer_name="DistributedMuon",
+                optimizer_kwargs={
+                    **muon_kwargs,
+                    "compute_sharding": MuonComputeSharding(placement=Shard(0)),
+                },
+            )
+        )
+    for pattern in (
+        r"feed_forward\.w[123]\.weight$",
+        # Keep the 2D router gate on Muon: this follows the Kimi team's
+        # matrix-parameter rule, and Moonlight reports a larger SVD-entropy
+        # gain over AdamW for MoE router weights.
+        r"moe\.router\.gate\.weight$",
+        r"moe\.shared_experts\.w[123]\.weight$",
+    ):
+        param_groups.append(
+            ParamGroupConfig(
+                pattern=pattern,
+                optimizer_name="DistributedMuon",
+                optimizer_kwargs={
+                    **muon_kwargs,
+                    "compute_sharding": MuonComputeSharding(placement=Owned()),
+                },
+            )
+        )
+    param_groups.append(
+        ParamGroupConfig(
+            pattern=r".*",
+            optimizer_name="AdamW",
+            optimizer_kwargs=adamw_kwargs,
+        )
+    )
+
+    def layer_fqns(layer_id: int) -> tuple[str, ...]:
+        prefix = f"layers.{layer_id}"
+        fqns = tuple(
+            f"{prefix}.attention.{projection}.weight"
+            for projection in attention_shardings
+        )
+        if not layer_id:
+            fqns += tuple(
+                f"{prefix}.feed_forward.{projection}.weight"
+                for projection in ("w1", "w2", "w3")
+            )
+        else:
+            fqns += tuple(
+                f"{prefix}.moe.routed_experts.inner_experts.{projection}"
+                for projection in expert_projections
+            )
+            fqns += (f"{prefix}.moe.router.gate.weight",)
+            fqns += tuple(
+                f"{prefix}.moe.shared_experts.{projection}.weight"
+                for projection in ("w1", "w2", "w3")
+            )
+        return fqns
+
+    layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(num_layers))
+    # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
+    # collective launch overhead across pairs of MoE layers.
+    bucket_layer_ids = ((0,),) + tuple(
+        tuple(range(first_layer_id, min(first_layer_id + 2, num_layers)))
+        for first_layer_id in range(1, num_layers, 2)
+    )
+    bucket_fqns = tuple(
+        tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
+        for layer_ids in bucket_layer_ids
+    )
+    bucket_configs = tuple(
+        BucketConfig(
+            name="layers." + "-".join(map(str, layer_ids)),
+            patterns=fqns,
+            mesh_axes=("dp_shard",),
+        )
+        for layer_ids, fqns in zip(
+            bucket_layer_ids,
+            bucket_fqns,
+            strict=True,
+        )
+    )
+    return OptimizersContainer.Config(
+        implementation="foreach",
+        param_groups=param_groups,
+        optimizer_init_kwargs={
+            "DistributedMuon": {
+                "bucket_configs": bucket_configs,
+            }
+        },
+    )
+
+
+def _moonlight_distributed_muon_optimizer() -> OptimizersContainer.Config:
+    per_head = _per_head_muon_sharding(num_heads=16)
+    return _kimi_text_distributed_muon_optimizer(
+        num_layers=27,
+        lr=3e-4,
+        attention_shardings={
+            "wq": per_head,
+            "wkv_a": MuonComputeSharding(placement=Owned()),
+            "wkv_b": per_head,
+            "wo": MuonComputeSharding(placement=Owned()),
+        },
+    )
+
+
+def _kimi_k2_5_distributed_muon_optimizer() -> OptimizersContainer.Config:
+    per_head = _per_head_muon_sharding(num_heads=64)
+    return _kimi_text_distributed_muon_optimizer(
+        num_layers=61,
+        lr=2.2e-4,
+        attention_shardings={
+            "wq_a": MuonComputeSharding(placement=Owned()),
+            "wq_b": per_head,
+            "wkv_a": MuonComputeSharding(placement=Owned()),
+            "wkv_b": per_head,
+            "wo": MuonComputeSharding(placement=Owned()),
+        },
     )
 
 
@@ -106,6 +288,24 @@ def moonlight_16b_a3b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
     )
+
+
+def moonlight_16b_a3b_muon() -> Trainer.Config:
+    """Moonlight 16B-A3B with DistributedMuon for matrix parameters."""
+    config = moonlight_16b_a3b()
+    num_data_parallel_shard_ranks = 8
+    config.optimizer = _moonlight_distributed_muon_optimizer()
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=num_data_parallel_shard_ranks,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=4,
+        enable_sequence_parallel=False,
+        spmd_backend="spmd_types",
+    )
+    return config
 
 
 def kimi_vl_a3b() -> Trainer.Config:
@@ -181,3 +381,21 @@ def kimi_k2_5() -> Trainer.Config:
         activation_checkpoint=FullAC.Config(),
         compile=compile_config,
     )
+
+
+def kimi_k2_5_muon() -> Trainer.Config:
+    """Full Kimi K2.5 with DistributedMuon for text-tower matrices."""
+    config = kimi_k2_5()
+    num_data_parallel_shard_ranks = 64
+    config.optimizer = _kimi_k2_5_distributed_muon_optimizer()
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=num_data_parallel_shard_ranks,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=8,
+        enable_sequence_parallel=False,
+        spmd_backend="spmd_types",
+    )
+    return config
