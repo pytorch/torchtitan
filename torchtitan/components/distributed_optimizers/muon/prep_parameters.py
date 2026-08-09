@@ -18,13 +18,15 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
 
-from .flex_optimizer_reshard import _bind_bucket_configs, BucketConfig, BucketSpec
-from .muon import _PreparedParameterComputeView, DistributedMuon, Owned
+from ..flex_optimizer_reshard import BucketConfig, BucketSpec
+from .distributed_muon import DistributedMuon
+from .storage_to_compute import _PreparedParameterComputeView, Owned
 
 
 __all__ = [
     "BatchedMatrixComputeView",
     "MuonComputeSharding",
+    "Owned",
     "build_distributed_muon",
 ]
 
@@ -66,9 +68,10 @@ class BatchedMatrixComputeView:
 class MuonComputeSharding:
     """Define the logical Muon tensor and its compute placement.
 
-    ``Owned`` requires one rank to compute a complete 2D matrix when storage
-    is sharded. ``Shard(0)`` computes rank-3-or-higher matrix batches locally
-    when storage shards preserve complete matrices.
+    ``Owned`` balances complete 2D matrices across bucket participants.
+    ``Shard(0)`` partitions rank-3 matrix batches along the batch dimension.
+    Storage is redistributed when it does not already match the requested
+    compute placement.
     """
 
     # Applied before compute placement, so placement dimensions refer to the
@@ -78,9 +81,9 @@ class MuonComputeSharding:
     placement: Owned | Shard
 
     def __post_init__(self) -> None:
-        if not isinstance(self.placement, (Owned, Shard)) or (
+        if type(self.placement) not in (Owned, Shard) or (
             self.view_before_placement is not None
-            and not isinstance(self.view_before_placement, BatchedMatrixComputeView)
+            and type(self.view_before_placement) is not BatchedMatrixComputeView
         ):
             raise TypeError(
                 "MuonComputeSharding requires a supported view and placement"
@@ -129,19 +132,6 @@ def build_distributed_muon(
             parameters_to_prepare.append((param, fqn, compute_view))
         prepared_params.append(group)
 
-    if bucket_configs is not None:
-        storage_by_fqn = {
-            fqn: param
-            for param, fqn, _compute_view in parameters_to_prepare
-            if isinstance(param, DTensor)
-        }
-        if len(storage_by_fqn) != len(parameters_to_prepare):
-            raise TypeError("bucket_configs require named DTensor parameters")
-        bucket_specs = _bind_bucket_configs(bucket_configs, storage_by_fqn)
-    else:
-        assert bucket_specs is not None
-        bucket_specs = tuple(bucket_specs)
-
     prepared_compute_views = {}
     for param, fqn, compute_view in parameters_to_prepare:
         global_storage_shape = torch.Size(param.shape)
@@ -188,15 +178,20 @@ def build_distributed_muon(
             local_storage_view = local_storage_for_compute_view.view(
                 resolved_view.compute_shape(local_storage_shape)
             )
+        if len(global_compute_shape) not in (2, 3):
+            raise ValueError(
+                f"Muon parameter {fqn!r} compute shape "
+                f"{tuple(global_compute_shape)} must be 2D or batch-first 3D"
+            )
         prepared_compute_views[fqn] = _PreparedParameterComputeView(
             compute_view_key=compute_view_key,
             global_compute_shape=global_compute_shape,
             local_storage_view=local_storage_view,
         )
-
     return DistributedMuon(
         prepared_params,
-        bucket_specs=bucket_specs,
+        bucket_specs=None if bucket_specs is None else tuple(bucket_specs),
+        _bucket_configs=(None if bucket_configs is None else tuple(bucket_configs)),
         _prepared_compute_views=prepared_compute_views,
         **kwargs,
     )
