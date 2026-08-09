@@ -88,6 +88,11 @@ _StorageToComputeTransition = (
 
 
 @dataclass(frozen=True, slots=True)
+class _ReplicatedCompute:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class _ShardedCompute:
     dim: int
 
@@ -97,12 +102,14 @@ class _SingleRankCompute:
     pass
 
 
-_ComputeDistribution = _ShardedCompute | _SingleRankCompute
+_ComputeDistribution = _ReplicatedCompute | _ShardedCompute | _SingleRankCompute
 
 
 def _compute_distribution_key(
     distribution: _ComputeDistribution,
 ) -> tuple[str, ...] | tuple[str, int]:
+    if isinstance(distribution, _ReplicatedCompute):
+        return ("replicate",)
     if isinstance(distribution, _ShardedCompute):
         return ("shard", distribution.dim)
     assert isinstance(distribution, _SingleRankCompute)
@@ -468,6 +475,11 @@ def _resolve_storage_to_compute_transition(
         param
     )
     mesh_size = param.device_mesh.size()
+    if isinstance(compute_placement, Replicate) and replicated_storage:
+        return _ResolvedStorageToComputeTransition(
+            compute_distribution=_ReplicatedCompute(),
+            storage_to_compute_transition=_NoRedistributionTransition(),
+        )
     if isinstance(compute_placement, Shard):
         if len(global_compute_shape) == 3 and (
             _normalize_dim(compute_placement.dim, len(global_compute_shape)) == 0

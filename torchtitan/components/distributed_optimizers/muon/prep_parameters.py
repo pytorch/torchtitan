@@ -72,6 +72,7 @@ class MuonComputeSharding:
     ``Shard(0)`` partitions rank-3 matrix batches along
     the matrix-batch dimension. Aligned storage computes locally; otherwise an
     exact one-dimensional ``Shard(0)`` storage layout is repartitioned.
+    ``Replicate`` computes the complete logical tensor on every participant.
     Storage is redistributed when it does not already match the requested
     compute placement.
     """
@@ -80,10 +81,10 @@ class MuonComputeSharding:
     # viewed tensor. A future view_after_placement mode can apply a local view
     # after redistribution; that ordering is not supported yet.
     view_before_placement: BatchedMatrixComputeView | None = None
-    placement: Owned | Shard
+    placement: Owned | Replicate | Shard
 
     def __post_init__(self) -> None:
-        if type(self.placement) not in (Owned, Shard) or (
+        if type(self.placement) not in (Owned, Replicate, Shard) or (
             self.view_before_placement is not None
             and type(self.view_before_placement) is not BatchedMatrixComputeView
         ):
