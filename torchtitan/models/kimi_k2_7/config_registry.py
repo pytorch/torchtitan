@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Mapping
+from typing import cast
 
 from torch.distributed.tensor import Shard
 
@@ -32,9 +32,12 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K2_5_SPECIAL_TOKENS, model_registry
+from .model import KimiK25Model
 
 
 def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
@@ -69,7 +72,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=_mm_dataloader("cc12m-test"),
-        optimizer=_kimi_k2_5_debug_distributed_muon_optimizer(),
+        optimizer=_distributed_muon_optimizer(model_spec, lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -102,7 +105,7 @@ def moonlight_16b_a3b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Moonlight-16B-A3B",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_moonlight_distributed_muon_optimizer(),
+        optimizer=_distributed_muon_optimizer(model_spec, lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -176,7 +179,7 @@ def kimi_k2_5() -> Trainer.Config:
         hf_assets_path="./assets/hf/Kimi-K2.5",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_kimi_k2_5_distributed_muon_optimizer(),
+        optimizer=_distributed_muon_optimizer(model_spec, lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -199,55 +202,29 @@ def kimi_k2_5() -> Trainer.Config:
     )
 
 
-def _kimi_k2_5_debug_distributed_muon_optimizer() -> OptimizersContainer.Config:
-    per_head = _per_head_muon_sharding(num_heads=16)
-    return _kimi_text_distributed_muon_optimizer(
-        num_layers=6,
-        lr=8e-4,
-        attention_shardings={
-            "wq": per_head,
-            "wkv_a": MuonComputeSharding(placement=Owned()),
-            "wkv_b": per_head,
-            "wo": MuonComputeSharding(placement=Owned()),
-        },
-    )
-
-
-def _moonlight_distributed_muon_optimizer() -> OptimizersContainer.Config:
-    per_head = _per_head_muon_sharding(num_heads=16)
-    return _kimi_text_distributed_muon_optimizer(
-        num_layers=27,
-        lr=3e-4,
-        attention_shardings={
-            "wq": per_head,
-            "wkv_a": MuonComputeSharding(placement=Owned()),
-            "wkv_b": per_head,
-            "wo": MuonComputeSharding(placement=Owned()),
-        },
-    )
-
-
-def _kimi_k2_5_distributed_muon_optimizer() -> OptimizersContainer.Config:
-    per_head = _per_head_muon_sharding(num_heads=64)
-    return _kimi_text_distributed_muon_optimizer(
-        num_layers=61,
-        lr=2.2e-4,
-        attention_shardings={
+def _distributed_muon_optimizer(
+    model_spec: ModelSpec,
+    *,
+    lr: float,
+) -> OptimizersContainer.Config:
+    model_config = cast(KimiK25Model.Config, model_spec.model)
+    attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
+    per_head = _per_head_muon_sharding(num_heads=attention.n_heads)
+    query_shardings: dict[str, MuonComputeSharding] = (
+        {
             "wq_a": MuonComputeSharding(placement=Owned()),
             "wq_b": per_head,
-            "wkv_a": MuonComputeSharding(placement=Owned()),
-            "wkv_b": per_head,
-            "wo": MuonComputeSharding(placement=Owned()),
-        },
+        }
+        if attention.q_lora_rank
+        else {"wq": per_head}
     )
-
-
-def _kimi_text_distributed_muon_optimizer(
-    *,
-    num_layers: int,
-    lr: float,
-    attention_shardings: Mapping[str, MuonComputeSharding],
-) -> OptimizersContainer.Config:
+    attention_shardings = {
+        **query_shardings,
+        "wkv_a": MuonComputeSharding(placement=Owned()),
+        "wkv_b": per_head,
+        "wo": MuonComputeSharding(placement=Owned()),
+    }
+    num_layers = len(model_config.layers)
     muon_kwargs = {
         "lr": lr,
         "weight_decay": 0.1,
