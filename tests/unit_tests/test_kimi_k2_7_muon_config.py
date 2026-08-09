@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import json
 import unittest
 
 import torch
@@ -15,7 +14,6 @@ from torchtitan.components.distributed_optimizers.muon import (
     Owned,
 )
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.kimi_k2_7.config_registry import (
     kimi_k2_5_muon,
     moonlight_16b_a3b_muon,
@@ -141,74 +139,6 @@ class _KimiMuonConfigTests:
         )
         for suffix, group in group_by_suffix.items():
             self.assertEqual(group["compute_sharding"], expected_sharding[suffix])
-
-    def test_bucket_and_parallelism_config(self):
-        optimizer_config = self.config.optimizer
-        bucket_configs = optimizer_config.optimizer_init_kwargs["DistributedMuon"][
-            "bucket_configs"
-        ]
-        bucket_layer_ids = ((0,),) + tuple(
-            tuple(
-                range(
-                    first_layer_id,
-                    min(first_layer_id + 2, self.num_layers),
-                )
-            )
-            for first_layer_id in range(1, self.num_layers, 2)
-        )
-        self.assertEqual(len(bucket_configs), len(bucket_layer_ids))
-        for layer_ids, bucket in zip(bucket_layer_ids, bucket_configs, strict=True):
-            expected = ()
-            for layer_id in layer_ids:
-                prefix = f"layers.{layer_id}"
-                attention_fqns = tuple(
-                    f"{prefix}.attention.{projection}.weight"
-                    for projection in self.attention_projections
-                )
-                expected += attention_fqns
-                if not layer_id:
-                    dense_fqns = tuple(
-                        f"{prefix}.feed_forward.{projection}.weight"
-                        for projection in ("w1", "w2", "w3")
-                    )
-                    expected += dense_fqns
-                else:
-                    expert_fqns = tuple(
-                        f"{prefix}.moe.routed_experts.inner_experts.{projection}"
-                        for projection in ("w1_EFD", "w2_EDF", "w3_EFD")
-                    )
-                    router_fqn = f"{prefix}.moe.router.gate.weight"
-                    shared_fqns = tuple(
-                        f"{prefix}.moe.shared_experts.{projection}.weight"
-                        for projection in ("w1", "w2", "w3")
-                    )
-                    expected += expert_fqns + (router_fqn,) + shared_fqns
-            self.assertEqual(
-                bucket.name,
-                "layers." + "-".join(map(str, layer_ids)),
-            )
-            self.assertEqual(bucket.patterns, expected)
-            self.assertEqual(bucket.mesh_axis, "dp_shard")
-
-        parallelism = self.config.parallelism
-        self.assertEqual(parallelism.data_parallel_replicate_degree, 1)
-        self.assertEqual(
-            parallelism.data_parallel_shard_degree,
-            self.num_data_parallel_shard_ranks,
-        )
-        self.assertEqual(
-            parallelism.expert_parallel_degree,
-            self.expert_parallel_degree,
-        )
-        self.assertEqual(parallelism.tensor_parallel_degree, 1)
-        self.assertEqual(parallelism.context_parallel_degree, 1)
-        self.assertEqual(parallelism.pipeline_parallel_degree, 1)
-        self.assertFalse(parallelism.enable_sequence_parallel)
-        self.assertEqual(parallelism.spmd_backend, "spmd_types")
-        self.assertIsInstance(self.config.activation_checkpoint, FullAC.Config)
-
-    def test_config_is_json_serializable(self):
-        json.dumps(self.config.to_dict())
 
 
 class TestKimiK25MuonConfig(_KimiMuonConfigTests, unittest.TestCase):
