@@ -10,6 +10,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -265,6 +266,143 @@ class _DistributedMuonTestBase(DTensorTestBase):
             reference_local_blocks[rank]
         ]["momentum_buffer"].detach()
         _assert_exact(local_blocks_momentum.to_local(), expected_local_blocks_momentum)
+
+    def _build_split_head_optimizer(
+        self,
+        value: torch.Tensor,
+        *,
+        num_heads: int,
+    ) -> tuple[torch.nn.Parameter, DistributedMuon]:
+        parameter = self._parameter(value)
+        optimizer = build_distributed_muon(
+            [
+                {
+                    "params": [parameter],
+                    "param_names": ["layers.0.wq.weight"],
+                    "compute_sharding": MuonComputeSharding(
+                        view_before_placement=BatchedMatrixComputeView(
+                            num_matrices=num_heads,
+                            matrices_flattened_into_dim=0,
+                        ),
+                        placement=Shard(0),
+                    ),
+                }
+            ],
+            bucket_specs=[
+                BucketSpec(
+                    patterns=("layers.0.*",),
+                    mesh=self.mesh,
+                )
+            ],
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+        return parameter, optimizer
+
+    def _build_per_head_reference(
+        self,
+        value: torch.Tensor,
+        *,
+        num_heads: int,
+    ) -> tuple[tuple[torch.nn.Parameter, ...], torch.optim.Muon]:
+        head_rows = value.shape[0] // num_heads
+        parameters = tuple(
+            torch.nn.Parameter(head.clone())
+            for head in value.view(num_heads, head_rows, value.shape[1])
+        )
+        optimizer = torch.optim.Muon(
+            parameters,
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+        return parameters, optimizer
+
+    def _set_split_head_grads(
+        self,
+        parameter: torch.nn.Parameter,
+        reference_parameters: tuple[torch.nn.Parameter, ...],
+        grad: torch.Tensor,
+    ) -> None:
+        parameter.grad = distribute_tensor(grad.clone(), self.mesh, (Shard(0),))
+        head_rows = grad.shape[0] // len(reference_parameters)
+        for reference_parameter, head_grad in zip(
+            reference_parameters,
+            grad.view(len(reference_parameters), head_rows, grad.shape[1]),
+            strict=True,
+        ):
+            reference_parameter.grad = head_grad.clone()
+
+    def _assert_split_head_matches_reference(
+        self,
+        optimizer: DistributedMuon,
+        parameter: torch.nn.Parameter,
+        reference_optimizer: torch.optim.Muon,
+        reference_parameters: tuple[torch.nn.Parameter, ...],
+        *,
+        parameter_before: torch.Tensor,
+        reference_parameters_before: tuple[torch.Tensor, ...],
+    ) -> None:
+        expected_parameter = torch.cat(
+            [value.detach() for value in reference_parameters], dim=0
+        )
+        expected_parameter_before = torch.cat(reference_parameters_before, dim=0)
+        local_rows, row_offset = Shard.local_shard_size_and_offset(
+            expected_parameter.shape[0],
+            self.world_size,
+            self.mesh.get_local_rank(),
+        )
+        _assert_batched_muon_update_close(
+            parameter_before,
+            parameter.to_local(),
+            expected_parameter_before.narrow(0, row_offset, local_rows),
+            expected_parameter.narrow(0, row_offset, local_rows),
+            lr=0.03,
+            weight_decay=0.2,
+            compute_matrix_shape=reference_parameters[0].shape,
+        )
+        self.assertEqual(parameter.placements, (Shard(0),))
+
+        self._assert_split_head_momentum_matches_reference(
+            optimizer,
+            parameter,
+            reference_optimizer,
+            reference_parameters,
+        )
+
+    def _assert_split_head_momentum_matches_reference(
+        self,
+        optimizer: DistributedMuon,
+        parameter: torch.nn.Parameter,
+        reference_optimizer: torch.optim.Muon,
+        reference_parameters: tuple[torch.nn.Parameter, ...],
+    ) -> None:
+        local_rows, row_offset = Shard.local_shard_size_and_offset(
+            parameter.shape[0],
+            self.world_size,
+            self.mesh.get_local_rank(),
+        )
+
+        momentum = optimizer.state[parameter]["momentum_buffer"]
+        expected_momentum = torch.cat(
+            [
+                reference_optimizer.state[value]["momentum_buffer"]
+                for value in reference_parameters
+            ],
+            dim=0,
+        )
+        self.assertIsInstance(momentum, DTensor)
+        self.assertEqual(momentum.placements, (Shard(0),))
+        _assert_exact(
+            momentum.to_local(),
+            expected_momentum.narrow(0, row_offset, local_rows),
+        )
+
 
 @unittest.skipUnless(torch.cuda.device_count() >= 1, "requires one CUDA device")
 class TestDistributedMuonSingleRank(_DistributedMuonTestBase):
@@ -709,31 +847,191 @@ class TestDistributedMuon(_DistributedMuonTestBase):
             )
 
     @with_comms
-    def test_constructor_rejects_storage_shards_that_split_matrices(self):
-        parameter = self._parameter(
-            torch.arange(36, device=self.device).reshape(12, 3).float()
+    def test_split_head_shard0_matches_plain_muon_and_continues_from_state_dict(
+        self,
+    ):
+        num_heads = 3
+        value = (
+            torch.arange(36, device=self.device).reshape(12, 3).float().div_(10).add_(1)
         )
-        with self.assertRaisesRegex(ValueError, "not aligned"):
-            build_distributed_muon(
-                [
-                    {
-                        "params": [parameter],
-                        "param_names": ["layers.0.wq.weight"],
-                        "compute_sharding": MuonComputeSharding(
-                            view_before_placement=BatchedMatrixComputeView(
-                                num_matrices=3, matrices_flattened_into_dim=0
-                            ),
-                            placement=Shard(0),
+        parameter, optimizer = self._build_split_head_optimizer(
+            value,
+            num_heads=num_heads,
+        )
+        reference_parameters, reference_optimizer = self._build_per_head_reference(
+            value,
+            num_heads=num_heads,
+        )
+
+        first_grad = (
+            torch.arange(1, 37, device=self.device).reshape(12, 3).float().div_(17)
+        )
+        parameter_before = parameter.to_local().clone()
+        reference_parameters_before = tuple(
+            reference.detach().clone() for reference in reference_parameters
+        )
+        self._set_split_head_grads(parameter, reference_parameters, first_grad)
+        all_to_all_single = dist.all_to_all_single
+        with patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "dist.all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            optimizer.step()
+        self.assertEqual(collective.call_count, 2)
+        reference_optimizer.step()
+        self._assert_split_head_matches_reference(
+            optimizer,
+            parameter,
+            reference_optimizer,
+            reference_parameters,
+            parameter_before=parameter_before,
+            reference_parameters_before=reference_parameters_before,
+        )
+
+        state_dict = optimizer.state_dict()
+        flat_state_dict = get_flat_optim_state_dict(optimizer)
+        resumed_value = parameter.full_tensor().detach()
+        _, changed_view_optimizer = self._build_split_head_optimizer(
+            resumed_value,
+            num_heads=2,
+        )
+        with self.assertRaisesRegex(ValueError, "compute layout"):
+            changed_view_optimizer.load_state_dict(state_dict)
+
+        resumed_parameter, resumed_optimizer = self._build_split_head_optimizer(
+            resumed_value,
+            num_heads=num_heads,
+        )
+        init_optim_state(resumed_optimizer)
+        load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        _assert_exact(resumed_parameter.to_local(), parameter.to_local())
+        self._assert_split_head_momentum_matches_reference(
+            resumed_optimizer,
+            resumed_parameter,
+            reference_optimizer,
+            reference_parameters,
+        )
+
+        second_grad = first_grad.flip((0, 1)).contiguous()
+        resumed_parameter_before = resumed_parameter.to_local().clone()
+        reference_parameters_before = tuple(
+            reference.detach().clone() for reference in reference_parameters
+        )
+        self._set_split_head_grads(
+            resumed_parameter,
+            reference_parameters,
+            second_grad,
+        )
+        with patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "dist.all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            resumed_optimizer.step()
+        self.assertEqual(collective.call_count, 2)
+        reference_optimizer.step()
+        self._assert_split_head_matches_reference(
+            resumed_optimizer,
+            resumed_parameter,
+            reference_optimizer,
+            reference_parameters,
+            parameter_before=resumed_parameter_before,
+            reference_parameters_before=reference_parameters_before,
+        )
+
+    @with_comms
+    def test_split_head_compute_with_actual_fsdp2_parameter(self):
+        num_heads = 3
+        value = (
+            torch.arange(36, device=self.device).reshape(12, 3).float().div_(10).add_(1)
+        )
+        module = torch.nn.Linear(3, 12, bias=False, device=self.device)
+        with torch.no_grad():
+            module.weight.copy_(value)
+        fully_shard(module, mesh=self.mesh, reshard_after_forward=True)
+        parameter = module.weight
+        optimizer = build_distributed_muon(
+            [
+                {
+                    "params": [parameter],
+                    "param_names": ["layers.0.wq.weight"],
+                    "compute_sharding": MuonComputeSharding(
+                        view_before_placement=BatchedMatrixComputeView(
+                            num_matrices=num_heads,
                         ),
-                    }
-                ],
-                bucket_specs=[
-                    BucketSpec(
-                        patterns=("layers.0.*",),
-                        mesh=self.mesh,
-                    )
-                ],
-            )
+                        placement=Shard(0),
+                    ),
+                }
+            ],
+            bucket_specs=[
+                BucketSpec(
+                    patterns=("layers.0.*",),
+                    mesh=self.mesh,
+                )
+            ],
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+
+        input = torch.tensor(
+            ((1.0, 2.0, 3.0), (4.0, 1.0, 2.0)),
+            device=self.device,
+        )
+        output_scales = torch.arange(1, 13, device=self.device).float()
+        (module(input) * output_scales).sum().backward()
+        full_grad = output_scales[:, None] * input.sum(dim=0)[None, :]
+
+        reference_parameters, reference_optimizer = self._build_per_head_reference(
+            value,
+            num_heads=num_heads,
+        )
+        parameter_before = parameter.to_local().clone()
+        reference_parameters_before = tuple(
+            reference.detach().clone() for reference in reference_parameters
+        )
+        for reference_parameter, head_grad in zip(
+            reference_parameters,
+            full_grad.view(num_heads, 4, 3),
+            strict=True,
+        ):
+            reference_parameter.grad = head_grad.clone()
+
+        all_to_all_single = dist.all_to_all_single
+        with patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "dist.all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            optimizer.step()
+        reference_optimizer.step()
+
+        local_rows, row_offset = Shard.local_shard_size_and_offset(
+            value.shape[0],
+            self.world_size,
+            self.mesh.get_local_rank(),
+        )
+        self.assertIsInstance(parameter, DTensor)
+        self.assertEqual(parameter.placements, (Shard(0),))
+        self.assertEqual(parameter.to_local().shape, torch.Size((6, 3)))
+        self.assertIsInstance(parameter.grad, DTensor)
+        self.assertEqual(parameter.grad.placements, (Shard(0),))
+        _assert_exact(
+            parameter.grad.to_local(),
+            full_grad.narrow(0, row_offset, local_rows),
+        )
+        self.assertEqual(collective.call_count, 2)
+        self._assert_split_head_matches_reference(
+            optimizer,
+            parameter,
+            reference_optimizer,
+            reference_parameters,
+            parameter_before=parameter_before,
+            reference_parameters_before=reference_parameters_before,
+        )
 
     @with_comms
     def test_constructor_rejects_owned_batched_matrix_view(self):
@@ -1345,30 +1643,79 @@ class TestDistributedMuonUnevenShards(_DistributedMuonTestBase):
     def world_size(self):
         return 4
 
-    @with_comms
-    def test_all_ranks_reject_shards_that_split_matrices(self):
-        parameter = self._parameter(
-            torch.arange(45, device=self.device).reshape(15, 3).float()
+    def _run_split_head_case(self, *, num_heads: int, head_rows: int) -> None:
+        num_columns = 3
+        value = (
+            torch.arange(
+                num_heads * head_rows * num_columns,
+                device=self.device,
+            )
+            .reshape(num_heads * head_rows, num_columns)
+            .float()
+            .div_(10)
+            .add_(1)
         )
-        with patch.object(DistributedMuon, "__init__", return_value=None) as init:
-            with self.assertRaisesRegex(ValueError, "not aligned"):
-                build_distributed_muon(
-                    [
-                        {
-                            "params": [parameter],
-                            "param_names": ["layers.0.wq.weight"],
-                            "compute_sharding": MuonComputeSharding(
-                                view_before_placement=BatchedMatrixComputeView(
-                                    num_matrices=5,
-                                    matrices_flattened_into_dim=0,
-                                ),
-                                placement=Shard(0),
-                            ),
-                        }
-                    ],
-                    bucket_specs=(),
-                )
-        init.assert_not_called()
+        parameter, optimizer = self._build_split_head_optimizer(
+            value,
+            num_heads=num_heads,
+        )
+        reference_parameters, reference_optimizer = self._build_per_head_reference(
+            value,
+            num_heads=num_heads,
+        )
+        parameter_before = parameter.to_local().clone()
+        reference_parameters_before = tuple(
+            reference.detach().clone() for reference in reference_parameters
+        )
+        grad = value.flip((0, 1)).contiguous().div_(17)
+        self._set_split_head_grads(parameter, reference_parameters, grad)
+
+        all_to_all_single = dist.all_to_all_single
+        with patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "dist.all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            optimizer.step()
+        self.assertEqual(collective.call_count, 2)
+
+        local_rank = self.mesh.get_local_rank()
+        local_num_heads, _ = Shard.local_shard_size_and_offset(
+            num_heads,
+            self.world_size,
+            local_rank,
+        )
+        head_numel = head_rows * num_columns
+        storage_to_compute, compute_to_storage = collective.call_args_list
+        self.assertEqual(
+            sum(storage_to_compute.kwargs["output_split_sizes"]),
+            local_num_heads * head_numel,
+        )
+        self.assertEqual(
+            sum(compute_to_storage.kwargs["input_split_sizes"]),
+            local_num_heads * head_numel,
+        )
+        self.assertGreater(parameter.to_local().numel(), 0)
+
+        reference_optimizer.step()
+        self._assert_split_head_matches_reference(
+            optimizer,
+            parameter,
+            reference_optimizer,
+            reference_parameters,
+            parameter_before=parameter_before,
+            reference_parameters_before=reference_parameters_before,
+        )
+
+    @with_comms
+    def test_uneven_heads_use_whole_head_shard0_compute(self):
+        self._run_split_head_case(num_heads=5, head_rows=3)
+
+    @with_comms
+    def test_more_ranks_than_heads_supports_empty_compute_shards(self):
+        # Eight storage rows keep every FSDP rank nonempty, while only the
+        # first two ranks receive a complete head for Muon compute.
+        self._run_split_head_case(num_heads=2, head_rows=4)
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
@@ -1526,11 +1873,17 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
         dense_value = (
             torch.arange(24, device=self.device).reshape(8, 3).float().div_(10)
         )
+        qkv_value = (
+            torch.arange(24, 60, device=self.device).reshape(12, 3).float().div_(10)
+        )
         expert_value = (
             torch.arange(48, device=self.device).reshape(8, 2, 3).float().div_(10)
         )
         dense = torch.nn.Parameter(
             distribute_tensor(dense_value.clone(), dense_mesh, (Shard(0),))
+        )
+        qkv = torch.nn.Parameter(
+            distribute_tensor(qkv_value.clone(), dense_mesh, (Shard(0),))
         )
         expert_placements = (
             _StridedShard(0, split_factor=expert_mesh["ep"].size()),
@@ -1549,6 +1902,16 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
                     "params": [dense],
                     "param_names": ["layers.0.dense.weight"],
                     "compute_sharding": MuonComputeSharding(placement=Owned()),
+                },
+                {
+                    "params": [qkv],
+                    "param_names": ["layers.0.qkv.weight"],
+                    "compute_sharding": MuonComputeSharding(
+                        view_before_placement=BatchedMatrixComputeView(
+                            num_matrices=3,
+                        ),
+                        placement=Shard(0),
+                    ),
                 },
                 {
                     "params": [expert],
@@ -1573,8 +1936,10 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
         dense_grad = (
             torch.arange(1, 25, device=self.device).reshape(8, 3).float().div_(17)
         )
+        qkv_grad = qkv_value.flip((0, 1)).contiguous().div_(23)
         expert_grad = expert_value.flip((0, 1, 2)).contiguous().div_(19)
         dense.grad = distribute_tensor(dense_grad.clone(), dense_mesh, (Shard(0),))
+        qkv.grad = distribute_tensor(qkv_grad.clone(), dense_mesh, (Shard(0),))
         expert.grad = distribute_tensor(
             expert_grad.clone(),
             expert_mesh,
@@ -1582,10 +1947,19 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
         )
 
         reference_dense = torch.nn.Parameter(dense_value.clone())
+        reference_qkv = tuple(
+            torch.nn.Parameter(matrix.clone()) for matrix in qkv_value.view(3, 4, 3)
+        )
         reference_experts = tuple(
             torch.nn.Parameter(matrix.clone()) for matrix in expert.to_local()
         )
         reference_dense.grad = dense_grad.clone()
+        for parameter, grad in zip(
+            reference_qkv,
+            qkv_grad.view(3, 4, 3),
+            strict=True,
+        ):
+            parameter.grad = grad.clone()
         for parameter, grad in zip(
             reference_experts,
             expert.grad.to_local(),
@@ -1593,25 +1967,48 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
         ):
             parameter.grad = grad.clone()
         reference_optimizer = torch.optim.Muon(
-            [reference_dense, *reference_experts],
+            [reference_dense, *reference_qkv, *reference_experts],
             lr=0.03,
             weight_decay=0.2,
             momentum=0.8,
             nesterov=True,
             ns_steps=2,
         )
+        rank = dense_mesh.get_local_rank()
+        qkv_before = qkv.to_local().clone()
+        reference_qkv_before = torch.cat(
+            [parameter.detach().clone() for parameter in reference_qkv]
+        ).chunk(self.world_size, dim=0)[rank]
         expert_before = expert.to_local().clone()
         reference_experts_before = torch.stack(
             [parameter.detach().clone() for parameter in reference_experts]
         )
 
-        optimizer.step()
+        all_to_all_single = dist.all_to_all_single
+        with patch(
+            "torchtitan.components.distributed_optimizers.flex_optimizer_reshard."
+            "dist.all_to_all_single",
+            wraps=all_to_all_single,
+        ) as collective:
+            optimizer.step()
         reference_optimizer.step()
 
-        rank = dense_mesh.get_local_rank()
+        self.assertEqual(collective.call_count, 2)
         _assert_exact(
             dense.to_local(),
             reference_dense.detach().chunk(self.world_size, dim=0)[rank],
+        )
+        reference_qkv_after = torch.cat(
+            [parameter.detach() for parameter in reference_qkv]
+        ).chunk(self.world_size, dim=0)[rank]
+        _assert_batched_muon_update_close(
+            qkv_before,
+            qkv.to_local(),
+            reference_qkv_before,
+            reference_qkv_after,
+            lr=0.03,
+            weight_decay=0.2,
+            compute_matrix_shape=reference_qkv[0].shape,
         )
         _assert_batched_muon_update_close(
             expert_before,
@@ -1629,6 +2026,17 @@ class TestDistributedMuonBucketMeshes(_DistributedMuonTestBase):
         _assert_exact(
             dense_momentum.to_local(),
             reference_dense_momentum.chunk(self.world_size, dim=0)[rank],
+        )
+        qkv_momentum = optimizer.state[qkv]["momentum_buffer"]
+        reference_qkv_momentum = torch.cat(
+            [
+                reference_optimizer.state[parameter]["momentum_buffer"]
+                for parameter in reference_qkv
+            ]
+        )
+        _assert_exact(
+            qkv_momentum.to_local(),
+            reference_qkv_momentum.chunk(self.world_size, dim=0)[rank],
         )
         expert_momentum = optimizer.state[expert]["momentum_buffer"]
         _assert_exact(

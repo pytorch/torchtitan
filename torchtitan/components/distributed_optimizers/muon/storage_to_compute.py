@@ -490,6 +490,16 @@ def _resolve_storage_to_compute_transition(
                     compute_distribution=_ShardedCompute(0),
                     storage_to_compute_transition=_NoRedistributionTransition(),
                 )
+            if (
+                local_storage_view is None
+                and storage_can_redistribute
+                and storage_shard_axis is not None
+            ):
+                return _ResolvedStorageToComputeTransition(
+                    compute_distribution=_ShardedCompute(0),
+                    storage_to_compute_transition=_ShardedRedistributionTransition(),
+                    redistribution_storage_mesh_axis=storage_shard_axis,
+                )
     elif (
         isinstance(compute_placement, Owned)
         and len(global_compute_shape) == 2

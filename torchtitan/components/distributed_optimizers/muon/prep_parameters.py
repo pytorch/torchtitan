@@ -69,7 +69,9 @@ class MuonComputeSharding:
     """Define the logical Muon tensor and its compute placement.
 
     ``Owned`` balances complete 2D matrices across bucket participants.
-    ``Shard(0)`` partitions rank-3 matrix batches along the batch dimension.
+    ``Shard(0)`` partitions rank-3 matrix batches along
+    the matrix-batch dimension. Aligned storage computes locally; otherwise an
+    exact one-dimensional ``Shard(0)`` storage layout is repartitioned.
     Storage is redistributed when it does not already match the requested
     compute placement.
     """
@@ -136,6 +138,7 @@ def build_distributed_muon(
     for param, fqn, compute_view in parameters_to_prepare:
         global_storage_shape = torch.Size(param.shape)
         resolved_view = None
+        storage_shards_are_matrix_aligned = True
         if compute_view is not None and any(
             type(placement) not in (Shard, Replicate)
             for placement in getattr(param, "placements", ())
@@ -147,10 +150,12 @@ def build_distributed_muon(
         if compute_view is not None:
             resolved_view = compute_view._resolve(global_storage_shape)
             if isinstance(param, DTensor):
-                _validate_batched_matrix_storage_alignment(
-                    fqn,
-                    param,
-                    resolved_view,
+                storage_shards_are_matrix_aligned = (
+                    _validate_batched_matrix_storage_alignment(
+                        fqn,
+                        param,
+                        resolved_view,
+                    )
                 )
         local_storage = param.to_local() if isinstance(param, DTensor) else param
         local_storage_for_compute_view = (
@@ -175,8 +180,12 @@ def build_distributed_muon(
                     resolved_view.matrix_columns,
                 )
             )
-            local_storage_view = local_storage_for_compute_view.view(
-                resolved_view.compute_shape(local_storage_shape)
+            local_storage_view = (
+                local_storage_for_compute_view.view(
+                    resolved_view.compute_shape(local_storage_shape)
+                )
+                if storage_shards_are_matrix_aligned
+                else None
             )
         if len(global_compute_shape) not in (2, 3):
             raise ValueError(
@@ -225,8 +234,8 @@ def _validate_batched_matrix_storage_alignment(
     fqn: str,
     param: DTensor,
     resolved_view: _ResolvedBatchedMatrixView,
-) -> None:
-    """Validate every storage shard from globally identical DTensor metadata."""
+) -> bool:
+    """Validate every storage shard and return whether all preserve matrices."""
     for placement in param.placements:
         if type(placement) is Replicate:
             continue
@@ -240,6 +249,7 @@ def _validate_batched_matrix_storage_alignment(
     matrix_rows = resolved_view.matrix_rows
     # Every rank must validate all coordinates before DistributedMuon performs
     # collectives; checking only the local shard could strand its peers.
+    storage_is_aligned = True
     coordinates = product(
         *(range(mesh_axis_size) for mesh_axis_size in param.device_mesh.shape)
     )
@@ -253,7 +263,14 @@ def _validate_batched_matrix_storage_alignment(
         if local_shape[0] and (
             local_shape[0] % matrix_rows or global_offset[0] % matrix_rows
         ):
-            raise ValueError(
-                f"batched-matrix Muon parameter {fqn!r} storage shards are not "
-                f"aligned to matrix rows of size {matrix_rows}"
-            )
+            storage_is_aligned = False
+
+    if not storage_is_aligned and (
+        len(param.device_mesh.shape) != 1 or param.placements != (Shard(0),)
+    ):
+        raise ValueError(
+            f"batched-matrix Muon parameter {fqn!r} storage shards are not "
+            f"aligned to matrix rows of size {matrix_rows}; unaligned storage "
+            "requires an exact one-dimensional Shard(0) placement"
+        )
+    return storage_is_aligned
