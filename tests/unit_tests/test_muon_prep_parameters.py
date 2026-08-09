@@ -26,11 +26,9 @@ class TestMuonParameterPrep(unittest.TestCase):
     def test_batched_matrix_view_validation(self):
         with self.assertRaisesRegex(ValueError, "positive integer"):
             BatchedMatrixComputeView(0)
-        with self.assertRaisesRegex(ValueError, "only matrices_flattened_into_dim=0"):
-            BatchedMatrixComputeView(3, 1)
 
     def test_builder_compiles_layout_without_mutating_caller_group(self):
-        view = BatchedMatrixComputeView(num_matrices=3, matrices_flattened_into_dim=0)
+        view = BatchedMatrixComputeView(num_matrices=3)
         compute_sharding = MuonComputeSharding(
             view_before_placement=view,
             placement=Shard(0),
@@ -114,7 +112,7 @@ class TestMuonParameterPrep(unittest.TestCase):
         storage = torch.empty(2, 2)
         config = BucketConfig(
             patterns=("layers.*",),
-            mesh_axes=("optimizer",),
+            mesh_axis="optimizer",
         )
 
         with mock.patch.object(DistributedMuon, "__init__", return_value=None) as init:
@@ -142,9 +140,7 @@ class TestMuonParameterPrep(unittest.TestCase):
                                 "params": [torch.empty(shape)],
                                 "param_names": ["layers.0.wq.weight"],
                                 "compute_sharding": MuonComputeSharding(
-                                    view_before_placement=BatchedMatrixComputeView(
-                                        2, 0
-                                    ),
+                                    view_before_placement=BatchedMatrixComputeView(2),
                                     placement=Shard(0),
                                 ),
                             }
