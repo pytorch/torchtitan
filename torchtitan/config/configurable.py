@@ -50,6 +50,8 @@ class Configurable:
                 if hasattr(val, "to_dict"):
                     return val.to_dict()
                 elif dataclasses.is_dataclass(val):
+                    # dataclasses.asdict() recursively flattens nested dataclasses
+                    # before _convert can honor their custom to_dict() serialization.
                     return {
                         f.name: _convert(getattr(val, f.name))
                         for f in dataclasses.fields(val)
