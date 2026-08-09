@@ -37,6 +37,149 @@ from torchtitan.trainer import Trainer
 from . import KIMI_K2_5_SPECIAL_TOKENS, model_registry
 
 
+def kimi_k2_5_debugmodel() -> Trainer.Config:
+    model_spec = model_registry("debugmodel")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./tests/assets/tokenizer",
+        tokenizer=MultiModalTokenizer.Config(**KIMI_K2_5_SPECIAL_TOKENS),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_spec,
+        dataloader=_mm_dataloader("cc12m-test"),
+        optimizer=_kimi_k2_5_debug_distributed_muon_optimizer(),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=1,
+            seq_len=512,
+            steps=10,
+        ),
+        parallelism=ParallelismConfig(spmd_backend="spmd_types"),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=SelectiveAC.Config(),
+    )
+
+
+def moonlight_16b_a3b() -> Trainer.Config:
+    """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
+    model_spec = model_registry("moonlight-16B-A3B", attn_backend="flex")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./assets/hf/Moonlight-16B-A3B",
+        model_spec=model_spec,
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        optimizer=_moonlight_distributed_muon_optimizer(),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2000,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=4,
+            seq_len=4096,
+            steps=10000,
+        ),
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=8,
+            spmd_backend="spmd_types",
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=FullAC.Config(),
+    )
+
+
+def kimi_vl_a3b() -> Trainer.Config:
+    """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
+    model_spec = model_registry("Kimi-VL-A3B", attn_backend="flex")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./assets/hf/Kimi-VL-A3B",
+        # Kimi-VL-A3B names the vision-start token <|media_start|>, whereas the
+        # K2.5 family uses <|media_begin|>; override just that one entry.
+        tokenizer=MultiModalTokenizer.Config(
+            **{**KIMI_K2_5_SPECIAL_TOKENS, "vision_start_token": "<|media_start|>"}
+        ),
+        model_spec=model_spec,
+        # Kimi-VL is a compatibility flavor; resizing intentionally follows
+        # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
+        dataloader=_mm_dataloader("cc12m"),
+        optimizer=default_adamw(lr=3e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2000,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=1,
+            seq_len=4096,
+            steps=10000,
+        ),
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=8,
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=FullAC.Config(),
+    )
+
+
+def kimi_k2_5() -> Trainer.Config:
+    """Full Kimi K2.5 (~1T-total / ~32B-active)."""
+    compile_config = CompileConfig(enable=True, components=["loss"])
+    # The report uses BF16 compute; its FP8 path only compresses saved activations.
+    model_spec = model_registry("Kimi-K2.5", attn_backend="flex")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./assets/hf/Kimi-K2.5",
+        model_spec=model_spec,
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        optimizer=_kimi_k2_5_distributed_muon_optimizer(),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2000,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=4,
+            seq_len=4096,
+            steps=10000,
+        ),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="Interleaved1F1B",
+            expert_parallel_degree=8,
+            spmd_backend="spmd_types",
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=FullAC.Config(),
+        compile=compile_config,
+    )
+
+
 def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
     return MMDataLoader.Config(
         dataset=dataset,
@@ -56,12 +199,46 @@ def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
     )
 
 
-def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
-    return MuonComputeSharding(
-        view_before_placement=BatchedMatrixComputeView(
-            num_matrices=num_heads,
-        ),
-        placement=Shard(0),
+def _moonlight_distributed_muon_optimizer() -> OptimizersContainer.Config:
+    per_head = _per_head_muon_sharding(num_heads=16)
+    return _kimi_text_distributed_muon_optimizer(
+        num_layers=27,
+        lr=3e-4,
+        attention_shardings={
+            "wq": per_head,
+            "wkv_a": MuonComputeSharding(placement=Owned()),
+            "wkv_b": per_head,
+            "wo": MuonComputeSharding(placement=Owned()),
+        },
+    )
+
+
+def _kimi_k2_5_debug_distributed_muon_optimizer() -> OptimizersContainer.Config:
+    per_head = _per_head_muon_sharding(num_heads=16)
+    return _kimi_text_distributed_muon_optimizer(
+        num_layers=6,
+        lr=8e-4,
+        attention_shardings={
+            "wq": per_head,
+            "wkv_a": MuonComputeSharding(placement=Owned()),
+            "wkv_b": per_head,
+            "wo": MuonComputeSharding(placement=Owned()),
+        },
+    )
+
+
+def _kimi_k2_5_distributed_muon_optimizer() -> OptimizersContainer.Config:
+    per_head = _per_head_muon_sharding(num_heads=64)
+    return _kimi_text_distributed_muon_optimizer(
+        num_layers=61,
+        lr=2.2e-4,
+        attention_shardings={
+            "wq_a": MuonComputeSharding(placement=Owned()),
+            "wq_b": per_head,
+            "wkv_a": MuonComputeSharding(placement=Owned()),
+            "wkv_b": per_head,
+            "wo": MuonComputeSharding(placement=Owned()),
+        },
     )
 
 
@@ -192,186 +369,10 @@ def _kimi_text_distributed_muon_optimizer(
     )
 
 
-def _moonlight_distributed_muon_optimizer() -> OptimizersContainer.Config:
-    per_head = _per_head_muon_sharding(num_heads=16)
-    return _kimi_text_distributed_muon_optimizer(
-        num_layers=27,
-        lr=3e-4,
-        attention_shardings={
-            "wq": per_head,
-            "wkv_a": MuonComputeSharding(placement=Owned()),
-            "wkv_b": per_head,
-            "wo": MuonComputeSharding(placement=Owned()),
-        },
-    )
-
-
-def _kimi_k2_5_distributed_muon_optimizer() -> OptimizersContainer.Config:
-    per_head = _per_head_muon_sharding(num_heads=64)
-    return _kimi_text_distributed_muon_optimizer(
-        num_layers=61,
-        lr=2.2e-4,
-        attention_shardings={
-            "wq_a": MuonComputeSharding(placement=Owned()),
-            "wq_b": per_head,
-            "wkv_a": MuonComputeSharding(placement=Owned()),
-            "wkv_b": per_head,
-            "wo": MuonComputeSharding(placement=Owned()),
-        },
-    )
-
-
-def kimi_k2_5_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
-    return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
-            ),
+def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
+    return MuonComputeSharding(
+        view_before_placement=BatchedMatrixComputeView(
+            num_matrices=num_heads,
         ),
-        hf_assets_path="./tests/assets/tokenizer",
-        tokenizer=MultiModalTokenizer.Config(**KIMI_K2_5_SPECIAL_TOKENS),
-        metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
-        dataloader=_mm_dataloader("cc12m-test"),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
-        ),
-        training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=512,
-            steps=10,
-        ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
-        activation_checkpoint=SelectiveAC.Config(),
-    )
-
-
-def moonlight_16b_a3b() -> Trainer.Config:
-    """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
-    model_spec = model_registry("moonlight-16B-A3B", attn_backend="flex")
-    return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
-            ),
-        ),
-        hf_assets_path="./assets/hf/Moonlight-16B-A3B",
-        model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_moonlight_distributed_muon_optimizer(),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2000,
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.1,
-        ),
-        training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
-            steps=10000,
-        ),
-        parallelism=ParallelismConfig(
-            data_parallel_replicate_degree=1,
-            data_parallel_shard_degree=8,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-            expert_parallel_degree=4,
-            enable_sequence_parallel=False,
-            spmd_backend="spmd_types",
-        ),
-        checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=FullAC.Config(),
-    )
-
-
-def kimi_vl_a3b() -> Trainer.Config:
-    """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
-    model_spec = model_registry("Kimi-VL-A3B", attn_backend="flex")
-    return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
-            ),
-        ),
-        hf_assets_path="./assets/hf/Kimi-VL-A3B",
-        # Kimi-VL-A3B names the vision-start token <|media_start|>, whereas the
-        # K2.5 family uses <|media_begin|>; override just that one entry.
-        tokenizer=MultiModalTokenizer.Config(
-            **{**KIMI_K2_5_SPECIAL_TOKENS, "vision_start_token": "<|media_start|>"}
-        ),
-        model_spec=model_spec,
-        # Kimi-VL is a compatibility flavor; resizing intentionally follows
-        # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
-        dataloader=_mm_dataloader("cc12m"),
-        optimizer=default_adamw(lr=3e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2000,
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.1,
-        ),
-        training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=4096,
-            steps=10000,
-        ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=8,
-        ),
-        checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=FullAC.Config(),
-    )
-
-
-def kimi_k2_5() -> Trainer.Config:
-    """Full Kimi K2.5 (~1T-total / ~32B-active)."""
-    compile_config = CompileConfig(enable=True, components=["loss"])
-    # The report uses BF16 compute; its FP8 path only compresses saved activations.
-    model_spec = model_registry("Kimi-K2.5", attn_backend="flex")
-    return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
-            ),
-        ),
-        hf_assets_path="./assets/hf/Kimi-K2.5",
-        model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_kimi_k2_5_distributed_muon_optimizer(),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2000,
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.1,
-        ),
-        training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
-            steps=10000,
-        ),
-        parallelism=ParallelismConfig(
-            data_parallel_replicate_degree=1,
-            data_parallel_shard_degree=64,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-            expert_parallel_degree=8,
-            enable_sequence_parallel=False,
-            spmd_backend="spmd_types",
-        ),
-        checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=FullAC.Config(),
-        compile=compile_config,
+        placement=Shard(0),
     )
