@@ -856,6 +856,15 @@ class Qwen35Model(Decoder):
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
+
+        # As in Decoder.forward, which this override does not call.
+        if (
+            self._needs_varlen_masks
+            and attention_masks is None
+            and positions is not None
+        ):
+            attention_masks = self.get_attention_masks(positions)
+
         for layer in self.layers.values():
             x = layer(x, attention_masks, rope_positions)
 

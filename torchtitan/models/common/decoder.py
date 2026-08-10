@@ -234,6 +234,11 @@ class Decoder(BaseModel):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.lm_head.weight
 
+        self._needs_varlen_masks = isinstance(
+            getattr(config.first_attention, "inner_attention", None),
+            VarlenAttention.Config,
+        )
+
     def init_states(
         self,
         *,
@@ -258,6 +263,16 @@ class Decoder(BaseModel):
         # which returns (tokens, positions) and binds them positionally, maps
         # positions to the right parameter (it would otherwise land in the
         # attention_masks slot and break the maskless SDPA backend).
+
+        # Derived here, not handed in: cu_seqlens index this forward's tokens,
+        # and a pipeline schedule would slice them like per-sample data.
+        if (
+            self._needs_varlen_masks
+            and attention_masks is None
+            and positions is not None
+        ):
+            attention_masks = self.get_attention_masks(positions)
+
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 

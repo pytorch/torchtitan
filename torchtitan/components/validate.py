@@ -21,7 +21,7 @@ from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import utils
@@ -177,17 +177,16 @@ class Validator(BaseValidator):
 
         positions = extra_kwargs.get("positions", None)
         # positions and attention_masks are optional (Decoder.forward defaults
-        # both to None). Build masks only for the masked backends (Flex/Varlen),
-        # which is where get_attention_masks is defined. A maskless backend (the
-        # SDPA config used by the graph_trainer tests) still receives positions
-        # for RoPE but no masks — it relies on is_causal instead.
+        # both to None). Build masks only for flex, which is where
+        # get_attention_masks is defined. A maskless backend (the SDPA config
+        # used by the graph_trainer tests) still receives positions for RoPE but
+        # no masks -- it relies on is_causal instead. Varlen metadata is derived
+        # in Decoder.forward instead; see there.
         if isinstance(model_config, Decoder.Config) and positions is not None:
             inner_attention = getattr(
                 model_config.first_attention, "inner_attention", None
             )
-            if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
-            ):
+            if isinstance(inner_attention, FlexAttention.Config):
                 model = cast(Decoder, model_parts[0])
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
                     positions=positions,

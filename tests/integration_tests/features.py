@@ -603,6 +603,19 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module llama3 --config llama3_debugmodel_varlen_attn",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.pipeline_parallel_degree=2",
+                ]
+            ],
+            "PP+FSDP+VARLEN_ATTN",
+            "pp+fsdp+varlen_attn",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--module llama3 --config llama3_debugmodel_float8_emulate_lora",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
