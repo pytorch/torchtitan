@@ -262,8 +262,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     # Consolidate the former 2-GPU FSDP smoke and 8-GPU
                     # FSDP+TP+EP+PP test into one supported FSDP+EP path with
                     # checkpoint resume. Kimi DistributedMuon rejects TP because
-                    # it produces _StridedShard storage, and rejects PP because
-                    # each stage owns only a subset of its global optimizer groups.
+                    # it produces _StridedShard storage.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
@@ -286,6 +285,47 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "Kimi K2.7 DistributedMuon spmd_types FSDP+EP checkpoint resume",
             "kimi_k2_5_muon_fsdp+ep_spmd_types",
             ngpu=6,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    # PP partitions global optimizer groups across stages. The
+                    # resume run covers stage-local Muon state and flex-slot reuse.
+                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
+                    "--parallelism.spmd_backend spmd_types",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--training.local_batch_size 4",
+                    # Every DP shard must have one resumed batch. Sequence length
+                    # 512 filters all remaining samples on one test-data shard.
+                    "--training.seq_len 1024",
+                    "activation-checkpoint:full",
+                    "--training.steps 1",
+                    "--checkpoint.enable",
+                    "--checkpoint.enable_first_step_checkpoint",
+                ],
+                [
+                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
+                    "--parallelism.spmd_backend spmd_types",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--training.local_batch_size 4",
+                    "--training.seq_len 1024",
+                    "activation-checkpoint:full",
+                    # Stop before the tiny test dataset wraps so checkpoint
+                    # continuation consumes the same samples as an uninterrupted run.
+                    "--training.steps 2",
+                    "--checkpoint.enable",
+                ],
+            ],
+            "Kimi K2.7 DistributedMuon PP+FSDP+EP+FullAC checkpoint resume",
+            "kimi_k2_5_muon_pp+fsdp+ep+full_ac",
+            ngpu=8,
+            timeout=600,
         ),
     ]
 

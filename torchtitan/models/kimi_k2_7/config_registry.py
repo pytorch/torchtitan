@@ -363,16 +363,11 @@ class _KimiTrainerConfig(Trainer.Config):
             group.optimizer_name == "DistributedMuon"
             for group in self.optimizer.param_groups
         )
-        if uses_distributed_muon and (
-            self.parallelism.tensor_parallel_degree > 1
-            or self.parallelism.pipeline_parallel_degree > 1
-        ):
+        if uses_distributed_muon and self.parallelism.tensor_parallel_degree > 1:
             # Fail during config parsing, before TP/FSDP creates _StridedShard
-            # storage or PP constructs optimizers from stage-local parameters.
+            # storage.
             raise ValueError(
                 "Kimi DistributedMuon currently requires "
-                "tensor_parallel_degree=1 and pipeline_parallel_degree=1: "
-                "tensor parallelism can produce unsupported _StridedShard "
-                "parameter layouts, and pipeline parallelism gives each stage "
-                "only a subset of the optimizer's parameter-group patterns."
+                "tensor_parallel_degree=1: tensor parallelism can produce "
+                "unsupported _StridedShard parameter layouts."
             )
