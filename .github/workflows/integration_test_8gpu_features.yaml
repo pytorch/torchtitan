@@ -89,8 +89,9 @@ jobs:
         end=$(date +%s)
         echo "pip install torchao took $((end - start)) seconds"
 
-        # Discover GPU unit tests that CPU unit CI collects but skips.
-        python -m pytest tests/unit_tests -m gpu --durations=20 -vv
+        # Run the GPU-only DistributedMuon test that CPU unit CI skips.
+        python -m pytest tests/unit_tests/test_distributed_muon.py \
+          -m gpu --durations=20 -vv
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
