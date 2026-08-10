@@ -185,6 +185,7 @@ def build_mla_moe_layers(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
+    absorb_router_scores: bool = False,
     linear_init: dict[str, Callable],
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
@@ -249,6 +250,7 @@ def build_mla_moe_layers(
                     param_init=depth_experts_init(layer_id),
                     comm_backend=moe_comm_backend,
                     non_blocking_capacity_factor=non_blocking_capacity_factor,
+                    absorb_router_scores=absorb_router_scores,
                 ),
                 shared_experts=make_ffn_config(
                     dim=dim,
@@ -276,6 +278,7 @@ def _build_dsv3_layers(**kwargs) -> list[TransformerBlock.Config]:
     """Thin wrapper: ``build_mla_moe_layers`` with DeepSeek V3's own inits."""
     return build_mla_moe_layers(
         **kwargs,
+        absorb_router_scores=True,
         linear_init=_LINEAR_INIT,
         norm_init=_NORM_INIT,
         depth_init=_depth_init,

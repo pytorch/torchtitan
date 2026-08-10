@@ -56,6 +56,8 @@ class GroupedExperts(Module):
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine.
 
@@ -103,6 +105,8 @@ class GroupedExperts(Module):
             B_t=w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
+        if routed_scores_R is not None:
+            h_RF = h_RF * routed_scores_R.to(h_RF.dtype).reshape(-1, 1)
         return self._grouped_mm(
             A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
@@ -128,9 +132,13 @@ class RoutedExperts(Module):
     class Config(Module.Config):
         inner_experts: GroupedExperts.Config
         token_dispatcher: LocalTokenDispatcher.Config
+        absorb_router_scores: bool = False
+        """Apply router scores to the expert intermediate before its output
+        projection, then skip router-score multiplication during combine."""
 
     def __init__(self, config: Config):
         super().__init__()
+        self.absorb_router_scores = config.absorb_router_scores
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
 
@@ -161,22 +169,29 @@ class RoutedExperts(Module):
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
             metadata,
+            routed_scores_R,
         ) = self.token_dispatcher.dispatch(
             x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
+            absorb_router_scores=self.absorb_router_scores,
         )
+
         with maybe_set_sparse_mesh():
             routed_output_RD = self.inner_experts(
-                routed_input_RD, num_global_tokens_per_local_expert_e
+                routed_input_RD,
+                num_global_tokens_per_local_expert_e,
+                routed_scores_R=routed_scores_R,
             )
+
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
             x_TD,
             num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
             local_seq_len_after_padding=local_seq_len_after_padding,
+            router_scores_applied=routed_scores_R is not None,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
