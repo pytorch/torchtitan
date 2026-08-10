@@ -620,7 +620,6 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
     )
     # Generator-only overrides -> cudagraph-able DeepEP EXPAND dispatch; trainer keeps compact.
-    # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
     config.generator.override = OverrideConfig(
         imports=[
             "torchtitan.overrides.fused_swiglu.fused_swiglu",
@@ -631,9 +630,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
             ),
         ]
     )
-    config.generator.cudagraph = VLLMCudagraphConfig(
-        enable=True, mode="FULL_AND_PIECEWISE"
-    )
+    config.generator.cudagraph = VLLMCudagraphConfig(enable=True, mode="FULL")
     # Two inference knobs to set per workload (no golden default; here EP=4):
     #  * max_num_batched_tokens: vLLM's per-step token budget. We expose the knob (default
     #    None -> vLLM's own default of 2048). Decide it from your input/rollout sequence

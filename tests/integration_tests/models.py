@@ -63,7 +63,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel_mtp",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
@@ -71,8 +71,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "torchtitan.overrides.helion_rope.helion_complex_rope",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP+compile (+ Helion RoPE override)",
-            "deepseek_v3_fsdp+ep+compile",
+            "DeepSeek V3 MTP FSDP+EP+compile",
+            "deepseek_v3_mtp_fsdp+ep+compile",
             ngpu=4,
             # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
             # H100/GB200; skip on ROCm where they are unvalidated.
@@ -239,7 +239,37 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module gpt_oss --config gpt_oss_debugmodel",
+                    "--training.global_batch_size 64",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.expert_parallel_degree 4",
+                    "activation-checkpoint:selective",
+                ],
+            ],
+            "Gpt-oss PP+FSDP+EP+SACOP with VarlenAttention",
+            "gpt_oss_pp+fsdp+ep+sacop",
+            ngpu=8,
+        ),
         # Integration Test Cases for Kimi K2.7
+        OverrideDefinitions(
+            [
+                [
+                    # Do not enable --debug.spmd_typechecking: multimodal pixel
+                    # tensors from the dataloader are not SPMD-annotated yet.
+                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
+                    "--parallelism.spmd_backend spmd_types",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "Kimi K2.7 multimodal spmd_types FSDP",
+            "kimi_k2_5_mm_fsdp_spmd_types",
+            ngpu=2,
+        ),
         OverrideDefinitions(
             [
                 [
