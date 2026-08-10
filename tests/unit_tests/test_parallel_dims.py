@@ -652,6 +652,71 @@ class TestSpmdMeshesFullDTensor(DTensorTestBase):
             self.assertEqual(dense.mesh_dim_names, ("dp_replicate", "dp_shard", "tp"))
 
 
+class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
+    """get_all_one_dimensional_meshes() must not report fake-backed axes."""
+
+    @property
+    def world_size(self):
+        return 8
+
+    @with_comms
+    def test_efsdp_excluded_when_ep_disabled(self):
+        """With ep=1, efsdp is fake-backed even though its size is > 1."""
+        with patch(
+            "torchtitan.distributed.parallel_dims.device_type", self.device_type
+        ):
+            pd = ParallelDims(
+                dp_replicate=1,
+                dp_shard=4,
+                cp=1,
+                tp=2,
+                pp=1,
+                ep=1,
+                world_size=8,
+            )
+            pd.build_mesh()
+
+            # efsdp = dp_shard * cp * tp / ep = 4 * 1 * 2 / 1 = 8, so the
+            # size > 1 filter alone would let this fake-backed axis through.
+            self.assertEqual(pd._single_axis_meshes["efsdp"].size(), 8)
+            self.assertIsNone(pd.get_optional_mesh("efsdp"))
+
+            one_d_meshes = pd.get_all_one_dimensional_meshes()
+            self.assertNotIn("efsdp", one_d_meshes)
+            self.assertIn("fsdp", one_d_meshes)
+            self.assertIn("tp", one_d_meshes)
+            # Every reported axis must own a usable process group.
+            for name, mesh in one_d_meshes.items():
+                self.assertNotEqual(
+                    dist.get_backend(mesh.get_group()), "fake", f"axis {name}"
+                )
+
+    @with_comms
+    def test_efsdp_reported_when_ep_enabled(self):
+        """With ep>1, efsdp is real and must still be reported."""
+        with patch(
+            "torchtitan.distributed.parallel_dims.device_type", self.device_type
+        ):
+            pd = ParallelDims(
+                dp_replicate=1,
+                dp_shard=4,
+                cp=1,
+                tp=2,
+                pp=1,
+                ep=2,
+                world_size=8,
+            )
+            pd.build_mesh()
+
+            one_d_meshes = pd.get_all_one_dimensional_meshes()
+            self.assertIn("efsdp", one_d_meshes)
+            self.assertIn("ep", one_d_meshes)
+            for name, mesh in one_d_meshes.items():
+                self.assertNotEqual(
+                    dist.get_backend(mesh.get_group()), "fake", f"axis {name}"
+                )
+
+
 class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
     """Test ParallelDims mesh operations with 8-rank distributed environment."""
 
@@ -746,20 +811,22 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             hsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
             self.assertEqual(hsdp_mesh.shape, (2, 2))
 
-            # Test get_all_one_dimensional_meshes returns only meshes with size > 1
+            # Test get_all_one_dimensional_meshes returns only enabled meshes
             one_d_meshes = parallel_dims.get_all_one_dimensional_meshes()
             self.assertGreater(len(one_d_meshes), 0)
-            # Should include: dp_replicate, fsdp, tp, batch, loss, efsdp (all with size > 1)
+            # Should include: dp_replicate, fsdp, tp, batch, loss (all with size > 1)
             self.assertIn("dp_replicate", one_d_meshes)
             self.assertIn("fsdp", one_d_meshes)
             self.assertIn("tp", one_d_meshes)
             self.assertIn("batch", one_d_meshes)
             self.assertIn("loss", one_d_meshes)
-            self.assertIn("efsdp", one_d_meshes)
             # Should not include: pp, cp, ep (all with size = 1)
             self.assertNotIn("pp", one_d_meshes)
             self.assertNotIn("cp", one_d_meshes)
             self.assertNotIn("ep", one_d_meshes)
+            # Should not include efsdp: with ep=1 it does not exist, so it was
+            # unflattened with the fake backend even though its size is 4.
+            self.assertNotIn("efsdp", one_d_meshes)
 
             # Test that we can get 2D meshes via get_mesh() instead
             dp_replicate_fsdp = parallel_dims.get_mesh(["dp_replicate", "fsdp"])

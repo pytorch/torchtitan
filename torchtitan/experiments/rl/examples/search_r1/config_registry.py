@@ -108,8 +108,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            # cudagraph on: decode-only graphs (FULL_DECODE_ONLY) are safe at this
-            # config's large batch; plain full graphs corrupted here before. See #3668.
             cudagraph=VLLMCudagraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -222,9 +220,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            # varlen attention -> FULL_AND_PIECEWISE (decode captured FULL, prefill
-            # piecewise).
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
             # Generator-only: DeepEP cudagraph EXPAND dispatch on top of the perf overrides.

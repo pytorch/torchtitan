@@ -97,6 +97,24 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.training.steps == 5
 
+    def test_pipeline_microbatch_size_must_divide_local_batch_size(self):
+        config_manager = ConfigManager()
+        with pytest.raises(ValueError, match="must be evenly divisible"):
+            config_manager.parse_args(
+                [
+                    "--module",
+                    "llama3",
+                    "--config",
+                    "llama3_debugmodel",
+                    "--training.local_batch_size",
+                    "8",
+                    "--parallelism.pipeline_parallel_degree",
+                    "2",
+                    "--parallelism.pipeline_parallel_microbatch_size",
+                    "3",
+                ]
+            )
+
     def test_cli_override_dump_folder(self):
         """CLI args override config defaults for nested fields."""
         config_manager = ConfigManager()
