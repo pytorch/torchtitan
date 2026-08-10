@@ -6,12 +6,17 @@
 
 from dataclasses import replace
 
+from torchtitan.components.quantization import (
+    MXFP8GroupedExpertsConverter,
+    MXFP8LinearConverter,
+)
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
     deepseek_v3_16b_minimal_async_ep,
@@ -25,6 +30,27 @@ from . import model_registry
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
+    base = deepseek_v3_debugmodel()
+    # Quantize dense and moe gemms to mxfp8
+    base.model_spec = deepseek_v3_model_registry(
+        "debugmodel",
+        converters=[
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=True,
+                fqns=["attention", "shared_experts", "feed_forward"],
+            ),
+            MXFP8GroupedExpertsConverter.Config(
+                model_compile_enabled=True,
+                pad_multiple=128,
+            ),
+        ],
+    )
+    config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 

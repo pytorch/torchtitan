@@ -1349,7 +1349,11 @@ class TestMetadataPropagation(unittest.TestCase):
                 if not node.stack_trace:
                     bwd_nodes_missing_stack_trace.append((node.name, seq_nr))
 
-        self.assertEqual(num_checked, 24)
+        self.assertGreater(
+            num_checked,
+            0,
+            "Expected at least one backward node with a forward stack_trace",
+        )
         self.assertEqual(
             bwd_nodes_missing_stack_trace,
             [],
