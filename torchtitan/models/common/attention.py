@@ -12,7 +12,7 @@
 #   H = head dimension (per-head dim),
 #   T = packed tokens (B*L, used by VarlenAttention)
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
@@ -80,7 +80,12 @@ class VarlenMetadata(NamedTuple):
     cu_seq_q_host: tuple[int, ...] | None = None
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+# Mapping (not dict) so covariant value types accept both dict[str, BlockMask]
+# (e.g. gpt_oss) and mixed dicts carrying VarlenMetadata (e.g. qwen3.5's
+# GatedDeltaNet document offsets).
+AttentionMasksType = (
+    Mapping[str, BlockMask | VarlenMetadata] | BlockMask | VarlenMetadata
+)
 
 
 class VarlenAttention(Module):
