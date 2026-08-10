@@ -167,6 +167,12 @@ class Profiler(Configurable):
         enable_memory_snapshot: bool = False
         """Whether to dump memory snapshot."""
 
+        memory_snapshot_freq: int | None = None
+        """How often to collect memory snapshots, in iterations.
+
+        Defaults to ``profile_freq`` when unset for backward compatibility.
+        """
+
         save_memory_snapshot_folder: str = MEMORY_DIR
         """Memory snapshot files location."""
 
@@ -355,6 +361,18 @@ class Profiler(Configurable):
         if not cfg.enable_memory_snapshot:
             return None
 
+        memory_snapshot_freq = (
+            cfg.profile_freq
+            if cfg.memory_snapshot_freq is None
+            else cfg.memory_snapshot_freq
+        )
+        if memory_snapshot_freq <= 0:
+            raise ValueError(
+                "Memory snapshot frequency must be greater than zero; set "
+                "profiler.memory_snapshot_freq or profiler.profile_freq to a "
+                "positive value."
+            )
+
         snapshot_dir = os.path.join(base_folder, cfg.save_memory_snapshot_folder)
         if not os.path.exists(snapshot_dir):
             os.makedirs(snapshot_dir, exist_ok=True)
@@ -363,7 +381,7 @@ class Profiler(Configurable):
         logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
         return MemoryProfiler(
             global_step,
-            cfg.profile_freq,
+            memory_snapshot_freq,
             snapshot_dir,
             leaf_folder,
             rank,
