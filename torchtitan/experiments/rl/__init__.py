@@ -47,11 +47,22 @@ if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
         )
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
-from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
-
-
 __all__ = [
     "VLLMModelWrapper",
     "register_to_vllm",  # Export register function for manual use
 ]
+
+
+def __getattr__(name: str):
+    # Keep lightweight RL modules, such as environments and sandbox clients,
+    # importable without requiring vLLM. The public inference exports are loaded
+    # on first access and retain the same package-level API.
+    if name == "register_to_vllm":
+        from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
+
+        return register_to_vllm
+    if name == "VLLMModelWrapper":
+        from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
+
+        return VLLMModelWrapper
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

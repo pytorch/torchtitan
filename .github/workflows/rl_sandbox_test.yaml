@@ -1,0 +1,68 @@
+name: RL Sandbox Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'torchtitan/experiments/rl/sandbox/**'
+      - 'torchtitan/experiments/rl/examples/terminal_bench/**'
+      - 'torchtitan/experiments/rl/environment/**'
+      - 'torchtitan/experiments/rl/rollout/**'
+      - 'torchtitan/experiments/rl/tests/test_sandbox*.py'
+      - 'torchtitan/experiments/rl/tests/test_terminal_bench.py'
+      - '.github/workflows/rl_sandbox_test.yaml'
+  pull_request:
+    paths:
+      - 'torchtitan/experiments/rl/sandbox/**'
+      - 'torchtitan/experiments/rl/examples/terminal_bench/**'
+      - 'torchtitan/experiments/rl/environment/**'
+      - 'torchtitan/experiments/rl/rollout/**'
+      - 'torchtitan/experiments/rl/tests/test_sandbox*.py'
+      - 'torchtitan/experiments/rl/tests/test_terminal_bench.py'
+      - '.github/workflows/rl_sandbox_test.yaml'
+
+concurrency:
+  group: rl-sandbox-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docker-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'git+https://github.com/PrimeIntellect-ai/renderers.git@main'
+          python -m pip install -e '.[dev,sandbox-docker]'
+
+      - name: Run provider-independent tests
+        run: |
+          pytest -v \
+            torchtitan/experiments/rl/tests/test_sandbox.py \
+            torchtitan/experiments/rl/tests/test_terminal_bench.py
+
+      - name: Run Docker contract and Terminal-Bench tests
+        run: |
+          docker info
+          pytest -v -m docker \
+            torchtitan/experiments/rl/tests/test_sandbox_docker.py
+
+      - name: Check for leaked sandboxes
+        if: always()
+        run: |
+          leaked=$(docker ps -aq --filter label=torchtitan.sandbox=true)
+          if [ -n "$leaked" ]; then
+            docker rm -f $leaked
+            exit 1
+          fi

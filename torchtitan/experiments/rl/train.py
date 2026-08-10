@@ -68,10 +68,14 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
     return {}
 
 
-def _preimport_torch() -> None:
-    """``bootstrap`` setup callable: pre-import torch on the spawned proc."""
-    # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
+def _preimport_runtime_modules() -> None:
+    """``bootstrap`` setup callable: pre-import runtime modules on the spawned proc."""
+    # TODO: Remove once Monarch avoids concurrent imports during actor unpickling.
     import torch  # noqa: F401
+
+    # TorchStore types may be unpickled while the actor module imports TorchStore.
+    # Finish the package import first to avoid observing partially initialized modules.
+    import torchstore  # noqa: F401
 
 
 def _bootstrap_generator() -> None:
@@ -104,7 +108,7 @@ def _bootstrap_generator() -> None:
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, _prev_mask)
 
-    _preimport_torch()
+    _preimport_runtime_modules()
 
 
 class PerHostProvisioner:
@@ -236,7 +240,7 @@ def spawn_proc_mesh(
             trainer_host_mesh,
             trainer_world_size,
             gpus_per_node,
-            bootstrap=_preimport_torch,
+            bootstrap=_preimport_runtime_modules,
             role="trainer",
         )
         generator_meshes = [
@@ -257,7 +261,7 @@ def spawn_proc_mesh(
         provisioner = PerHostProvisioner(total_gpus=total_gpus)
         trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
-            bootstrap=_preimport_torch,
+            bootstrap=_preimport_runtime_modules,
             bootstrap_command=default_bootstrap_cmd().with_env(
                 provisioner.allocate(trainer_world_size)
             ),
