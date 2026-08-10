@@ -23,7 +23,8 @@ from torchtitan.models.common.token_dispatcher import (
 )
 from torchtitan.models.deepseek_v3 import model_registry
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
-from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
+from torchtitan.models.gpt_oss import model_registry as gptoss_model_registry
+from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.kimi_k2_7 import model_registry as kimi_model_registry
 from torchtitan.models.kimi_k2_7.model import KimiK25Model
 
@@ -192,6 +193,21 @@ class TestRouterScoreAbsorption(unittest.TestCase):
     def test_kimi_keeps_post_combine_router_scoring(self):
         model_config = cast(
             KimiK25Model.Config, kimi_model_registry("debugmodel").model
+        )
+        routed_expert_configs = [
+            layer.moe.routed_experts
+            for layer in model_config.layers
+            if layer.moe is not None
+        ]
+
+        self.assertTrue(routed_expert_configs)
+        self.assertTrue(
+            all(not config.absorb_router_scores for config in routed_expert_configs)
+        )
+
+    def test_gpt_oss_keeps_post_combine_router_scoring(self):
+        model_config = cast(
+            GptOssModel.Config, gptoss_model_registry("debugmodel").model
         )
         routed_expert_configs = [
             layer.moe.routed_experts
@@ -532,78 +548,6 @@ class TestRouterScoreAbsorption(unittest.TestCase):
             (experts.w1_EFD, w1_EFD),
             (experts.w2_EDF, w2_EDF),
             (experts.w3_EFD, w3_EFD),
-        ):
-            torch.testing.assert_close(
-                _grad_float(parameter),
-                _grad_float(reference_parameter),
-                rtol=0.03,
-                atol=0.03,
-            )
-
-    def test_gpt_oss_experts_matches_dense_reference_backward(self):
-        torch.manual_seed(42)
-        experts = GptOssGroupedExperts(
-            GptOssGroupedExperts.Config(dim=16, hidden_dim=16, num_experts=2)
-        )
-        with torch.no_grad():
-            for parameter in experts.parameters():
-                parameter.normal_(std=0.1)
-
-        x_RD = torch.randn(3, 16, dtype=torch.bfloat16, requires_grad=True)
-        scores_R = torch.tensor([0.25, 0.5, 0.75], requires_grad=True)
-        counts_E = torch.tensor([2, 1])
-        loss_weight_RD = torch.arange(1, 49, dtype=torch.float32).reshape(3, 16)
-        output_RD = experts(x_RD, counts_E, routed_scores_R=scores_R)
-
-        x_ref_RD = x_RD.detach().clone().requires_grad_()
-        scores_ref_R = scores_R.detach().float().requires_grad_()
-        reference_weights = [
-            parameter.detach().bfloat16().requires_grad_()
-            for parameter in (
-                experts.mlp1_weight_EGD,
-                experts.mlp1_bias_EG,
-                experts.mlp2_weight_EDF,
-                experts.mlp2_bias_ED,
-            )
-        ]
-        mlp1_weight_EGD, mlp1_bias_EG, mlp2_weight_EDF, mlp2_bias_ED = reference_weights
-        reference_rows = []
-        row_start = 0
-        for expert_index, count in enumerate(counts_E.tolist()):
-            rows = x_ref_RD[row_start : row_start + count]
-            hidden = rows @ mlp1_weight_EGD[expert_index].transpose(-2, -1)
-            hidden = hidden + mlp1_bias_EG[expert_index]
-            gate, up = hidden[..., ::2], hidden[..., 1::2]
-            gate = gate.clamp(max=experts.swiglu_limit)
-            up = up.clamp(min=-experts.swiglu_limit, max=experts.swiglu_limit)
-            hidden = torch.addcmul(
-                gate * torch.sigmoid(1.702 * gate),
-                gate * torch.sigmoid(1.702 * gate),
-                up,
-            )
-            projected = hidden @ mlp2_weight_EDF[expert_index].transpose(-2, -1)
-            projected = projected + mlp2_bias_ED[expert_index]
-            reference_rows.append(
-                projected
-                * scores_ref_R[row_start : row_start + count].bfloat16().reshape(-1, 1)
-            )
-            row_start += count
-        reference_RD = torch.cat(reference_rows).bfloat16()
-
-        torch.testing.assert_close(output_RD, reference_RD, rtol=0.03, atol=0.03)
-        (output_RD.float() * loss_weight_RD).sum().backward()
-        (reference_RD.float() * loss_weight_RD).sum().backward()
-        torch.testing.assert_close(
-            _grad_float(x_RD), _grad_float(x_ref_RD), rtol=0.03, atol=0.03
-        )
-        torch.testing.assert_close(
-            scores_R.grad, scores_ref_R.grad, rtol=0.03, atol=0.03
-        )
-        for parameter, reference_parameter in (
-            (experts.mlp1_weight_EGD, mlp1_weight_EGD),
-            (experts.mlp1_bias_EG, mlp1_bias_EG),
-            (experts.mlp2_weight_EDF, mlp2_weight_EDF),
-            (experts.mlp2_bias_ED, mlp2_bias_ED),
         ):
             torch.testing.assert_close(
                 _grad_float(parameter),
