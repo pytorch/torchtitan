@@ -60,6 +60,7 @@ include = ["torchtitan*"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks
+markers = ["gpu: requires GPU hardware"]
 testpaths = ["tests"]
 
 [tool.pyrefly]
