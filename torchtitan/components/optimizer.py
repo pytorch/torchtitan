@@ -100,7 +100,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         model_parts (List[nn.Module]): List of model parts to be optimized.
         pp_process_group (ProcessGroup, optional): Pipeline-parallel process group
             used to validate parameter-group matches across stages.
-        device (torch.device, optional): Device for PP match-flag collectives.
+        device (torch.device, optional): Device for PP match-flag collectives;
+            required when ``pp_process_group`` is provided.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -134,6 +135,17 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
           Only supported for Adam/AdamW. See docs/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
+
+        def build(self, **kwargs):
+            """Build with PP context only when PP is enabled.
+
+            Omitting the new keywords for non-PP construction preserves the
+            constructor contract of existing ``OptimizersContainer`` subclasses.
+            """
+            if kwargs.get("pp_process_group") is None:
+                kwargs.pop("pp_process_group", None)
+                kwargs.pop("device", None)
+            return Configurable.Config.build(self, **kwargs)
 
     optimizers: list[T]
     model_parts: list[nn.Module]
@@ -221,6 +233,82 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         return groups, patterns, matches
 
+    def __init__(
+        self,
+        config: Config,
+        *,
+        model_parts: list[nn.Module],
+        pp_process_group: dist.ProcessGroup | None = None,
+        device: torch.device | None = None,
+    ) -> None:
+        impl_kwargs = self._build_impl_kwargs(config)
+        param_group_configs = config.param_groups
+        self.optimizers = []
+        self.model_parts = model_parts
+
+        if pp_process_group is None:
+            param_groups_by_part = [
+                self._build_param_groups(model, param_group_configs, impl_kwargs)
+                for model in self.model_parts
+            ]
+            group_matches_by_part = None
+        else:
+            resolved_by_part = [
+                self._resolve_param_groups(model, param_group_configs, impl_kwargs)
+                for model in self.model_parts
+            ]
+            param_groups_by_part = [
+                (groups_by_opt_name, patterns_by_opt_name)
+                for groups_by_opt_name, patterns_by_opt_name, _ in resolved_by_part
+            ]
+            group_matches_by_part = [matches for _, _, matches in resolved_by_part]
+        all_params = [
+            param
+            for groups_by_opt_name, _ in param_groups_by_part
+            for opt_param_groups in groups_by_opt_name.values()
+            for group in opt_param_groups
+            for param in group["params"]
+        ]
+
+        if pp_process_group is None:
+            self._validate_params(all_params)
+        else:
+            if device is None:
+                raise ValueError("device is required with pp_process_group")
+            assert group_matches_by_part is not None
+            local_matches = [
+                any(matches[config_idx] for matches in group_matches_by_part)
+                for config_idx in range(len(param_group_configs))
+            ]
+            self._validate_pp_param_groups_and_params(
+                param_group_configs,
+                local_matches,
+                all_params,
+                pp_process_group,
+                device,
+            )
+
+        # Resolve all configured factories before any stage constructs an
+        # optimizer, so invalid names fail consistently across PP ranks.
+        optimizer_factories = {
+            group.optimizer_name: self._resolve_optimizer_factory(group.optimizer_name)
+            for group in param_group_configs
+        }
+        for part_idx, (groups_by_opt_name, patterns_by_opt_name) in enumerate(
+            param_groups_by_part
+        ):
+            for opt_name, opt_param_groups in groups_by_opt_name.items():
+                optimizer = optimizer_factories[opt_name](
+                    opt_param_groups,
+                    **config.optimizer_init_kwargs.get(opt_name, {}),
+                )
+                self.optimizers.append(cast(T, optimizer))
+                self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
+
+        if config.implementation == "fused_opt_states_bf16":
+            self._register_bf16_optimizer_state_hook()
+        self._post_init(all_params)
+
     @staticmethod
     def _validate_param_group_matches(
         param_group_configs: list[ParamGroupConfig],
@@ -256,87 +344,20 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             [*local_matches, expected != actual], dtype=torch.int32, device=device
         )
         dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=pp_process_group)
+        global_flags = [bool(flag) for flag in flags.tolist()]
 
         # A group may be absent locally, but must claim a parameter on some PP
         # stage. This retains typo/stale-pattern detection without requiring
         # every stage to own every global optimizer group.
         self._validate_param_group_matches(
             param_group_configs,
-            [bool(flag) for flag in flags[:-1].tolist()],
+            global_flags[:-1],
         )
-        if bool(flags[-1].item()):
+        if global_flags[-1]:
             raise RuntimeError(
                 "Parameter mismatch on at least one pipeline stage: every "
                 "trainable parameter must be assigned to an optimizer"
             )
-
-    def __init__(
-        self,
-        config: Config,
-        *,
-        model_parts: list[nn.Module],
-        pp_process_group: dist.ProcessGroup | None = None,
-        device: torch.device | None = None,
-    ) -> None:
-        impl_kwargs = self._build_impl_kwargs(config)
-        param_group_configs = config.param_groups
-        self.optimizers = []
-        self.model_parts = model_parts
-
-        resolved_by_part = [
-            self._resolve_param_groups(model, param_group_configs, impl_kwargs)
-            for model in self.model_parts
-        ]
-        all_params = [
-            param
-            for groups_by_opt_name, _, _ in resolved_by_part
-            for opt_param_groups in groups_by_opt_name.values()
-            for group in opt_param_groups
-            for param in group["params"]
-        ]
-
-        if pp_process_group is None:
-            # Preserve non-PP behavior: every config must match every model part.
-            for _, _, matches in resolved_by_part:
-                self._validate_param_group_matches(param_group_configs, matches)
-            self._validate_params(all_params)
-        else:
-            if device is None:
-                raise ValueError("device is required with pp_process_group")
-            local_matches = [
-                any(matches[config_idx] for _, _, matches in resolved_by_part)
-                for config_idx in range(len(param_group_configs))
-            ]
-            self._validate_pp_param_groups_and_params(
-                param_group_configs,
-                local_matches,
-                all_params,
-                pp_process_group,
-                device,
-            )
-
-        # Resolve all configured factories before any stage constructs an
-        # optimizer, so invalid names fail consistently across PP ranks.
-        optimizer_factories = {
-            group.optimizer_name: self._resolve_optimizer_factory(group.optimizer_name)
-            for group in param_group_configs
-        }
-        for part_idx, (
-            groups_by_opt_name,
-            patterns_by_opt_name,
-            _,
-        ) in enumerate(resolved_by_part):
-            for opt_name, opt_param_groups in groups_by_opt_name.items():
-                optimizer = optimizer_factories[opt_name](
-                    opt_param_groups,
-                    **config.optimizer_init_kwargs.get(opt_name, {}),
-                )
-                self.optimizers.append(cast(T, optimizer))
-                self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
-
-        if config.implementation == "fused_opt_states_bf16":
-            self._register_bf16_optimizer_state_hook()
-        self._post_init(all_params)
 
     def _log_optimizer(
         self, optimizer: Optimizer, part_idx: int, patterns: list[str]
