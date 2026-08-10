@@ -239,6 +239,22 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module gpt_oss --config gpt_oss_debugmodel",
+                    "--training.global_batch_size 64",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.expert_parallel_degree 4",
+                    "activation-checkpoint:selective",
+                ],
+            ],
+            "Gpt-oss PP+FSDP+EP+SACOP with VarlenAttention",
+            "gpt_oss_pp+fsdp+ep+sacop",
+            ngpu=8,
+        ),
         # Integration Test Cases for Kimi K2.7
         OverrideDefinitions(
             [
