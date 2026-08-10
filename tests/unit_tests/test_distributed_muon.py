@@ -6,7 +6,6 @@
 
 import unittest
 
-import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Shard
@@ -33,7 +32,6 @@ from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
 )
 
 
-@pytest.mark.gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistributedMuon(DTensorTestBase):
     @property

@@ -91,7 +91,7 @@ jobs:
 
         # Run the GPU-only DistributedMuon test that CPU unit CI skips.
         python -m pytest tests/unit_tests/test_distributed_muon.py \
-          -m gpu --durations=20 -vv
+          --durations=20 -vv
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
