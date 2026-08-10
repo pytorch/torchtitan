@@ -296,7 +296,7 @@ class TestKimiK3(unittest.TestCase):
         assert moe_config is not None
         self.assertEqual(moe_config.num_experts, 8)
         self.assertEqual(moe_config.router.top_k, 2)
-        self.assertEqual(moe_config.routed_experts[0].w1.out_features, 128)
+        self.assertEqual(moe_config.routed_experts.hidden_dim, 128)
         vision_config = config.vision_encoder
         assert vision_config is not None
         self.assertEqual(vision_config.dim, 256)
@@ -385,13 +385,17 @@ class TestKimiK3(unittest.TestCase):
         self.assertTrue(unused_experts)
 
         moe(inputs).float().sum().backward()
-        for expert_idx in unused_experts:
-            for parameter in moe.routed_experts[expert_idx].parameters():
-                self.assertIsNotNone(parameter.grad)
-                assert parameter.grad is not None
+        for parameter in (
+            moe.routed_experts.w1_EFD,
+            moe.routed_experts.w2_EDF,
+            moe.routed_experts.w3_EFD,
+        ):
+            self.assertIsNotNone(parameter.grad)
+            assert parameter.grad is not None
+            for expert_idx in unused_experts:
                 torch.testing.assert_close(
-                    parameter.grad,
-                    torch.zeros_like(parameter.grad),
+                    parameter.grad[expert_idx],
+                    torch.zeros_like(parameter.grad[expert_idx]),
                 )
 
     def test_small_multimodal_model_forward_backward_and_adapter(self):

@@ -20,21 +20,23 @@ import torch.nn.functional as F
 
 from fla.ops.kda import chunk_kda
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.fsdp import add_zero_valued_dependency
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.kimi_k3.vision_encoder import KimiK3VisionEncoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.module import Module, ModuleList
+from torchtitan.protocols.module import Module
 
 # Shape suffixes:
 # B = batch, L = sequence length, D = model dimension, H = heads,
@@ -375,23 +377,67 @@ class KimiDeltaAttention(Module):
         return self.output_proj(out_BLHV.reshape(B, L, -1))
 
 
-class KimiRoutedExperts(ModuleList):
-    """List-backed experts implementing TorchTitan's FSDP expert protocol.
+class KimiGroupedExperts(GroupedExperts):
+    """``common/moe.py::GroupedExperts`` with Kimi's SiTU activation.
 
-    Kimi K3 keeps one module per expert so the eager implementation and
-    HuggingFace state-dict mapping stay directly inspectable.  The shared FSDP
-    wrapper discovers routed expert parameters through ``inner_experts`` and
-    ``num_experts``; exposing those properties here lets it shard this
-    list-backed layout without changing parameter names or forward math.
+    Inherits its stacked-weight shape (``w1_EFD``/``w2_EDF``/``w3_EFD``) and
+    parameter allocation; only ``forward`` differs, since the activation is
+    baked into the ``torch._grouped_mm`` call sequence rather than being a
+    swappable argument. ``inner_experts`` returns ``self`` so the shared FSDP
+    wrapper's ``moe.routed_experts.inner_experts`` discovery path works
+    without a separate dispatch-composing wrapper class.
     """
 
-    @property
-    def inner_experts(self) -> "KimiRoutedExperts":
-        return self
+    @dataclass(kw_only=True, slots=True)
+    class Config(GroupedExperts.Config):
+        beta: float = 1.0
+        linear_beta: float | None = None
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.beta = config.beta
+        self.linear_beta = config.linear_beta
 
     @property
-    def num_experts(self) -> int:
-        return len(self)
+    def inner_experts(self) -> "KimiGroupedExperts":
+        return self
+
+    def forward(
+        self,
+        x_RD: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        if isinstance(self.w1_EFD, DTensor):
+            w1_EFD = self.w1_EFD.to_local()
+            assert isinstance(self.w2_EDF, DTensor)
+            w2_EDF = self.w2_EDF.to_local()
+            assert isinstance(self.w3_EFD, DTensor)
+            w3_EFD = self.w3_EFD.to_local()
+        else:
+            w1_EFD = self.w1_EFD
+            w2_EDF = self.w2_EDF
+            w3_EFD = self.w3_EFD
+
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+
+        gate_RF = torch._grouped_mm(
+            x_RD.bfloat16(), w1_EFD.bfloat16().transpose(-2, -1), offs=offsets_E
+        )
+        up_RF = torch._grouped_mm(
+            x_RD.bfloat16(), w3_EFD.bfloat16().transpose(-2, -1), offs=offsets_E
+        )
+
+        input_dtype = gate_RF.dtype
+        gate_RF = gate_RF.float()
+        up_RF = up_RF.float()
+        gate_RF = self.beta * torch.tanh(gate_RF / self.beta) * torch.sigmoid(gate_RF)
+        if self.linear_beta is not None:
+            up_RF = self.linear_beta * torch.tanh(up_RF / self.linear_beta)
+        h_RF = (gate_RF * up_RF).to(input_dtype)
+
+        return torch._grouped_mm(
+            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+        ).type_as(x_RD)
 
 
 class KimiLatentMoE(Module):
@@ -402,7 +448,8 @@ class KimiLatentMoE(Module):
         num_experts: int
         router: TokenChoiceTopKRouter.Config
         routed_down: Linear.Config
-        routed_experts: list[KimiFeedForward.Config]
+        routed_experts: KimiGroupedExperts.Config
+        token_dispatcher: LocalTokenDispatcher.Config
         routed_norm: KimiRMSNorm.Config
         routed_up: Linear.Config
         shared_experts: KimiFeedForward.Config
@@ -410,16 +457,13 @@ class KimiLatentMoE(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        if len(config.routed_experts) != config.num_experts:
-            raise ValueError(
-                "The number of routed expert configs must equal num_experts."
-            )
+        if config.routed_experts.num_experts != config.num_experts:
+            raise ValueError("routed_experts.num_experts must equal num_experts.")
         self.num_experts = config.num_experts
         self.router = config.router.build()
         self.routed_down = config.routed_down.build()
-        self.routed_experts = KimiRoutedExperts(
-            [expert.build() for expert in config.routed_experts]
-        )
+        self.routed_experts = config.routed_experts.build()
+        self.token_dispatcher = config.token_dispatcher.build()
         self.routed_norm = config.routed_norm.build()
         self.routed_up = config.routed_up.build()
         self.shared_experts = config.shared_experts.build()
@@ -450,30 +494,38 @@ class KimiLatentMoE(Module):
             dtype=torch.bool,
             device=x_BLD.device,
         ).scatter(-1, expert_ids_BLK, True)
+        num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
         with torch.no_grad():
             # In place so the load-balancing hook registered on the optimizer
             # keeps referring to this buffer across steps.
-            self.tokens_per_expert_E.add_(routing_map_BLE.sum(dim=(0, 1)).float())
+            self.tokens_per_expert_E.add_(num_tokens_per_expert_E.float())
 
-        latent_TD = self.routed_down(x_BLD).reshape(B * L, -1)
-        expert_ids_TK = expert_ids_BLK.reshape(B * L, -1)
-        weights_TK = weights_BLK.reshape(B * L, -1)
-        routed_TD = torch.zeros_like(latent_TD, dtype=torch.float32)
+        latent_BLD = self.routed_down(x_BLD)
+        latent_dim = latent_BLD.shape[-1]
+        K = weights_BLK.shape[-1]
+        T = B * L
+        latent_TD = latent_BLD.reshape(T, latent_dim)
+        weights_TK = weights_BLK.reshape(T, K)
+        expert_ids_TK = expert_ids_BLK.reshape(T, K)
 
-        for expert_idx, expert in enumerate(self.routed_experts):
-            token_and_slot = torch.nonzero(expert_ids_TK == expert_idx, as_tuple=False)
-            # Keep empty experts in the autograd graph so every FSDP rank
-            # produces zero gradients instead of rank-dependent None gradients.
-            token_ids = token_and_slot[:, 0]
-            route_slots = token_and_slot[:, 1]
-            expert_output = expert(latent_TD.index_select(0, token_ids))
-            route_weight = weights_TK[token_ids, route_slots].unsqueeze(-1)
-            routed_TD = routed_TD.index_add(
-                0, token_ids, expert_output.float() * route_weight
+        # Every expert's weights are packed into one grouped-mm call, so an
+        # expert with zero assigned tokens still sits in the autograd graph
+        # and receives an all-zero gradient rather than None.
+        routed_input_RD, num_tokens_per_expert_E, metadata = (
+            self.token_dispatcher.dispatch(
+                latent_TD, weights_TK, expert_ids_TK, num_tokens_per_expert_E
             )
+        )
+        routed_output_RD = self.routed_experts(routed_input_RD, num_tokens_per_expert_E)
+        routed_TD = self.token_dispatcher.combine(
+            routed_output_RD,
+            metadata,
+            latent_TD,
+            num_local_tokens_after_padding=T,
+            local_seq_len_after_padding=L,
+        )
 
-        routed_BLD = routed_TD.to(latent_TD.dtype).view(B, L, -1)
-        routed_BLD = self.routed_up(self.routed_norm(routed_BLD))
+        routed_BLD = self.routed_up(self.routed_norm(routed_TD.view(B, L, latent_dim)))
         return routed_BLD + self.shared_experts(x_BLD)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
