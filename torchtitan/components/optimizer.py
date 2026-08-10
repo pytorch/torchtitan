@@ -377,7 +377,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "foreach",
         }
         opt_name = type(optimizer).__name__
-        for group, pattern in zip(optimizer.param_groups, patterns, strict=True):
+        for group, pattern in zip(optimizer.param_groups, patterns):
             num_params = len(group["params"])
             kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
             logger.info(
