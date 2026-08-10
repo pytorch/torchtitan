@@ -37,8 +37,7 @@ from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
-from . import KIMI_K2_5_SPECIAL_TOKENS, model_registry
-from .model import KimiK25Model
+from . import KIMI_K2_5_SPECIAL_TOKENS, KimiK25Model, model_registry
 
 
 def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
