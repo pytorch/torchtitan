@@ -218,23 +218,25 @@ These layouts should continue to fail with explicit validation errors.
 ### Distributed numerical test
 
 Keep one compact numerical oracle in
-`tests/integration_tests/test_distributed_muon.py`. It compares both Owned
+`tests/unit_tests/test_distributed_muon.py`. It compares both Owned
 redistribution and batched `Shard(0)` computation with plain
 `torch.optim.Muon`, including momentum, then reloads the flat optimizer state
 and compares another step. The update-direction comparison uses an explicit
 BF16 tolerance because batched `bmm`/`baddbmm` and independent `mm`/`addmm`
 calls are not bitwise equivalent.
 
-The recipe integration below covers the successful split-head path. Isolated
+Three logical matrices are stored across two ranks, so the storage-shard
+boundary splits the middle matrix and exercises the successful split-head
+path. Isolated
 collective-count, invalid-layout, empty-shard, and other regional permutations
 are intentionally omitted to keep the test footprint minimal.
 
-### FSDP2 and DP+EP integration tests
+### FSDP2+EP integration test
 
-- Run the Kimi debug recipe with actual FSDP2 (`dp_shard=6`) and EP=2. Six
-  storage ranks do not divide its 16 attention heads evenly, so dense QKV
-  exercises split-head redistribution on `dp_shard` while routed experts
-  compute on their expert meshes.
+- Keep the inherited Kimi debug recipe on four GPUs with actual FSDP2
+  (`dp_shard=4`) and EP=2. This is an end-to-end checkpoint smoke test; four
+  storage ranks divide its 16 attention heads evenly, so split-head behavior
+  is covered by the numerical test above.
 - Save a full checkpoint after step 1, relaunch from that checkpoint, and
   complete step 2.
 
@@ -260,8 +262,8 @@ are intentionally omitted to keep the test footprint minimal.
 2. Extend packed preparation, assembly, and finalization to multiple spans.
 3. Wire the matrix-batch transition into Muon while preserving the local and
    `Owned` paths.
-4. Replace split-head rejection tests with distributed numerical parity tests.
-5. Add the actual FSDP2 and mixed DP+EP integration coverage.
+4. Cover split heads in the compact distributed numerical parity test.
+5. Retain the actual FSDP2+EP integration coverage.
 6. Run lint, numerical validation, and profiling before declaring the change
    review-ready.
 
@@ -289,11 +291,12 @@ Development validation before the final test consolidation included:
 
 Retained validation:
 
-- The compact distributed numerical oracle compares Owned and batched Shard
-  updates and momentum with `torch.optim.Muon` before and after a flat
-  optimizer checkpoint restore.
-- The two-phase Kimi FSDP2+EP integration saves a full checkpoint after step 1,
-  reloads it in a fresh launch, and completes step 2.
+- The compact two-GPU numerical oracle splits the middle of three logical
+  matrices across storage ranks and compares Owned and batched Shard updates
+  and momentum with `torch.optim.Muon` before and after a flat optimizer
+  checkpoint restore.
+- The inherited four-GPU Kimi FSDP2+EP integration saves a full checkpoint
+  after step 1, reloads it in a fresh launch, and completes step 2.
 
 Additional development validation results:
 
