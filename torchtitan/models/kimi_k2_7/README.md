@@ -36,9 +36,9 @@ pip install av torchvision
 | Feature | Notes |
 |---------|-------|
 | FSDP / HSDP | Decoder sharded per-layer. Without PP, the vision encoder is a separate FSDP unit; with PP, it belongs to the first-stage root FSDP unit |
-| Tensor Parallelism (TP) | The token embedding and vision activations remain replicated for the vision scatter; decoder SP resumes at layer 0. Vision attention heads and linear layers are TP-sharded, without vision SP |
+| Tensor Parallelism (TP) | The model supports TP: token embeddings and vision activations remain replicated for vision scatter, decoder SP resumes at layer 0, and vision attention/linear layers are TP-sharded without vision SP. The default DistributedMuon recipes currently reject TP because it can produce unsupported `_StridedShard` parameter layouts |
 | Expert Parallelism (EP) | DeepSeek-V3 routed + shared experts |
-| Pipeline Parallel (PP) | Vision encoder folded into the first stage; 1F1B and Interleaved1F1B schedules |
+| Pipeline Parallel (PP) | The model supports PP with the vision encoder folded into the first stage, but the default DistributedMuon recipes do not yet support stage-local optimizer groups |
 
 ## Numerical Checks
 
