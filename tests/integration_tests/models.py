@@ -259,49 +259,22 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    # Consolidate the former 2-GPU FSDP smoke and 8-GPU
-                    # FSDP+TP+EP+PP test into one supported FSDP+EP path with
-                    # checkpoint resume. Kimi DistributedMuon rejects TP because
-                    # it produces _StridedShard storage.
+                    # One four-GPU checkpoint-resume path covers PP=2, FSDP=2,
+                    # and EP=2. PP leaves some global optimizer groups absent on
+                    # an individual stage, exercising stage-local Muon state. TP
+                    # remains unsupported because it can produce _StridedShard
+                    # storage.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
-                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--training.steps 1",
-                    "--checkpoint.enable",
-                    "--checkpoint.enable_first_step_checkpoint",
-                ],
-                [
-                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--training.steps 2",
-                    "--checkpoint.enable",
-                ],
-            ],
-            "Kimi K2.7 DistributedMuon spmd_types FSDP+EP checkpoint resume",
-            "kimi_k2_5_muon_fsdp+ep_spmd_types",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    # PP partitions global optimizer groups across stages. The
-                    # resume run covers stage-local Muon state and flex-slot reuse.
-                    # PP=2, FSDP=2, and EP=2 keep every relevant axis active
-                    # while fitting the minimum four-GPU topology.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--parallelism.spmd_backend spmd_types",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
+                    # Four microbatches match the four virtual stages; seq_len=1024
+                    # keeps enough samples in each tiny sharded data partition.
                     "--training.local_batch_size 4",
-                    # Every DP shard must have one resumed batch. Sequence length
-                    # 512 filters all remaining samples on one test-data shard.
                     "--training.seq_len 1024",
                     "--training.steps 1",
                     "--lr_scheduler.total_steps 2",
