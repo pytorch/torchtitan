@@ -4,7 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Public bucket contracts and private resharding for distributed optimizers."""
+"""Public bucket contracts and private resharding for distributed optimizers.
+
+The high-level load-balanced scheduling, packed all-to-all redistribution, and
+asynchronous optimizer-compute overlap are informed by Canzona and its FSDP
+implementation:
+
+- Canzona: https://arxiv.org/abs/2602.06079
+- FSDP-Canzona: https://github.com/liangyuwang/FSDP-Canzona
+"""
 
 from __future__ import annotations
 
