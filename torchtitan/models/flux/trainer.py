@@ -164,8 +164,8 @@ class FluxTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
         global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
         """
@@ -185,6 +185,8 @@ class FluxTrainer(Trainer):
         assert (
             global_valid_tokens is None
         ), "FLUX model don't need to rescale loss by number of global valid tokens"
+        assert isinstance(input_dict, dict)
+        assert isinstance(labels, torch.Tensor)
 
         # generate t5 and clip embeddings
         input_dict["image"] = labels
