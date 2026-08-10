@@ -22,7 +22,6 @@ from fla.ops.kda import chunk_kda
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.fsdp import add_zero_valued_dependency
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -740,33 +739,6 @@ class KimiK3Model(Decoder):
                     "number of text positions than the encoder produces."
                 )
 
-    def _encode_placeholder_image(
-        self,
-        embeddings_BLD: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run the vision encoder on the smallest grid it can merge.
-
-        A batch without images must still drive the vision encoder, because it
-        is its own FSDP unit and the data-parallel ranks that do have images
-        will issue its collectives. See ``add_zero_valued_dependency``.
-        """
-        assert self.vision_encoder is not None
-        kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
-        patch_dim = self.vision_encoder.patch_embed.in_features
-        pixel_values_NPK = torch.zeros(
-            1,
-            kernel_h * kernel_w,
-            patch_dim,
-            dtype=embeddings_BLD.dtype,
-            device=embeddings_BLD.device,
-        )
-        grid_thw_N3 = torch.tensor(
-            [[1, kernel_h, kernel_w]],
-            dtype=torch.long,
-            device=embeddings_BLD.device,
-        )
-        return self.vision_encoder(pixel_values_NPK, grid_thw=grid_thw_N3)
-
     def get_attention_masks(self, positions: torch.Tensor) -> AttentionMasksType | None:
         del positions
         return None
@@ -786,12 +758,7 @@ class KimiK3Model(Decoder):
                 "both be omitted."
             )
         if pixel_values is None:
-            if self.vision_encoder is None:
-                return embeddings
-            return add_zero_valued_dependency(
-                embeddings,
-                self._encode_placeholder_image(embeddings),
-            )
+            return embeddings
         assert grid_thw is not None
         if self.vision_encoder is None:
             raise ValueError("pixel_values were provided without a vision encoder.")
