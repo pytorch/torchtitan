@@ -295,7 +295,7 @@ class TestRouterScoreAbsorption(unittest.TestCase):
         self.assertEqual(enabled_expert[0]["routed_scores_R"].shape, (4,))
         self.assertEqual(enabled_combine[0]["router_scores_applied"], True)
         self.assertEqual(disabled_dispatch[0]["absorb_router_scores"], False)
-        self.assertNotIn("routed_scores_R", disabled_expert[0])
+        self.assertIsNone(disabled_expert[0]["routed_scores_R"])
         self.assertEqual(disabled_combine[0]["router_scores_applied"], False)
 
     def test_local_dispatch_returns_expert_aligned_scores(self):
