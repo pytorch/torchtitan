@@ -375,6 +375,88 @@ def _build_b4_router_input_grad_body(
     return body
 
 
+def _build_f3_residual_rmsnorm_first_body(
+    mm: torch.fx.Node,
+    addends_2d: tuple[torch.fx.Node, ...],
+    gamma_2d: torch.fx.Node,
+    group: int,
+    accumulated_value_is_lhs: tuple[bool, ...],
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    inputs = []
+    for index, source in enumerate((*mm.args, *addends_2d, gamma_2d)):
+        placeholder = graph.placeholder(f"arg{index}")
+        if isinstance(source, torch.fx.Node):
+            placeholder.meta = dict(source.meta)
+        inputs.append(placeholder)
+
+    body_mm = graph.call_function(_MM, tuple(inputs[:2]), dict(mm.kwargs))
+    body_mm.meta = dict(mm.meta)
+    accumulator = graph.call_function(_TO_COPY, (body_mm,), {"dtype": torch.float32})
+    accumulator.meta = _copy_meta_with_dtype(mm, torch.float32, mm)
+    rounded = graph.call_function(_TO_COPY, (accumulator,), {"dtype": torch.bfloat16})
+    rounded.meta = _copy_meta_with_value_from(mm, mm)
+    total = rounded
+    for input_index, (addend, value_is_lhs) in enumerate(
+        zip(addends_2d, accumulated_value_is_lhs, strict=True), start=2
+    ):
+        add_args = (
+            (total, inputs[input_index])
+            if value_is_lhs
+            else (
+                inputs[input_index],
+                total,
+            )
+        )
+        total = graph.call_function(_ADD, add_args)
+        total.meta = _copy_meta_with_value_from(mm, mm, *addends_2d[: input_index - 1])
+    total_fp32 = graph.call_function(_TO_COPY, (total,), {"dtype": torch.float32})
+    total_fp32.meta = _copy_meta_with_dtype(mm, torch.float32, mm, *addends_2d)
+    weighted_fp32 = graph.call_function(_MUL, (total_fp32, inputs[-1]))
+    weighted_fp32.meta = _copy_meta_with_dtype(
+        mm, torch.float32, mm, *addends_2d, gamma_2d
+    )
+    weighted = graph.call_function(
+        _TO_COPY, (weighted_fp32,), {"dtype": torch.bfloat16}
+    )
+    weighted.meta = _copy_meta_with_value_from(mm, mm, *addends_2d, gamma_2d)
+
+    mm_shape = _node_shape(mm)
+    assert mm_shape is not None
+    grouped = graph.call_function(
+        _VIEW,
+        (total_fp32, [mm_shape[0], -1, group]),
+    )
+    total_value = total_fp32.meta.get("val")
+    if isinstance(total_value, torch.Tensor):
+        grouped.meta = _copy_meta_with_value(
+            total_value.reshape(mm_shape[0], -1, group), mm, *addends_2d
+        )
+    else:
+        grouped.meta = _copy_meta(mm, *addends_2d)
+    squared = graph.call_function(_POW_SCALAR, (grouped, 2))
+    grouped_value = grouped.meta.get("val")
+    if isinstance(grouped_value, torch.Tensor):
+        squared.meta = _copy_meta_with_value(grouped_value.square(), mm, *addends_2d)
+    else:
+        squared.meta = _copy_meta(mm, *addends_2d)
+    partial_mean_square = graph.call_function(_MEAN_DIM, (squared, [-1]))
+    squared_value = squared.meta.get("val")
+    if isinstance(squared_value, torch.Tensor):
+        partial_mean_square.meta = _copy_meta_with_value(
+            squared_value.mean(-1), mm, *addends_2d
+        )
+    else:
+        partial_mean_square.meta = _copy_meta(mm, *addends_2d)
+
+    graph.output((weighted, total, partial_mean_square))
+    body = torch.fx.GraphModule(torch.nn.Module(), graph)
+    apply_flex_gemm_body_graph_passes(body, _MM)
+    for node in body.graph.nodes:
+        _tag_for_regional_inductor(node)
+    return body
+
+
 def _build_f2_q_rmsnorm_first_body(
     mm: torch.fx.Node,
     gamma_2d: torch.fx.Node,
@@ -1362,6 +1444,529 @@ def fuse_b4_router_input_grad_add_pass(
     return gm
 
 
+def _layer_module_role(module_fqn: str | None) -> tuple[int, str] | None:
+    if module_fqn is None:
+        return None
+    parts = module_fqn.split(".")
+    if len(parts) < 3 or parts[0] != "layers" or not parts[1].isdigit():
+        return None
+    return int(parts[1]), ".".join(parts[2:])
+
+
+def _f3_expected_second_roles(
+    first_mm: torch.fx.Node,
+    norm: torch.fx.Node,
+) -> tuple[int, set[str]] | None:
+    first = _layer_module_role(_module_fqn(first_mm))
+    normalized = _layer_module_role(_module_fqn(norm))
+    if first is None or normalized is None:
+        return None
+    first_layer, first_role = first
+    norm_layer, norm_role = normalized
+    if (
+        first_role == "attention.wo"
+        and norm_layer == first_layer
+        and norm_role == "ffn_norm"
+    ):
+        return first_layer, {"feed_forward.w1", "feed_forward.w3"}
+    if (
+        first_role == "feed_forward.w2"
+        and norm_layer == first_layer + 1
+        and norm_role == "attention_norm"
+    ):
+        return norm_layer, {"attention.wq_a", "attention.wkv_a"}
+    if (
+        first_role == "moe.shared_experts.w2"
+        and norm_layer == first_layer + 1
+        and norm_role == "attention_norm"
+    ):
+        return norm_layer, {"attention.wq_a", "attention.wkv_a"}
+    return None
+
+
+def _match_f3_add_tree(
+    add: torch.fx.Node,
+    norm: torch.fx.Node,
+    depth: int = 1,
+) -> list[
+    tuple[
+        torch.fx.Node,
+        torch.fx.Node,
+        tuple[torch.fx.Node, ...],
+        tuple[bool, ...],
+        tuple[torch.fx.Node, ...],
+    ]
+]:
+    if add.target != _ADD or len(add.args) < 2 or add.kwargs.get("alpha", 1) != 1:
+        return []
+
+    matches = []
+    for index, operand in enumerate(add.args[:2]):
+        sibling = add.args[1 - index]
+        if not isinstance(operand, torch.fx.Node) or not isinstance(
+            sibling, torch.fx.Node
+        ):
+            continue
+        if (
+            operand.target in (_RESHAPE, _VIEW)
+            and operand.args
+            and isinstance(operand.args[0], torch.fx.Node)
+        ):
+            candidate_mm = operand.args[0]
+            if (
+                candidate_mm.target == _MM
+                and _sole_user(candidate_mm) is operand
+                and _sole_user(operand) is add
+                and _f3_expected_second_roles(candidate_mm, norm) is not None
+            ):
+                matches.append(
+                    (
+                        candidate_mm,
+                        operand,
+                        (sibling,),
+                        (index == 0,),
+                        (add,),
+                    )
+                )
+        if depth == 1 or operand.target != _ADD or _sole_user(operand) is not add:
+            continue
+        for candidate_mm, reshape, addends, orders, add_nodes in _match_f3_add_tree(
+            operand, norm, depth - 1
+        ):
+            matches.append(
+                (
+                    candidate_mm,
+                    reshape,
+                    (*addends, sibling),
+                    (*orders, index == 0),
+                    (*add_nodes, add),
+                )
+            )
+    return matches
+
+
+def _match_f3_residual_rmsnorm(
+    norm: torch.fx.Node,
+) -> tuple[
+    torch.fx.Node,
+    torch.fx.Node,
+    tuple[torch.fx.Node, ...],
+    tuple[bool, ...],
+    tuple[torch.fx.Node, ...],
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node | None,
+    list[tuple[torch.fx.Node, torch.fx.Node]],
+    float,
+] | None:
+    if norm.target != _FUSED_RMS_NORM or len(norm.args) < 4:
+        return None
+    add, normalized_shape, gamma, eps = norm.args[:4]
+    if (
+        not isinstance(add, torch.fx.Node)
+        or add.target != _ADD
+        or len(add.args) < 2
+        or add.kwargs.get("alpha", 1) != 1
+        or not isinstance(gamma, torch.fx.Node)
+        or not isinstance(normalized_shape, (list, tuple))
+        or len(normalized_shape) != 1
+        or not isinstance(eps, float)
+    ):
+        return None
+
+    producer_matches = _match_f3_add_tree(add, norm, depth=2)
+    if len(producer_matches) != 1:
+        return None
+    (
+        first_mm,
+        first_reshape,
+        addends,
+        accumulated_value_is_lhs,
+        add_nodes,
+    ) = producer_matches[0]
+
+    norm_outputs: dict[int, torch.fx.Node] = {}
+    for user in norm.users:
+        if (
+            user.target is not operator.getitem
+            or len(user.args) < 2
+            or not isinstance(user.args[1], int)
+            or user.args[1] in norm_outputs
+        ):
+            return None
+        norm_outputs[user.args[1]] = user
+    if set(norm_outputs) not in ({0}, {0, 1}):
+        return None
+    norm_output = norm_outputs[0]
+    rstd_output = norm_outputs.get(1)
+    is_recomputed = rstd_output is not None
+
+    second_pairs = []
+    for second_input in norm_output.users:
+        if (
+            second_input.target not in (_RESHAPE, _VIEW)
+            or not second_input.args
+            or second_input.args[0] is not norm_output
+        ):
+            return None
+        second_mms = [
+            user
+            for user in second_input.users
+            if user.target == _MM and user.args and user.args[0] is second_input
+        ]
+        if len(second_mms) != 1:
+            return None
+        second_mm = second_mms[0]
+        if not is_recomputed and _sole_user(second_input) is not second_mm:
+            return None
+        second_pairs.append((second_input, second_mm))
+
+    expected = _f3_expected_second_roles(first_mm, norm)
+    assert expected is not None
+    second_layer, expected_roles = expected
+    actual_roles = set()
+    for _, second_mm in second_pairs:
+        second = _layer_module_role(_module_fqn(second_mm))
+        if second is None or second[0] != second_layer:
+            return None
+        actual_roles.add(second[1])
+    if actual_roles != expected_roles or len(second_pairs) != len(expected_roles):
+        return None
+
+    first_shape = _node_shape(first_mm)
+    output_shape = _node_shape(add)
+    if (
+        first_shape is None
+        or len(first_shape) != 2
+        or output_shape is None
+        or output_shape[-1] != first_shape[-1]
+        or first_shape[-1] != normalized_shape[0]
+        or first_shape[-1] % _CODA_RMSNORM_GROUP != 0
+        or _node_shape(first_reshape) != output_shape
+        or any(_node_shape(addend) != output_shape for addend in addends)
+        or _node_shape(norm_output) != output_shape
+        or _node_shape(gamma) != (first_shape[-1],)
+        or any(
+            _node_shape(second_input) != first_shape for second_input, _ in second_pairs
+        )
+    ):
+        return None
+    if rstd_output is not None and (
+        _node_dtype(rstd_output) != torch.float32
+        or _node_shape(rstd_output) != (*output_shape[:-1], 1)
+    ):
+        return None
+    tensor_nodes = (
+        first_mm,
+        first_reshape,
+        *addends,
+        *add_nodes,
+        gamma,
+        norm_output,
+        *(node for pair in second_pairs for node in pair),
+    )
+    if any(_node_dtype(node) != torch.bfloat16 for node in tensor_nodes):
+        return None
+    if not all(
+        isinstance(node.meta.get("val"), torch.Tensor)
+        for node in (first_mm, *addends, gamma, *(mm for _, mm in second_pairs))
+    ):
+        return None
+    return (
+        first_mm,
+        first_reshape,
+        addends,
+        accumulated_value_is_lhs,
+        add_nodes,
+        norm,
+        norm_output,
+        gamma,
+        rstd_output,
+        second_pairs,
+        eps,
+    )
+
+
+def fuse_f3_residual_rmsnorm_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Reparameterize residual RMSNorm across its neighboring GEMMs."""
+    del example_inputs
+    num_original_fused = 0
+    num_recomputed_fused = 0
+    num_projection_fused = 0
+    for norm in list(gm.graph.nodes):
+        match = _match_f3_residual_rmsnorm(norm)
+        if match is None:
+            continue
+        (
+            first_mm,
+            first_reshape,
+            addends,
+            accumulated_value_is_lhs,
+            add_nodes,
+            norm,
+            norm_output,
+            gamma,
+            rstd_output,
+            second_pairs,
+            eps,
+        ) = match
+        add = add_nodes[-1]
+        first_shape = _node_shape(first_mm)
+        output_shape = _node_shape(add)
+        assert first_shape is not None
+        assert output_shape is not None
+        first_value = first_mm.meta["val"]
+        addend_values = tuple(addend.meta["val"] for addend in addends)
+        gamma_value = gamma.meta["val"]
+        assert isinstance(first_value, torch.Tensor)
+        assert all(isinstance(value, torch.Tensor) for value in addend_values)
+        assert isinstance(gamma_value, torch.Tensor)
+        preserve_saved_values = rstd_output is not None
+
+        # Bucketing may materialize the next layer's RMSNorm weight after the
+        # producing GEMM. Insert at the norm boundary where every capture is
+        # guaranteed to dominate the new HOP.
+        with gm.graph.inserting_before(norm):
+            addends_2d = []
+            addend_values_2d = []
+            for addend, addend_value in zip(addends, addend_values, strict=True):
+                addend_2d = gm.graph.call_function(
+                    _RESHAPE,
+                    (addend, list(first_shape)),
+                )
+                addend_value_2d = addend_value.reshape(first_shape)
+                addend_2d.meta = _copy_meta_with_value(
+                    addend_value_2d, addend, *add_nodes
+                )
+                _tag_for_regional_inductor(addend_2d)
+                addends_2d.append(addend_2d)
+                addend_values_2d.append(addend_value_2d)
+            gamma_2d = gm.graph.call_function(
+                _RESHAPE,
+                (gamma, [1, first_shape[-1]]),
+            )
+            gamma_2d_value = gamma_value.reshape(1, first_shape[-1])
+            gamma_2d.meta = _copy_meta_with_value(gamma_2d_value, gamma)
+            _tag_for_regional_inductor(gamma_2d)
+
+            first_body = _build_f3_residual_rmsnorm_first_body(
+                first_mm,
+                tuple(addends_2d),
+                gamma_2d,
+                _CODA_RMSNORM_GROUP,
+                accumulated_value_is_lhs,
+            )
+            first_body_name = _next_submodule_name(gm, "_coda_f3_residual_first_body")
+            gm.add_module(first_body_name, first_body)
+            first_body_ref = gm.graph.get_attr(first_body_name)
+            _tag_for_regional_inductor(first_body_ref)
+            first_fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    first_body_ref,
+                    tuple(first_mm.args) + (*addends_2d, gamma_2d),
+                    dict(first_mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            total_value = first_value
+            for addend_value, value_is_lhs in zip(
+                addend_values_2d, accumulated_value_is_lhs, strict=True
+            ):
+                total_value = (
+                    total_value + addend_value
+                    if value_is_lhs
+                    else addend_value + total_value
+                )
+            weighted_value = (total_value.float() * gamma_2d_value).to(torch.bfloat16)
+            partial_value = (
+                total_value.float()
+                .reshape(first_shape[0], -1, _CODA_RMSNORM_GROUP)
+                .square()
+                .mean(-1)
+            )
+            weighted_meta = _copy_meta_with_value(
+                weighted_value,
+                first_mm,
+                first_reshape,
+                *addends,
+                *add_nodes,
+                norm,
+                norm_output,
+                gamma,
+            )
+            total_meta = _copy_meta_with_value(
+                total_value, first_mm, first_reshape, *addends, *add_nodes
+            )
+            partial_meta = _copy_meta_with_value(
+                partial_value,
+                first_mm,
+                first_reshape,
+                *addends,
+                *add_nodes,
+                norm,
+            )
+            first_fused.meta = _copy_meta(
+                first_mm,
+                first_reshape,
+                *addends,
+                *add_nodes,
+                norm,
+                norm_output,
+            )
+            first_fused.meta["val"] = (
+                weighted_meta["val"],
+                total_meta["val"],
+                partial_meta["val"],
+            )
+            first_fused.meta.pop("tensor_meta", None)
+            _tag_for_regional_inductor(first_fused)
+
+            weighted = gm.graph.call_function(operator.getitem, (first_fused, 0))
+            weighted.meta = weighted_meta
+            _tag_for_regional_inductor(weighted)
+            total_2d = gm.graph.call_function(operator.getitem, (first_fused, 1))
+            total_2d.meta = total_meta
+            _tag_for_regional_inductor(total_2d)
+            partial = gm.graph.call_function(operator.getitem, (first_fused, 2))
+            partial.meta = partial_meta
+            _tag_for_regional_inductor(partial)
+            total = gm.graph.call_function(
+                _RESHAPE,
+                (total_2d, list(output_shape)),
+            )
+            total.meta = _copy_meta_with_value(total_value.reshape(output_shape), add)
+            _tag_for_regional_inductor(total)
+            mean_square = gm.graph.call_function(_MEAN_DIM, (partial, [-1], True))
+            mean_square_value = partial_value.mean(-1, keepdim=True)
+            mean_square.meta = _copy_meta_with_value(
+                mean_square_value, first_mm, add, norm
+            )
+            _tag_for_regional_inductor(mean_square)
+            stabilized = gm.graph.call_function(_ADD_SCALAR, (mean_square, eps))
+            stabilized_value = mean_square_value + eps
+            stabilized.meta = _copy_meta_with_value(
+                stabilized_value, first_mm, add, norm
+            )
+            _tag_for_regional_inductor(stabilized)
+            rstd = gm.graph.call_function(_RSQRT, (stabilized,))
+            rstd_value = stabilized_value.rsqrt()
+            rstd.meta = _copy_meta_with_value(rstd_value, first_mm, add, norm)
+            _tag_for_regional_inductor(rstd)
+
+            saved_norm_output = None
+            saved_rstd_output = None
+            if preserve_saved_values:
+                assert rstd_output is not None
+                normalized_fp32 = gm.graph.call_function(
+                    _MUL,
+                    (total_2d, rstd),
+                )
+                normalized_value = total_value.float() * rstd_value
+                normalized_fp32.meta = _copy_meta_with_value(
+                    normalized_value, add, norm, norm_output
+                )
+                _tag_for_regional_inductor(normalized_fp32)
+                normalized_weighted_fp32 = gm.graph.call_function(
+                    _MUL,
+                    (normalized_fp32, gamma_2d),
+                )
+                normalized_weighted_value = normalized_value * gamma_2d_value
+                normalized_weighted_fp32.meta = _copy_meta_with_value(
+                    normalized_weighted_value, add, norm, norm_output, gamma
+                )
+                _tag_for_regional_inductor(normalized_weighted_fp32)
+                saved_norm_output = gm.graph.call_function(
+                    _TO_COPY,
+                    (normalized_weighted_fp32,),
+                    {"dtype": torch.bfloat16},
+                )
+                saved_norm_output.meta = _copy_meta_with_value(
+                    normalized_weighted_value.to(torch.bfloat16), norm_output
+                )
+                _tag_for_regional_inductor(saved_norm_output)
+                rstd_output_shape = _node_shape(rstd_output)
+                assert rstd_output_shape is not None
+                saved_rstd_output = gm.graph.call_function(
+                    _RESHAPE,
+                    (rstd, list(rstd_output_shape)),
+                )
+                saved_rstd_output.meta = _copy_meta_with_value(
+                    rstd_value.reshape(rstd_output_shape), rstd_output
+                )
+                _tag_for_regional_inductor(saved_rstd_output)
+
+        for second_input, second_mm in second_pairs:
+            second_value = second_mm.meta["val"]
+            assert isinstance(second_value, torch.Tensor)
+            second_body = _build_f2_q_rmsnorm_second_body(second_mm, rstd)
+            second_body_name = _next_submodule_name(gm, "_coda_f3_residual_second_body")
+            gm.add_module(second_body_name, second_body)
+            with gm.graph.inserting_before(second_mm):
+                second_body_ref = gm.graph.get_attr(second_body_name)
+                _tag_for_regional_inductor(second_body_ref)
+                second_fused = gm.graph.call_function(
+                    flex_gemm_hop,
+                    (
+                        _MM,
+                        second_body_ref,
+                        (weighted, second_mm.args[1], rstd),
+                        dict(second_mm.kwargs),
+                        {"backend": "QUACK"},
+                    ),
+                )
+                second_meta = _copy_meta_with_value(
+                    second_value, norm, norm_output, second_input, second_mm
+                )
+                second_fused.meta = _copy_meta(
+                    norm, norm_output, second_input, second_mm
+                )
+                second_fused.meta["val"] = (second_meta["val"],)
+                second_fused.meta.pop("tensor_meta", None)
+                _tag_for_regional_inductor(second_fused)
+                output = gm.graph.call_function(operator.getitem, (second_fused, 0))
+                output.meta = second_meta
+                _tag_for_regional_inductor(output)
+
+            second_mm.replace_all_uses_with(output)
+            gm.graph.erase_node(second_mm)
+            if preserve_saved_values:
+                assert saved_norm_output is not None
+                second_input.replace_all_uses_with(saved_norm_output)
+            gm.graph.erase_node(second_input)
+            num_projection_fused += 1
+
+        add.replace_all_uses_with(total)
+        if preserve_saved_values:
+            assert rstd_output is not None
+            assert saved_rstd_output is not None
+            rstd_output.replace_all_uses_with(saved_rstd_output)
+            gm.graph.erase_node(rstd_output)
+            num_recomputed_fused += 1
+        else:
+            num_original_fused += 1
+        gm.graph.erase_node(norm_output)
+        gm.graph.erase_node(norm)
+        for add_node in reversed(add_nodes):
+            gm.graph.erase_node(add_node)
+        gm.graph.erase_node(first_reshape)
+        gm.graph.erase_node(first_mm)
+
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(
+        f"F3 fused {num_original_fused} original and "
+        f"{num_recomputed_fused} recomputed residual RMSNorm boundaries "
+        f"across {num_projection_fused} downstream projections"
+    )
+    return gm
+
+
 def _match_f2_q_rmsnorm(
     norm: torch.fx.Node,
 ) -> tuple[
@@ -1728,6 +2333,7 @@ CODA_PATTERN_PASSES: dict[str, Callable] = {
     "b2_dense_swiglu_backward": fuse_b2_dense_swiglu_backward_pass,
     "b4_router_input_grad_add": fuse_b4_router_input_grad_add_pass,
     "b6_bf16_weight_grad_cast": fuse_b6_bf16_weight_grad_cast_pass,
+    "f3_residual_rmsnorm": fuse_f3_residual_rmsnorm_pass,
     "f2_q_rmsnorm": fuse_f2_q_rmsnorm_pass,
     "f4_dense_swiglu": fuse_f4_dense_swiglu_pass,
     "f6_router_sigmoid_bias": fuse_f6_router_sigmoid_bias_pass,

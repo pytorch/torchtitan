@@ -650,3 +650,194 @@ GB300.
 
 Speedup: `9.29x`. The fused output had `max_abs_error=0.00048828125` and
 `mean_abs_error=1.494e-6` relative to eager.
+
+## F3 residual RMSNorm between GEMMs
+
+Pattern name: `f3_residual_rmsnorm`
+
+This pass implements the paper's central GEMM-residual-RMSNorm-GEMM
+reparameterization. It follows PyTorch's end-to-end FlexGEMM coverage in
+`test_mm_coda_rmsnorm_rewrite_e2e`: the first FlexGEMM emits a gamma-weighted
+activation and 512-column mean-square partials, a small root-graph reduction
+forms the row-wise `rstd`, and each downstream FlexGEMM applies `rstd` in its
+epilogue. The TorchTitan body additionally emits the raw residual sum because
+the model reuses that value as the residual stream and checkpointed backward
+requires it.
+
+The matcher covers three grounded boundaries:
+
+```text
+layers.L.attention.wo -> residual -> layers.L.ffn_norm
+    -> layers.L.feed_forward.{w1,w3}
+
+layers.L.feed_forward.w2 -> residual -> layers.L+1.attention_norm
+    -> layers.L+1.attention.{wq_a,wkv_a}
+
+layers.L.moe.shared_experts.w2 + routed output -> residual
+    -> layers.L+1.attention_norm
+    -> layers.L+1.attention.{wq_a,wkv_a}
+```
+
+The first form is restricted to the three dense FFN layers. MoE normalized
+activations also feed routing and grouped GEMMs, so that boundary remains
+assigned to distMoE. The third form starts at the shared expert's ordinary W2
+GEMM after the routed expert collective. It captures both the routed result and
+the residual in their original BF16 addition order; it does not rewrite either
+grouped expert GEMM.
+
+Real before sample from layer 0:
+
+```python
+mm_4 = torch.ops.aten.mm.default(view_22, t_4)
+attention_out = torch.ops.aten.reshape.default(mm_4, [24, 4096, 7168])
+residual = torch.ops.aten.add.Tensor(embedding, attention_out)
+norm = torch.ops.aten._fused_rms_norm.default(
+    residual, [7168], ffn_norm_weight, 1e-05
+)
+normalized = norm[0]
+w1 = torch.ops.aten.mm.default(normalized.reshape(98304, 7168), t_5)
+w3 = torch.ops.aten.mm.default(normalized.reshape(98304, 7168), t_6)
+```
+
+Real after sample:
+
+```python
+residual_2d = torch.ops.aten.reshape.default(embedding, [98304, 7168])
+gamma_2d = torch.ops.aten.reshape.default(ffn_norm_weight, [1, 7168])
+first = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f3_residual_first_body_0,
+    (view_22, t_4, residual_2d, gamma_2d),
+    {},
+    {"backend": "QUACK"},
+)
+weighted = first[0]
+residual = first[1]
+partial_mean_square = first[2]
+rstd = torch.ops.aten.rsqrt.default(
+    torch.ops.aten.add.Scalar(
+        torch.ops.aten.mean.dim(partial_mean_square, [-1], True), 1e-05
+    )
+)
+w1 = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f3_residual_second_body_0,
+    (weighted, t_5, rstd),
+    {},
+    {"backend": "QUACK"},
+)[0]
+w3 = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f3_residual_second_body_1,
+    (weighted, t_6, rstd),
+    {},
+    {"backend": "QUACK"},
+)[0]
+```
+
+Real MoE-output before and after samples from layer 3:
+
+```python
+# Before
+shared = torch.ops.aten.mm.default(view_159, t_34)
+shared = torch.ops.aten.reshape.default(shared, [24, 4096, 7168])
+moe_output = torch.ops.aten.add.Tensor(routed_output, shared)
+residual = torch.ops.aten.add.Tensor(previous_residual, moe_output)
+norm = torch.ops.aten._fused_rms_norm.default(
+    residual, [7168], attention_norm_weight, 1e-05
+)
+
+# After
+routed_2d = torch.ops.aten.reshape.default(routed_output, [98304, 7168])
+residual_2d = torch.ops.aten.reshape.default(previous_residual, [98304, 7168])
+gamma_2d = torch.ops.aten.reshape.default(attention_norm_weight, [1, 7168])
+first = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f3_residual_first_body_6,
+    (view_159, t_34, routed_2d, residual_2d, gamma_2d),
+    {},
+    {"backend": "QUACK"},
+)
+```
+
+FSDP bucketing can define the next norm's unsharded gamma after the producing
+GEMM. The new first HOP is therefore placed immediately before the norm, where
+the GEMM inputs, residual, and gamma all dominate it. A late-gamma unit test
+covers this real graph ordering.
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-f3-proof-20260810/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_f3_residual_rmsnorm_pass_274.txt
+after_fuse_f3_residual_rmsnorm_pass_275.txt
+```
+
+Pass diff for the root graph:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 1,950 | -198 |
+| root `_fused_rms_norm.default` | 490 | 424 | -66 |
+| root `add.Tensor` | 1,017 | 894 | -123 |
+| root `flex_gemm` | 0 | 198 | +198 |
+| root `get_attr` | 427 | 625 | +198 |
+| root `getitem` | 24,620 | 24,881 | +261 |
+| root `mean.dim` | 0 | 66 | +66 |
+| root `add.Scalar` | 0 | 66 | +66 |
+| root `rsqrt.default` | 0 | 66 | +66 |
+| root `_to_copy.default` | 2,486 | 2,489 | +3 |
+| root `mul.Tensor` | 1,249 | 1,255 | +6 |
+| root `reshape.default` | 6,822 | 6,882 | +60 |
+
+All six original dense boundaries, 57 original MoE-output boundaries, and three
+within-layer recomputed dense boundaries fused, covering 132 downstream
+projections. Cross-layer residual outputs are `MUST_SAVE` under full activation
+checkpointing, so their backward-side norms have no recomputed producer GEMM to
+fuse. The proof run then OOMed on the known 192 GiB unfused FlexAttention
+allocation after all pass artifacts were written.
+
+### GB300 microbenchmarks
+
+The representative attention-to-dense-FFN boundary uses BF16 tensors with
+`M=98,304`, attention width `16,384`, model width `7,168`, and two FFN
+projections of width `18,432`. It includes all three GEMMs, the residual add,
+RMSNorm, partial-statistics reduction, and row-scale epilogues. Inputs were
+scaled by `0.02`; five warmups and 20 CUDA-event iterations were run on one
+GB300.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager three GEMMs + residual RMSNorm | 47.514 ms | 45.148 ms | 51.077 ms |
+| three QUACK FlexGEMMs + partial reduction | 50.049 ms | 48.385 ms | 50.740 ms |
+
+Speedup: `0.95x`. This remains under the project policy that accepts FlexGEMM
+fusions without a speedup. The residual output was bitwise exact. Both
+projected outputs had `max_abs_error=0.0625`; their mean absolute errors were
+`0.00224166` and `0.00224173`. Moving `rstd` across the downstream GEMMs changes
+rounding, so this pattern requires convergence validation.
+
+The representative MoE-output boundary uses a shared-expert W2 GEMM with
+`M=98,304`, input width `2,048`, and model width `7,168`. Its first epilogue
+captures both model-width routed and residual tensors, and the two downstream
+attention projections have widths `1,536` and `576`. The benchmark otherwise
+uses the same input scaling, warmups, and iteration count.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager shared W2 + two adds + RMSNorm + projections | 4.464 ms | 4.284 ms | 5.673 ms |
+| three QUACK FlexGEMMs + two captures + partial reduction | 5.120 ms | 4.999 ms | 6.504 ms |
+
+Speedup: `0.87x`. The residual output was bitwise exact. Both projected outputs
+had `max_abs_error=0.0625`; their mean absolute errors were `0.00223414` and
+`0.00223534`. This does not justify a custom kernel under the project policy.

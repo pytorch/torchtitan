@@ -16,6 +16,7 @@ from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_b4_router_input_grad_add_pass,
     fuse_b6_bf16_weight_grad_cast_pass,
     fuse_f2_q_rmsnorm_pass,
+    fuse_f3_residual_rmsnorm_pass,
     fuse_f4_dense_swiglu_pass,
     fuse_f6_router_sigmoid_bias_pass,
     get_coda_pattern_passes,
@@ -336,6 +337,199 @@ class TestB2DenseSwiGLUBackwardPass(TestCase):
         self.assertEqual(self._flex_gemm_nodes(gm), [])
 
 
+class TestF3ResidualRMSNormPass(TestCase):
+    def _trace_chain(self, *, cross_layer=False, return_saved=False):
+        m, k, n, p, q = 8, 16, 512, 64, 96
+
+        def fn(a, first_weight, residual, gamma, second_weight, third_weight):
+            first = torch.ops.aten.mm.default(a, first_weight)
+            first = torch.ops.aten.reshape.default(first, [2, 4, n])
+            total = torch.ops.aten.add.Tensor(residual, first)
+            gamma_for_norm = torch.ops.aten.clone.default(gamma)
+            normalized, rstd = torch.ops.aten._fused_rms_norm.default(
+                total, [n], gamma_for_norm, 1e-5
+            )
+            second_input = torch.ops.aten.reshape.default(normalized, [m, n])
+            second = torch.ops.aten.mm.default(second_input, second_weight)
+            third_input = torch.ops.aten.reshape.default(normalized, [m, n])
+            third = torch.ops.aten.mm.default(third_input, third_weight)
+            if return_saved:
+                return second, third, total, rstd, second_input, third_input
+            return second, third, total
+
+        inputs = (
+            torch.randn(m, k, dtype=torch.bfloat16) * 0.02,
+            torch.randn(k, n, dtype=torch.bfloat16) * 0.02,
+            torch.randn(2, 4, n, dtype=torch.bfloat16) * 0.02,
+            torch.ones(n, dtype=torch.bfloat16),
+            torch.randn(n, p, dtype=torch.bfloat16) * 0.02,
+            torch.randn(n, q, dtype=torch.bfloat16) * 0.02,
+        )
+        gm = torch.fx.symbolic_trace(fn)
+        gm.graph.eliminate_dead_code()
+        gm.recompile()
+        FakeTensorProp(gm).propagate(*inputs)
+        mm_nodes = [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+        norm = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._fused_rms_norm.default
+        )
+        if cross_layer:
+            mm_nodes[0].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w2"}
+            norm.meta["custom"] = {"module_fqn": "layers.3.attention_norm"}
+            mm_nodes[1].meta["custom"] = {"module_fqn": "layers.3.attention.wq_a"}
+            mm_nodes[2].meta["custom"] = {"module_fqn": "layers.3.attention.wkv_a"}
+        else:
+            mm_nodes[0].meta["custom"] = {"module_fqn": "layers.2.attention.wo"}
+            norm.meta["custom"] = {"module_fqn": "layers.2.ffn_norm"}
+            mm_nodes[1].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w1"}
+            mm_nodes[2].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w3"}
+        return gm, inputs
+
+    def _expected(self, inputs):
+        a, first_weight, residual, gamma, second_weight, third_weight = inputs
+        first = torch.mm(a, first_weight).reshape(2, 4, 512)
+        total = residual + first
+        total_2d = total.reshape(8, 512)
+        weighted = (total_2d.float() * gamma).bfloat16()
+        partial_mean_square = total_2d.float().reshape(8, -1, 512).square().mean(-1)
+        rstd = (partial_mean_square.mean(-1, keepdim=True) + 1e-5).rsqrt()
+        second = (torch.mm(weighted, second_weight).float() * rstd).bfloat16()
+        third = (torch.mm(weighted, third_weight).float() * rstd).bfloat16()
+        normalized = (total_2d.float() * rstd * gamma).bfloat16()
+        return second, third, total, rstd, normalized
+
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_reparameterizes_same_layer_residual_norm(self):
+        gm, inputs = self._trace_chain()
+        expected_second, expected_third, expected_total, _, _ = self._expected(inputs)
+
+        fuse_f3_residual_rmsnorm_pass(gm)
+
+        actual_second, actual_third, actual_total = gm(*inputs)
+        torch.testing.assert_close(actual_second, expected_second, atol=1e-3, rtol=2e-2)
+        torch.testing.assert_close(actual_third, expected_third, atol=1e-3, rtol=2e-2)
+        self.assertEqual(actual_total, expected_total)
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._fused_rms_norm.default
+                for node in gm.graph.nodes
+            )
+        )
+
+    def test_rewrites_cross_layer_recompute_and_preserves_saved_values(self):
+        gm, inputs = self._trace_chain(cross_layer=True, return_saved=True)
+        (
+            expected_second,
+            expected_third,
+            expected_total,
+            expected_rstd,
+            normalized,
+        ) = self._expected(inputs)
+
+        fuse_f3_residual_rmsnorm_pass(gm)
+
+        second, third, total, rstd, second_input, third_input = gm(*inputs)
+        torch.testing.assert_close(second, expected_second, atol=1e-3, rtol=2e-2)
+        torch.testing.assert_close(third, expected_third, atol=1e-3, rtol=2e-2)
+        self.assertEqual(total, expected_total)
+        self.assertEqual(rstd, expected_rstd.reshape(2, 4, 1))
+        self.assertEqual(second_input, normalized)
+        self.assertEqual(third_input, normalized)
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
+
+    def test_reparameterizes_moe_output_residual_norm(self):
+        m, k, n, p, q = 8, 16, 512, 64, 96
+
+        def fn(
+            a,
+            first_weight,
+            routed_output,
+            residual,
+            gamma,
+            second_weight,
+            third_weight,
+        ):
+            shared_output = torch.ops.aten.mm.default(a, first_weight)
+            shared_output = torch.ops.aten.reshape.default(shared_output, [2, 4, n])
+            moe_output = torch.ops.aten.add.Tensor(routed_output, shared_output)
+            total = torch.ops.aten.add.Tensor(residual, moe_output)
+            gamma_for_norm = torch.ops.aten.clone.default(gamma)
+            normalized, _ = torch.ops.aten._fused_rms_norm.default(
+                total, [n], gamma_for_norm, 1e-5
+            )
+            second_input = torch.ops.aten.reshape.default(normalized, [m, n])
+            second = torch.ops.aten.mm.default(second_input, second_weight)
+            third_input = torch.ops.aten.reshape.default(normalized, [m, n])
+            third = torch.ops.aten.mm.default(third_input, third_weight)
+            return second, third, total
+
+        inputs = (
+            torch.randn(m, k, dtype=torch.bfloat16) * 0.02,
+            torch.randn(k, n, dtype=torch.bfloat16) * 0.02,
+            torch.randn(2, 4, n, dtype=torch.bfloat16) * 0.02,
+            torch.randn(2, 4, n, dtype=torch.bfloat16) * 0.02,
+            torch.ones(n, dtype=torch.bfloat16),
+            torch.randn(n, p, dtype=torch.bfloat16) * 0.02,
+            torch.randn(n, q, dtype=torch.bfloat16) * 0.02,
+        )
+        gm = torch.fx.symbolic_trace(fn)
+        gm.graph.eliminate_dead_code()
+        gm.recompile()
+        FakeTensorProp(gm).propagate(*inputs)
+        mm_nodes = [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+        norm = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._fused_rms_norm.default
+        )
+        mm_nodes[0].meta["custom"] = {"module_fqn": "layers.3.moe.shared_experts.w2"}
+        norm.meta["custom"] = {"module_fqn": "layers.4.attention_norm"}
+        mm_nodes[1].meta["custom"] = {"module_fqn": "layers.4.attention.wq_a"}
+        mm_nodes[2].meta["custom"] = {"module_fqn": "layers.4.attention.wkv_a"}
+
+        a, first_weight, routed, residual, gamma, second_weight, third_weight = inputs
+        first = torch.mm(a, first_weight).reshape(2, 4, n)
+        expected_total = residual + (routed + first)
+        total_2d = expected_total.reshape(m, n)
+        weighted = (total_2d.float() * gamma).bfloat16()
+        partial = total_2d.float().reshape(m, -1, 512).square().mean(-1)
+        rstd = (partial.mean(-1, keepdim=True) + 1e-5).rsqrt()
+        expected_second = (torch.mm(weighted, second_weight).float() * rstd).bfloat16()
+        expected_third = (torch.mm(weighted, third_weight).float() * rstd).bfloat16()
+
+        fuse_f3_residual_rmsnorm_pass(gm)
+
+        actual_second, actual_third, actual_total = gm(*inputs)
+        torch.testing.assert_close(actual_second, expected_second, atol=1e-3, rtol=2e-2)
+        torch.testing.assert_close(actual_third, expected_third, atol=1e-3, rtol=2e-2)
+        self.assertEqual(actual_total, expected_total)
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
+
+    def test_does_not_fuse_incomplete_projection_set(self):
+        gm, _ = self._trace_chain()
+        mm_nodes = [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+        mm_nodes[2].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w2"}
+
+        fuse_f3_residual_rmsnorm_pass(gm)
+
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+
 class TestF2QRMSNormPass(TestCase):
     def _trace_q_chain(self, *, return_rstd=False):
         m, k, n, p = 8, 16, 512, 64
@@ -492,6 +686,7 @@ class TestCodaPatternRegistry(TestCase):
                 "f6_router_sigmoid_bias",
                 "f4_dense_swiglu",
                 "b2_dense_swiglu_backward",
+                "f3_residual_rmsnorm",
                 "f2_q_rmsnorm",
                 "b4_router_input_grad_add",
                 "b6_bf16_weight_grad_cast",
@@ -503,6 +698,7 @@ class TestCodaPatternRegistry(TestCase):
                 fuse_f6_router_sigmoid_bias_pass,
                 fuse_f4_dense_swiglu_pass,
                 fuse_b2_dense_swiglu_backward_pass,
+                fuse_f3_residual_rmsnorm_pass,
                 fuse_f2_q_rmsnorm_pass,
                 fuse_b4_router_input_grad_add_pass,
                 fuse_b6_bf16_weight_grad_cast_pass,
