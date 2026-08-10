@@ -12,6 +12,7 @@ from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_b6_bf16_weight_grad_cast_pass,
+    fuse_f6_router_sigmoid_bias_pass,
     get_coda_pattern_passes,
 )
 
@@ -97,10 +98,77 @@ class TestB6WeightGradCastPass(TestCase):
             self.assertIn("compile_with_inductor", node.meta["custom"])
 
 
+class TestF6RouterSigmoidBiasPass(TestCase):
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_fuses_sigmoid_and_bias_while_preserving_raw_scores(self):
+        x = torch.randn(8, 16)
+        weight = torch.randn(16, 5)
+        bias = torch.randn(5)
+
+        def fn(a, b, expert_bias):
+            scores = torch.sigmoid(torch.mm(a, b).reshape(2, 4, 5))
+            return scores, scores + expert_bias, scores * 2
+
+        gm = make_fx(fn)(x, weight, bias)
+        expected = gm(x, weight, bias)
+        fuse_f6_router_sigmoid_bias_pass(gm)
+
+        self.assertEqual(gm(x, weight, bias), expected, exact_dtype=True)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(len(fused[0].args[2]), 3)
+        body_ref = fused[0].args[1]
+        body = getattr(gm, body_ref.target)
+        targets = [node.target for node in body.graph.nodes]
+        self.assertEqual(targets.count(torch.ops.aten.mm.default), 1)
+        self.assertEqual(targets.count(torch.ops.aten.sigmoid.default), 1)
+        self.assertEqual(targets.count(torch.ops.aten.add.Tensor), 1)
+
+    def test_fuses_recomputed_sigmoid_without_bias(self):
+        x = torch.randn(8, 16)
+        weight = torch.randn(16, 5)
+
+        def fn(a, b):
+            scores = torch.sigmoid(torch.mm(a, b).reshape(2, 4, 5))
+            return scores, scores * 2
+
+        gm = make_fx(fn)(x, weight)
+        expected = gm(x, weight)
+        fuse_f6_router_sigmoid_bias_pass(gm)
+
+        self.assertEqual(gm(x, weight), expected, exact_dtype=True)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(len(fused[0].args[2]), 2)
+
+    def test_does_not_fuse_multi_use_mm(self):
+        x = torch.randn(8, 16)
+        weight = torch.randn(16, 5)
+
+        def fn(a, b):
+            mm = torch.mm(a, b)
+            return torch.sigmoid(mm.reshape(2, 4, 5)), mm + 1
+
+        gm = make_fx(fn)(x, weight)
+        fuse_f6_router_sigmoid_bias_pass(gm)
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+
 class TestCodaPatternRegistry(TestCase):
     def test_resolves_configured_order(self):
-        passes = get_coda_pattern_passes(["b6_bf16_weight_grad_cast"])
-        self.assertEqual(passes, [fuse_b6_bf16_weight_grad_cast_pass])
+        passes = get_coda_pattern_passes(
+            ["f6_router_sigmoid_bias", "b6_bf16_weight_grad_cast"]
+        )
+        self.assertEqual(
+            passes,
+            [fuse_f6_router_sigmoid_bias_pass, fuse_b6_bf16_weight_grad_cast_pass],
+        )
 
     def test_rejects_unknown_pattern(self):
         with self.assertRaisesRegex(ValueError, "Unknown.*not_a_pattern"):

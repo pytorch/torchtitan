@@ -101,3 +101,93 @@ The 58 FP32 router `mm -> BF16 -> FP32` chains are intentionally excluded.
 QUACK compilation for the real `(256, 98304) @ (98304, 7168)` shape failed on
 GB300 with `cudaErrorNoKernelImageForDevice`. No custom router kernel is added
 without evidence that it is faster than the original implementation.
+
+## F6 router sigmoid and expert bias
+
+Pattern name: `f6_router_sigmoid_bias`
+
+The matcher follows the real FP32 router chain through its canonical reshape:
+`mm -> reshape -> sigmoid`. The GEMM and reshape must each have one user, the
+last reshape dimension must equal the GEMM output width, and an expert bias is
+captured only when it is the exact one-dimensional output-width tensor. Other
+sigmoid users are preserved.
+
+That last point is required by the training graph. The original forward score
+is consumed both by the biased top-k path and by forced-load-balance routing;
+the recomputed score is also consumed by sigmoid backward. FlexGEMM therefore
+returns the raw sigmoid as its main output and, for the 58 forward cases, the
+biased score as a same-shape auxiliary output.
+
+Real before sample:
+
+```python
+mm_29 = torch.ops.aten.mm.default(view_109, t_29)
+_unsafe_view_29 = torch.ops.aten.reshape.default(mm_29, [24, 4096, 256])
+sigmoid = torch.ops.aten.sigmoid.default(_unsafe_view_29)
+add_7 = torch.ops.aten.add.Tensor(sigmoid, arg1938_1)
+```
+
+Real after sample:
+
+```python
+reshape_default = torch.ops.aten.reshape.default(arg1938_1, [1, 256])
+_coda_f6_body_0 = self._coda_f6_body_0
+flex_gemm = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f6_body_0,
+    (view_109, t_29, reshape_default),
+    {},
+    {"backend": "QUACK"},
+)
+raw_scores = torch.ops.aten.reshape.default(flex_gemm[0], [24, 4096, 256])
+biased_scores = torch.ops.aten.reshape.default(flex_gemm[1], [24, 4096, 256])
+```
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-f6-proof-20260810-144205/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_f6_router_sigmoid_bias_pass_274.txt
+after_fuse_f6_router_sigmoid_bias_pass_275.txt
+```
+
+Pass diff for the root graph:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 2,032 | -116 |
+| root `sigmoid.default` | 116 | 0 | -116 |
+| root `add.Tensor` | 1,017 | 959 | -58 |
+| root `flex_gemm` | 0 | 116 | +116 |
+| root `get_attr` | 427 | 543 | +116 |
+| root `getitem` | 24,620 | 24,794 | +174 |
+| root `reshape.default` | 6,822 | 6,938 | +116 |
+
+All 58 original and 58 recomputed router sigmoid chains fused. The 58 original
+expert-bias adds became auxiliary epilogue outputs. The proof run disabled
+regional Inductor to retain the rewrite as FX text, then OOMed in unfused
+FlexAttention after all pass artifacts had been written.
+
+### GB300 microbenchmark
+
+Representative shape: `(98304, 7168) @ (7168, 256)`, FP32 inputs and outputs,
+with both raw and biased router scores returned. Five warmups and 20 CUDA-event
+iterations were run on one GB300.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager `mm` + sigmoid + bias | 5.534 ms | 5.513 ms | 5.611 ms |
+| QUACK FlexGEMM | 0.983 ms | 0.966 ms | 1.032 ms |
+
+Speedup: `5.63x`. For random FP32 inputs scaled by `0.02`, both raw and biased
+outputs had `max_abs_error=1.395e-5` and `mean_abs_error=1.984e-6` versus eager.
