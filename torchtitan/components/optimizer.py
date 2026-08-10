@@ -164,6 +164,20 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "foreach": config.implementation == "foreach",
         }
 
+    @classmethod
+    def _build_param_groups(
+        cls,
+        model: nn.Module,
+        param_group_configs: list[ParamGroupConfig],
+        impl_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
+        """Build groups for a single non-PP model, retaining local validation."""
+        groups, patterns, matches = cls._resolve_param_groups(
+            model, param_group_configs, impl_kwargs
+        )
+        cls._validate_param_group_matches(param_group_configs, matches)
+        return groups, patterns
+
     @staticmethod
     def _resolve_param_groups(
         model: nn.Module,
@@ -206,20 +220,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             patterns[config.optimizer_name].append(config.pattern)
 
         return groups, patterns, matches
-
-    @classmethod
-    def _build_param_groups(
-        cls,
-        model: nn.Module,
-        param_group_configs: list[ParamGroupConfig],
-        impl_kwargs: dict[str, Any],
-    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
-        """Build groups for a single non-PP model, retaining local validation."""
-        groups, patterns, matches = cls._resolve_param_groups(
-            model, param_group_configs, impl_kwargs
-        )
-        cls._validate_param_group_matches(param_group_configs, matches)
-        return groups, patterns
 
     @staticmethod
     def _validate_param_group_matches(
