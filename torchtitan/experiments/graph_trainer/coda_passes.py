@@ -346,6 +346,35 @@ def _build_b2_input_add_body(
     return body
 
 
+def _build_b4_router_input_grad_body(
+    mm: torch.fx.Node,
+    cast: torch.fx.Node,
+    residual_2d: torch.fx.Node,
+    add: torch.fx.Node,
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    inputs = []
+    for index, source in enumerate((*mm.args, residual_2d)):
+        placeholder = graph.placeholder(f"arg{index}")
+        if isinstance(source, torch.fx.Node):
+            placeholder.meta = dict(source.meta)
+        inputs.append(placeholder)
+
+    body_mm = graph.call_function(_MM, tuple(inputs[:2]), dict(mm.kwargs))
+    body_mm.meta = dict(mm.meta)
+    rounded = graph.call_function(_TO_COPY, (body_mm,), dict(cast.kwargs))
+    rounded.meta = _copy_meta_with_dtype(mm, torch.bfloat16, mm, cast)
+    total = graph.call_function(_ADD, (inputs[2], rounded))
+    total.meta = _copy_meta_with_dtype(mm, torch.bfloat16, mm, cast, add)
+
+    graph.output((total,))
+    body = torch.fx.GraphModule(torch.nn.Module(), graph)
+    apply_flex_gemm_body_graph_passes(body, _MM)
+    for node in body.graph.nodes:
+        _tag_for_regional_inductor(node)
+    return body
+
+
 def _build_f2_q_rmsnorm_first_body(
     mm: torch.fx.Node,
     gamma_2d: torch.fx.Node,
@@ -1196,6 +1225,143 @@ def fuse_b2_dense_swiglu_backward_pass(
     return gm
 
 
+def _match_b4_router_input_grad_add(
+    add: torch.fx.Node,
+) -> tuple[torch.fx.Node, torch.fx.Node, torch.fx.Node, torch.fx.Node,] | None:
+    if add.target != _ADD or len(add.args) < 2:
+        return None
+    lhs, rhs = add.args[:2]
+    cast = next(
+        (
+            node
+            for node in (lhs, rhs)
+            if isinstance(node, torch.fx.Node) and _is_cast(node, torch.bfloat16)
+        ),
+        None,
+    )
+    if cast is None:
+        return None
+    residual = rhs if cast is lhs else lhs
+    if not isinstance(residual, torch.fx.Node):
+        return None
+    if _sole_user(cast) is not add or not cast.args:
+        return None
+    reshape = cast.args[0]
+    if not isinstance(reshape, torch.fx.Node) or reshape.target not in (
+        _RESHAPE,
+        _VIEW,
+    ):
+        return None
+    if _sole_user(reshape) is not cast or not reshape.args:
+        return None
+    mm = reshape.args[0]
+    if not isinstance(mm, torch.fx.Node) or mm.target != _MM:
+        return None
+    if _sole_user(mm) is not reshape:
+        return None
+
+    module_fqn = _module_fqn(mm)
+    if module_fqn is None or not module_fqn.endswith(".moe.router.gate"):
+        return None
+    mm_shape = _node_shape(mm)
+    output_shape = _node_shape(add)
+    if (
+        mm_shape is None
+        or len(mm_shape) != 2
+        or output_shape is None
+        or output_shape[-1] != mm_shape[-1]
+        or _node_shape(reshape) != output_shape
+        or _node_shape(cast) != output_shape
+        or _node_shape(residual) != output_shape
+    ):
+        return None
+    if _node_dtype(mm) != torch.float32 or _node_dtype(reshape) != torch.float32:
+        return None
+    if any(_node_dtype(node) != torch.bfloat16 for node in (cast, residual, add)):
+        return None
+    if not all(
+        isinstance(node.meta.get("val"), torch.Tensor)
+        for node in (mm, cast, residual, add)
+    ):
+        return None
+    return mm, reshape, cast, residual
+
+
+def fuse_b4_router_input_grad_add_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Fuse the router input-gradient cast and expert-gradient add."""
+    del example_inputs
+    num_fused = 0
+    for add in list(gm.graph.nodes):
+        match = _match_b4_router_input_grad_add(add)
+        if match is None:
+            continue
+        mm, reshape, cast, residual = match
+        mm_shape = _node_shape(mm)
+        output_shape = _node_shape(add)
+        assert mm_shape is not None
+        assert output_shape is not None
+        residual_value = residual.meta["val"]
+        cast_value = cast.meta["val"]
+        assert isinstance(residual_value, torch.Tensor)
+        assert isinstance(cast_value, torch.Tensor)
+
+        with gm.graph.inserting_before(mm):
+            residual_2d = gm.graph.call_function(
+                _RESHAPE,
+                (residual, list(mm_shape)),
+            )
+            residual_2d.meta = _copy_meta_with_value(
+                residual_value.reshape(mm_shape), residual
+            )
+            _tag_for_regional_inductor(residual_2d)
+            body = _build_b4_router_input_grad_body(mm, cast, residual_2d, add)
+            body_name = _next_submodule_name(gm, "_coda_b4_router_body")
+            gm.add_module(body_name, body)
+            body_ref = gm.graph.get_attr(body_name)
+            _tag_for_regional_inductor(body_ref)
+            fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    body_ref,
+                    tuple(mm.args) + (residual_2d,),
+                    dict(mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            total_2d_meta = _copy_meta_with_value(
+                cast_value.reshape(mm_shape), mm, reshape, cast, residual, add
+            )
+            fused.meta = _copy_meta(mm, reshape, cast, residual, add)
+            fused.meta["val"] = (total_2d_meta["val"],)
+            fused.meta.pop("tensor_meta", None)
+            _tag_for_regional_inductor(fused)
+            total_2d = gm.graph.call_function(operator.getitem, (fused, 0))
+            total_2d.meta = total_2d_meta
+            _tag_for_regional_inductor(total_2d)
+            total = gm.graph.call_function(
+                _RESHAPE,
+                (total_2d, list(output_shape)),
+            )
+            total.meta = _copy_meta(mm, reshape, cast, residual, add)
+            _tag_for_regional_inductor(total)
+
+        add.replace_all_uses_with(total)
+        gm.graph.erase_node(add)
+        gm.graph.erase_node(cast)
+        gm.graph.erase_node(reshape)
+        gm.graph.erase_node(mm)
+        num_fused += 1
+
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(f"B4 fused {num_fused} router input-gradient cast/add chains")
+    return gm
+
+
 def _match_f2_q_rmsnorm(
     norm: torch.fx.Node,
 ) -> tuple[
@@ -1560,6 +1726,7 @@ def fuse_f2_q_rmsnorm_pass(
 
 CODA_PATTERN_PASSES: dict[str, Callable] = {
     "b2_dense_swiglu_backward": fuse_b2_dense_swiglu_backward_pass,
+    "b4_router_input_grad_add": fuse_b4_router_input_grad_add_pass,
     "b6_bf16_weight_grad_cast": fuse_b6_bf16_weight_grad_cast_pass,
     "f2_q_rmsnorm": fuse_f2_q_rmsnorm_pass,
     "f4_dense_swiglu": fuse_f4_dense_swiglu_pass,

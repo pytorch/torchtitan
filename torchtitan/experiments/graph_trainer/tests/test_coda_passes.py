@@ -13,6 +13,7 @@ from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_b2_dense_swiglu_backward_pass,
+    fuse_b4_router_input_grad_add_pass,
     fuse_b6_bf16_weight_grad_cast_pass,
     fuse_f2_q_rmsnorm_pass,
     fuse_f4_dense_swiglu_pass,
@@ -434,6 +435,56 @@ class TestF2QRMSNormPass(TestCase):
         )
 
 
+class TestB4RouterInputGradAddPass(TestCase):
+    def _trace(self, module_fqn):
+        x = torch.randn(8, 16)
+        weight = torch.randn(16, 12)
+        residual = torch.randn(2, 4, 12, dtype=torch.bfloat16)
+
+        def fn(a, b, other_grad):
+            router_grad = torch.mm(a, b).reshape(2, 4, 12).bfloat16()
+            return other_grad + router_grad
+
+        gm = make_fx(fn)(x, weight, residual)
+        mm = next(
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        )
+        mm.meta["custom"] = {
+            "module_fqn": module_fqn,
+            "autograd_backward": True,
+        }
+        return gm, (x, weight, residual)
+
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_fuses_router_cast_and_expert_gradient_add(self):
+        gm, inputs = self._trace("layers.3.moe.router.gate")
+        expected = gm(*inputs)
+
+        fuse_b4_router_input_grad_add_pass(gm)
+
+        self.assertEqual(gm(*inputs), expected, exact_dtype=True)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(len(fused[0].args[2]), 3)
+        body = getattr(gm, fused[0].args[1].target)
+        targets = [node.target for node in body.graph.nodes]
+        self.assertEqual(targets.count(torch.ops.aten._to_copy.default), 1)
+        self.assertEqual(targets.count(torch.ops.aten.add.Tensor), 1)
+
+    def test_does_not_fuse_unrelated_fp32_linear(self):
+        gm, _ = self._trace("layers.3.attention.wo")
+
+        fuse_b4_router_input_grad_add_pass(gm)
+
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+
 class TestCodaPatternRegistry(TestCase):
     def test_resolves_configured_order(self):
         passes = get_coda_pattern_passes(
@@ -442,6 +493,7 @@ class TestCodaPatternRegistry(TestCase):
                 "f4_dense_swiglu",
                 "b2_dense_swiglu_backward",
                 "f2_q_rmsnorm",
+                "b4_router_input_grad_add",
                 "b6_bf16_weight_grad_cast",
             ]
         )
@@ -452,6 +504,7 @@ class TestCodaPatternRegistry(TestCase):
                 fuse_f4_dense_swiglu_pass,
                 fuse_b2_dense_swiglu_backward_pass,
                 fuse_f2_q_rmsnorm_pass,
+                fuse_b4_router_input_grad_add_pass,
                 fuse_b6_bf16_weight_grad_cast_pass,
             ],
         )

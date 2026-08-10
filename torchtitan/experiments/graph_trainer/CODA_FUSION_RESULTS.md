@@ -553,3 +553,100 @@ The 512-of-576 KV chain is intentionally excluded. It requires a segmented
 reduction and a separate 64-column RoPE epilogue, which current FlexGEMM does
 not express. This F2 pass requires convergence validation because moving the
 row scale across BF16 GEMMs changes rounding.
+
+## B4 router input-gradient cast and add
+
+Pattern name: `b4_router_input_grad_add`
+
+This pattern fuses the router input-gradient GEMM's FP32 -> BF16 store rounding
+and the addition of the expert-path input gradient. The matcher requires the
+GEMM's module FQN to end in `.moe.router.gate`, an FP32 two-dimensional GEMM,
+a sole reshape and BF16 cast chain, and a BF16 residual with the same final
+shape. These constraints exclude unrelated FP32 linears and multi-use values.
+
+Real before sample from layer 60:
+
+```python
+view_4467 = torch.ops.aten.reshape.default(sigmoid_backward, [98304, 256])
+mm_577 = torch.ops.aten.mm.default(view_4467, _to_copy_1718_recomputed)
+view_4468 = torch.ops.aten.reshape.default(mm_577, [24, 4096, 7168])
+_to_copy_1784 = torch.ops.aten._to_copy.default(
+    view_4468,
+    dtype=torch.bfloat16,
+    layout=torch.strided,
+    device=torch.device("cuda:0"),
+)
+add_366 = torch.ops.aten.add.Tensor(add_364, _to_copy_1784)
+```
+
+Real after sample:
+
+```python
+reshape_default = torch.ops.aten.reshape.default(add_364, [98304, 7168])
+flex_gemm = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_b4_router_body_0,
+    (view_4467, _to_copy_1718_recomputed, reshape_default),
+    {},
+    {"backend": "QUACK"},
+)
+router_input_grad = flex_gemm[0]
+reshape_default_1 = torch.ops.aten.reshape.default(
+    router_input_grad, [24, 4096, 7168]
+)
+```
+
+The FlexGEMM body performs the original BF16 conversion before the add, so the
+expert-path gradient is not added to an unrounded FP32 accumulator.
+`sigmoid_backward` feeds the GEMM and is therefore a prologue, not an epilogue;
+the following `_fused_rms_norm_backward` consumes the fused result but is not
+part of this fusion.
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-b4-proof-20260810/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_b4_router_input_grad_add_pass_274.txt
+after_fuse_b4_router_input_grad_add_pass_275.txt
+```
+
+Pass diff for the root graph:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 2,090 | -58 |
+| root `_to_copy.default` | 2,486 | 2,428 | -58 |
+| root `add.Tensor` | 1,017 | 959 | -58 |
+| root `flex_gemm` | 0 | 58 | +58 |
+| root `get_attr` | 427 | 485 | +58 |
+| root `getitem` | 24,620 | 24,678 | +58 |
+| root `reshape.default` | 6,822 | 6,880 | +58 |
+
+All 58 router input-gradient chains fused. The proof run disabled regional
+Inductor to retain the rewrite as FX text, then OOMed on the known 192 GiB
+unfused FlexAttention allocation after all pass artifacts had been written.
+
+### GB300 microbenchmark
+
+The representative full shape is FP32 `(98,304, 256) @ (256, 7,168)` followed
+by a BF16 conversion and addition to a BF16 `(98,304, 7,168)` residual. Inputs
+were scaled by `0.02`; five warmups and 20 CUDA-event iterations were run on one
+GB300.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager GEMM + BF16 cast + add | 7.276 ms | 7.266 ms | 7.300 ms |
+| QUACK FlexGEMM | 0.784 ms | 0.761 ms | 0.865 ms |
+
+Speedup: `9.29x`. The fused output had `max_abs_error=0.00048828125` and
+`mean_abs_error=1.494e-6` relative to eager.
