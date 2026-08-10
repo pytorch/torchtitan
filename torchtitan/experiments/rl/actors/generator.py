@@ -51,7 +51,7 @@ from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig, ParallelConfig
-from vllm.config.compilation import CompilationMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -200,7 +200,7 @@ class VLLMCudagraphConfig:
     """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
     auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
     exact sizes. When set, these sizes are deduped and sorted. When EP and TP are
-    enabled, capture sizes are rounded up to multiples of the TP degree."""
+    enabled, capture sizes that are not multiples of the TP degree are removed."""
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
@@ -217,9 +217,9 @@ class VLLMCudagraphConfig:
         max_num_seqs: int,
         max_num_batched_tokens: int | None = None,
         expert_sequence_parallel_size: int = 1,
-    ) -> CompilationConfig | None:
-        """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
-        when CUDA graphs are disabled.
+        enable_sequence_parallel: bool = False,
+    ) -> CompilationConfig:
+        """Build a vLLM ``CompilationConfig`` for the generator.
 
         When ``capture_sizes`` is set, those exact sizes are captured. Otherwise
         sizes are auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and
@@ -232,9 +232,12 @@ class VLLMCudagraphConfig:
         -- otherwise prefill chunks larger than the cap fall back to eager.
 
         ``expert_sequence_parallel_size`` is the TP-axis shard count used by the
-        internally sequence-sharded MoE path. A value greater than one rounds
-        capture sizes up to multiples of this count, preventing CUDA graph padding
-        from producing a token count that cannot be evenly TP-sharded.
+        internally sequence-sharded MoE path. A value greater than one removes
+        capture sizes that are not multiples of this count, preventing CUDA graph
+        padding from producing a token count that cannot be evenly TP-sharded.
+
+        ``enable_sequence_parallel`` is forwarded to vLLM's sequence parallelism
+        pass. vLLM filters dense-SP CUDA graph sizes using its own TP size.
 
         All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
@@ -242,7 +245,11 @@ class VLLMCudagraphConfig:
         also forces ``mode=NONE`` when that env is set) (#3709).
         """
         if not self.enable:
-            return None
+            return CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.NONE,
+                mode=CompilationMode.NONE,
+                pass_config=PassConfig(enable_sp=enable_sequence_parallel),
+            )
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
         if expert_sequence_parallel_size <= 0:
@@ -276,21 +283,30 @@ class VLLMCudagraphConfig:
             sizes = sorted(sizes)
 
         if expert_sequence_parallel_size > 1:
-            sizes = sorted(
-                {
-                    (
-                        (size + expert_sequence_parallel_size - 1)
-                        // expert_sequence_parallel_size
-                    )
-                    * expert_sequence_parallel_size
-                    for size in sizes
-                }
-            )
+            removed_sizes = [
+                size for size in sizes if size % expert_sequence_parallel_size != 0
+            ]
+            if removed_sizes:
+                logger.warning(
+                    "CUDA graph capture sizes %s are removed because they are not "
+                    "multiples of expert_sequence_parallel_size %d",
+                    removed_sizes,
+                    expert_sequence_parallel_size,
+                )
+            sizes = [
+                size for size in sizes if size % expert_sequence_parallel_size == 0
+            ]
+            if not sizes:
+                raise ValueError(
+                    "No CUDA graph capture sizes are divisible by "
+                    f"expert_sequence_parallel_size {expert_sequence_parallel_size}"
+                )
 
         return CompilationConfig(
             cudagraph_mode=self.mode,
             mode=CompilationMode.NONE,
             cudagraph_capture_sizes=sizes,
+            pass_config=PassConfig(enable_sp=enable_sequence_parallel),
         )
 
 
@@ -895,6 +911,7 @@ class VLLMGenerator(Actor, Configurable):
             max_num_seqs=self._max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
             expert_sequence_parallel_size=expert_sequence_parallel_size,
+            enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config

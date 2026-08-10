@@ -329,14 +329,17 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
 # --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---
 
 
-def test_cudagraph_disabled_returns_none():
-    assert (
-        VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(max_num_seqs=256)
-        is None
+def test_cudagraph_disabled_preserves_sequence_parallel_config():
+    compilation_config = VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(
+        max_num_seqs=256,
+        enable_sequence_parallel=True,
     )
 
+    assert compilation_config.cudagraph_mode.name == "NONE"
+    assert compilation_config.pass_config.enable_sp
 
-def test_expert_sequence_parallel_padding_rounds_cudagraph_sizes():
+
+def test_expert_sequence_parallel_padding_filters_cudagraph_sizes():
     parallelism = InferenceParallelismConfig(
         tensor_parallel_degree=4,
         expert_parallel_degree=4,
@@ -358,7 +361,19 @@ def test_expert_sequence_parallel_padding_keeps_small_cudagraph_batches():
         expert_sequence_parallel_size=8,
     )
 
-    assert cfg.cudagraph_capture_sizes == [8]
+    assert cfg.cudagraph_capture_sizes[0] == 8
+    assert all(size % 8 == 0 for size in cfg.cudagraph_capture_sizes)
+
+
+def test_expert_sequence_parallel_padding_rejects_no_valid_cudagraph_sizes():
+    with pytest.raises(ValueError, match="No CUDA graph capture sizes"):
+        VLLMCudagraphConfig(
+            enable=True,
+            capture_sizes=[1, 2, 3],
+        ).get_vllm_compilation_config(
+            max_num_seqs=3,
+            expert_sequence_parallel_size=4,
+        )
 
 
 def test_expert_sequence_parallel_padding_disabled_without_ep():
@@ -370,17 +385,33 @@ def test_expert_sequence_parallel_padding_disabled_without_ep():
     assert parallelism.expert_sequence_parallel_size == 1
 
 
-def test_expert_sequence_parallel_padding_rounds_runner_tokens():
+@pytest.mark.parametrize(
+    ("enable_dense_sp", "enable_expert_sp", "expected_num_tokens"),
+    [
+        (False, True, 8),
+        (True, False, 8),
+        (False, False, 5),
+    ],
+)
+def test_sequence_parallel_padding_rounds_runner_tokens(
+    enable_dense_sp, enable_expert_sp, expected_num_tokens
+):
     model_runner = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            pass_config=SimpleNamespace(enable_sp=enable_dense_sp)
+        ),
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(
-                enable_expert_parallel=True,
+                enable_expert_parallel=enable_expert_sp,
                 tensor_parallel_size=4,
             ),
-        )
+        ),
     )
 
-    assert TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5) == 8
+    assert (
+        TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5)
+        == expected_num_tokens
+    )
 
 
 def test_cudagraph_default_mode_is_full_decode_only():
@@ -424,10 +455,22 @@ def test_cudagraph_rejects_nonpositive_max_num_seqs():
         VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=0)
 
 
-def test_inference_parallelism_disables_dense_sequence_parallelism():
-    parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
+def test_inference_parallelism_propagates_dense_sequence_parallelism():
+    parallelism = InferenceParallelismConfig(
+        tensor_parallel_degree=4,
+        enable_sequence_parallel=True,
+    )
 
-    assert not parallelism.to_training().enable_sequence_parallel
+    assert parallelism.to_training().enable_sequence_parallel
+
+    compilation_config = VLLMCudagraphConfig(
+        capture_sizes=[1, 4, 5, 8]
+    ).get_vllm_compilation_config(
+        max_num_seqs=8,
+        enable_sequence_parallel=parallelism.enable_sequence_parallel,
+    )
+    assert compilation_config.cudagraph_capture_sizes == [1, 4, 5, 8]
+    assert compilation_config.pass_config.enable_sp
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

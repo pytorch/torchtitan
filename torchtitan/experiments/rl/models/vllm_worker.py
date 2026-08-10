@@ -13,14 +13,15 @@ from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
-    """V1 runner that pads EP+TP batches for TorchTitan's MoE sharding."""
+    """V1 runner that pads batches for dense and expert sequence parallelism."""
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
-        # This is input padding only. It does not enable vLLM's
-        # pass_config.enable_sp Inductor optimization.
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        enable_ep = self.vllm_config.parallel_config.enable_expert_parallel
-        if enable_ep and tp_size > 1:
+        enable_dense_sp = self.compilation_config.pass_config.enable_sp and tp_size > 1
+        enable_expert_sp = (
+            self.vllm_config.parallel_config.enable_expert_parallel and tp_size > 1
+        )
+        if enable_dense_sp or enable_expert_sp:
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
