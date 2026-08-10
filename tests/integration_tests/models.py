@@ -268,7 +268,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 6",
+                    "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--training.steps 1",
                     "--checkpoint.enable",
@@ -277,7 +277,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                 [
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 6",
+                    "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--training.steps 2",
                     "--checkpoint.enable",
@@ -285,7 +285,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ],
             "Kimi K2.7 DistributedMuon spmd_types FSDP+EP checkpoint resume",
             "kimi_k2_5_muon_fsdp+ep_spmd_types",
-            ngpu=6,
+            ngpu=4,
         ),
     ]
 
