@@ -259,31 +259,33 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    # Consolidate the former 2-GPU FSDP smoke and 8-GPU
+                    # FSDP+TP+EP+PP test into one supported FSDP+EP path with
+                    # checkpoint resume. Kimi DistributedMuon rejects TP because
+                    # it produces _StridedShard storage, and rejects PP because
+                    # each stage owns only a subset of its global optimizer groups.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.data_parallel_shard_degree 6",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--training.steps 1",
+                    "--checkpoint.enable",
+                    "--checkpoint.enable_first_step_checkpoint",
                 ],
-            ],
-            "Kimi K2.7 multimodal spmd_types FSDP",
-            "kimi_k2_5_mm_fsdp_spmd_types",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
                 [
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--training.local_batch_size 2",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.spmd_backend spmd_types",
+                    "--parallelism.data_parallel_shard_degree 6",
                     "--parallelism.expert_parallel_degree 2",
+                    "--training.steps 2",
+                    "--checkpoint.enable",
                 ],
             ],
-            "Kimi K2.7 multimodal FSDP+TP+EP+PP",
-            "kimi_k2_5_mm_fsdp+tp+ep+pp",
-            ngpu=8,
+            "Kimi K2.7 DistributedMuon spmd_types FSDP+EP checkpoint resume",
+            "kimi_k2_5_muon_fsdp+ep_spmd_types",
+            ngpu=6,
         ),
     ]
 
