@@ -320,17 +320,17 @@ class BaseLoss(ABC, Configurable):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return the scaled loss and any metrics computed by the loss."""
+        del kwargs
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
                 if get_spmd_backend() == "spmd_types":
-                    spmd.assert_type(
-                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
-                    )
+                    spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 
 
@@ -352,16 +352,16 @@ class CrossEntropyLoss(BaseLoss):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        del kwargs
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
                 if get_spmd_backend() == "spmd_types":
-                    spmd.assert_type(
-                        loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
-                    )
+                    spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 
 
