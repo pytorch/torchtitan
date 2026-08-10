@@ -215,38 +215,34 @@ These layouts should continue to fail with explicit validation errors.
 
 ## Test plan
 
-### Distributed numerical tests
+### Distributed numerical test
 
-Update `tests/unit_tests/test_distributed_muon.py`:
+Keep one compact numerical oracle in
+`tests/integration_tests/test_distributed_muon.py`. It compares both Owned
+redistribution and batched `Shard(0)` computation with plain
+`torch.optim.Muon`, including momentum, then reloads the flat optimizer state
+and compares another step. The update-direction comparison uses an explicit
+BF16 tolerance because batched `bmm`/`baddbmm` and independent `mm`/`addmm`
+calls are not bitwise equivalent.
 
-- Compare split-head computation with plain `torch.optim.Muon` operating on
-  one parameter per complete logical head.
-- Compare update directions with an explicit BF16 tolerance because batched
-  `bmm`/`baddbmm` and independent `mm`/`addmm` calls are not bitwise
-  equivalent.
-- Compare momentum exactly after multiple steps, including Nesterov, weight
-  decay, and nonzero momentum.
-- Assert that parameters, gradients, and momentum retain the original FSDP2
-  `Shard(0)` placement.
-- Assert exactly two `all_to_all_single` calls per communicating bucket.
-- Assert no communication for a fully aligned bucket.
-- Cover more ranks than heads and verify zero-head ranks participate correctly.
-- Save and reload the flat optimizer state, then compare another step.
-- Retain rejection when `num_matrices` changes across checkpoint restore.
+The recipe integration below covers the successful split-head path. Isolated
+collective-count, invalid-layout, empty-shard, and other regional permutations
+are intentionally omitted to keep the test footprint minimal.
 
 ### FSDP2 and DP+EP integration tests
 
-- Add a small module wrapped by actual FSDP2, rather than relying only on
-  manually constructed DTensors, and choose dimensions that split a head.
-- Extend the mixed DP+EP test with dense QKV redistributed on `dp_shard` and
-  routed experts computing locally on `(efsdp, ep)`.
-- Verify that EP does not participate in dense QKV redistribution.
+- Run the Kimi debug recipe with actual FSDP2 (`dp_shard=6`) and EP=2. Six
+  storage ranks do not divide its 16 attention heads evenly, so dense QKV
+  exercises split-head redistribution on `dp_shard` while routed experts
+  compute on their expert meshes.
+- Save a full checkpoint after step 1, relaunch from that checkpoint, and
+  complete step 2.
 
 ## Validation and performance acceptance
 
-- Run focused CPU and distributed Muon tests.
-- Run `pre-commit run --all-files`.
-- Run an FSDP2 integration workload with at least 10 training steps.
+- Run the focused distributed Muon numerical test.
+- Run the two-phase FSDP2+EP Kimi checkpoint integration.
+- Run pre-commit checks on the changed files.
 - Compare the aligned path before and after the change with deterministic
   settings to prove that the existing path is unchanged.
 - Compare split-head results against the complete-head reference within the
@@ -280,7 +276,7 @@ packed all-to-all transport. The optimizer state fingerprint describes the
 mathematical matrix view and remains independent of execution distribution,
 generated routes, buckets, and world size.
 
-Completed coverage includes:
+Development validation before the final test consolidation included:
 
 - CPU validation of head-aware routes, exact forward/reverse inversion,
   multi-fragment packing, invalid storage placements, and aligned aliases.
@@ -291,14 +287,19 @@ Completed coverage includes:
 - Mixed DP+EP coverage in which dense QKV redistribution uses only
   `dp_shard`, while routed experts compute locally on `(efsdp, ep)`.
 
-Validation results:
+Retained validation:
 
-- Split-head update directions match the per-matrix `torch.optim.Muon`
-  reference within an explicit BF16 tolerance. Momentum, checkpoint state,
-  layouts, and communication remain exact.
+- The compact distributed numerical oracle compares Owned and batched Shard
+  updates and momentum with `torch.optim.Muon` before and after a flat
+  optimizer checkpoint restore.
+- The two-phase Kimi FSDP2+EP integration saves a full checkpoint after step 1,
+  reloads it in a fresh launch, and completes step 2.
+
+Additional development validation results:
 
 - Focused CPU suites: 25 passed and 9 subtests passed.
-- Distributed Muon suite: 26 passed and 7 subtests passed.
+- The pre-consolidation distributed Muon suite: 26 passed and 7 subtests
+  passed.
 - Formatting, lint, documentation, spelling, and link hooks passed. The local
   Pyrefly hook reports five baseline `torch.version.hip` stub errors in
   unchanged files.
