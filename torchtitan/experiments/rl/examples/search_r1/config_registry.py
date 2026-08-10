@@ -61,8 +61,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
-            num_groups_per_train_step=8,
-            group_size=8,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=4096),
@@ -108,8 +108,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            # cudagraph on: decode-only graphs (FULL_DECODE_ONLY) are safe at this
-            # config's large batch; plain full graphs corrupted here before. See #3668.
             cudagraph=VLLMCudagraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -181,8 +179,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
-            num_groups_per_train_step=32,  # TODO: TBD
-            group_size=8,  # TODO: TBD
+            num_prompts_per_train_step=32,  # TODO: TBD
+            num_samples_per_prompt=8,  # TODO: TBD
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(
                 # TODO: TBD local_batch_size, seq_len
@@ -222,9 +220,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            # varlen attention -> FULL_AND_PIECEWISE (decode captured FULL, prefill
-            # piecewise).
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
             # Generator-only: DeepEP cudagraph EXPAND dispatch on top of the perf overrides.
