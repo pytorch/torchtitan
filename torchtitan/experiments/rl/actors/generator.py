@@ -199,8 +199,9 @@ class VLLMCudagraphConfig:
     capture_sizes: list[int] | None = None
     """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
     auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
-    exact sizes. When set, these sizes are deduped and sorted. When EP and TP are
-    enabled, capture sizes that are not multiples of the TP degree are removed."""
+    exact sizes. When set, these sizes are deduped and sorted. When expert
+    sequence parallelism is enabled, capture sizes that are not multiples of
+    its degree are removed."""
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
