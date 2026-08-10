@@ -129,23 +129,19 @@ class GraphTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
         global_valid_tokens: float,
     ) -> torch.Tensor:
-        if self.config.compile.mode != "aot_fx_trace":
+        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_step(
                 input_dict=input_dict,
                 labels=labels,
                 global_valid_tokens=global_valid_tokens,
             )
-        if self.parallel_dims.pp_enabled:
-            return self._graph_pp_forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                global_valid_tokens=global_valid_tokens,
-            )
 
+        assert isinstance(input_dict, dict)
+        assert isinstance(labels, torch.Tensor)
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
@@ -165,32 +161,6 @@ class GraphTrainer(Trainer):
             params,
             extra_kwargs,
         )
-
-    def _graph_pp_forward_backward_step(
-        self,
-        *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-        global_valid_tokens: float,
-    ) -> torch.Tensor:
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
-        loss_kwargs = {"global_valid_tokens": global_valid_tokens}
-        with self.train_context():
-            targets, losses = (labels, []) if self.pp_has_last_stage else (None, None)
-            schedule_args = (inputs,) if self.pp_has_first_stage else ()
-            self.pp_schedule.step(
-                *schedule_args,
-                **extra_kwargs,
-                target=targets,
-                losses=losses,
-                loss_kwargs=loss_kwargs,
-                return_outputs=False,
-            )
-
-        if self.pp_has_last_stage:
-            assert losses is not None
-            return torch.sum(torch.stack(losses)).to(self.device)
-        return torch.tensor([-1.0], device=self.device)
 
     def _load_precompiled_fx_trace(self, model: nn.Module) -> None:
         """Load a precompiled aot_fx_trace artifact from disk."""

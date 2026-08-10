@@ -189,20 +189,28 @@ def set_determinism(
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-        # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
-        # reproducibility, since the autotune results may not be deterministic. We disable
-        # autotune in-place on FlexAttention.inductor_configs (rather than recompiling with
-        # no options) so the regional-inductor scoop configs are preserved.
         from torch.nn.attention.flex_attention import flex_attention
 
         from torchtitan.models.common.attention import FlexAttention
 
-        FlexAttention.inductor_configs["max_autotune"] = False
-        FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
-        # pyrefly: ignore [no-matching-overload]
-        FlexAttention._compiled_flex_attn = torch.compile(
-            flex_attention, options=FlexAttention.inductor_configs
-        )
+        if torch.version.hip is not None:
+            # Compiled ROCm flex attention is not deterministic.
+            # Falling back to eager (non-compiled) flex_attention for determinism on ROCm.
+            logger.info(
+                "Using eager (non-compiled) flex_attention for determinism on ROCm."
+            )
+            FlexAttention._compiled_flex_attn = flex_attention
+        else:
+            # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
+            # reproducibility, since the autotune results may not be deterministic. We disable
+            # autotune in-place on FlexAttention.inductor_configs (rather than recompiling with
+            # no options) so the regional-inductor scoop configs are preserved.
+            FlexAttention.inductor_configs["max_autotune"] = False
+            FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
+            # pyrefly: ignore [no-matching-overload]
+            FlexAttention._compiled_flex_attn = torch.compile(
+                flex_attention, options=FlexAttention.inductor_configs
+            )
 
     if debug_config.detect_anomaly:
         logger.warning(
@@ -398,19 +406,23 @@ def get_spmd_context(
     return context
 
 
-def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
+def init_fake_mode(
+    world_size: int,
+    comm_mode: str = "fake_backend",
+    *,
+    rank: int = 0,
+) -> None:
     """Initialize fake backend
 
     Args:
         world_size: The number of GPUs to simulate
         comm_mode: Communication mode ("fake_backend" or "local_tensor")
+        rank: Global rank to simulate
 
-    Returns:
-        The world size
     """
     torch.distributed.init_process_group(
         "fake",
-        rank=0,
+        rank=rank,
         world_size=world_size,
     )
 
@@ -448,7 +460,18 @@ def init_distributed(
             raise ValueError(
                 f"NGPU environment variable must be a valid integer, got: {ngpu_str}"
             ) from e
-        init_fake_mode(world_size, comm_config.mode)
+        rank_str = os.environ.get("RANK", "0")
+        try:
+            rank = int(rank_str)
+        except ValueError as e:
+            raise ValueError(
+                f"RANK environment variable must be a valid integer, got: {rank_str}"
+            ) from e
+        if not 0 <= rank < world_size:
+            raise ValueError(
+                f"RANK must be in [0, {world_size}) for fake mode, got: {rank}"
+            )
+        init_fake_mode(world_size, comm_config.mode, rank=rank)
         return world_size
 
     def _warn_overwrite_env(env, val):
