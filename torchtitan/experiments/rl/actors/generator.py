@@ -174,28 +174,25 @@ class VLLMCudagraphConfig:
 
     ``mode`` selects which vLLM cudagraph mode to capture; see that field and
     ``get_vllm_compilation_config`` for the per-mode trade-offs. The default,
-    ``FULL_DECODE_ONLY``, is the only mode that is both cheap (no inductor
-    compile) and correct with our varlen/FA3 attention backend.
+    ``FULL``, graphs the whole forward (prefill included).
     """
 
     enable: bool = True
     """Whether to enable CUDA graph capture."""
 
-    mode: Literal["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "FULL"] = "FULL_DECODE_ONLY"
+    mode: Literal["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "FULL"] = "FULL"
     """Which vLLM cudagraph mode to capture (when ``enable``):
 
-    - ``"FULL_DECODE_ONLY"`` (default): graph pure-decode batches; prefill / mixed
-      batches run eager. Cheap (no inductor compile) and correct with our
-      varlen/FA3 attention backend (#3668).
+    - ``"FULL_DECODE_ONLY"``: graph pure-decode batches; prefill / mixed
+      batches run eager. Cheap (no inductor compile).
     - ``"FULL_AND_PIECEWISE"``: FULL graph for pure single-token decode (whole
       forward incl. attention -- safe because decode has a fixed query_len==1
       layout) AND breakable PIECEWISE for prefill / mixed batches (attention runs
       eager at a stream-capture break). Best coverage: the common decode path
       gets a full graph while only mixed batches pay the eager-break cost.
       Requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1``.
-    - ``"FULL"``: graph the whole forward, prefill included, attention captured
-      too. Only valid with the flex attention backend, which survives FULL
-      capture of mixed prefill+decode batches
+    - ``"FULL"`` (default): graph the whole forward, prefill included, attention
+      captured too.
     """
 
     capture_sizes: list[int] | None = None
