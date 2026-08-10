@@ -251,8 +251,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 self._build_param_groups(model, param_group_configs, impl_kwargs)
                 for model in self.model_parts
             ]
-            group_matches_by_part = None
+            assigned_params = self._collect_assigned_params(param_groups_by_part)
+            self._validate_params(assigned_params)
         else:
+            if device is None:
+                raise ValueError("device is required with pp_process_group")
             resolved_by_part = [
                 self._resolve_param_groups(model, param_group_configs, impl_kwargs)
                 for model in self.model_parts
@@ -261,29 +264,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 (groups_by_opt_name, patterns_by_opt_name)
                 for groups_by_opt_name, patterns_by_opt_name, _ in resolved_by_part
             ]
-            group_matches_by_part = [matches for _, _, matches in resolved_by_part]
-        all_params = [
-            param
-            for groups_by_opt_name, _ in param_groups_by_part
-            for opt_param_groups in groups_by_opt_name.values()
-            for group in opt_param_groups
-            for param in group["params"]
-        ]
-
-        if pp_process_group is None:
-            self._validate_params(all_params)
-        else:
-            if device is None:
-                raise ValueError("device is required with pp_process_group")
-            assert group_matches_by_part is not None
+            assigned_params = self._collect_assigned_params(param_groups_by_part)
             local_matches = [
-                any(matches[config_idx] for matches in group_matches_by_part)
+                any(matches[config_idx] for _, _, matches in resolved_by_part)
                 for config_idx in range(len(param_group_configs))
             ]
             self._validate_pp_param_groups_and_params(
                 param_group_configs,
                 local_matches,
-                all_params,
+                assigned_params,
                 pp_process_group,
                 device,
             )
@@ -307,7 +296,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
-        self._post_init(all_params)
+        self._post_init(assigned_params)
 
     @staticmethod
     def _validate_param_group_matches(
@@ -358,6 +347,20 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 "Parameter mismatch on at least one pipeline stage: every "
                 "trainable parameter must be assigned to an optimizer"
             )
+
+    @staticmethod
+    def _collect_assigned_params(
+        param_groups_by_part: list[
+            tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]
+        ],
+    ) -> list[nn.Parameter]:
+        return [
+            param
+            for groups_by_opt_name, _ in param_groups_by_part
+            for opt_param_groups in groups_by_opt_name.values()
+            for group in opt_param_groups
+            for param in group["params"]
+        ]
 
     def _log_optimizer(
         self, optimizer: Optimizer, part_idx: int, patterns: list[str]
