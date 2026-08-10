@@ -269,7 +269,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 any(matches[config_idx] for _, _, matches in resolved_by_part)
                 for config_idx in range(len(param_group_configs))
             ]
-            self._validate_pp_param_groups_and_params(
+            self._validate_pp_assignments(
                 param_group_configs,
                 local_matches,
                 assigned_params,
@@ -304,16 +304,14 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         matches: list[bool],
     ) -> None:
         """Require every config to claim at least one parameter."""
-        for param_group_config, matched in zip(
-            param_group_configs, matches, strict=True
-        ):
+        for param_group_config, matched in zip(param_group_configs, matches):
             if not matched:
                 raise ValueError(
                     "Optimizer param_groups pattern "
                     f"{param_group_config.pattern!r} matched no parameters"
                 )
 
-    def _validate_pp_param_groups_and_params(
+    def _validate_pp_assignments(
         self,
         param_group_configs: list[ParamGroupConfig],
         local_matches: list[bool],
