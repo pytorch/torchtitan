@@ -327,6 +327,12 @@ def qwen3_30b_a3b() -> Trainer.Config:
     )
 
 
+def qwen3_30b_a3b_megatron_init() -> Trainer.Config:
+    config = qwen3_30b_a3b()
+    config.model_spec = model_registry("30B-A3B-megatron-init")
+    return config
+
+
 def qwen3_32b() -> Trainer.Config:
     model_spec = model_registry("32B")
     return Trainer.Config(

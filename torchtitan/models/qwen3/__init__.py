@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+from collections.abc import Callable
 from functools import partial
 
 import torch.nn as nn
@@ -44,20 +45,39 @@ __all__ = [
 ]
 
 
-_LINEAR_INIT = {
+_LINEAR_INIT: dict[str, Callable] = {
     "weight": partial(nn.init.normal_, std=0.02),
     "bias": nn.init.zeros_,
 }
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=0.02)}
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
-_EXPERTS_INIT = {
+_EXPERTS_INIT: dict[str, Callable] = {
     "w1_EFD": _LINEAR_INIT["weight"],
     "w2_EDF": _LINEAR_INIT["weight"],
     "w3_EFD": _LINEAR_INIT["weight"],
 }
 
 _EPS = 1e-6
+
+
+def _megatron_output_weight_init(n_layers: int) -> Callable:
+    std = 0.02 / (2 * n_layers) ** 0.5
+    return partial(nn.init.normal_, std=std)
+
+
+def _megatron_output_init(n_layers: int) -> dict[str, Callable]:
+    return {
+        "weight": _megatron_output_weight_init(n_layers),
+        "bias": nn.init.zeros_,
+    }
+
+
+def _megatron_experts_init(n_layers: int) -> dict[str, Callable]:
+    return {
+        **_EXPERTS_INIT,
+        "w2_EDF": _megatron_output_weight_init(n_layers),
+    }
 
 
 def _qwen3_norm(dim: int) -> RMSNorm.Config:
@@ -122,9 +142,12 @@ def _build_qwen3_moe_layers(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
+    megatron_init: bool = False,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
+    output_init = _megatron_output_init(n_layers) if megatron_init else _LINEAR_INIT
+    experts_init = _megatron_experts_init(n_layers) if megatron_init else _EXPERTS_INIT
     layers = []
     for _ in range(n_layers):
         layers.append(
@@ -137,7 +160,7 @@ def _build_qwen3_moe_layers(
                     n_kv_heads=n_kv_heads,
                     head_dim=head_dim,
                     wqkv_param_init=_LINEAR_INIT,
-                    wo_param_init=_LINEAR_INIT,
+                    wo_param_init=output_init,
                     inner_attention=inner_attention,
                     fuse_qkv=fuse_qkv,
                     rope=rope,
@@ -158,7 +181,7 @@ def _build_qwen3_moe_layers(
                         hidden_dim=moe_hidden_dim,
                         num_experts=num_experts,
                         top_k=top_k,
-                        param_init=_EXPERTS_INIT,
+                        param_init=experts_init,
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
@@ -490,6 +513,8 @@ def _debugmodel_moe(
 def _30b_a3b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
+    *,
+    megatron_init: bool = False,
 ) -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
@@ -524,7 +549,19 @@ def _30b_a3b(
                 theta=1000000.0,
             ),
             moe_comm_backend=moe_comm_backend,
+            megatron_init=megatron_init,
         ),
+    )
+
+
+def _30b_a3b_megatron_init(
+    attn_backend: str,
+    moe_comm_backend: str = "standard",
+) -> Qwen3Model.Config:
+    return _30b_a3b(
+        attn_backend,
+        moe_comm_backend,
+        megatron_init=True,
     )
 
 
@@ -580,6 +617,7 @@ qwen3_configs = {
     "32B": _32b,
     "debugmodel_moe": _debugmodel_moe,
     "30B-A3B": _30b_a3b,
+    "30B-A3B-megatron-init": _30b_a3b_megatron_init,
     "235B-A22B": _235b_a22b,
 }
 
