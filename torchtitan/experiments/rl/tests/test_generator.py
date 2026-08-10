@@ -320,11 +320,11 @@ def test_cudagraph_disabled_returns_none():
     )
 
 
-def test_cudagraph_default_mode_is_full_decode_only():
-    # Default mode; decode-only graphs avoid the mixed-batch corruption (#3668),
-    # with no inductor compile (CompilationMode.NONE == 0).
+def test_cudagraph_default_mode_is_full():
+    # Default mode graphs the whole forward (prefill included), with no inductor
+    # compile (CompilationMode.NONE == 0).
     cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=256)
-    assert cfg.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
 
 
@@ -340,7 +340,9 @@ def test_cudagraph_full_mode_no_compile():
 def test_cudagraph_decode_only_capture_sizes_cover_max_num_seqs():
     # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs (plus
     # max_num_seqs itself when not a power of 2).
-    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=500)
+    cfg = VLLMCudagraphConfig(
+        enable=True, mode="FULL_DECODE_ONLY"
+    ).get_vllm_compilation_config(max_num_seqs=500)
     assert cfg.cudagraph_capture_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 500]
 
 

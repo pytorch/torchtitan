@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
+import dataclasses
 import math
 import os
 from collections.abc import Callable
@@ -32,9 +33,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed._pipeline_compat import (
-    ensure_fake_pg_static_metadata_support,
-)
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model import BaseModel
@@ -42,36 +40,49 @@ from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
-# pipeline_llm is the public entrypoint for model-specific PP setup. Helpers in
-# this module are implementation details and should stay private.
-__all__ = ["pipeline_llm"]
+# pipeline_llm and pipeline_vlm are the public entrypoints for model-specific PP
+# setup. Helpers in this module are implementation details and stay private.
+__all__ = ["pipeline_llm", "pipeline_vlm"]
 
 
-def _build_fake_stage_args(
+def _can_build_static_pipeline_stage_args(
+    parallelism: ParallelismConfig,
+    model_config: BaseModel.Config,
+) -> bool:
+    return (
+        parallelism.spmd_backend == "default"
+        and parallelism.tensor_parallel_degree == 1
+        and parallelism.context_parallel_degree == 1
+        and isinstance(model_config, Decoder.Config)
+    )
+
+
+def _build_static_pipeline_stage_args(
     stage_idx: int,
     num_stages: int,
     *,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     model_config: BaseModel.Config,
-    loss_fn: LossFunction,
-    device: torch.device,
+    output_hidden_states: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build static decoder boundary metadata for pipeline execution."""
     if (
         parallelism.spmd_backend != "default"
         or parallelism.tensor_parallel_degree != 1
         or parallelism.context_parallel_degree != 1
     ):
-        raise ValueError(
-            "Fake pipeline execution currently requires spmd_backend='default', "
-            "tensor_parallel_degree=1, and context_parallel_degree=1. Fake PP "
-            "with TP, CP, or a typed SPMD backend requires distributed forward "
-            "and gradient metadata at pipeline boundaries."
+        raise NotImplementedError(
+            "Static pipeline stage metadata currently requires "
+            "spmd_backend='default', tensor_parallel_degree=1, and "
+            "context_parallel_degree=1. TP, CP, or a typed SPMD backend "
+            "requires distributed forward and gradient metadata at pipeline "
+            "boundaries."
         )
 
     if not isinstance(model_config, Decoder.Config):
-        raise TypeError(
-            "Fake pipeline stages require a Decoder model config, got "
+        raise NotImplementedError(
+            "Static pipeline stage metadata requires a Decoder model config, got "
             f"{type(model_config).__qualname__}."
         )
 
@@ -83,22 +94,22 @@ def _build_fake_stage_args(
     hidden_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
 
     if stage_idx == 0:
-        input_args = torch.empty(microbatch_shape, dtype=torch.int64, device=device)
+        input_args = torch.empty(microbatch_shape, dtype=torch.int64, device="meta")
     else:
         input_args = torch.empty(
             hidden_shape,
             dtype=hidden_dtype,
-            device=device,
+            device="meta",
             requires_grad=True,
         )
 
     output_dim = model_config.dim
-    if stage_idx == num_stages - 1 and not isinstance(loss_fn, ChunkedLossWrapper):
+    if stage_idx == num_stages - 1 and not output_hidden_states:
         output_dim = model_config.vocab_size
     output_args = torch.empty(
         (*microbatch_shape, output_dim),
         dtype=hidden_dtype,
-        device=device,
+        device="meta",
         requires_grad=True,
     )
     return input_args, output_args
@@ -161,9 +172,10 @@ def pipeline_llm(
 
     get_mesh_cb = _build_get_mesh_callback(parallel_dims)
     pp_group = pp_mesh.get_group("pp")
-    use_fake_stage = dist.get_backend(pp_group) == "fake"
-    if use_fake_stage:
-        ensure_fake_pg_static_metadata_support()
+    requires_static_stage_args = dist.get_backend(pp_group) == "fake"
+    use_static_stage_args = requires_static_stage_args or (
+        _can_build_static_pipeline_stage_args(parallelism, model_config)
+    )
     stages, model_parts = _pipeline_module_split(
         model,
         pp_mesh,
@@ -171,19 +183,18 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
-        fake_stage_args=(
+        static_stage_args_factory=(
             (
-                lambda stage_idx, num_stages: _build_fake_stage_args(
+                lambda stage_idx, num_stages: _build_static_pipeline_stage_args(
                     stage_idx,
                     num_stages,
                     training=training,
                     parallelism=parallelism,
                     model_config=model_config,
-                    loss_fn=loss_fn,
-                    device=device,
+                    output_hidden_states=isinstance(loss_fn, ChunkedLossWrapper),
                 )
             )
-            if use_fake_stage
+            if use_static_stage_args
             else None
         ),
     )
@@ -224,6 +235,56 @@ def pipeline_llm(
             has_last_stage = True
 
     return pp_schedule, model_parts, has_first_stage, has_last_stage
+
+
+def pipeline_vlm(
+    model: nn.Module,
+    *,
+    parallel_dims: ParallelDims,
+    parallelism: ParallelismConfig,
+    model_config: BaseModel.Config,
+    **kwargs,
+) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+    """PP entrypoint for vision-language models: co-locate the vision encoder
+    with the first stage, then delegate to ``pipeline_llm``.
+
+    The auto-generated LLM stage split only knows about decoder modules
+    (``tok_embeddings``, ``layers.*``, ``norm``, ``lm_head``). For a VLM we inject
+    ``vision_encoder`` into the first stage's FQN list so it runs alongside
+    ``tok_embeddings`` (vision features are scattered into the embedding sequence
+    before the decoder layers). On stages other than the first, ``tok_embeddings``
+    and ``vision_encoder`` are pruned to ``None``; each model's ``forward`` must
+    guard on ``self.tok_embeddings is not None`` so the multimodal logic is
+    skipped there.
+
+    NOTE: This adds load to stage 0 that the auto split does not model
+    (``input_weight`` only accounts for ``tok_embeddings``); for a heavy vision
+    encoder, bump ``parallelism.pipeline_parallel_first_stage_less_layers`` to
+    rebalance.
+    """
+    if parallelism.module_fqns_per_model_part is None:
+        (
+            num_virtual_stages,
+            num_layers,
+            input_weight,
+            output_weight,
+        ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
+        fqn_per_part = _generate_llm_fqn_per_model_part(
+            num_virtual_stages, num_layers, input_weight, output_weight
+        )
+        if model.vision_encoder is not None:
+            fqn_per_part[0].insert(0, "vision_encoder")
+        parallelism = dataclasses.replace(
+            parallelism, module_fqns_per_model_part=fqn_per_part
+        )
+
+    return pipeline_llm(
+        model,
+        parallel_dims=parallel_dims,
+        parallelism=parallelism,
+        model_config=model_config,
+        **kwargs,
+    )
 
 
 def _get_pipeline_metadata(
@@ -620,7 +681,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-    fake_stage_args: (
+    static_stage_args_factory: (
         Callable[[int, int], tuple[torch.Tensor, torch.Tensor]] | None
     ) = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
@@ -646,6 +707,9 @@ def _pipeline_module_split(
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
                                - "lm_head" for the output projection layer
+        static_stage_args_factory: Optional factory for static stage input and
+                                   output metadata. Without it, PyTorch infers
+                                   metadata dynamically during schedule warmup.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -670,8 +734,8 @@ def _pipeline_module_split(
         module_names = module_names_per_stage[stage_idx]
         model_chunk = _split_module(whole_model, module_names)
         input_args, output_args = (
-            fake_stage_args(stage_idx, num_stages)
-            if fake_stage_args is not None
+            static_stage_args_factory(stage_idx, num_stages)
+            if static_stage_args_factory is not None
             else (None, None)
         )
         stage = PipelineStage(
