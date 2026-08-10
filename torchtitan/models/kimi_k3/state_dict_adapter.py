@@ -87,6 +87,17 @@ _MOE_FROM_HF = {
     ),
 }
 
+# KimiGroupedExperts stacks all experts' weights into one (E, F, D) param per
+# projection; HF stores them as separate per-expert 2D tensors.
+_EXPERT_PROJECTION_TO_GROUPED_PARAM = {
+    "w1": "w1_EFD",
+    "w2": "w2_EDF",
+    "w3": "w3_EFD",
+}
+_GROUPED_PARAM_TO_EXPERT_PROJECTION = {
+    v: k for k, v in _EXPERT_PROJECTION_TO_GROUPED_PARAM.items()
+}
+
 _VISION_GLOBAL_FROM_HF = {
     "vision_tower.patch_embed.proj.weight": ("vision_encoder.patch_embed.weight"),
     "vision_tower.patch_embed.pos_emb.weight": "vision_encoder.pos_embed",
@@ -115,6 +126,12 @@ class KimiK3StateDictAdapter(StateDictAdapter):
     ):
         super().__init__(model_config, hf_assets_path)
         self.kimi_config = model_config
+        # {(layer_idx, projection): {expert_idx: 2D tensor}}, filled in from_hf
+        # while HF's per-expert keys arrive one at a time; stacked into
+        # KimiGroupedExperts' (E, F, D) parameter once all experts are seen.
+        self._expert_weights_by_layer_projection: dict[
+            tuple[str, str], dict[int, torch.Tensor]
+        ] = {}
 
     @staticmethod
     def _raise_if_quantized_key(key: str) -> None:
@@ -164,10 +181,24 @@ class KimiK3StateDictAdapter(StateDictAdapter):
                 )
                 if expert_match is not None:
                     expert_idx, projection = expert_match.groups()
-                    state_dict[
+                    moe_config = self.kimi_config.layers[int(layer_idx)].moe
+                    assert moe_config is not None
+                    grouped_key = (
                         f"layers.{layer_idx}.moe.routed_experts."
-                        f"{expert_idx}.{projection}.weight"
-                    ] = value
+                        f"{_EXPERT_PROJECTION_TO_GROUPED_PARAM[projection]}"
+                    )
+                    experts = self._expert_weights_by_layer_projection.setdefault(
+                        (layer_idx, projection), {}
+                    )
+                    experts[int(expert_idx)] = value
+                    if len(experts) == moe_config.num_experts:
+                        sorted_experts = [
+                            experts[i] for i in range(moe_config.num_experts)
+                        ]
+                        state_dict[grouped_key] = torch.stack(sorted_experts, dim=0)
+                        del self._expert_weights_by_layer_projection[
+                            (layer_idx, projection)
+                        ]
                     continue
 
                 layer_config = self.kimi_config.layers[int(layer_idx)]
@@ -222,6 +253,13 @@ class KimiK3StateDictAdapter(StateDictAdapter):
                 "KimiK3StateDictAdapter found HuggingFace keys without a "
                 f"mapping: {unmapped}."
             )
+        if self._expert_weights_by_layer_projection:
+            incomplete = list(self._expert_weights_by_layer_projection.keys())
+            self._expert_weights_by_layer_projection.clear()
+            raise ValueError(
+                "KimiK3StateDictAdapter received an incomplete set of "
+                f"routed-expert weights for (layer, projection): {incomplete}."
+            )
         return state_dict
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -275,16 +313,18 @@ class KimiK3StateDictAdapter(StateDictAdapter):
             if text_match is not None:
                 layer_idx, suffix = text_match.groups()
                 expert_match = re.fullmatch(
-                    r"moe\.routed_experts\.(\d+)\." r"(w1|w2|w3)\.weight",
+                    r"moe\.routed_experts\." r"(w1_EFD|w2_EDF|w3_EFD)",
                     suffix,
                 )
                 if expert_match is not None:
-                    expert_idx, projection = expert_match.groups()
-                    hf_state_dict[
-                        f"language_model.model.layers.{layer_idx}."
-                        f"block_sparse_moe.experts.{expert_idx}."
-                        f"{projection}.weight"
-                    ] = value
+                    (grouped_param,) = expert_match.groups()
+                    projection = _GROUPED_PARAM_TO_EXPERT_PROJECTION[grouped_param]
+                    for expert_idx, expert_weight in enumerate(value.unbind(0)):
+                        hf_state_dict[
+                            f"language_model.model.layers.{layer_idx}."
+                            f"block_sparse_moe.experts.{expert_idx}."
+                            f"{projection}.weight"
+                        ] = expert_weight
                     continue
 
                 mapped_suffix = text_layer_to_hf.get(suffix)

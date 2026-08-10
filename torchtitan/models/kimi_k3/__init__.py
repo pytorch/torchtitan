@@ -16,6 +16,7 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
+from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import VisionMLP
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
@@ -24,6 +25,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .model import (
     KimiDeltaAttention,
     KimiFeedForward,
+    KimiGroupedExperts,
     KimiK3Model,
     KimiK3TransformerBlock,
     KimiKDAKernel,
@@ -230,13 +232,6 @@ def _latent_moe_config(
     top_k: int,
     num_shared_experts: int,
 ) -> KimiLatentMoE.Config:
-    routed_experts = [
-        _feed_forward_config(
-            dim=latent_dim,
-            hidden_dim=expert_hidden_dim,
-        )
-        for _ in range(num_experts)
-    ]
     return KimiLatentMoE.Config(
         num_experts=num_experts,
         router=TokenChoiceTopKRouter.Config(
@@ -248,7 +243,22 @@ def _latent_moe_config(
             route_scale=1.0,
         ),
         routed_down=_linear(dim, latent_dim),
-        routed_experts=routed_experts,
+        routed_experts=KimiGroupedExperts.Config(
+            dim=latent_dim,
+            hidden_dim=expert_hidden_dim,
+            num_experts=num_experts,
+            beta=4.0,
+            linear_beta=25.0,
+            param_init={
+                "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
+                "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
+            },
+        ),
+        token_dispatcher=LocalTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+        ),
         routed_norm=_norm(latent_dim),
         routed_up=_linear(latent_dim, dim),
         shared_experts=_feed_forward_config(
