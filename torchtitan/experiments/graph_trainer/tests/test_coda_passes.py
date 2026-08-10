@@ -11,6 +11,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.experiments.graph_trainer.coda_passes import (
+    fuse_b2_dense_swiglu_backward_pass,
     fuse_b6_bf16_weight_grad_cast_pass,
     fuse_f4_dense_swiglu_pass,
     fuse_f6_router_sigmoid_bias_pass,
@@ -232,12 +233,113 @@ class TestF4DenseSwiGLUPass(TestCase):
         self.assertEqual(self._flex_gemm_nodes(gm), [])
 
 
+class TestB2DenseSwiGLUBackwardPass(TestCase):
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_fuses_branch_derivatives_and_input_gradient_add(self):
+        grad_out = torch.randn(8, 16, dtype=torch.bfloat16)
+        w2 = torch.randn(16, 12, dtype=torch.bfloat16)
+        saved_silu = torch.randn(2, 4, 12, dtype=torch.bfloat16)
+        saved_gate = torch.randn(2, 4, 12, dtype=torch.bfloat16)
+        saved_preactivation = torch.randn(2, 4, 12, dtype=torch.bfloat16)
+        w3 = torch.randn(12, 7, dtype=torch.bfloat16)
+        w1 = torch.randn(12, 7, dtype=torch.bfloat16)
+
+        def fn(
+            grad,
+            output_weight,
+            silu,
+            gate,
+            preactivation,
+            gate_weight,
+            first_weight,
+        ):
+            branch_grad = torch.mm(grad, output_weight).reshape(2, 4, 12)
+            gate_grad = branch_grad * silu
+            silu_grad = torch.ops.aten.silu_backward.default(
+                branch_grad * gate, preactivation
+            )
+            w3_input_grad = torch.mm(gate_grad.reshape(8, 12), gate_weight)
+            w1_input_grad = torch.mm(silu_grad.reshape(8, 12), first_weight)
+            input_grad = w3_input_grad.reshape(2, 4, 7) + w1_input_grad.reshape(2, 4, 7)
+            return gate_grad, silu_grad, input_grad
+
+        inputs = (
+            grad_out,
+            w2,
+            saved_silu,
+            saved_gate,
+            saved_preactivation,
+            w3,
+            w1,
+        )
+        gm = make_fx(fn)(*inputs)
+        expected = gm(*inputs)
+        mm_nodes = [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+        self.assertEqual(len(mm_nodes), 3)
+        mm_nodes[1].meta["custom"] = {
+            "module_fqn": "layers.0.feed_forward.w3",
+            "autograd_backward": True,
+        }
+        mm_nodes[2].meta["custom"] = {
+            "module_fqn": "layers.0.feed_forward.w1",
+            "autograd_backward": True,
+        }
+
+        fuse_b2_dense_swiglu_backward_pass(gm)
+
+        self.assertEqual(gm(*inputs), expected, exact_dtype=True)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 2)
+        self.assertEqual(len(fused[0].args[2]), 5)
+        self.assertEqual(len(fused[1].args[2]), 3)
+
+        branch_body = getattr(gm, fused[0].args[1].target)
+        branch_targets = [node.target for node in branch_body.graph.nodes]
+        self.assertEqual(branch_targets.count(torch.ops.aten.mul.Tensor), 2)
+        self.assertEqual(branch_targets.count(torch.ops.aten.silu_backward.default), 1)
+        self.assertEqual(branch_targets.count(torch.ops.aten._to_copy.default), 2)
+
+        input_add_body = getattr(gm, fused[1].args[1].target)
+        input_add_targets = [node.target for node in input_add_body.graph.nodes]
+        self.assertEqual(input_add_targets.count(torch.ops.aten.add.Tensor), 1)
+        self.assertEqual(input_add_targets.count(torch.ops.aten._to_copy.default), 2)
+
+    def test_does_not_fuse_unrelated_input_gradient_add(self):
+        x = torch.randn(8, 12, dtype=torch.bfloat16)
+        first_weight = torch.randn(12, 7, dtype=torch.bfloat16)
+        second_weight = torch.randn(12, 7, dtype=torch.bfloat16)
+
+        def fn(a, first, second):
+            lhs = torch.mm(a, first).reshape(2, 4, 7)
+            rhs = torch.mm(a, second).reshape(2, 4, 7)
+            return lhs + rhs
+
+        gm = make_fx(fn)(x, first_weight, second_weight)
+        for index, node in enumerate(
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ):
+            node.meta["custom"] = {"module_fqn": f"layers.0.linear{index}"}
+
+        fuse_b2_dense_swiglu_backward_pass(gm)
+
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+
 class TestCodaPatternRegistry(TestCase):
     def test_resolves_configured_order(self):
         passes = get_coda_pattern_passes(
             [
                 "f6_router_sigmoid_bias",
                 "f4_dense_swiglu",
+                "b2_dense_swiglu_backward",
                 "b6_bf16_weight_grad_cast",
             ]
         )
@@ -246,6 +348,7 @@ class TestCodaPatternRegistry(TestCase):
             [
                 fuse_f6_router_sigmoid_bias_pass,
                 fuse_f4_dense_swiglu_pass,
+                fuse_b2_dense_swiglu_backward_pass,
                 fuse_b6_bf16_weight_grad_cast_pass,
             ],
         )

@@ -26,6 +26,7 @@ _MUL = torch.ops.aten.mul.Tensor
 _RESHAPE = torch.ops.aten.reshape.default
 _SIGMOID = torch.ops.aten.sigmoid.default
 _SILU = torch.ops.aten.silu.default
+_SILU_BACKWARD = torch.ops.aten.silu_backward.default
 _TO_COPY = torch.ops.aten._to_copy.default
 _VIEW = torch.ops.aten.view.default
 _COMPILE_WITH_INDUCTOR = "compile_with_inductor"
@@ -46,6 +47,12 @@ def _node_shape(node: torch.fx.Node) -> tuple | None:
     tensor_meta = node.meta.get("tensor_meta")
     shape = getattr(tensor_meta, "shape", None)
     return None if shape is None else tuple(shape)
+
+
+def _module_fqn(node: torch.fx.Node) -> str | None:
+    custom = node.meta.get("custom", {})
+    module_fqn = custom.get("module_fqn")
+    return module_fqn if isinstance(module_fqn, str) else None
 
 
 def _sole_user(node: torch.fx.Node) -> torch.fx.Node | None:
@@ -239,6 +246,86 @@ def _build_f4_mul_body(
     product.meta = _copy_meta_with_value_from(mm, mm, reshape, mul)
 
     graph.output((rounded, product))
+    body = torch.fx.GraphModule(torch.nn.Module(), graph)
+    apply_flex_gemm_body_graph_passes(body, _MM)
+    for node in body.graph.nodes:
+        _tag_for_regional_inductor(node)
+    return body
+
+
+def _build_b2_branch_body(
+    mm: torch.fx.Node,
+    grad_view: torch.fx.Node,
+    saved_silu_2d: torch.fx.Node,
+    saved_gate_2d: torch.fx.Node,
+    saved_preactivation_2d: torch.fx.Node,
+    gate_grad: torch.fx.Node,
+    silu_grad: torch.fx.Node,
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    inputs = []
+    sources = (
+        *mm.args,
+        saved_silu_2d,
+        saved_gate_2d,
+        saved_preactivation_2d,
+    )
+    for index, source in enumerate(sources):
+        placeholder = graph.placeholder(f"arg{index}")
+        if isinstance(source, torch.fx.Node):
+            placeholder.meta = dict(source.meta)
+        inputs.append(placeholder)
+
+    body_mm = graph.call_function(_MM, tuple(inputs[:2]), dict(mm.kwargs))
+    body_mm.meta = dict(mm.meta)
+    to_fp32 = graph.call_function(_TO_COPY, (body_mm,), {"dtype": torch.float32})
+    to_fp32.meta = _copy_meta_with_dtype(mm, torch.float32, mm, grad_view)
+    rounded = graph.call_function(_TO_COPY, (to_fp32,), {"dtype": torch.bfloat16})
+    rounded.meta = _copy_meta_with_value_from(mm, mm, grad_view)
+
+    gate_grad_2d = graph.call_function(_MUL, (rounded, inputs[2]))
+    gate_grad_2d.meta = _copy_meta_with_value_from(mm, mm, grad_view, gate_grad)
+    gated_grad_2d = graph.call_function(_MUL, (rounded, inputs[3]))
+    gated_grad_2d.meta = _copy_meta_with_value_from(mm, mm, grad_view)
+    silu_grad_2d = graph.call_function(
+        _SILU_BACKWARD,
+        (gated_grad_2d, inputs[4]),
+    )
+    silu_grad_2d.meta = _copy_meta_with_value_from(mm, mm, grad_view, silu_grad)
+
+    graph.output((gate_grad_2d, silu_grad_2d))
+    body = torch.fx.GraphModule(torch.nn.Module(), graph)
+    apply_flex_gemm_body_graph_passes(body, _MM)
+    for node in body.graph.nodes:
+        _tag_for_regional_inductor(node)
+    return body
+
+
+def _build_b2_input_add_body(
+    mm: torch.fx.Node,
+    reshape: torch.fx.Node,
+    captured_branch_2d: torch.fx.Node,
+    add: torch.fx.Node,
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    inputs = []
+    sources = (*mm.args, captured_branch_2d)
+    for index, source in enumerate(sources):
+        placeholder = graph.placeholder(f"arg{index}")
+        if isinstance(source, torch.fx.Node):
+            placeholder.meta = dict(source.meta)
+        inputs.append(placeholder)
+
+    body_mm = graph.call_function(_MM, tuple(inputs[:2]), dict(mm.kwargs))
+    body_mm.meta = dict(mm.meta)
+    to_fp32 = graph.call_function(_TO_COPY, (body_mm,), {"dtype": torch.float32})
+    to_fp32.meta = _copy_meta_with_dtype(mm, torch.float32, mm, reshape, add)
+    rounded = graph.call_function(_TO_COPY, (to_fp32,), {"dtype": torch.bfloat16})
+    rounded.meta = _copy_meta_with_value_from(mm, mm, reshape, add)
+    total = graph.call_function(_ADD, (inputs[2], rounded))
+    total.meta = _copy_meta_with_value_from(mm, mm, reshape, add)
+
+    graph.output((total,))
     body = torch.fx.GraphModule(torch.nn.Module(), graph)
     apply_flex_gemm_body_graph_passes(body, _MM)
     for node in body.graph.nodes:
@@ -680,7 +767,327 @@ def fuse_f4_dense_swiglu_pass(
     return gm
 
 
+def _match_b2_branch_derivatives(
+    silu_grad: torch.fx.Node,
+) -> tuple[
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+] | None:
+    if silu_grad.target != _SILU_BACKWARD or len(silu_grad.args) < 2:
+        return None
+    gated_grad, saved_preactivation = silu_grad.args[:2]
+    if not isinstance(gated_grad, torch.fx.Node) or gated_grad.target != _MUL:
+        return None
+    if not isinstance(saved_preactivation, torch.fx.Node):
+        return None
+    if _sole_user(gated_grad) is not silu_grad or len(gated_grad.args) < 2:
+        return None
+    grad_view, saved_gate = gated_grad.args[:2]
+    if not isinstance(grad_view, torch.fx.Node) or grad_view.target not in (
+        _RESHAPE,
+        _VIEW,
+    ):
+        return None
+    if not isinstance(saved_gate, torch.fx.Node):
+        return None
+    if not grad_view.args or not isinstance(grad_view.args[0], torch.fx.Node):
+        return None
+    mm = grad_view.args[0]
+    if mm.target != _MM or _sole_user(mm) is not grad_view:
+        return None
+
+    sibling_grads = [
+        user
+        for user in grad_view.users
+        if user is not gated_grad
+        and user.target == _MUL
+        and len(user.args) >= 2
+        and user.args[0] is grad_view
+        and isinstance(user.args[1], torch.fx.Node)
+    ]
+    if len(grad_view.users) != 2 or len(sibling_grads) != 1:
+        return None
+    gate_grad = sibling_grads[0]
+    saved_silu = gate_grad.args[1]
+    assert isinstance(saved_silu, torch.fx.Node)
+
+    nodes = (
+        mm,
+        grad_view,
+        gate_grad,
+        gated_grad,
+        silu_grad,
+        saved_silu,
+        saved_gate,
+        saved_preactivation,
+    )
+    if any(_node_dtype(node) != torch.bfloat16 for node in nodes):
+        return None
+    mm_shape = _node_shape(mm)
+    output_shape = _node_shape(grad_view)
+    if (
+        mm_shape is None
+        or len(mm_shape) != 2
+        or output_shape is None
+        or output_shape[-1] != mm_shape[-1]
+        or any(_node_shape(node) != output_shape for node in nodes[2:])
+    ):
+        return None
+    return (
+        mm,
+        grad_view,
+        gate_grad,
+        gated_grad,
+        silu_grad,
+        saved_silu,
+        saved_gate,
+    )
+
+
+def _match_b2_input_grad_add(
+    add: torch.fx.Node,
+) -> tuple[torch.fx.Node, torch.fx.Node, torch.fx.Node, torch.fx.Node,] | None:
+    if add.target != _ADD or len(add.args) < 2:
+        return None
+    lhs, rhs = add.args[:2]
+    if not all(
+        isinstance(node, torch.fx.Node) and node.target in (_RESHAPE, _VIEW)
+        for node in (lhs, rhs)
+    ):
+        return None
+    assert isinstance(lhs, torch.fx.Node)
+    assert isinstance(rhs, torch.fx.Node)
+    if not lhs.args or not rhs.args:
+        return None
+    lhs_mm, rhs_mm = lhs.args[0], rhs.args[0]
+    if not all(
+        isinstance(node, torch.fx.Node) and node.target == _MM
+        for node in (lhs_mm, rhs_mm)
+    ):
+        return None
+    assert isinstance(lhs_mm, torch.fx.Node)
+    assert isinstance(rhs_mm, torch.fx.Node)
+    if _sole_user(lhs_mm) is not lhs or _sole_user(rhs_mm) is not rhs:
+        return None
+    if _sole_user(lhs) is not add or _sole_user(rhs) is not add:
+        return None
+
+    lhs_fqn = _module_fqn(lhs_mm)
+    rhs_fqn = _module_fqn(rhs_mm)
+    if lhs_fqn is None or rhs_fqn is None or "." not in lhs_fqn or "." not in rhs_fqn:
+        return None
+    lhs_parent, lhs_role = lhs_fqn.rsplit(".", 1)
+    rhs_parent, rhs_role = rhs_fqn.rsplit(".", 1)
+    if lhs_parent != rhs_parent or {lhs_role, rhs_role} != {"w1", "w3"}:
+        return None
+    if lhs_role == "w3":
+        captured_mm, captured_reshape = lhs_mm, lhs
+        fused_mm, fused_reshape = rhs_mm, rhs
+    else:
+        captured_mm, captured_reshape = rhs_mm, rhs
+        fused_mm, fused_reshape = lhs_mm, lhs
+    seen_captured_mm = False
+    for node in add.graph.nodes:
+        if node is captured_mm:
+            seen_captured_mm = True
+        if node is fused_mm:
+            break
+    if not seen_captured_mm:
+        return None
+
+    if any(
+        _node_dtype(node) != torch.bfloat16
+        for node in (captured_mm, captured_reshape, fused_mm, fused_reshape, add)
+    ):
+        return None
+    if (
+        _node_shape(captured_mm) != _node_shape(fused_mm)
+        or _node_shape(captured_reshape) != _node_shape(fused_reshape)
+        or _node_shape(captured_reshape) != _node_shape(add)
+    ):
+        return None
+    return captured_mm, captured_reshape, fused_mm, fused_reshape
+
+
+def fuse_b2_dense_swiglu_backward_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Fuse dense/shared-expert SwiGLU backward GEMM epilogues."""
+    del example_inputs
+    num_branch_fused = 0
+    for silu_grad in list(gm.graph.nodes):
+        match = _match_b2_branch_derivatives(silu_grad)
+        if match is None:
+            continue
+        (
+            mm,
+            grad_view,
+            gate_grad,
+            gated_grad,
+            silu_grad,
+            saved_silu,
+            saved_gate,
+        ) = match
+        saved_preactivation = silu_grad.args[1]
+        assert isinstance(saved_preactivation, torch.fx.Node)
+        mm_shape = _node_shape(mm)
+        output_shape = _node_shape(grad_view)
+        assert mm_shape is not None
+        assert output_shape is not None
+
+        captures = []
+        with gm.graph.inserting_before(mm):
+            for saved in (saved_silu, saved_gate, saved_preactivation):
+                captured = gm.graph.call_function(
+                    _RESHAPE,
+                    (saved, list(mm_shape)),
+                )
+                captured.meta = _copy_meta_with_value_from(mm, saved)
+                _tag_for_regional_inductor(captured)
+                captures.append(captured)
+
+        body = _build_b2_branch_body(
+            mm,
+            grad_view,
+            captures[0],
+            captures[1],
+            captures[2],
+            gate_grad,
+            silu_grad,
+        )
+        body_name = _next_submodule_name(gm, "_coda_b2_branch_body")
+        gm.add_module(body_name, body)
+        with gm.graph.inserting_before(mm):
+            body_ref = gm.graph.get_attr(body_name)
+            _tag_for_regional_inductor(body_ref)
+            fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    body_ref,
+                    tuple(mm.args) + tuple(captures),
+                    dict(mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            gate_grad_2d_meta = _copy_meta_with_value_from(mm, mm, grad_view, gate_grad)
+            silu_grad_2d_meta = _copy_meta_with_value_from(mm, mm, grad_view, silu_grad)
+            fused.meta = _copy_meta(mm, grad_view, gate_grad, silu_grad)
+            for key in ("val", "tensor_meta"):
+                values = [
+                    meta[key]
+                    for meta in (gate_grad_2d_meta, silu_grad_2d_meta)
+                    if key in meta
+                ]
+                if len(values) == 2:
+                    fused.meta[key] = tuple(values)
+                else:
+                    fused.meta.pop(key, None)
+            _tag_for_regional_inductor(fused)
+
+            gate_grad_2d = gm.graph.call_function(operator.getitem, (fused, 0))
+            gate_grad_2d.meta = gate_grad_2d_meta
+            _tag_for_regional_inductor(gate_grad_2d)
+            gate_grad_output = gm.graph.call_function(
+                _RESHAPE,
+                (gate_grad_2d, list(output_shape)),
+            )
+            gate_grad_output.meta = _copy_meta(mm, grad_view, gate_grad)
+            _tag_for_regional_inductor(gate_grad_output)
+
+            silu_grad_2d = gm.graph.call_function(operator.getitem, (fused, 1))
+            silu_grad_2d.meta = silu_grad_2d_meta
+            _tag_for_regional_inductor(silu_grad_2d)
+            silu_grad_output = gm.graph.call_function(
+                _RESHAPE,
+                (silu_grad_2d, list(output_shape)),
+            )
+            silu_grad_output.meta = _copy_meta(mm, grad_view, silu_grad)
+            _tag_for_regional_inductor(silu_grad_output)
+
+        gate_grad.replace_all_uses_with(gate_grad_output)
+        silu_grad.replace_all_uses_with(silu_grad_output)
+        gm.graph.erase_node(silu_grad)
+        gm.graph.erase_node(gated_grad)
+        gm.graph.erase_node(gate_grad)
+        gm.graph.erase_node(grad_view)
+        gm.graph.erase_node(mm)
+        num_branch_fused += 1
+
+    num_input_add_fused = 0
+    for add in list(gm.graph.nodes):
+        match = _match_b2_input_grad_add(add)
+        if match is None:
+            continue
+        captured_mm, captured_reshape, fused_mm, fused_reshape = match
+        output_shape = _node_shape(add)
+        assert output_shape is not None
+
+        body = _build_b2_input_add_body(
+            fused_mm,
+            fused_reshape,
+            captured_mm,
+            add,
+        )
+        body_name = _next_submodule_name(gm, "_coda_b2_input_add_body")
+        gm.add_module(body_name, body)
+        with gm.graph.inserting_before(fused_mm):
+            body_ref = gm.graph.get_attr(body_name)
+            _tag_for_regional_inductor(body_ref)
+            fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    body_ref,
+                    tuple(fused_mm.args) + (captured_mm,),
+                    dict(fused_mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            total_2d_meta = _copy_meta_with_value_from(
+                fused_mm, captured_reshape, fused_mm, fused_reshape, add
+            )
+            fused.meta = _copy_meta(captured_reshape, fused_mm, fused_reshape, add)
+            for key in ("val", "tensor_meta"):
+                if key in total_2d_meta:
+                    fused.meta[key] = (total_2d_meta[key],)
+                else:
+                    fused.meta.pop(key, None)
+            _tag_for_regional_inductor(fused)
+            total_2d = gm.graph.call_function(operator.getitem, (fused, 0))
+            total_2d.meta = total_2d_meta
+            _tag_for_regional_inductor(total_2d)
+            total = gm.graph.call_function(
+                _RESHAPE,
+                (total_2d, list(output_shape)),
+            )
+            total.meta = _copy_meta(captured_reshape, fused_reshape, add)
+            _tag_for_regional_inductor(total)
+
+        add.replace_all_uses_with(total)
+        gm.graph.erase_node(add)
+        gm.graph.erase_node(captured_reshape)
+        gm.graph.erase_node(fused_reshape)
+        gm.graph.erase_node(fused_mm)
+        num_input_add_fused += 1
+
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(
+        f"B2 fused {num_branch_fused} branch-derivative GEMMs and "
+        f"{num_input_add_fused} input-gradient GEMM adds"
+    )
+    return gm
+
+
 CODA_PATTERN_PASSES: dict[str, Callable] = {
+    "b2_dense_swiglu_backward": fuse_b2_dense_swiglu_backward_pass,
     "b6_bf16_weight_grad_cast": fuse_b6_bf16_weight_grad_cast_pass,
     "f4_dense_swiglu": fuse_f4_dense_swiglu_pass,
     "f6_router_sigmoid_bias": fuse_f6_router_sigmoid_bias_pass,

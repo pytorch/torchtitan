@@ -301,3 +301,127 @@ CUDA-event iterations were run on one GB300.
 Speedup: `0.97x` (FlexGEMM is 2.7% slower). This is retained under the project
 policy that accepts FlexGEMM fusions without a speedup. SiLU, raw gate, and
 product were bitwise identical to eager on the full representative shape.
+
+## B2 dense and shared-expert SwiGLU backward
+
+Pattern name: `b2_dense_swiglu_backward`
+
+The matcher covers the two grounded BF16 GEMM epilogues in a dense or shared
+SwiGLU backward block. The W2 input-gradient GEMM feeds two derivatives:
+
+```text
+mm(W2 input gradient) -> reshape --+-> mul(saved SiLU)
+                                   +-> mul(saved W3) -> silu_backward(saved W1)
+```
+
+The first FlexGEMM captures the three saved activations and returns both
+derivatives. A second FlexGEMM captures the already-computed W3 input-gradient
+GEMM and folds its add into the W1 input-gradient GEMM. The second match also
+requires sibling `w3` and `w1` module FQNs from the same feed-forward block,
+with the captured W3 GEMM preceding W1 in the graph. Routed grouped GEMMs are
+excluded and remain assigned to distMoE.
+
+Real before sample from layer 60:
+
+```python
+mm_571 = torch.ops.aten.mm.default(view_4444, _unsafe_view_2734)
+view_4445 = torch.ops.aten.reshape.default(mm_571, [24, 4096, 2048])
+mul_357 = torch.ops.aten.mul.Tensor(view_4445, silu_118_recomputed)
+mul_358 = torch.ops.aten.mul.Tensor(view_4445, _unsafe_view_660_recomputed)
+silu_backward = torch.ops.aten.silu_backward.default(
+    mul_358, _unsafe_view_659_recomputed
+)
+
+mm_573 = torch.ops.aten.mm.default(view_4447, _unsafe_view_2735)
+view_4448 = torch.ops.aten.reshape.default(mm_573, [24, 4096, 7168])
+mm_575 = torch.ops.aten.mm.default(view_4450, _unsafe_view_2733)
+view_4451 = torch.ops.aten.reshape.default(mm_575, [24, 4096, 7168])
+add_362 = torch.ops.aten.add.Tensor(view_4448, view_4451)
+```
+
+Real after sample:
+
+```python
+flex_gemm = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_b2_branch_body_0,
+    (
+        view_4444,
+        _unsafe_view_2734,
+        reshape_default,
+        reshape_default_1,
+        reshape_default_2,
+    ),
+    {},
+    {"backend": "QUACK"},
+)
+gate_grad = flex_gemm[0]
+silu_grad = flex_gemm[1]
+
+flex_gemm_61 = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_b2_input_add_body_0,
+    (view_4450, _unsafe_view_2733, mm_573),
+    {},
+    {"backend": "QUACK"},
+)
+input_grad = flex_gemm_61[0]
+```
+
+Both bodies explicitly model the original BF16 GEMM store rounding with an
+FP32 -> BF16 conversion before evaluating their epilogues.
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-b2-proof-20260810-continued/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_b2_dense_swiglu_backward_pass_274.txt
+after_fuse_b2_dense_swiglu_backward_pass_275.txt
+```
+
+Pass diff for the root graph:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 2,026 | -122 |
+| root `mul.Tensor` | 1,249 | 1,127 | -122 |
+| root `silu_backward.default` | 119 | 58 | -61 |
+| root `add.Tensor` | 1,017 | 956 | -61 |
+| root `flex_gemm` | 0 | 122 | +122 |
+| root `get_attr` | 427 | 549 | +122 |
+| root `getitem` | 24,620 | 24,803 | +183 |
+| root `reshape.default` | 6,822 | 7,005 | +183 |
+
+All 61 dense/shared branch-derivative chains and all 61 matching
+input-gradient adds fused. The proof run disabled regional Inductor to retain
+the rewrite as FX text, then OOMed on the known 192 GiB unfused FlexAttention
+allocation after all pass artifacts had been written.
+
+### GB300 microbenchmark
+
+The full representative shared-expert backward block used BF16 tensors with
+`M=98,304`, model width `7,168`, and shared-expert width `2,048`. It includes
+the W2 input-gradient GEMM, both derivative branches, both W3/W1 input-gradient
+GEMMs, and their final add. Five warmups and 20 CUDA-event iterations were run
+on one GB300.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager three GEMMs + derivative epilogues | 6.046 ms | 5.663 ms | 6.277 ms |
+| two QUACK FlexGEMMs + one eager GEMM | 6.955 ms | 6.769 ms | 7.899 ms |
+
+Speedup: `0.87x` (FlexGEMM is 15% slower). This is retained under the project
+policy that accepts FlexGEMM fusions without a speedup. The gate derivative was
+bitwise identical to eager. The SiLU derivative and final input gradient had
+maximum absolute errors of `3.052e-5` and `1.526e-5`, respectively, with random
+BF16 inputs scaled by `0.02`.
