@@ -93,7 +93,7 @@ jobs:
             "gpu-arch-type": "rocm",
             "gpu-arch-version": "7.2",
             "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.2",
+            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.14",
             "torch-version": ""
           }
           EOF
