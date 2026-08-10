@@ -96,5 +96,20 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--override.imports "
+                    "torchtitan.overrides.dist_gemm_attention.dist_gemm_attention",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "Override: fuse the TP collectives into the attention QKV and output "
+            "projections (FSDP2 + TP2)",
+            "override_dist_gemm_attention",
+            ngpu=4,
+            # symmetric memory is CUDA-only.
+            skip_rocm_test=True,
+        ),
     ]
     return integration_tests_flavors

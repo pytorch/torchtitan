@@ -197,6 +197,13 @@ class Decoder(BaseModel):
 
             maybe_update_minimal_async_ep_config(self, config)
 
+            # Imported lazily: the dist-GEMM override is opt-in and CUDA-only.
+            from torchtitan.overrides.dist_gemm_attention import (
+                maybe_update_dist_gemm_config,
+            )
+
+            maybe_update_dist_gemm_config(self, config)
+
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known
             # ahead of time, so keep the RoPE cache at the model's max_seq_len.
