@@ -257,8 +257,6 @@ def _routed_experts_sharding_configs(
                         # still a DTensor input to local_map and must have placements.
                         tokens_per_expert_layout,
                     )
-                    if enable_ep
-                    else None
                 ),
             ),
         ),
