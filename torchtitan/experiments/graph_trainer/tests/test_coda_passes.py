@@ -12,6 +12,7 @@ from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_b6_bf16_weight_grad_cast_pass,
+    fuse_f4_dense_swiglu_pass,
     fuse_f6_router_sigmoid_bias_pass,
     get_coda_pattern_passes,
 )
@@ -160,14 +161,93 @@ class TestF6RouterSigmoidBiasPass(TestCase):
         self.assertEqual(self._flex_gemm_nodes(gm), [])
 
 
+class TestF4DenseSwiGLUPass(TestCase):
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_fuses_two_gemms_and_preserves_saved_activations(self):
+        x = torch.randn(8, 16, dtype=torch.bfloat16)
+        w1 = torch.randn(16, 12, dtype=torch.bfloat16)
+        w3 = torch.randn(16, 12, dtype=torch.bfloat16)
+
+        def fn(a, first_weight, gate_weight):
+            first = torch.mm(a, first_weight).reshape(2, 4, 12)
+            activated = torch.nn.functional.silu(first)
+            gate = torch.mm(a, gate_weight).reshape(2, 4, 12)
+            product = activated * gate
+            return first, activated, gate, product, product + 1
+
+        gm = make_fx(fn)(x, w1, w3)
+        expected = gm(x, w1, w3)
+        fuse_f4_dense_swiglu_pass(gm)
+
+        self.assertEqual(gm(x, w1, w3), expected, exact_dtype=True)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 2)
+        self.assertEqual(len(fused[0].args[2]), 2)
+        self.assertEqual(len(fused[1].args[2]), 3)
+        self.assertEqual(len(fused[0].meta["val"]), 2)
+        first_body = getattr(gm, fused[0].args[1].target)
+        second_body = getattr(gm, fused[1].args[1].target)
+        first_targets = [node.target for node in first_body.graph.nodes]
+        second_targets = [node.target for node in second_body.graph.nodes]
+        self.assertEqual(first_targets.count(torch.ops.aten.silu.default), 1)
+        self.assertEqual(first_targets.count(torch.ops.aten._to_copy.default), 2)
+        self.assertEqual(second_targets.count(torch.ops.aten.mul.Tensor), 1)
+        self.assertEqual(second_targets.count(torch.ops.aten._to_copy.default), 2)
+
+    def test_does_not_fuse_fp32_swiglu(self):
+        x = torch.randn(8, 16)
+        w1 = torch.randn(16, 12)
+        w3 = torch.randn(16, 12)
+
+        def fn(a, first_weight, gate_weight):
+            activated = torch.nn.functional.silu(
+                torch.mm(a, first_weight).reshape(2, 4, 12)
+            )
+            gate = torch.mm(a, gate_weight).reshape(2, 4, 12)
+            return activated * gate
+
+        gm = make_fx(fn)(x, w1, w3)
+        fuse_f4_dense_swiglu_pass(gm)
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+    def test_does_not_fuse_multi_use_first_gemm(self):
+        x = torch.randn(8, 16, dtype=torch.bfloat16)
+        w1 = torch.randn(16, 12, dtype=torch.bfloat16)
+        w3 = torch.randn(16, 12, dtype=torch.bfloat16)
+
+        def fn(a, first_weight, gate_weight):
+            first_mm = torch.mm(a, first_weight)
+            activated = torch.nn.functional.silu(first_mm.reshape(2, 4, 12))
+            gate = torch.mm(a, gate_weight).reshape(2, 4, 12)
+            return activated * gate, first_mm + 1
+
+        gm = make_fx(fn)(x, w1, w3)
+        fuse_f4_dense_swiglu_pass(gm)
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+
 class TestCodaPatternRegistry(TestCase):
     def test_resolves_configured_order(self):
         passes = get_coda_pattern_passes(
-            ["f6_router_sigmoid_bias", "b6_bf16_weight_grad_cast"]
+            [
+                "f6_router_sigmoid_bias",
+                "f4_dense_swiglu",
+                "b6_bf16_weight_grad_cast",
+            ]
         )
         self.assertEqual(
             passes,
-            [fuse_f6_router_sigmoid_bias_pass, fuse_b6_bf16_weight_grad_cast_pass],
+            [
+                fuse_f6_router_sigmoid_bias_pass,
+                fuse_f4_dense_swiglu_pass,
+                fuse_b6_bf16_weight_grad_cast_pass,
+            ],
         )
 
     def test_rejects_unknown_pattern(self):

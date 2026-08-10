@@ -191,3 +191,113 @@ iterations were run on one GB300.
 
 Speedup: `5.63x`. For random FP32 inputs scaled by `0.02`, both raw and biased
 outputs had `max_abs_error=1.395e-5` and `mean_abs_error=1.984e-6` versus eager.
+
+## F4 dense and shared-expert SwiGLU
+
+Pattern name: `f4_dense_swiglu`
+
+The matcher requires the grounded BF16 two-GEMM layout:
+
+```text
+mm(W1) -> reshape -> silu --+
+                               mul
+mm(W3) -> reshape ----------+
+```
+
+Both GEMMs and their reshapes must be shape-compatible, and each GEMM must feed
+only its reshape. Routed `_grouped_mm` SwiGLU is excluded and remains assigned
+to distMoE.
+
+The first FlexGEMM emits SiLU. The second captures that same-shape tile and
+emits both the BF16-rounded W3 result and the product. Recomputed W1
+preactivations have an additional `silu_backward` consumer, so those first
+FlexGEMMs also return the rounded preactivation as an auxiliary output. The 61
+original forward cases do not create that unused auxiliary output. Explicit
+FP32 -> BF16 conversions inside both bodies preserve the original GEMM store
+rounding.
+
+Real before sample:
+
+```python
+mm_5 = torch.ops.aten.mm.default(view_25, t_5)
+_unsafe_view_5 = torch.ops.aten.reshape.default(mm_5, [24, 4096, 18432])
+silu = torch.ops.aten.silu.default(_unsafe_view_5)
+mm_6 = torch.ops.aten.mm.default(view_27, t_6)
+_unsafe_view_6 = torch.ops.aten.reshape.default(mm_6, [24, 4096, 18432])
+mul_2 = torch.ops.aten.mul.Tensor(silu, _unsafe_view_6)
+```
+
+Real after sample:
+
+```python
+flex_gemm = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f4_silu_body_0,
+    (view_25, t_5),
+    {},
+    {"backend": "QUACK"},
+)
+silu_2d = flex_gemm[0]
+flex_gemm_1 = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f4_mul_body_0,
+    (view_27, t_6, silu_2d),
+    {},
+    {"backend": "QUACK"},
+)
+gate_2d = flex_gemm_1[0]
+product_2d = flex_gemm_1[1]
+```
+
+The first recomputed case has two outputs instead: `flex_gemm_122[0]` is SiLU
+and `flex_gemm_122[1]` is the saved W1 preactivation.
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-f4-full-proof-20260810-150132/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_f4_dense_swiglu_pass_274.txt
+after_fuse_f4_dense_swiglu_pass_275.txt
+```
+
+Pass diff for the root graph:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 1,904 | -244 |
+| root `silu.default` | 238 | 116 | -122 |
+| root `mul.Tensor` | 1,249 | 1,127 | -122 |
+| root `flex_gemm` | 0 | 244 | +244 |
+| root `get_attr` | 427 | 671 | +244 |
+| root `getitem` | 24,620 | 25,047 | +427 |
+| root `reshape.default` | 6,822 | 7,005 | +183 |
+
+All 6 dense and 116 shared-expert original/recomputed chains fused. The 116
+routed grouped-GEMM chains remain unchanged. The proof run disabled regional
+Inductor to retain the rewrite as FX text, then OOMed in unfused FlexAttention
+after all pass artifacts had been written.
+
+### GB300 microbenchmark
+
+Representative shared-expert shape: two `(98304, 7168) @ (7168, 2048)` BF16
+GEMMs, returning SiLU, the raw W3 gate, and their product. Five warmups and 20
+CUDA-event iterations were run on one GB300.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager two GEMMs + SiLU + multiply | 3.613 ms | 3.332 ms | 3.739 ms |
+| two QUACK FlexGEMMs | 3.711 ms | 3.619 ms | 4.069 ms |
+
+Speedup: `0.97x` (FlexGEMM is 2.7% slower). This is retained under the project
+policy that accepts FlexGEMM fusions without a speedup. SiLU, raw gate, and
+product were bitwise identical to eager on the full representative shape.

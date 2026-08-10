@@ -22,8 +22,10 @@ from torchtitan.tools.logging import logger
 
 _MM = torch.ops.aten.mm.default
 _ADD = torch.ops.aten.add.Tensor
+_MUL = torch.ops.aten.mul.Tensor
 _RESHAPE = torch.ops.aten.reshape.default
 _SIGMOID = torch.ops.aten.sigmoid.default
+_SILU = torch.ops.aten.silu.default
 _TO_COPY = torch.ops.aten._to_copy.default
 _VIEW = torch.ops.aten.view.default
 _COMPILE_WITH_INDUCTOR = "compile_with_inductor"
@@ -78,6 +80,21 @@ def _copy_meta_with_value_from(
             merged[key] = value_source.meta[key]
         else:
             merged.pop(key, None)
+    return merged
+
+
+def _copy_meta_with_dtype(
+    value_source: torch.fx.Node,
+    dtype: torch.dtype,
+    *nodes: torch.fx.Node,
+) -> dict:
+    merged = _copy_meta(*nodes)
+    value = value_source.meta.get("val")
+    if isinstance(value, torch.Tensor):
+        merged["val"] = value.to(dtype=dtype)
+    else:
+        merged.pop("val", None)
+    merged.pop("tensor_meta", None)
     return merged
 
 
@@ -156,6 +173,72 @@ def _build_f6_router_body(
         outputs.append(biased_scores)
 
     graph.output(tuple(outputs))
+    body = torch.fx.GraphModule(torch.nn.Module(), graph)
+    apply_flex_gemm_body_graph_passes(body, _MM)
+    for node in body.graph.nodes:
+        _tag_for_regional_inductor(node)
+    return body
+
+
+def _build_f4_silu_body(
+    mm: torch.fx.Node,
+    reshape: torch.fx.Node,
+    silu: torch.fx.Node,
+    preserve_preactivation: bool,
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    inputs = []
+    for index, arg in enumerate(mm.args):
+        placeholder = graph.placeholder(f"arg{index}")
+        if isinstance(arg, torch.fx.Node):
+            placeholder.meta = dict(arg.meta)
+        inputs.append(placeholder)
+
+    body_mm = graph.call_function(_MM, tuple(inputs), dict(mm.kwargs))
+    body_mm.meta = dict(mm.meta)
+    to_fp32 = graph.call_function(_TO_COPY, (body_mm,), {"dtype": torch.float32})
+    to_fp32.meta = _copy_meta_with_dtype(mm, torch.float32, mm, reshape, silu)
+    rounded = graph.call_function(_TO_COPY, (to_fp32,), {"dtype": torch.bfloat16})
+    rounded.meta = _copy_meta_with_value_from(mm, mm, reshape, silu)
+    silu_2d = graph.call_function(_SILU, (rounded,))
+    silu_2d.meta = _copy_meta_with_value_from(mm, mm, reshape, silu)
+
+    outputs = (silu_2d, rounded) if preserve_preactivation else (silu_2d,)
+    graph.output(outputs)
+    body = torch.fx.GraphModule(torch.nn.Module(), graph)
+    apply_flex_gemm_body_graph_passes(body, _MM)
+    for node in body.graph.nodes:
+        _tag_for_regional_inductor(node)
+    return body
+
+
+def _build_f4_mul_body(
+    mm: torch.fx.Node,
+    reshape: torch.fx.Node,
+    silu_2d: torch.fx.Node,
+    mul: torch.fx.Node,
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    inputs = []
+    for index, arg in enumerate(mm.args):
+        placeholder = graph.placeholder(f"arg{index}")
+        if isinstance(arg, torch.fx.Node):
+            placeholder.meta = dict(arg.meta)
+        inputs.append(placeholder)
+    silu_input = graph.placeholder(f"arg{len(inputs)}")
+    silu_input.meta = dict(silu_2d.meta)
+    inputs.append(silu_input)
+
+    body_mm = graph.call_function(_MM, tuple(inputs[:2]), dict(mm.kwargs))
+    body_mm.meta = dict(mm.meta)
+    to_fp32 = graph.call_function(_TO_COPY, (body_mm,), {"dtype": torch.float32})
+    to_fp32.meta = _copy_meta_with_dtype(mm, torch.float32, mm, reshape, mul)
+    rounded = graph.call_function(_TO_COPY, (to_fp32,), {"dtype": torch.bfloat16})
+    rounded.meta = _copy_meta_with_value_from(mm, mm, reshape, mul)
+    product = graph.call_function(_MUL, (rounded, silu_input))
+    product.meta = _copy_meta_with_value_from(mm, mm, reshape, mul)
+
+    graph.output((rounded, product))
     body = torch.fx.GraphModule(torch.nn.Module(), graph)
     apply_flex_gemm_body_graph_passes(body, _MM)
     for node in body.graph.nodes:
@@ -388,8 +471,218 @@ def fuse_f6_router_sigmoid_bias_pass(
     return gm
 
 
+def _match_f4_swiglu(
+    mul: torch.fx.Node,
+) -> tuple[
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+] | None:
+    if mul.target != _MUL or len(mul.args) < 2:
+        return None
+    silu, gate_reshape = mul.args[:2]
+    if not isinstance(silu, torch.fx.Node) or silu.target != _SILU:
+        return None
+    if not isinstance(gate_reshape, torch.fx.Node) or gate_reshape.target not in (
+        _RESHAPE,
+        _VIEW,
+    ):
+        return None
+    if len(silu.args) != 1 or not isinstance(silu.args[0], torch.fx.Node):
+        return None
+    silu_reshape = silu.args[0]
+    if silu_reshape.target not in (_RESHAPE, _VIEW):
+        return None
+    if not silu_reshape.args or not isinstance(silu_reshape.args[0], torch.fx.Node):
+        return None
+    if not gate_reshape.args or not isinstance(gate_reshape.args[0], torch.fx.Node):
+        return None
+    silu_mm = silu_reshape.args[0]
+    gate_mm = gate_reshape.args[0]
+    if silu_mm.target != _MM or gate_mm.target != _MM:
+        return None
+    if _sole_user(silu_mm) is not silu_reshape:
+        return None
+    if _sole_user(gate_mm) is not gate_reshape:
+        return None
+    if any(
+        _node_dtype(node) != torch.bfloat16
+        for node in (silu_mm, silu_reshape, silu, gate_mm, gate_reshape, mul)
+    ):
+        return None
+
+    silu_mm_shape = _node_shape(silu_mm)
+    gate_mm_shape = _node_shape(gate_mm)
+    silu_shape = _node_shape(silu)
+    gate_shape = _node_shape(gate_reshape)
+    if (
+        silu_mm_shape is None
+        or len(silu_mm_shape) != 2
+        or silu_mm_shape != gate_mm_shape
+        or silu_shape is None
+        or silu_shape != gate_shape
+        or silu_shape != _node_shape(mul)
+        or silu_shape[-1] != silu_mm_shape[-1]
+    ):
+        return None
+    return silu_mm, silu_reshape, silu, gate_mm, gate_reshape
+
+
+def fuse_f4_dense_swiglu_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Fuse dense/shared-expert two-GEMM SwiGLU pointwise work."""
+    del example_inputs
+    num_fused = 0
+    for mul in list(gm.graph.nodes):
+        match = _match_f4_swiglu(mul)
+        if match is None:
+            continue
+        silu_mm, silu_reshape, silu, gate_mm, gate_reshape = match
+        output_shape = _node_shape(mul)
+        assert output_shape is not None
+        preserve_preactivation = any(user is not silu for user in silu_reshape.users)
+
+        silu_body = _build_f4_silu_body(
+            silu_mm,
+            silu_reshape,
+            silu,
+            preserve_preactivation,
+        )
+        silu_body_name = _next_submodule_name(gm, "_coda_f4_silu_body")
+        gm.add_module(silu_body_name, silu_body)
+        with gm.graph.inserting_before(silu_mm):
+            silu_body_ref = gm.graph.get_attr(silu_body_name)
+            _tag_for_regional_inductor(silu_body_ref)
+            silu_fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    silu_body_ref,
+                    tuple(silu_mm.args),
+                    dict(silu_mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            silu_2d_meta = _copy_meta_with_value_from(
+                silu_mm, silu_mm, silu_reshape, silu
+            )
+            silu_fused.meta = _copy_meta(silu_mm, silu_reshape, silu)
+            for key in ("val", "tensor_meta"):
+                values = [silu_2d_meta[key]] if key in silu_2d_meta else []
+                if preserve_preactivation and key in silu_2d_meta:
+                    values.append(silu_2d_meta[key])
+                if len(values) == 1 + int(preserve_preactivation):
+                    silu_fused.meta[key] = tuple(values)
+                else:
+                    silu_fused.meta.pop(key, None)
+            _tag_for_regional_inductor(silu_fused)
+            silu_2d = gm.graph.call_function(operator.getitem, (silu_fused, 0))
+            silu_2d.meta = silu_2d_meta
+            _tag_for_regional_inductor(silu_2d)
+            silu_output = gm.graph.call_function(
+                _RESHAPE,
+                (silu_2d, list(output_shape)),
+            )
+            silu_output.meta = _copy_meta(silu_mm, silu_reshape, silu)
+            _tag_for_regional_inductor(silu_output)
+
+            preactivation_output = None
+            if preserve_preactivation:
+                preactivation_2d = gm.graph.call_function(
+                    operator.getitem,
+                    (silu_fused, 1),
+                )
+                preactivation_2d.meta = silu_2d_meta
+                _tag_for_regional_inductor(preactivation_2d)
+                preactivation_output = gm.graph.call_function(
+                    _RESHAPE,
+                    (preactivation_2d, list(output_shape)),
+                )
+                preactivation_output.meta = _copy_meta(silu_mm, silu_reshape)
+                _tag_for_regional_inductor(preactivation_output)
+
+        gate_body = _build_f4_mul_body(
+            gate_mm,
+            gate_reshape,
+            silu_2d,
+            mul,
+        )
+        gate_body_name = _next_submodule_name(gm, "_coda_f4_mul_body")
+        gm.add_module(gate_body_name, gate_body)
+        with gm.graph.inserting_before(gate_mm):
+            gate_body_ref = gm.graph.get_attr(gate_body_name)
+            _tag_for_regional_inductor(gate_body_ref)
+            gate_fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    gate_body_ref,
+                    tuple(gate_mm.args) + (silu_2d,),
+                    dict(gate_mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            gate_2d_meta = _copy_meta_with_value_from(gate_mm, gate_mm, gate_reshape)
+            product_2d_meta = _copy_meta_with_value_from(
+                gate_mm, silu, gate_mm, gate_reshape, mul
+            )
+            gate_fused.meta = _copy_meta(silu, gate_mm, gate_reshape, mul)
+            for key in ("val", "tensor_meta"):
+                values = [
+                    meta[key] for meta in (gate_2d_meta, product_2d_meta) if key in meta
+                ]
+                if len(values) == 2:
+                    gate_fused.meta[key] = tuple(values)
+                else:
+                    gate_fused.meta.pop(key, None)
+            _tag_for_regional_inductor(gate_fused)
+
+            gate_2d = gm.graph.call_function(operator.getitem, (gate_fused, 0))
+            gate_2d.meta = gate_2d_meta
+            _tag_for_regional_inductor(gate_2d)
+            gate_output = gm.graph.call_function(
+                _RESHAPE,
+                (gate_2d, list(output_shape)),
+            )
+            gate_output.meta = _copy_meta(gate_mm, gate_reshape)
+            _tag_for_regional_inductor(gate_output)
+
+            product_2d = gm.graph.call_function(operator.getitem, (gate_fused, 1))
+            product_2d.meta = product_2d_meta
+            _tag_for_regional_inductor(product_2d)
+            product = gm.graph.call_function(
+                _RESHAPE,
+                (product_2d, list(output_shape)),
+            )
+            product.meta = _copy_meta(silu, gate_mm, gate_reshape, mul)
+            _tag_for_regional_inductor(product)
+
+        silu.replace_all_uses_with(silu_output)
+        if preactivation_output is not None:
+            silu_reshape.replace_all_uses_with(preactivation_output)
+        gate_reshape.replace_all_uses_with(gate_output)
+        mul.replace_all_uses_with(product)
+        gm.graph.erase_node(mul)
+        gm.graph.erase_node(silu)
+        gm.graph.erase_node(silu_reshape)
+        gm.graph.erase_node(silu_mm)
+        gm.graph.erase_node(gate_reshape)
+        gm.graph.erase_node(gate_mm)
+        num_fused += 1
+
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(f"F4 fused {num_fused} dense/shared-expert SwiGLU chains")
+    return gm
+
+
 CODA_PATTERN_PASSES: dict[str, Callable] = {
     "b6_bf16_weight_grad_cast": fuse_b6_bf16_weight_grad_cast_pass,
+    "f4_dense_swiglu": fuse_f4_dense_swiglu_pass,
     "f6_router_sigmoid_bias": fuse_f6_router_sigmoid_bias_pass,
 }
 
