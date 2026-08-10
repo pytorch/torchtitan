@@ -42,6 +42,7 @@ def parallelize_deepseekv3(
         # runs inside the local_map boundary on local tensors.
         if parallel_dims.cp_enabled:
             apply_cp_to_forward(
+                # pyrefly: ignore [missing-attribute]
                 [block.attention.inner_attention for block in model.layers.values()],
                 parallel_dims.get_mesh("cp"),
             )
@@ -81,6 +82,7 @@ def parallelize_deepseekv3(
             edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
     apply_fsdp_to_mtp_decoder(
+        # pyrefly: ignore [bad-argument-type]
         model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],

@@ -34,12 +34,8 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import (
-    Attention,
-    DeepSeekV3Model,
-    DeepSeekV3TransformerBlock,
-)
-from .mtp import MTPLoss, MTPDecoder, MTPTransformerBlock
+from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
+from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
 from .parallelize import parallelize_deepseekv3
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
@@ -281,7 +277,6 @@ def build_mla_moe_layers(
     return layers
 
 
-
 def _build_dsv3_layers(**kwargs) -> list[TransformerBlock.Config]:
     """Thin wrapper: ``build_mla_moe_layers`` with DeepSeek V3's own inits."""
     return build_mla_moe_layers(
@@ -291,6 +286,7 @@ def _build_dsv3_layers(**kwargs) -> list[TransformerBlock.Config]:
         depth_init=_depth_init,
         depth_experts_init=_depth_experts_init,
     )
+
 
 def _build_mtp_layers(
     inner_cfg: DeepSeekV3TransformerBlock.Config,
@@ -318,7 +314,6 @@ def _build_mtp_layers(
             )
         )
     return mtp_layers
-
 
 
 def _debugmodel(
@@ -383,6 +378,7 @@ def _debugmodel(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
+            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -452,6 +448,7 @@ def _16b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
+            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -525,6 +522,7 @@ def _236b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
+            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -599,6 +597,7 @@ def _671b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
+            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,

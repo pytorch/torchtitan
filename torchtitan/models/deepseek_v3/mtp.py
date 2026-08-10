@@ -72,9 +72,7 @@ def roll_mtp_sequence(
     """
     seq_len = sequence.shape[1]
     if shift <= 0 or shift > seq_len:
-        raise ValueError(
-            f"MTP roll shift must be in [1, {seq_len}], got {shift}."
-        )
+        raise ValueError(f"MTP roll shift must be in [1, {seq_len}], got {shift}.")
 
     rolled = torch.full_like(sequence, fill_value)
     valid_mask = torch.zeros_like(sequence, dtype=torch.bool)
@@ -92,8 +90,7 @@ def roll_mtp_sequence(
             f"MTP positions need at least {seq_len} tokens, got {positions.shape[1]}."
         )
     valid_tokens = (
-        positions[:, shift:seq_len]
-        == positions[:, : seq_len - shift] + shift
+        positions[:, shift:seq_len] == positions[:, : seq_len - shift] + shift
     )
     # valid_tokens follows positions placement, while valid_mask intentionally
     # follows sequence placement for the following where.
@@ -200,10 +197,12 @@ class MTPDecoder(Decoder):
                 del self.layers[num_main_layers:]
 
             parallelism = config.parallelism
+            # TODO: Add Pipeline Parallel support for MTP.
             if parallelism.pipeline_parallel_degree > 1:
                 raise NotImplementedError(
                     "MTP does not support pipeline parallelism yet."
                 )
+            # TODO: Add Context Parallel support for MTP.
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
                     "MTP does not support context parallelism yet."
@@ -246,8 +245,11 @@ class MTPDecoder(Decoder):
 
         mtp_outputs = []
         for depth, layer in enumerate(self.mtp_layers, 1):
-            # Shift token ids before embedding. Reusing the main embedding
-            # output would locally shift a sequence-parallel shard.
+            # NOTE: Without SP, the local main embedding output has shape
+            # [batch, seq_len, hidden_dim] and could be shifted and reused.
+            # Under SP, its sequence dimension is sharded, so a local shift
+            # would be incorrect at shard boundaries. Reuse in that case
+            # would require a cross-shard shift or redistribution.
             mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
                 tokens,
                 shift=depth,
@@ -272,8 +274,7 @@ class MTPDecoder(Decoder):
                 "ChunkedLoss supports MTP outputs."
             )
         return [
-            self.lm_head(item) if self.lm_head is not None else item
-            for item in outputs
+            self.lm_head(item) if self.lm_head is not None else item for item in outputs
         ]
 
 
@@ -319,6 +320,7 @@ def apply_fsdp_to_mtp_decoder(
             del model.layers[key]
 
 
+# TODO: Add ChunkedLoss support for the main and per-depth MTP outputs.
 class MTPLoss(BaseLoss):
     """DeepSeek-V3 multi-token prediction loss."""
 
@@ -363,7 +365,7 @@ class MTPLoss(BaseLoss):
             labels[:, : pred[0].shape[1]],
             global_vocab_size=self.global_vocab_size,
         )
-        mtp_loss = None
+        mtp_loss: torch.Tensor | None = None
 
         for label_offset, mtp_pred in enumerate(pred[1:], 1):
             mtp_seq_len = mtp_pred.shape[1]

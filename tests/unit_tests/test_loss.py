@@ -33,9 +33,9 @@ from torchtitan.components.loss import (
     GradAccumulator,
     IGNORE_INDEX,
 )
-from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import set_spmd_backend
+from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
 
 
 class TestLoss(unittest.TestCase):

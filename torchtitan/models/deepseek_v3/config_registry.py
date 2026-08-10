@@ -71,7 +71,6 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
     )
 
 
-
 def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry("debugmodel", num_mtp_layers=1)

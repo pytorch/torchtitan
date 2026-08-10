@@ -83,6 +83,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     ) -> tuple[str, str]:
         new_key = self.from_hf_map[abstract_key]
         if len(getattr(self.model_config, "mtp_layers", [])) > 0:
+            # pyrefly: ignore [missing-attribute]
             num_main_layers = len(self.model_config.layers)
             layer_idx = int(layer_num)
             if layer_idx >= num_main_layers:
@@ -96,9 +97,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         1,
                     )
                 else:
-                    new_key = new_key.replace(
-                        "layers.{}.", "mtp_layers.{}.", 1
-                    )
+                    new_key = new_key.replace("layers.{}.", "mtp_layers.{}.", 1)
                 layer_num = str(layer_idx - num_main_layers)
         return new_key, layer_num
 
@@ -116,6 +115,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 "layers.{}.",
                 1,
             ).replace("mtp_layers.{}.", "layers.{}.", 1)
+            # pyrefly: ignore [missing-attribute]
             hf_layer_num = str(len(self.model_config.layers) + int(layer_num))
             return to_hf_map[main_abstract_key], hf_layer_num
 
@@ -168,6 +168,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         "layers.{}.",
                         1,
                     ).replace("mtp_layers.{}.", "layers.{}.", 1)
+                    # pyrefly: ignore [missing-attribute]
                     layer_num = str(len(self.model_config.layers) + int(layer_num))
                 new_abstract_key = to_hf_map[abstract_key]
 

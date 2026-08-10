@@ -82,6 +82,14 @@ The trainer still provides the normal next-token-prediction batch. For an unpack
 | MTP depth 1 | `[t1, t2, t3, t4, t5, FILL]` | `[t2, t3, t4, t5, t6, IGNORE]` |
 | MTP depth 2 | `[t2, t3, t4, t5, FILL, FILL]` | `[t3, t4, t5, t6, IGNORE, IGNORE]` |
 
+> **Note:** This alignment differs from Figure 3 in the DeepSeek-V3 paper.
+> The figure illustrates an equal-width contiguous window at every MTP depth,
+> with additional future tokens available as the input window shifts. TorchTitan's
+> dataloader provides one fixed-length input/label pair, so this implementation
+> shifts within that same input row and fills the unavailable tail.
+> Each additional MTP depth therefore has one fewer valid target than the
+> previous depth.
+
 For a packed row, each document is shifted independently. Consider:
 
 - `tokens=[A0, A1, A2, B0, B1, B2, B3, C0, C1, C2]`
@@ -94,15 +102,19 @@ For a packed row, each document is shifted independently. Consider:
 
 The same helper is used for MTP input tokens and MTP labels, with different fill values. Input-token fills use token id `0`; label fills use `IGNORE_INDEX`.
 
-The MTP block receives the original `positions`, not rolled positions. This is intentional: each output hidden state is still anchored at destination position `i` for attention/RoPE, while the shifted embedding branch contributes the future token content `t_{i+k}`. Rolling `positions` would make the block behave as if the output itself moved to `i+k`, which is not the DeepSeek-V3 MTP computation.
+The MTP block receives the original `positions`, not rolled positions. This is intentional: each output hidden state remains anchored at its original destination position for attention/RoPE, while the shifted embedding branch contributes the token content selected for the current MTP depth. Rolling `positions` would incorrectly move the output to the shifted token position.
 
 ### 2.4 Behavior Compared with the DeepSeek-V3 Paper
 
-This PR implements the paper-style MTP module, where depth `k` consumes both the previous depth hidden state `h_i^{k-1}` and the shifted token embedding `Emb(t_{i+k})`. This is different from an only-shift-loss design, where every head would consume the same hidden/input state and only the labels would be shifted.
+This PR follows the paper-style MTP architecture: each MTP depth combines the
+previous depth's hidden state at the same sequence position with the embedding
+of the token shifted for that depth. This differs from an only-shift-loss design,
+where every prediction head consumes the same hidden/input state and only shifts
+its labels.
 
-The paper diagram shows a contiguous sequence window. TorchTitan training batches can contain packed documents, so this implementation adds boundary-aware filling and masking. That is the main semantic extension beyond the diagram: MTP does not allow `A2` to predict through `B0` just because they are adjacent in the physical tensor.
-
-We also observed a similar `roll_tensor` operation in Megatron-LM's MTP implementation, which shifts the token input for each MTP depth instead of only shifting labels in the loss.
+The input-window alignment and packed-document handling that differ from the
+simplified paper figure are described in Sections 2.2 and 2.3. Megatron-LM uses
+a similar `roll_tensor` operation to shift the token input at each MTP depth.
 
 References:
 
