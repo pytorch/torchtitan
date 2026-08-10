@@ -13,7 +13,7 @@ speed; the pure-PyTorch recurrence it is checked against lives in
 ``tests/unit_tests/test_kimi_k3.py`` and is far too slow for training.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
@@ -24,7 +24,11 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.fsdp import add_zero_valued_dependency
 from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    BaseAttention,
+    ScaledDotProductAttention,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
@@ -117,18 +121,21 @@ class KimiFeedForward(FeedForward):
         return self.w2((gate * up).to(input_dtype))
 
 
-class KimiMLAAttention(Module):
+class KimiMLAAttention(BaseAttention):
     """Kimi K3 multi-head latent attention.
 
     Unlike DeepSeek-V3 MLA, the released K3 configuration sets
-    ``mla_use_nope=True``.  The RoPE-sized query/key slices remain part of the
-    projected head, but no rotary transform is applied.
+    ``mla_use_nope=True``: the RoPE-sized query/key slices remain part of the
+    projected head, but no rotary transform is applied, so this has no rope
+    config at all. Attention itself runs through ``ScaledDotProductAttention``
+    rather than a hand-written softmax: torchtitan's training path has no
+    need to match HF eager's bit-for-bit fp32 softmax, so it uses the same
+    SDPA inner attention the rest of the codebase relies on.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(BaseAttention.Config):
         dim: int
-        num_heads: int
         kv_lora_rank: int
         qk_nope_head_dim: int
         qk_rope_head_dim: int
@@ -141,10 +148,13 @@ class KimiMLAAttention(Module):
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
+        inner_attention: Module.Config = field(
+            default_factory=ScaledDotProductAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
-        self.num_heads = config.num_heads
+        self.n_heads = config.n_heads
         self.qk_nope_head_dim = config.qk_nope_head_dim
         self.qk_rope_head_dim = config.qk_rope_head_dim
         self.q_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
@@ -160,6 +170,7 @@ class KimiMLAAttention(Module):
         self.wkv_b = config.wkv_b.build()
         self.gate = config.gate.build()
         self.wo = config.wo.build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -175,7 +186,7 @@ class KimiMLAAttention(Module):
 
         B, L, _ = x_BLD.shape
         q_BLNH = self.wq_b(self.q_norm(self.wq_a(x_BLD))).view(
-            B, L, self.num_heads, self.q_head_dim
+            B, L, self.n_heads, self.q_head_dim
         )
 
         compressed_kv = self.wkv_a(x_BLD)
@@ -187,7 +198,7 @@ class KimiMLAAttention(Module):
         kv_BLNH = self.wkv_b(self.kv_norm(kv_latent)).view(
             B,
             L,
-            self.num_heads,
+            self.n_heads,
             self.qk_nope_head_dim + self.v_head_dim,
         )
         k_nope, v_BLNH = torch.split(
@@ -196,27 +207,12 @@ class KimiMLAAttention(Module):
             dim=-1,
         )
         k_rope = k_rope.view(B, L, 1, self.qk_rope_head_dim).expand(
-            -1, -1, self.num_heads, -1
+            -1, -1, self.n_heads, -1
         )
         k_BLNH = torch.cat((k_nope, k_rope), dim=-1)
 
-        # HuggingFace eager attention keeps the matmul in the input dtype and
-        # performs softmax in FP32.
-        scores_BNLS = torch.einsum("blnh,bsnh->bnls", q_BLNH, k_BLNH)
-        scores_BNLS = scores_BNLS * self.scale
-        causal_mask = torch.ones(L, L, dtype=torch.bool, device=x_BLD.device).triu(
-            diagonal=1
-        )
-        scores_BNLS = scores_BNLS.masked_fill(
-            causal_mask.view(1, 1, L, L),
-            torch.finfo(scores_BNLS.dtype).min,
-        )
-        probs_BNLS = torch.softmax(scores_BNLS, dim=-1, dtype=torch.float32).to(
-            v_BLNH.dtype
-        )
-        out_BLNV = torch.einsum("bnls,bsnv->blnv", probs_BNLS, v_BLNH)
-
-        out_BLD = out_BLNV.reshape(B, L, self.num_heads * self.v_head_dim)
+        out_BLNV = self.inner_attention(q_BLNH, k_BLNH, v_BLNH, scale=self.scale)
+        out_BLD = out_BLNV.reshape(B, L, self.n_heads * self.v_head_dim)
         out_BLD = out_BLD * torch.sigmoid(self.gate(x_BLD))
         return self.wo(out_BLD)
 
@@ -712,7 +708,7 @@ class KimiK3Model(Decoder):
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                attention_config.num_heads,
+                attention_config.n_heads,
                 attention_config.qk_nope_head_dim
                 + attention_config.qk_rope_head_dim
                 + attention_config.v_head_dim,

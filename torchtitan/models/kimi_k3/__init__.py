@@ -153,7 +153,7 @@ def _mla_config(
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
     return KimiMLAAttention.Config(
         dim=dim,
-        num_heads=num_heads,
+        n_heads=num_heads,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
         qk_rope_head_dim=qk_rope_head_dim,
