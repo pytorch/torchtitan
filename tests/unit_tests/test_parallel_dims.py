@@ -805,6 +805,11 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertIsNone(parallel_dims.get_optional_mesh("pp"))
             self.assertIsNone(parallel_dims.get_optional_mesh("cp"))
             self.assertIsNone(parallel_dims.get_optional_mesh("ep"))
+            self.assertIsNone(parallel_dims.get_optional_process_group("pp"))
+            self.assertIs(
+                parallel_dims.get_optional_process_group("loss"),
+                parallel_dims.get_mesh("loss").get_group(),
+            )
 
             # Test get_mesh with 2D mesh names
             self.assertIsNotNone(parallel_dims.get_mesh(["dp_replicate", "fsdp"]))
