@@ -500,14 +500,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build optimizer after applying parallelisms to the model
-        if parallel_dims.pp_enabled:
-            self.optimizers = config.optimizer.build(
-                model_parts=self.model_parts,
-                pp_process_group=parallel_dims.get_mesh("pp").get_group("pp"),
-                device=self.device,
-            )
-        else:
-            self.optimizers = config.optimizer.build(model_parts=self.model_parts)
+        self.optimizers = config.optimizer.build(
+            model_parts=self.model_parts,
+            pp_process_group=parallel_dims.get_optional_process_group("pp"),
+            device=self.device,
+        )
         if model_spec.post_optimizer_build_fn is not None:
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims

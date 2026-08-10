@@ -21,11 +21,7 @@ from torchtitan.components.distributed_optimizers.muon import (
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import (
-    default_adamw,
-    OptimizersContainer,
-    ParamGroupConfig,
-)
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -129,7 +125,7 @@ def moonlight_16b_a3b() -> Trainer.Config:
 def kimi_vl_a3b() -> Trainer.Config:
     """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
     model_spec = model_registry("Kimi-VL-A3B", attn_backend="flex")
-    return Trainer.Config(
+    return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_spec),
@@ -145,7 +141,7 @@ def kimi_vl_a3b() -> Trainer.Config:
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
         dataloader=_mm_dataloader("cc12m"),
-        optimizer=default_adamw(lr=3e-4),
+        optimizer=_distributed_muon_optimizer(model_spec, lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -159,6 +155,7 @@ def kimi_vl_a3b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=8,
+            spmd_backend="spmd_types",
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
@@ -281,6 +278,7 @@ def _distributed_muon_optimizer(
                 },
             )
         )
+    # Keep embeddings, norms, biases, and vision encoder parameters on AdamW.
     param_groups.append(
         ParamGroupConfig(
             pattern=r".*",
@@ -359,11 +357,7 @@ def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        uses_distributed_muon = any(
-            group.optimizer_name == "DistributedMuon"
-            for group in self.optimizer.param_groups
-        )
-        if uses_distributed_muon and self.parallelism.tensor_parallel_degree > 1:
+        if self.parallelism.tensor_parallel_degree > 1:
             # Fail during config parsing, before TP/FSDP creates _StridedShard
             # storage.
             raise ValueError(
