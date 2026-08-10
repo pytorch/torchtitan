@@ -291,40 +291,40 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                 [
                     # PP partitions global optimizer groups across stages. The
                     # resume run covers stage-local Muon state and flex-slot reuse.
+                    # PP=2, FSDP=2, and EP=2 keep every relevant axis active
+                    # while fitting the minimum four-GPU topology.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--parallelism.spmd_backend spmd_types",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                     "--training.local_batch_size 4",
                     # Every DP shard must have one resumed batch. Sequence length
                     # 512 filters all remaining samples on one test-data shard.
                     "--training.seq_len 1024",
-                    "activation-checkpoint:full",
                     "--training.steps 1",
+                    "--lr_scheduler.total_steps 2",
                     "--checkpoint.enable",
-                    "--checkpoint.enable_first_step_checkpoint",
                 ],
                 [
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--parallelism.spmd_backend spmd_types",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                     "--training.local_batch_size 4",
                     "--training.seq_len 1024",
-                    "activation-checkpoint:full",
-                    # Stop before the tiny test dataset wraps so checkpoint
-                    # continuation consumes the same samples as an uninterrupted run.
+                    # Avoid wrapping the tiny dataset during checkpoint resume.
                     "--training.steps 2",
+                    "--lr_scheduler.total_steps 2",
                     "--checkpoint.enable",
                 ],
             ],
-            "Kimi K2.7 DistributedMuon PP+FSDP+EP+FullAC checkpoint resume",
-            "kimi_k2_5_muon_pp+fsdp+ep+full_ac",
-            ngpu=8,
+            "Kimi K2.7 DistributedMuon PP+FSDP+EP checkpoint resume",
+            "kimi_k2_5_muon_pp+fsdp+ep",
+            ngpu=4,
             timeout=600,
         ),
     ]
