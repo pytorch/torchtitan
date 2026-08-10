@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
 from typing import cast
 
 from torch.distributed.tensor import Shard
@@ -61,7 +62,7 @@ def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
 
 def kimi_k2_5_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
-    return Trainer.Config(
+    return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_spec),
@@ -96,7 +97,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
 def moonlight_16b_a3b() -> Trainer.Config:
     """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
     model_spec = model_registry("moonlight-16B-A3B", attn_backend="flex")
-    return Trainer.Config(
+    return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_spec),
@@ -170,7 +171,7 @@ def kimi_k2_5() -> Trainer.Config:
     compile_config = CompileConfig(enable=True, components=["loss"])
     # The report uses BF16 compute; its FP8 path only compresses saved activations.
     model_spec = model_registry("Kimi-K2.5", attn_backend="flex")
-    return Trainer.Config(
+    return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_spec),
@@ -353,3 +354,26 @@ def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
         ),
         placement=Shard(0),
     )
+
+
+@dataclass(kw_only=True, slots=True)
+class _KimiTrainerConfig(Trainer.Config):
+    def __post_init__(self) -> None:
+        Trainer.Config.__post_init__(self)
+        uses_distributed_muon = any(
+            group.optimizer_name == "DistributedMuon"
+            for group in self.optimizer.param_groups
+        )
+        if uses_distributed_muon and (
+            self.parallelism.tensor_parallel_degree > 1
+            or self.parallelism.pipeline_parallel_degree > 1
+        ):
+            # Fail during config parsing, before TP/FSDP creates _StridedShard
+            # storage or PP constructs optimizers from stage-local parameters.
+            raise ValueError(
+                "Kimi DistributedMuon currently requires "
+                "tensor_parallel_degree=1 and pipeline_parallel_degree=1: "
+                "tensor parallelism can produce unsupported _StridedShard "
+                "parameter layouts, and pipeline parallelism gives each stage "
+                "only a subset of the optimizer's parameter-group patterns."
+            )
