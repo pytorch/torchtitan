@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import cast
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -13,7 +15,9 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     ParamGroupConfig,
 )
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.components.quantization import NVFP4LinearConverter
+from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
@@ -23,6 +27,7 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+from .model import Qwen3Model
 
 
 def qwen3_debugmodel() -> Trainer.Config:
@@ -55,6 +60,51 @@ def qwen3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def qwen3_debugmodel_nvfp4() -> Trainer.Config:
+    config = qwen3_debugmodel()
+    config.parallelism.spmd_backend = "spmd_types"
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    # Convert every decoder-layer Linear while leaving the lm_head in bf16.
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=["layers"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
+def qwen3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
+    config = qwen3_debugmodel()
+    config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    # Keep the last 15% of decoder layers and the lm_head in bf16.
+    num_layers = len(cast(Qwen3Model.Config, config.model_spec.model).layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
+    fqns = nvfp4_bf16_tail_fqns(
+        num_layers,
+        _NVFP4_BF16_TAIL_FRACTION,
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=fqns,
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
 
 
 def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
@@ -180,6 +230,31 @@ def qwen3_1_7b() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
+    config = sft_qwen3_8b_math()
+    config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
+    config.compile = CompileConfig(enable=True, components=["model"])
+    # Keep the last 15% of decoder layers and the lm_head in bf16.
+    num_layers = len(cast(Qwen3Model.Config, config.model_spec.model).layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
+    fqns = nvfp4_bf16_tail_fqns(
+        num_layers,
+        _NVFP4_BF16_TAIL_FRACTION,
+    )
+    config.model_spec = model_registry(
+        "8B",
+        attn_backend="varlen",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=fqns,
+                model_compile_enabled=True,
+            ),
+        ],
+    )
+    return config
 
 
 def qwen3_14b() -> Trainer.Config:

@@ -65,8 +65,6 @@ def gpt_oss_debugmodel() -> Trainer.Config:
 
 
 def gpt_oss_debugmodel_flex() -> Trainer.Config:
-    # FlexAttention variant. Pipeline Parallel is incompatible with
-    # VarlenAttention, so PP integration tests use this flex config.
     return _gpt_oss_debugmodel(attn_backend="flex")
 
 

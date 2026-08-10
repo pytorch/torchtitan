@@ -97,6 +97,98 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             )
         assert_equal(grad_scores, expected_grad_scores)
 
+    def test_topk_backward_uses_int64_for_row_stride_arithmetic(self):
+        num_cols = 2048
+        top_k = 8
+        first_overflow_row = 2**31 // num_cols
+        num_rows = first_overflow_row + 2
+        num_tokens = (num_rows + top_k - 1) // top_k
+
+        free_bytes, _ = torch.cuda.mem_get_info()
+        required_bytes = (
+            (num_rows + num_tokens) * num_cols * 2 + num_rows * 8 + 512 * 1024**2
+        )
+        if free_bytes < required_bytes:
+            self.skipTest(
+                f"need at least {required_bytes} free CUDA bytes, got {free_bytes}"
+            )
+
+        grad_out = torch.ones(
+            num_tokens,
+            num_cols,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        flat_indices = torch.arange(num_rows, device="cuda", dtype=torch.int64)
+        grad_routed = expand_topk_grad_kernel(
+            grad_out,
+            flat_indices,
+            None,
+            top_k=top_k,
+            dtype=torch.bfloat16,
+        )
+        rows = torch.tensor(
+            [first_overflow_row - 1, first_overflow_row, num_rows - 1],
+            device="cuda",
+        )
+        assert_equal(
+            grad_routed[rows, 0],
+            torch.ones(rows.numel(), device="cuda", dtype=torch.bfloat16),
+        )
+
+        grad_scores = topk_scores_grad_kernel(
+            grad_routed,
+            grad_out,
+            flat_indices,
+            top_k=top_k,
+            dtype=torch.float32,
+            scores_are_slot_ordered=True,
+        )
+        assert_equal(
+            grad_scores[rows],
+            torch.full(
+                (rows.numel(),),
+                num_cols,
+                device="cuda",
+                dtype=torch.float32,
+            ),
+        )
+
+    def test_topk_reduce_uses_int64_for_output_stride_arithmetic(self):
+        num_cols = 2048
+        first_overflow_token = 2**31 // num_cols
+        num_tokens = first_overflow_token + 2
+
+        free_bytes, _ = torch.cuda.mem_get_info()
+        required_bytes = num_tokens * num_cols * 2 + num_tokens * 8 + 512 * 1024**2
+        if free_bytes < required_bytes:
+            self.skipTest(
+                f"need at least {required_bytes} free CUDA bytes, got {free_bytes}"
+            )
+
+        routed_output = torch.ones(
+            num_tokens,
+            num_cols,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+        slot_to_row = torch.arange(num_tokens, device="cuda", dtype=torch.int64)
+        out = reduce_topk_slots_kernel(
+            routed_output,
+            slot_to_row,
+            None,
+            num_tokens=num_tokens,
+            top_k=1,
+        )
+        tokens = torch.tensor(
+            [first_overflow_token - 1, first_overflow_token, num_tokens - 1],
+            device="cuda",
+        )
+        assert_equal(
+            out[tokens, 0],
+            torch.ones(tokens.numel(), device="cuda", dtype=torch.uint8),
+        )
+
     def test_metadata_kernels_match_reference(self):
         counts_storage = torch.tensor(
             [2, 1, 0, 0, 1, 0, 1, 0],
