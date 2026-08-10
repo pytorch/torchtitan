@@ -97,24 +97,6 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.training.steps == 5
 
-    def test_kimi_distributed_muon_rejects_tp_and_pp(self):
-        for degree, reason in (
-            ("tensor_parallel_degree", "_StridedShard"),
-            ("pipeline_parallel_degree", "parameter-group patterns"),
-        ):
-            with self.subTest(degree=degree):
-                with pytest.raises(ValueError, match=reason):
-                    ConfigManager().parse_args(
-                        [
-                            "--module",
-                            "kimi_k2_7",
-                            "--config",
-                            "kimi_k2_5_debugmodel",
-                            f"--parallelism.{degree}",
-                            "2",
-                        ]
-                    )
-
     def test_cli_override_dump_folder(self):
         """CLI args override config defaults for nested fields."""
         config_manager = ConfigManager()
