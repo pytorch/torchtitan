@@ -8,11 +8,13 @@ import operator
 
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_b2_dense_swiglu_backward_pass,
     fuse_b6_bf16_weight_grad_cast_pass,
+    fuse_f2_q_rmsnorm_pass,
     fuse_f4_dense_swiglu_pass,
     fuse_f6_router_sigmoid_bias_pass,
     get_coda_pattern_passes,
@@ -333,6 +335,105 @@ class TestB2DenseSwiGLUBackwardPass(TestCase):
         self.assertEqual(self._flex_gemm_nodes(gm), [])
 
 
+class TestF2QRMSNormPass(TestCase):
+    def _trace_q_chain(self, *, return_rstd=False):
+        m, k, n, p = 8, 16, 512, 64
+
+        def fn(a, first_weight, gamma, second_weight):
+            first = torch.ops.aten.mm.default(a, first_weight)
+            first = torch.ops.aten.reshape.default(first, [2, 4, n])
+            normalized, rstd = torch.ops.aten._fused_rms_norm.default(
+                first, [n], gamma, 1e-5
+            )
+            normalized = torch.ops.aten.reshape.default(normalized, [m, n])
+            output = torch.ops.aten.mm.default(normalized, second_weight)
+            return (output, rstd, first, normalized) if return_rstd else output
+
+        inputs = (
+            torch.randn(m, k, dtype=torch.bfloat16) * 0.02,
+            torch.randn(k, n, dtype=torch.bfloat16) * 0.02,
+            torch.ones(n, dtype=torch.bfloat16),
+            torch.randn(n, p, dtype=torch.bfloat16) * 0.02,
+        )
+        gm = torch.fx.symbolic_trace(fn)
+        gm.graph.eliminate_dead_code()
+        gm.recompile()
+        FakeTensorProp(gm).propagate(*inputs)
+        mm_nodes = [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+        norm = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._fused_rms_norm.default
+        )
+        mm_nodes[0].meta["custom"] = {"module_fqn": "layers.0.attention.wq_a"}
+        norm.meta["custom"] = {"module_fqn": "layers.0.attention.q_norm"}
+        mm_nodes[1].meta["custom"] = {"module_fqn": "layers.0.attention.wq_b"}
+        return gm, inputs
+
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_reparameterizes_original_forward_q_norm(self):
+        gm, inputs = self._trace_q_chain()
+        a, first_weight, gamma, second_weight = inputs
+        first = torch.mm(a, first_weight)
+        weighted = (first.float() * gamma).bfloat16()
+        partial_mean_square = first.float().reshape(8, -1, 512).square().mean(-1)
+        rstd = (partial_mean_square.mean(-1, keepdim=True) + 1e-5).rsqrt()
+        expected = (torch.mm(weighted, second_weight).float() * rstd).bfloat16()
+
+        fuse_f2_q_rmsnorm_pass(gm)
+
+        actual = gm(*inputs)
+        self.assertEqual(actual.dtype, torch.bfloat16)
+        torch.testing.assert_close(actual, expected, atol=1e-3, rtol=2e-2)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 2)
+        self.assertEqual(len(fused[0].args[2]), 3)
+        self.assertEqual(len(fused[1].args[2]), 3)
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._fused_rms_norm.default
+                for node in gm.graph.nodes
+            )
+        )
+        first_body = getattr(gm, fused[0].args[1].target)
+        first_targets = [node.target for node in first_body.graph.nodes]
+        self.assertEqual(first_targets.count(torch.ops.aten.mean.dim), 1)
+        self.assertEqual(first_targets.count(torch.ops.aten.pow.Tensor_Scalar), 1)
+
+    def test_rewrites_recomputed_norm_and_preserves_saved_values(self):
+        gm, inputs = self._trace_q_chain(return_rstd=True)
+        a, first_weight, gamma, second_weight = inputs
+        first = torch.mm(a, first_weight)
+        partial_mean_square = first.float().reshape(8, -1, 512).square().mean(-1)
+        rstd_2d = (partial_mean_square.mean(-1, keepdim=True) + 1e-5).rsqrt()
+        weighted = (first.float() * gamma).bfloat16()
+        output = (torch.mm(weighted, second_weight).float() * rstd_2d).bfloat16()
+        normalized = (first.float() * rstd_2d * gamma).bfloat16()
+
+        fuse_f2_q_rmsnorm_pass(gm)
+
+        actual_output, actual_rstd, actual_first, actual_normalized = gm(*inputs)
+        torch.testing.assert_close(actual_output, output, atol=1e-3, rtol=2e-2)
+        self.assertEqual(actual_rstd, rstd_2d.reshape(2, 4, 1))
+        self.assertEqual(actual_first, first.reshape(2, 4, 512))
+        self.assertEqual(actual_normalized, normalized)
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 2)
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._fused_rms_norm.default
+                for node in gm.graph.nodes
+            )
+        )
+
+
 class TestCodaPatternRegistry(TestCase):
     def test_resolves_configured_order(self):
         passes = get_coda_pattern_passes(
@@ -340,6 +441,7 @@ class TestCodaPatternRegistry(TestCase):
                 "f6_router_sigmoid_bias",
                 "f4_dense_swiglu",
                 "b2_dense_swiglu_backward",
+                "f2_q_rmsnorm",
                 "b6_bf16_weight_grad_cast",
             ]
         )
@@ -349,6 +451,7 @@ class TestCodaPatternRegistry(TestCase):
                 fuse_f6_router_sigmoid_bias_pass,
                 fuse_f4_dense_swiglu_pass,
                 fuse_b2_dense_swiglu_backward_pass,
+                fuse_f2_q_rmsnorm_pass,
                 fuse_b6_bf16_weight_grad_cast_pass,
             ],
         )

@@ -425,3 +425,131 @@ policy that accepts FlexGEMM fusions without a speedup. The gate derivative was
 bitwise identical to eager. The SiLU derivative and final input gradient had
 maximum absolute errors of `3.052e-5` and `1.526e-5`, respectively, with random
 BF16 inputs scaled by `0.02`.
+
+## F2 MLA Q projection and RMSNorm
+
+Pattern name: `f2_q_rmsnorm`
+
+This is an opt-in, numerics-changing CODA reparameterization of the grounded
+MLA Q chain:
+
+```text
+mm(wq_a) -> RMSNorm(q_norm) -> mm(wq_b)
+```
+
+The first FlexGEMM applies the 1,536-element norm weight without the row scale
+and emits three 512-column partial mean-square values per token. Root-graph
+pointwise ops finalize one inverse-RMS value per token. The second FlexGEMM
+captures that row value and applies it after the `wq_b` accumulation.
+
+The pass rewrites both the 61 original and 61 rematerialized Q chains. The
+rematerialized first FlexGEMM additionally returns raw BF16 Q. The pass
+reconstructs normalized Q and reshapes `rstd` for the existing `wq_b` weight
+gradient and RMSNorm backward consumers, so activation checkpointing does not
+mix CODA forward values with an unrelated recomputation path.
+
+Real before sample:
+
+```python
+mm = torch.ops.aten.mm.default(view_4, t)
+_unsafe_view = torch.ops.aten.reshape.default(mm, [24, 4096, 1536])
+_fused_rms_norm_1 = torch.ops.aten._fused_rms_norm.default(
+    _unsafe_view, [1536], _unsafe_view_1273, 1e-05
+)
+getitem_2 = _fused_rms_norm_1[0]
+view_7 = torch.ops.aten.reshape.default(getitem_2, [98304, 1536])
+mm_1 = torch.ops.aten.mm.default(view_7, t_1)
+```
+
+Real original-forward after sample:
+
+```python
+flex_gemm = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f2_q_first_body_0,
+    (view_4, t, reshape_default),
+    {},
+    {"backend": "QUACK"},
+)
+weighted_q = flex_gemm[0]
+partial_mean_square = flex_gemm[1]
+mean_square = torch.ops.aten.mean.dim(partial_mean_square, [-1], True)
+rstd = torch.ops.aten.rsqrt.default(
+    torch.ops.aten.add.Scalar(mean_square, 1e-05)
+)
+flex_gemm_1 = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f2_q_second_body_0,
+    (weighted_q, t_1, rstd),
+    {},
+    {"backend": "QUACK"},
+)
+q = flex_gemm_1[0]
+```
+
+The rematerialized first HOP has a third output: raw BF16 Q is output 1 and
+the partial statistics move to output 2. Generated-kernel validation confirmed
+that QUACK supports this combination of a same-shape auxiliary output and a
+compressed physical reduction.
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-f2-q-full-proof-20260810-2/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_f2_q_rmsnorm_pass_274.txt
+after_fuse_f2_q_rmsnorm_pass_275.txt
+```
+
+Pass diff for the root graph:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 1,904 | -244 |
+| root `_fused_rms_norm.default` | 490 | 368 | -122 |
+| root `flex_gemm` | 0 | 244 | +244 |
+| root `get_attr` | 427 | 671 | +244 |
+| root `getitem` | 24,620 | 24,864 | +244 |
+| root `mean.dim` | 0 | 122 | +122 |
+| root `add.Scalar` | 0 | 122 | +122 |
+| root `rsqrt.default` | 0 | 122 | +122 |
+| root `_to_copy.default` | 2,486 | 2,608 | +122 |
+| root `mul.Tensor` | 1,249 | 1,371 | +122 |
+
+All 61 original and 61 rematerialized Q chains fused. The remaining 368 norms
+include KV, residual/FFN, final, and their rematerialized copies. The proof run
+disabled regional Inductor to retain the rewrite as FX text, then OOMed on the
+known 192 GiB unfused FlexAttention allocation after all pass artifacts had
+been written.
+
+### GB300 microbenchmarks
+
+The representative Q chain uses BF16 tensors with `M=98,304`, input width
+`7,168`, Q low-rank width `1,536`, and projected width `24,576`. Five warmups
+and 20 CUDA-event iterations were run on one GB300.
+
+| Variant | Eager | CODA FlexGEMM | Speedup |
+| --- | ---: | ---: | ---: |
+| original forward | 5.816 ms | 6.020 ms | 0.97x |
+| rematerialized with saved values | 5.919 ms | 6.294 ms | 0.94x |
+
+Both variants are retained under the project policy that accepts FlexGEMM
+fusions without a speedup. On the full original-forward shape, projected Q had
+`max_abs_error=0.03125` and `mean_abs_error=0.001034`. In the rematerialized
+variant, raw Q was bitwise exact, saved `rstd` had `max_abs_error=5.722e-6`,
+and reconstructed normalized Q had `max_abs_error=0.015625` and
+`mean_abs_error=3.656e-8`.
+
+The 512-of-576 KV chain is intentionally excluded. It requires a segmented
+reduction and a separate 64-column RoPE epilogue, which current FlexGEMM does
+not express. This F2 pass requires convergence validation because moving the
+row scale across BF16 GEMMs changes rounding.
