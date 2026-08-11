@@ -616,13 +616,18 @@ class ParallelDims:
         access their process groups.
 
         Note:
-            Device meshes created with the Fake backend are still included in the results.
+            Axes that ``build_mesh`` created with the Fake backend are excluded,
+            because their process groups cannot carry collectives. For example,
+            ``efsdp`` when EP is disabled: its size is ``dp_shard * cp * tp``,
+            but ``_mesh_exist`` marks it nonexistent so it is unflattened with a
+            fake backend.
 
         Returns:
             dict[str, DeviceMesh]: A dictionary mapping mesh dimension names to their
                 corresponding DeviceMesh objects. Only includes meshes where:
                 - ndim == 1 (one-dimensional)
                 - parallelism is enabled (size > 1)
+                - the axis exists, i.e. it is not backed by the Fake backend
 
         Example:
             >>> parallel_dims = ParallelDims(
@@ -630,7 +635,7 @@ class ParallelDims:
             ... )
             >>> meshes = parallel_dims.get_all_one_dimensional_meshes()
             >>> print(meshes.keys())
-            dict_keys(['dp_replicate', 'fsdp', 'tp', 'batch', 'loss', 'efsdp'])
+            dict_keys(['dp_replicate', 'fsdp', 'tp', 'batch', 'loss'])
 
         Note:
             Under ``spmd_backend="full_dtensor"`` the dense shard axis appears as
@@ -641,7 +646,7 @@ class ParallelDims:
         return {
             k: v
             for k, v in self._single_axis_meshes.items()
-            if v.ndim == 1 and v.size() > 1
+            if v.ndim == 1 and v.size() > 1 and self._mesh_exist(k, v.size())
         }
 
     @property

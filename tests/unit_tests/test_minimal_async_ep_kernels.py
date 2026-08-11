@@ -7,8 +7,10 @@
 import operator
 import os
 import unittest
+from collections import deque
 from contextlib import ExitStack
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -41,46 +43,22 @@ def assert_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
 
 
 def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+
+    dispatcher = object.__new__(MinimalAsyncEPTokenDispatcher)
+    dispatcher.top_k = 2
+    dispatcher.receive_capacity = 16
+    dispatcher.ep_mesh = SimpleNamespace(
+        get_group=lambda: SimpleNamespace(size=lambda: 2)
+    )
+
     def exchange(x, expert_ids, counts, scores):
-        (
-            hidden,
-            dispatch_ranks,
-            dispatch_rows,
-            combine_ranks,
-            combine_rows,
-            num_valid,
-            expert_to_token,
-            token_to_expert,
-            tokens_per_expert,
-        ) = minimal_async_ep_api.dispatch_op(x, expert_ids, counts, 16, 2)
-        hidden, tokens_per_expert = minimal_async_ep_api.wait_dispatch_op(
-            hidden,
-            tokens_per_expert,
-            [x, expert_ids, counts],
+        hidden, tokens_per_expert, metadata = dispatcher.dispatch(
+            x, scores.view(4, 2), expert_ids, counts
         )
         expert_offsets = torch.cumsum(tokens_per_expert, 0)
         expert_output = hidden * 2 + expert_offsets[-1] * 0
-        routed = minimal_async_ep_api.combine_op(
-            expert_output,
-            dispatch_ranks,
-            dispatch_rows,
-            combine_ranks,
-            combine_rows,
-            num_valid,
-            8,
-        )
-        routed = minimal_async_ep_api.wait_combine_op(
-            routed,
-            [expert_output, combine_ranks, combine_rows, num_valid],
-        )
-        return minimal_async_ep_api.reduce_topk_op(
-            routed,
-            token_to_expert,
-            expert_to_token,
-            scores,
-            4,
-            2,
-        )
+        return dispatcher.combine(expert_output, metadata, x)
 
     gm = make_fx(exchange, tracing_mode="fake")(
         torch.randn(4, 8),
@@ -98,7 +76,8 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
     dispatch = one(torch.ops.minimal_async_ep.dispatch.default)
     wait_dispatch = one(torch.ops.minimal_async_ep.wait_dispatch.default)
     combine = one(torch.ops.minimal_async_ep.combine.default)
-    wait_combine = one(torch.ops.minimal_async_ep.wait_combine.default)
+    source_wait = one(torch.ops.minimal_async_ep.wait_combine_source.default)
+    ready_wait = one(torch.ops.minimal_async_ep.wait_combine.default)
     dispatch_hidden = next(
         user
         for user in dispatch.users
@@ -141,15 +120,22 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
     assert depends_on(counts_cumsum, wait_counts)
     assert wait_dispatch not in dispatch_ranks.users
     assert wait_hidden not in dispatch.users
-    assert wait_combine.args[0] is combine
-    assert wait_combine.args[1][0] is combine.args[0]
-    assert list(combine.users) == [wait_combine]
+    assert source_wait.args == (
+        combine,
+        [combine.args[0], combine.args[3], combine.args[4], combine.args[5]],
+    )
+    assert ready_wait.args[1] == []
+    assert list(combine.users) == [source_wait]
+    source_projection = next(iter(source_wait.users))
+    assert source_projection.target is torch.ops.aten.view.default
+    assert list(source_projection.users) == [ready_wait]
 
 
 def test_minimal_async_ep_wait_schemas_are_nonmutating_aliases():
     schemas = (
         (torch.ops.minimal_async_ep.wait_dispatch.default._schema, ("a", "b")),
         (torch.ops.minimal_async_ep.wait_dispatch_data.default._schema, ("a",)),
+        (torch.ops.minimal_async_ep.wait_combine_source.default._schema, ("a",)),
         (torch.ops.minimal_async_ep.wait_combine.default._schema, ("a",)),
     )
     for schema, aliases in schemas:
@@ -166,6 +152,31 @@ def test_minimal_async_ep_wait_schemas_are_nonmutating_aliases():
             assert result.alias_info.before_set == {alias}
             assert not arg.alias_info.is_write
             assert not result.alias_info.is_write
+
+
+def test_combine_source_wait_releases_retained_tensors():
+    pending = torch.empty(1)
+    retained = torch.empty(1)
+    source_event, ready_event = object(), object()
+    event_key = ("combine", pending.data_ptr())
+    event = minimal_async_ep_api._PendingEvent(source_event, ready_event, (retained,))
+    state = SimpleNamespace(pending_events={event_key: deque((event,))})
+    stream = Mock()
+
+    with (
+        patch.object(minimal_async_ep_api, "_buffer_state", state),
+        patch.object(torch.cuda, "current_stream", return_value=stream),
+    ):
+        minimal_async_ep_api._wait_pending_event("combine", pending, source_only=True)
+        assert event.retained == ()
+        assert event_key in state.pending_events
+        minimal_async_ep_api._wait_pending_event("combine", pending)
+        assert event_key not in state.pending_events
+
+    assert [call.args[0] for call in stream.wait_event.call_args_list] == [
+        source_event,
+        ready_event,
+    ]
 
 
 def test_forced_load_balance_receive_capacity_matches_round_robin_routing():
@@ -229,51 +240,40 @@ def test_buffer_rows_use_configured_receive_capacity():
     assert capacity_limited == (262_144, 131_072)
 
 
-def test_671b_forced_load_balance_uses_tight_receive_capacity():
-    from torchtitan.distributed.activation_checkpoint import FullAC
-    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
-    from torchtitan.models.deepseek_v3.config_registry import (
-        deepseek_v3_671b_bf16_minimal_async_ep,
-    )
-
-    config = deepseek_v3_671b_bf16_minimal_async_ep()
-    config.activation_checkpoint = FullAC.Config()
-    config.debug.moe_force_load_balance = True
-    config.model_spec.model.update_from_config(config=config)
-
-    moe_layers = [layer for layer in config.model_spec.model.layers if layer.moe]
-    assert moe_layers
-    for layer in moe_layers:
-        dispatcher = layer.moe.routed_experts.token_dispatcher
-        assert isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
-        assert dispatcher.force_load_balance
-        assert dispatcher.receive_capacity == 131_072
-
-
-def test_671b_real_routing_uses_configured_receive_capacity():
+def test_minimal_async_ep_runtime_config_propagation():
     from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
-        graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep,
+        graph_trainer_deepseek_v3_debugmodel_minimal_async_ep,
     )
     from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
 
-    config = graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep()
+    config = graph_trainer_deepseek_v3_debugmodel_minimal_async_ep()
+    config.parallelism.expert_parallel_degree = 2
     config.compile.memory_policy = "full"
-    config.compile.ep_overlap.minimal_async_ep_receive_capacity_factor = 4.0
+    config.compile.ep_overlap.minimal_async_ep_receive_capacity_factor = 2.0
     config.model_spec.model.update_from_config(config=config)
 
-    moe_layers = [layer for layer in config.model_spec.model.layers if layer.moe]
-    assert moe_layers
-    expected_capacity = (
+    dispatchers = [
+        layer.moe.routed_experts.token_dispatcher
+        for layer in config.model_spec.model.layers
+        if layer.moe is not None
+    ]
+    assert dispatchers
+    expected = (
         config.training.local_batch_size
         * config.training.seq_len
-        * moe_layers[0].moe.routed_experts.token_dispatcher.top_k
-        * 4
+        * dispatchers[0].top_k
+        * 2
     )
-    for layer in moe_layers:
-        dispatcher = layer.moe.routed_experts.token_dispatcher
-        assert isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
-        assert dispatcher.receive_capacity_factor == 4.0
-        assert dispatcher.receive_capacity == expected_capacity
+    assert all(
+        isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+        and dispatcher.receive_capacity == expected
+        for dispatcher in dispatchers
+    )
+    assert all(dispatcher.num_row_copy_ctas is None for dispatcher in dispatchers)
+
+    config.compile.ep_overlap.enabled = True
+    config.model_spec.model.update_from_config(config=config)
+    assert all(dispatcher.num_row_copy_ctas == 72 for dispatcher in dispatchers)
 
 
 def test_receive_capacity_rejects_global_routing_overflow():
@@ -287,31 +287,18 @@ def test_receive_capacity_rejects_global_routing_overflow():
         )
 
 
-def test_overlap_copy_grid_propagates_to_minimal_async_ep_dispatchers():
+def test_minimal_async_ep_requires_full_graph_recompute():
     from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
-        graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep,
+        graph_trainer_deepseek_v3_debugmodel_minimal_async_ep,
     )
-    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
 
-    config = graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep()
+    config = graph_trainer_deepseek_v3_debugmodel_minimal_async_ep()
+    config.parallelism.expert_parallel_degree = 2
+    with pytest.raises(ValueError, match="memory_policy full"):
+        config.model_spec.model.update_from_config(config=config)
+
     config.compile.memory_policy = "full"
     config.model_spec.model.update_from_config(config=config)
-    dispatchers = [
-        layer.moe.routed_experts.token_dispatcher
-        for layer in config.model_spec.model.layers
-        if layer.moe is not None
-    ]
-    assert dispatchers
-    assert all(dispatcher.num_row_copy_ctas is None for dispatcher in dispatchers)
-
-    config.compile.ep_overlap.enabled = True
-    config.model_spec.model.update_from_config(config=config)
-
-    assert all(
-        isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
-        and dispatcher.num_row_copy_ctas == 50
-        for dispatcher in dispatchers
-    )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -369,7 +356,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                     4,
                     buffer_set,
                 )
-                routed = minimal_async_ep_api.wait_combine_op(
+                routed = minimal_async_ep_api.wait_combine(
                     routed,
                     [expert_output, combine_ranks, combine_rows, num_valid],
                 )
@@ -523,7 +510,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             return pending.sin()
 
         def combine_fn(x):
-            pending = minimal_async_ep_api.wait_combine_op(x * 2, [x])
+            pending = minimal_async_ep_api.wait_combine(x * 2, [x])
             return pending.sin()
 
         cases = (
