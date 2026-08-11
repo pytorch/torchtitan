@@ -457,8 +457,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.context_parallel_degree=2",
+                    "--module torchtitan_configs.tests "
+                    "--config llama3_debugmodel_fsdp2_cp2",
                 ]
             ],
             "FSDP+CP",

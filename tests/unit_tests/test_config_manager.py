@@ -58,6 +58,21 @@ class TestConfigManager(unittest.TestCase):
         with pytest.raises(ValueError, match="--module is required"):
             config_manager.parse_args([])
 
+    def test_torchtitan_configs_package_resolves(self):
+        """torchtitan_configs is importable and its configs load."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "torchtitan_configs.tests",
+                "--config",
+                "llama3_debugmodel_fsdp2_cp2",
+            ]
+        )
+        assert config.model_spec.name == "llama3"
+        assert config.model_spec.flavor == "debugmodel"
+        assert config.parallelism.context_parallel_degree == 2
+
     def test_invalid_model_errors(self):
         """--module with unknown module name raises ImportError."""
         config_manager = ConfigManager()
