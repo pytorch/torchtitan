@@ -340,9 +340,9 @@ def make_token_dispatcher_config(
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
         # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
         # selects the static no-host-sync expand layout (set on the generator by the
-        # deepep_override). ``num_max_tokens_per_rank`` is the per-rank EXPAND
-        # capacity: training infers it (the compact path auto-sizes), inference must set it
-        # >= the largest per-rank token count for droplessness.
+        # deepep_override). ``num_max_tokens_per_rank`` is the hard per-rank input-token
+        # bound. Runtime config derives it from the fixed training shape or inference
+        # scheduler/cudagraph limits before the dispatcher is built.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
@@ -355,11 +355,14 @@ def make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+            hidden_dim=hidden_dim,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
     elif comm_backend == "minimal_async_ep":
         return MinimalAsyncEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
