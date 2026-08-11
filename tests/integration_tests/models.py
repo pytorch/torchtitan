@@ -13,7 +13,9 @@ from tests.integration_tests import OverrideDefinitions
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
     """Use ``backend`` for every variant, or return an unsupported test unchanged."""
     if backend == "spmd_types" and any(
-        "--module qwen3_5" in arg or "--module kimi_k2_7" in arg
+        "--module qwen3_5" in arg
+        or "--module kimi_k2_7" in arg
+        or "--module muse_glimmer" in arg
         for variant in t.override_args
         for arg in variant
     ):
@@ -63,7 +65,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel_mtp",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
@@ -71,8 +73,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "torchtitan.overrides.helion_rope.helion_complex_rope",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP+compile (+ Helion RoPE override)",
-            "deepseek_v3_fsdp+ep+compile",
+            "DeepSeek V3 MTP FSDP+EP+compile",
+            "deepseek_v3_mtp_fsdp+ep+compile",
             ngpu=4,
             # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
             # H100/GB200; skip on ROCm where they are unvalidated.
@@ -284,6 +286,19 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "Kimi K2.7 multimodal FSDP+TP+EP+PP",
             "kimi_k2_5_mm_fsdp+tp+ep+pp",
             ngpu=8,
+        ),
+        # Integration Test Cases for Muse Glimmer
+        OverrideDefinitions(
+            [
+                [
+                    "--module muse_glimmer --config muse_glimmer_debugmodel_mm",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "Muse Glimmer multimodal FSDP+TP+SP",
+            "muse_glimmer_mm_fsdp+tp+sp",
+            ngpu=4,
         ),
     ]
 

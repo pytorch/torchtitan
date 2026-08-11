@@ -234,8 +234,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
                 "redistribution."
             )
         if changed_axes and (
-            src_types[changed_axes[0]] is spmd.V
-            or dst_types[changed_axes[0]] is spmd.V
+            src_types[changed_axes[0]] is spmd.V or dst_types[changed_axes[0]] is spmd.V
         ):
             axis = changed_axes[0]
             raise ValueError(
