@@ -22,8 +22,8 @@ import warnings
 import torch
 import torch.nn as nn
 
-from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.compile import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     get_transformer_block_buckets,
 )
@@ -66,12 +66,16 @@ def apply_compile(
     Args:
         model: The model to compile
         compile_config: Compilation configuration with mode and passes
-        parallelism: Parallelism configuration
         parallel_dims: Parallel dimensions
         dump_folder: Folder for dumping debug graphs
     """
     if not compile_config.enable:
         return model
+
+    maybe_enable_async_tp(
+        compile_config,
+        parallel_dims.get_dense_tp_mesh() if parallel_dims.tp_enabled else None,
+    )
 
     mode = compile_config.mode
     if mode is None:

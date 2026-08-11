@@ -7,7 +7,6 @@
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     annotate_moe_ep_regions,
@@ -78,11 +77,6 @@ def parallelize_deepseekv3(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
 
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(
-            parallelism, compile_config, parallel_dims.get_dense_tp_mesh()
-        )
-
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
@@ -114,7 +108,6 @@ def parallelize_deepseekv3(
     model = apply_compile(
         model,
         compile_config=compile_config,
-        parallelism=parallelism,
         parallel_dims=parallel_dims,
         dump_folder=dump_folder,
     )

@@ -79,12 +79,6 @@ class InferenceParallelismConfig:
     spmd_backend: Literal["default", "spmd_types"] = "default"
     """SPMD backend used by TorchTitan model parallelization in the generator."""
 
-    enable_async_tensor_parallel: bool = False
-    """Whether to enable async tensor parallel in the TorchTitan generator wrapper."""
-
-    enable_sequence_parallel: bool = False
-    """Whether to enable sequence parallelism inside the TorchTitan model."""
-
     @property
     def expert_sequence_parallel_size(self) -> int:
         """TP-axis shard count used internally by expert-parallel MoE."""
@@ -114,7 +108,6 @@ class InferenceParallelismConfig:
             pipeline_parallel_degree=1,
             enable_sequence_parallel=self.enable_sequence_parallel,
             spmd_backend=self.spmd_backend,
-            enable_async_tensor_parallel=self.enable_async_tensor_parallel,
         )
 
 

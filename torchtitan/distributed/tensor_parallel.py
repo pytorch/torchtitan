@@ -5,20 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import warnings
 from functools import partial
 from typing import Any
 
 import torch
-import torch._inductor.config
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import distribute_module, DTensor, Replicate
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
-
-from torchtitan.config import CompileConfig, ParallelismConfig
-from torchtitan.tools.logging import logger
 
 
 class NoParallel(ParallelStyle):
@@ -98,30 +93,3 @@ class NoParallel(ParallelStyle):
                 self.use_local_output,
             ),
         )
-
-
-def maybe_enable_async_tp(
-    parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
-    tp_mesh: DeviceMesh,
-):
-    if not parallelism.enable_async_tensor_parallel:
-        return
-
-    if not (compile_config.enable and "model" in compile_config.components):
-        raise RuntimeError(
-            "Async TP requires 'model' in --compile.components and --compile.enable"
-        )
-
-    group_name = tp_mesh.get_group().group_name
-    from torch.distributed._symmetric_memory import (
-        enable_symm_mem_for_group,  # pyrefly: ignore [deprecated]
-    )
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", FutureWarning)
-        enable_symm_mem_for_group(group_name)  # pyrefly: ignore [deprecated]
-
-    torch._inductor.config._micro_pipeline_tp = True
-
-    logger.info("Async TP is enabled")

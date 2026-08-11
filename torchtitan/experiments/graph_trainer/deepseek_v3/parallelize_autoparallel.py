@@ -212,7 +212,6 @@ def parallelize_autoparallel_deepseekv3(
     model = apply_compile(
         parallel_mod,
         compile_config=compile_config,
-        parallelism=parallelism,
         parallel_dims=parallel_dims,
         dump_folder=dump_folder,
     )
