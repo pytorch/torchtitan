@@ -18,18 +18,14 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
-    BucketConfig,
-)
-from torchtitan.components.distributed_optimizers.muon import (
+from torchtitan.components.distributed_muon import (
+    _adjust_muon_learning_rate,
     BatchedMatrixComputeView,
     build_distributed_muon,
     MuonComputeShardingConfig,
     Owned,
 )
-from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
-    _adjust_muon_learning_rate,
-)
+from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -184,6 +180,9 @@ class TestDistributedMuon(DTensorTestBase):
         redistributed = make_parameter(redistributed_value)
         local_blocks = make_parameter(local_blocks_value)
         optimizer = make_optimizer(redistributed, local_blocks)
+        runtime = optimizer._redistribution_runtime
+        self.assertIsNotNone(runtime._context)
+        self.assertEqual(len(runtime._context.slots), 2)
 
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
         reference_local_blocks = tuple(
