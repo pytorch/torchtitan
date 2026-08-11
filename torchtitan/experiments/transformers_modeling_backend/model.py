@@ -35,19 +35,13 @@ from torchtitan.tools.logging import logger
 class HFFlexKernel(Module):
     """Flex-attention kernel wrapped as a titan Module for declarative TP.
 
-    Runs the flex HOP over q/k/v. Under TP the Module protocol wraps this
-    forward with ``local_map`` (driven by the ``ShardingConfig`` set in
-    hf_sharding.py): q/k/v arrive head-sharded as DTensors, are converted to
-    local tensors so the document ``mask_mod`` -- which closes over a plain
-    ``positions`` tensor -- sees plain tensors, and the output is wrapped back
-    head-sharded. Expressing the sharding declaratively
-    (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with Titan's own
-    attention and lets it ride the ``spmd_types`` backend switch, instead of a
-    hand-rolled ``local_map`` call.
-
-    The HF attention module and the BlockMask ride as passthrough keyword args
-    (non-tensors, so ``local_map`` leaves them untouched). CP is not handled
-    here (guarded in ``parallelize_hf_transformers``).
+    Runs the flex HOP over q/k/v. Under TP the Module protocol wraps this forward
+    with ``local_map`` (from the ``ShardingConfig`` in hf_sharding.py): q/k/v
+    arrive head-sharded, are converted to local tensors so the document
+    ``mask_mod`` (which closes over a plain ``positions`` tensor) sees plain
+    tensors, and the output is wrapped back head-sharded. The HF attention module
+    and BlockMask ride as passthrough kwargs. Under CP the k/v all-gather is added
+    to this forward by ``_wrap_flex_kernel_cp``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -68,12 +62,9 @@ class HFFlexKernel(Module):
 def _flex_attention_torchtitan(module, query, key, value, attention_mask, **kwargs):
     """HF ``AttentionInterface`` shim for flex attention.
 
-    Delegates to the per-attention-module ``HFFlexKernel`` when present (attached
-    under TP/EP in hf_sharding.py) so the Module protocol applies the declarative
-    ``local_map``. When no kernel is attached (e.g. FSDP-only, where the sharding
-    pass does not run), q/k/v are plain tensors and flex runs directly -- no
-    mapping needed. CP is not handled here (see the guard in
-    ``parallelize_hf_transformers``).
+    Delegates to the per-module ``HFFlexKernel`` when attached (TP/EP/CP, so the
+    Module protocol applies the declarative ``local_map``); otherwise (FSDP-only,
+    no sharding pass) runs flex directly on plain tensors.
     """
     kernel = getattr(module, "_titan_flex_kernel", None)
     if kernel is None:
@@ -171,16 +162,12 @@ _ATTN_IMPLEMENTATION = "flex_torchtitan"
 def _uses_dsa(config) -> bool:
     """True if the model uses DeepSeek-style sparse attention (DSA).
 
-    DSA models (e.g. GLM-5, model_type 'glm_moe_dsa') run an auxiliary
-    "indexer" sub-attention that scores all keys and selects the top-k per
-    query, expressing the selection as a dense additive mask. The indexer and
-    the main attention both consume the incoming attention mask as a plain
-    tensor -- the modeling code calls ``.dim()`` on it, adds it to the score
-    matrix, and combines it with the top-k selection into a dense additive mask
-    that is then handed to the attention interface. A flex ``BlockMask`` has no
-    ``.dim()`` and cannot be added elementwise, so DSA needs a dense 4D tensor
-    mask instead of a BlockMask (flex still runs, consuming the dense mask as a
-    ``score_mask``). Detected by the DSA-specific ``index_topk`` config attr.
+    DSA models (e.g. GLM-5, model_type 'glm_moe_dsa') run an "indexer" that scores
+    all keys, selects the top-k per query, and combines the selection with the
+    causal mask into a dense additive mask. That mask is consumed as a plain
+    tensor (``.dim()``, elementwise add), which a flex ``BlockMask`` cannot be, so
+    DSA uses a dense 4D mask (flex applies it as a ``score_mask``). Detected by
+    the ``index_topk`` config attr.
     """
     return getattr(config, "index_topk", None) is not None
 
@@ -326,16 +313,13 @@ class HFTransformerModel(BaseModel):
                     self._titan_injected_model_args[attr_name] = value
 
         def _configure_hf_attention(self):
-            """Configure HuggingFace attention to route through flex attention.
+            """Route HuggingFace attention through the flex HOP.
 
-            Routes attention through the flex HOP so a causal or document/packing
-            BlockMask can be applied -- is_causal alone cannot express
-            cross-sample (packed)
-            masking. The titan-built BlockMask (see ``get_attention_masks``)
-            rides HF's normal ``attention_mask`` argument (HF returns an
-            already-4D/BlockMask mask as-is), so no custom mask plumbing is
-            needed. The custom impl name only exists to bypass HF's per-model
-            ``_supports_flex_attn`` gate.
+            Lets a causal or document/packing BlockMask be applied -- is_causal
+            alone cannot express cross-sample (packed) masking. The titan-built
+            BlockMask (see ``get_attention_masks``) rides HF's normal
+            ``attention_mask`` argument. The custom impl name only bypasses HF's
+            per-model ``_supports_flex_attn`` gate.
             """
             AttentionInterface._global_mapping[
                 _ATTN_IMPLEMENTATION
@@ -1051,12 +1035,9 @@ class HFTransformerModel(BaseModel):
         attention, so a causal BlockMask is still required).
         """
         if _uses_dsa(self.model.config):
-            # DSA models cannot consume a flex BlockMask: their indexer and main
-            # attention treat the mask as a dense additive tensor (see
-            # ``_uses_dsa``). Return a dense 4D additive causal mask so the DSA
-            # modeling code works (its ``create_causal_mask`` returns an
-            # already-4D mask as-is) and flex applies the model-built dense mask
-            # as a ``score_mask``.
+            # DSA models consume the mask as a dense additive tensor (see
+            # ``_uses_dsa``), not a BlockMask; return a dense 4D causal mask (flex
+            # applies it as a score_mask).
             return self._build_dense_attention_mask(positions)
         if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
             mask_mod = and_masks(
@@ -1078,16 +1059,13 @@ class HFTransformerModel(BaseModel):
         )
 
     def _build_dense_attention_mask(self, positions: torch.Tensor) -> torch.Tensor:
-        """Dense 4D additive attention mask for DSA models under flex.
+        """Dense 4D additive causal mask ``[B, 1, S, S]`` for DSA models under flex.
 
-        DSA (DeepSeek sparse attention) models cannot use a flex BlockMask (see
-        ``_uses_dsa``); they need a dense additive tensor mask. Build a
-        ``[B, 1, S, S]`` mask with ``0.0`` on allowed positions and ``-inf``
-        elsewhere. "causal" allows key ``j <= query i``; "block_causal"
-        additionally requires same-document (positions reset to 0 at each packed
-        sample boundary), mirroring ``get_causal_mask_mod`` /
-        ``get_document_mask_mod``. The batch dim is materialized (not broadcast)
-        so flex's ``score_mod`` can index it per batch element.
+        DSA models need a dense additive mask, not a flex BlockMask (see
+        ``_uses_dsa``): 0.0 on allowed positions, -inf elsewhere. "causal" allows
+        key ``j <= query i``; "block_causal" additionally requires same-document
+        (positions reset to 0 at each packed boundary). The batch dim is
+        materialized so flex's ``score_mod`` can index it per batch element.
         """
         batch_size, seq_len = positions.shape
         device = positions.device

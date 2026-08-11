@@ -39,6 +39,7 @@ _MODULE = "transformers_modeling_backend"
 # cp=2; seq_len 256 -> 2 flex Q-blocks so ptrr (blocks % cp == 0) holds; 1 step;
 # fp32 so CP/PP reduction-order noise isn't masked by bf16. Small on purpose.
 _COMMON = (
+    "--parallelism.spmd_backend spmd_types "
     "--parallelism.context_parallel_degree 2 "
     "--training.local_batch_size 4 --training.seq_len 256 --training.steps 1 "
     "--training.mixed_precision_param float32 --debug.seed 42 --debug.deterministic"
