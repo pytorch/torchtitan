@@ -161,7 +161,7 @@ def make_mla_attention_config(
             param_init=depth_init(layer_id),
         ),
         inner_attention=inner_attention,
-        rope=dataclasses.replace(rope),
+        rope=rope,
     )
 
 

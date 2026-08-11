@@ -8,6 +8,15 @@ import dataclasses
 import unittest
 
 import torch
+from torchtitan.config import (
+    apply_overrides,
+    clear_overrides,
+    Configurable,
+    derive,
+    override,
+    OverrideConfig,
+)
+from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.attention import (
     GQAttention,
     QKVLinear,
@@ -21,6 +30,7 @@ from torchtitan.models.common.rope import (
     RoPE,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
+from torchtitan.protocols.module import Module
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -189,7 +199,7 @@ class TestMRoPECache(unittest.TestCase):
         self.assertEqual(xk_out.shape, xk.shape)
 
 
-class TestPerLayerRoPECache(unittest.TestCase):
+class TestDecoderRoPEWiring(unittest.TestCase):
     def test_gqa_attention_uses_layer_rope_cache(self):
         torch.manual_seed(42)
         dim = 8
@@ -215,25 +225,196 @@ class TestPerLayerRoPECache(unittest.TestCase):
         self.assertIsNotNone(attention.rope)
         self.assertEqual(out.shape, x.shape)
 
-    def test_decoder_builds_distinct_rope_modules_per_attention_layer(self):
+    def test_decoder_shares_one_rope_module_across_attention_layers(self):
+        """Llama3 hands one rope config to every layer, so the built model has
+        one RoPE and one cache rather than a full-size copy per layer."""
         from torchtitan.models.llama3 import llama3_configs
 
         model = llama3_configs["debugmodel"]("flex").build()
+        model.init_states(buffer_device=torch.device("cpu"))
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
         self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
-        self.assertEqual(len({id(rope) for rope in layer_ropes}), len(layer_ropes))
+        self.assertEqual(len({id(rope) for rope in layer_ropes}), 1)
+        self.assertEqual(len({rope.cache.data_ptr() for rope in layer_ropes}), 1)
 
-    def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):
+    def test_decoder_keeps_rope_config_shared_across_seq_len_resize(self):
+        """``update_from_config`` resizes in place; replacing the config per
+        layer would silently undo the sharing."""
+        from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
         from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.trainer import Trainer
 
         cfg = llama3_configs["debugmodel"]("flex")
+        seq_len = 128
+        cfg.update_from_config(
+            config=Trainer.Config(
+                training=dataclasses.replace(TrainingConfig(), seq_len=seq_len),
+                parallelism=ParallelismConfig(),
+                debug=DebugConfig(),
+            )
+        )
         layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
 
+        self.assertEqual(len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}), 1)
+        self.assertEqual(cfg.max_seq_len, seq_len)
+        model = cfg.build()
         self.assertEqual(
-            len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}),
-            len(layer_rope_cfgs),
+            len({id(layer.attention.rope) for layer in model.layers.values()}), 1
         )
+
+    def test_shared_rope_is_parallelized_once(self):
+        """``Module.parallelize`` recurses per parent, so a shared RoPE is
+        reached once per layer; a second pass is still a caller error."""
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+
+        class TwoLayers(Module):
+            def __init__(self, first, second):
+                super().__init__()
+                self.first, self.second = first, second
+
+        # These configs carry no sharding_config, so parallelize walks the tree
+        # and returns per module without resolving any mesh.
+        parallel_dims = ParallelDims(
+            dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1
+        )
+        root = TwoLayers(
+            _attention_config(rope_cfg).build(), _attention_config(rope_cfg).build()
+        )
+        self.assertIs(root.first.rope, root.second.rope)
+        root.parallelize(parallel_dims)
+
+        with self.assertRaises(ValueError):
+            root.parallelize(parallel_dims)
+
+
+def _attention_config(rope_cfg, *, dim=8, head_dim=4) -> GQAttention.Config:
+    """A minimal ``GQAttention.Config`` around ``rope_cfg``."""
+    return GQAttention.Config(
+        n_heads=2,
+        n_kv_heads=2,
+        head_dim=head_dim,
+        dim=dim,
+        qkv_linear=QKVLinear.Config(
+            head_dim=head_dim,
+            wq=Linear.Config(in_features=dim, out_features=dim),
+            wkv=Linear.Config(in_features=dim, out_features=dim),
+        ),
+        wo=Linear.Config(in_features=dim, out_features=dim),
+        inner_attention=ScaledDotProductAttention.Config(),
+        rope=rope_cfg,
+    )
+
+
+class TestRoPEConfigBuildReuse(unittest.TestCase):
+    """``RoPE.Config.build`` memoizes, so one config object means one module.
+
+    Reuse is opt-in through the config tree: layers handed the same config
+    object share a RoPE (and its cache); layers handed separate configs do not.
+    """
+
+    def test_same_config_object_builds_one_module(self):
+        cfg = ComplexRoPE.Config(dim=8, max_seq_len=16)
+
+        first, second = cfg.build(), cfg.build()
+
+        self.assertIs(first, second)
+        self.assertEqual(first.cache.data_ptr(), second.cache.data_ptr())
+
+    def test_separate_configs_build_distinct_modules(self):
+        first = ComplexRoPE.Config(dim=8, max_seq_len=16).build()
+        second = ComplexRoPE.Config(dim=8, max_seq_len=16).build()
+
+        self.assertIsNot(first, second)
+        self.assertNotEqual(first.cache.data_ptr(), second.cache.data_ptr())
+        torch.testing.assert_close(first.cache, second.cache)
+
+    def test_layers_sharing_a_rope_config_share_one_cache(self):
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+        shared_a = _attention_config(rope_cfg).build()
+        shared_b = _attention_config(rope_cfg).build()
+
+        self.assertIs(shared_a.rope, shared_b.rope)
+        self.assertEqual(shared_a.rope.cache.data_ptr(), shared_b.rope.cache.data_ptr())
+
+    def test_sharing_survives_init_states(self):
+        """``init_states`` recomputes caches per module; a shared RoPE must
+        still end up with one cache holding the reference values."""
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+        shared_a = _attention_config(rope_cfg).build()
+        shared_b = _attention_config(rope_cfg).build()
+        unshared = _attention_config(ComplexRoPE.Config(dim=4, max_seq_len=16)).build()
+
+        for attention in (shared_a, shared_b, unshared):
+            attention.init_states(buffer_device=torch.device("cpu"))
+
+        self.assertIs(shared_a.rope, shared_b.rope)
+        torch.testing.assert_close(shared_a.rope.cache, unshared.rope.cache)
+
+    def test_shared_rope_does_not_change_attention_output(self):
+        torch.manual_seed(42)
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+        shared = _attention_config(rope_cfg).build()
+        unshared = _attention_config(ComplexRoPE.Config(dim=4, max_seq_len=16)).build()
+        unshared.load_state_dict(shared.state_dict())
+
+        x = torch.randn(2, 4, 8)
+
+        torch.testing.assert_close(shared(x, None), unshared(x, None))
+
+
+class _ReplacementRoPE(ComplexRoPE):
+    """Stand-in for an override replacement such as ``HelionComplexRoPE``."""
+
+    @dataclasses.dataclass(kw_only=True, slots=True)
+    class Config(ComplexRoPE.Config):
+        pass
+
+
+class _AttentionLayers(Configurable):
+    """Minimal config root holding several attention configs."""
+
+    @dataclasses.dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        layers: list = dataclasses.field(default_factory=list)
+
+    def __init__(self, config: Config):
+        self.config = config
+
+
+class TestRoPEOverrideReuse(unittest.TestCase):
+    """An override must not split a shared rope config into per-layer copies."""
+
+    def setUp(self):
+        clear_overrides()
+
+    def tearDown(self):
+        clear_overrides()
+
+    def test_override_keeps_one_module_for_a_shared_rope_config(self):
+        @override(target=ComplexRoPE.Config, exact=True)
+        def to_replacement_rope(cfg: ComplexRoPE.Config) -> _ReplacementRoPE.Config:
+            return derive(cfg, _ReplacementRoPE.Config)
+
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+        root = _AttentionLayers.Config(
+            layers=[
+                _attention_config(rope_cfg),
+                _attention_config(rope_cfg),
+            ]
+        )
+
+        replacements = apply_overrides(
+            OverrideConfig(imports=[f"{__name__}.to_replacement_rope"]), root
+        )
+
+        # One node claimed through two slots -> one replacement config ...
+        self.assertEqual(len(replacements), 2)
+        self.assertIs(root.layers[0].rope, root.layers[1].rope)
+        # ... so the layers still share one module and one cache.
+        first, second = root.layers[0].build(), root.layers[1].build()
+        self.assertIsInstance(first.rope, _ReplacementRoPE)
+        self.assertIs(first.rope, second.rope)
 
 
 class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):

@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -14,6 +15,9 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.fx.experimental.symbolic_shapes import guard_or_false
 
 from torchtitan.protocols.module import Module
+
+if TYPE_CHECKING:
+    from torchtitan.distributed import ParallelDims
 
 __all__ = [
     "ComplexRoPE",
@@ -88,6 +92,10 @@ class RoPE(Module):
     Common base for concrete RoPE formats. Use ``ComplexRoPE.Config`` for
     complex exponential caches and ``CosSinRoPE.Config`` for concatenated
     cosine/sine caches.
+
+    ``Config.build`` memoizes the module it builds, so callers that pass one
+    config object to several attention layers get a single shared RoPE instead
+    of a full-size cache per layer. See ``Config.build`` for the details.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -107,6 +115,36 @@ class RoPE(Module):
         beta_slow: float = 1.0
         original_seq_len: int = 4096
         truncate: bool = True
+        # Module built by the first ``build()`` call, returned by later ones.
+        # ``init=False`` keeps it out of ``dataclasses.replace``, so a
+        # retargeted config (e.g. a new ``max_seq_len``) always builds a fresh
+        # module; ``compare=False`` keeps config equality about configuration.
+        _built: "RoPE | None" = dataclasses.field(
+            default=None, init=False, repr=False, compare=False
+        )
+
+        def build(self, **kwargs):
+            """Build the RoPE module, or return the one this config built before.
+
+            RoPE caches are replicated non-persistent buffers, so one copy per
+            attention layer costs ``n_layers * max_seq_len * cache_width`` on
+            every rank -- hundreds of MiB at long context, growing with both
+            context length and depth. Memoizing here makes reuse a property of
+            the config tree: layers handed the *same* config object share one
+            module and one cache, while layers handed separate (even equal)
+            configs each get their own. Sharing is observationally identical to
+            a private copy -- a RoPE holds no parameters, and its cache is a
+            deterministic, read-only function of the config.
+
+            Only ``RoPE.Config`` memoizes. Configs for modules with parameters
+            must not: ``GQAttention`` builds one ``qk_norm`` config into
+            separate ``q_norm``/``k_norm`` modules, and one ``wkv`` config into
+            separate ``wk``/``wv`` modules.
+            """
+            if self._built is None:
+                # slots=True prevents super().build() from working; call explicitly.
+                self._built = Module.Config.build(self, **kwargs)
+            return self._built
 
     def __init__(self, config: Config):
         super().__init__()
@@ -175,6 +213,21 @@ class RoPE(Module):
             buffer_device = self.cache.device
         with torch.device(buffer_device):
             self.cache = self._precompute_cache()
+
+    def parallelize(self, parallel_dims: "ParallelDims") -> None:
+        """When several layers share this module, parallelize only once.
+
+        ``Module.parallelize`` recurses per parent, so a RoPE shared by N
+        attention layers (see ``Config.build``) is reached N times in one pass,
+        where the base implementation treats the second visit as a caller
+        error. Here the visits are equivalent -- every layer holds the same
+        ``sharding_config`` object -- so the first parent to arrive shards the
+        cache and the rest are no-ops. Modules with parameters keep the strict
+        base behavior.
+        """
+        if self._parallelized:
+            return
+        super().parallelize(parallel_dims)
 
 
 class ComplexRoPE(RoPE):

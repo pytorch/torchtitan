@@ -130,6 +130,7 @@ def _build_muse_glimmer_attention(
     max_seq_len: int,
     window_pattern: list[int],
     attn_backend: str,
+    rope: ComplexRoPE.Config,
 ) -> Attention.Config:
     # Attention.Config mirrors GQAttention.Config plus Muse Glimmer-specific fields
     # (scale_query_by, o_gate, per-layer window_size).
@@ -163,11 +164,7 @@ def _build_muse_glimmer_attention(
         # Every layer (incl. NoPE) carries a rope config so the base Decoder's
         # max_seq_len discovery/resize works uniformly; NoPE layers simply never
         # apply it (guarded by use_rope in Attention.forward).
-        rope=ComplexRoPE.Config(
-            dim=head_dim,
-            max_seq_len=max_seq_len,
-            theta=_ROPE_THETA,
-        ),
+        rope=rope,
         scale_query_by=_SCALE_QUERY_NUMERATOR / math.sqrt(head_dim),
         o_gate=Linear.Config(
             in_features=dim,
@@ -191,6 +188,11 @@ def _build_muse_glimmer_layers(
 ) -> list[MuseGlimmerTransformerBlock.Config]:
     hidden_dim = int(_FFN_DIM_MULTIPLIER * dim)
     layers = []
+    rope = ComplexRoPE.Config(
+        dim=head_dim,
+        max_seq_len=max_seq_len,
+        theta=_ROPE_THETA,
+    )
     for layer_id in range(n_layers):
         layers.append(
             MuseGlimmerTransformerBlock.Config(
@@ -208,6 +210,7 @@ def _build_muse_glimmer_layers(
                     max_seq_len=max_seq_len,
                     window_pattern=window_pattern,
                     attn_backend=attn_backend,
+                    rope=rope,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,

@@ -135,6 +135,48 @@ class TestOverride(unittest.TestCase):
         for child_cfg in parent_cfg.children:
             self.assertIsInstance(child_cfg, ComponentB.Config)
 
+    def test_shared_config_object_gets_one_replacement(self):
+        """A config reached from several slots is one node: every slot must end
+        up pointing at the same replacement, so identity-based reuse (e.g.
+        ``RoPE.Config.build``'s memo) survives an override."""
+        calls = []
+
+        @override(target=ComponentA.Config)
+        def count_calls(cfg: ComponentA.Config) -> ComponentB.Config:
+            calls.append(cfg)
+            return _to_b(cfg)
+
+        shared = ComponentA.Config(dim=16)
+        parent_cfg = ParentComponent.Config(child=shared, children=[shared, shared])
+
+        replacements = apply_overrides(self._imports(), parent_cfg)
+
+        # Three slots replaced, but the factory ran once for the one node.
+        self.assertEqual(len(replacements), 3)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(parent_cfg.children[0], parent_cfg.child)
+        self.assertIs(parent_cfg.children[1], parent_cfg.child)
+
+    def test_distinct_overrides_keep_distinct_replacements(self):
+        """Reuse is per (override, node): two overrides claiming the same object
+        through different slots still produce their own replacement."""
+
+        @override(target=ComponentA.Config, fqns=["child"])
+        def for_child(cfg: ComponentA.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=1)
+
+        @override(target=ComponentA.Config, fqns=["children.*"])
+        def for_children(cfg: ComponentA.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=2)
+
+        shared = ComponentA.Config(dim=16)
+        parent_cfg = ParentComponent.Config(child=shared, children=[shared])
+
+        apply_overrides(self._imports(), parent_cfg)
+
+        self.assertEqual(parent_cfg.child.extra, 1)
+        self.assertEqual(parent_cfg.children[0].extra, 2)
+
     def test_fqns_glob(self):
         @override(target=ComponentA.Config, fqns=["children.*"])
         def by_glob(cfg: ComponentA.Config) -> ComponentB.Config:
