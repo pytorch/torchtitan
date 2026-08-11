@@ -31,9 +31,6 @@ import torch
 import torch.distributed as dist
 
 
-RESERVED_WORKSPACES: set[tuple[str, int]] = set()
-
-
 def ensure_symm_mem_ops():
     """Import the symmetric-memory module and return it.
 
@@ -69,19 +66,28 @@ def reserve_symm_mem_workspace(
     ever be as good as warmup having already covered every layer.
 
     ``features`` and ``tokens_per_rank`` are the local, post-sharding values the
-    collective will see. The reduce-scatter schedule is the larger consumer,
-    asking for twice the output chunk, so that is what is reserved.
+    collective will see. Both schedules draw from that one shared workspace, and
+    neither is uniformly the larger consumer: the all-gather asks for its input
+    shard, ``tokens_per_rank * K``, while the reduce-scatter asks for twice its
+    output chunk, ``2 * tokens_per_rank * N``. Passing ``max(K, N)`` as
+    ``features`` and keeping the factor of two bounds both at once, so a single
+    reservation per layer covers whichever direction runs.
+
+    Deliberately not memoized on ``(group_name, min_size)``. ``get_symm_mem_workspace``
+    is already idempotent -- an already-large-enough workspace skips the allocation
+    and hits a per-group rendezvous cache, which is what the fused ops rely on every
+    forward -- so a local memo would only add a second source of truth that can
+    disagree with it. Group names are reused small integers and nothing clears
+    PyTorch's workspace dict, so a memo that outlived that dict would skip the
+    reservation while believing it had happened, putting lazy growth back inside
+    graph capture.
     """
     symm_mem = ensure_symm_mem_ops()
 
     min_size = (
         2 * tokens_per_rank * features * torch.empty(0, dtype=dtype).element_size()
     )
-    key = (group.group_name, min_size)
-    if key in RESERVED_WORKSPACES:
-        return
     symm_mem.get_symm_mem_workspace(group.group_name, min_size=min_size)
-    RESERVED_WORKSPACES.add(key)
 
 
 class AllGatherLinear(torch.autograd.Function):
