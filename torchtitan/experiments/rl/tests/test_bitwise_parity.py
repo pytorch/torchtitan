@@ -94,7 +94,7 @@ logger = logging.getLogger(__name__)
 # TODO: directly testing against PolicyTrainer with debug model to avoid OOM
 def build_trainer_model(
     config: Controller.Config,
-) -> tuple[torch.nn.Module, torch.device]:
+) -> tuple[torch.nn.Module, torch.device, dist_utils.SpmdContext]:
     """Build, parallelize, and load weights for the trainer model.
 
     Mirrors PolicyTrainer._build_model() without the Monarch actor framework.
@@ -108,15 +108,12 @@ def build_trainer_model(
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
-    parallel_dims = ParallelDims(
-        dp_shard=parallelism.data_parallel_shard_degree,
-        dp_replicate=parallelism.data_parallel_replicate_degree,
-        cp=parallelism.context_parallel_degree,
-        tp=parallelism.tensor_parallel_degree,
-        pp=parallelism.pipeline_parallel_degree,
-        ep=parallelism.expert_parallel_degree,
+    parallel_dims = ParallelDims.from_config(
+        parallelism,
         world_size=dist.get_world_size(),
     )
+    dist_utils.set_spmd_backend(parallelism.spmd_backend)
+    spmd_context = dist_utils.get_spmd_context(parallel_dims=parallel_dims)
 
     dist_utils.set_determinism(
         parallel_dims,
@@ -127,50 +124,55 @@ def build_trainer_model(
 
     trainer_config = config.trainer
 
-    # Mirror PolicyTrainer._build_model: fill sharding configs (and any other
-    # parallelism-driven config mutations) on the model config BEFORE build,
-    # so each Module is constructed with its ShardingConfig / LocalMapConfig.
-    # Without this the trainer side would run un-parallelized while the vLLM
-    # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
-    model_spec.model.update_from_config(
-        config=trainer_config,
-    )
+    with spmd_context():
+        # Mirror PolicyTrainer._build_model: fill sharding configs (and any other
+        # parallelism-driven config mutations) on the model config BEFORE build,
+        # so each Module is constructed with its ShardingConfig / LocalMapConfig.
+        # Without this the trainer side would run un-parallelized while the vLLM
+        # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
+        model_spec.model.update_from_config(
+            config=trainer_config,
+        )
 
-    with torch.device("meta"):
-        with utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]):
-            model = model_spec.model.build()
+        with torch.device("meta"):
+            with utils.set_default_dtype(
+                TORCH_DTYPE_MAP[trainer_config.training.dtype]
+            ):
+                model = model_spec.model.build()
 
-    model = model_spec.parallelize_fn(
-        model,
-        parallel_dims=parallel_dims,
-        training=trainer_config.training,
-        parallelism=parallelism,
-        compile_config=config.compile,
-        ac_config=trainer_config.ac_config,
-        dump_folder=trainer_config.dump_folder,
-    )
-    model.to_empty(device=device_type)
-    with torch.no_grad():
-        model.init_weights(buffer_device=None)
+        model = model_spec.parallelize_fn(
+            model,
+            parallel_dims=parallel_dims,
+            training=trainer_config.training,
+            parallelism=parallelism,
+            compile_config=config.compile,
+            ac_config=trainer_config.ac_config,
+            dump_folder=trainer_config.dump_folder,
+        )
+        model.to_empty(device=device_type)
+        with torch.no_grad():
+            model.init_weights(buffer_device=None)
 
-    # Load HF checkpoint if available
-    if model_spec.state_dict_adapter is not None and hf_assets_path:
-        index_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
-        single_path = os.path.join(hf_assets_path, "model.safetensors")
-        if os.path.exists(index_path) or os.path.exists(single_path):
-            sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
-            storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
-            hf_state_dict = sd_adapter.to_hf(model.state_dict())
-            dcp.load(hf_state_dict, storage_reader=storage_reader)
-            tt_state_dict = sd_adapter.from_hf(hf_state_dict)
-            set_model_state_dict(
-                model=model,
-                model_state_dict=tt_state_dict,
-                options=StateDictOptions(strict=False),
-            )
+        # Load HF checkpoint if available
+        if model_spec.state_dict_adapter is not None and hf_assets_path:
+            index_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+            single_path = os.path.join(hf_assets_path, "model.safetensors")
+            if os.path.exists(index_path) or os.path.exists(single_path):
+                sd_adapter = model_spec.state_dict_adapter(
+                    model_spec.model, hf_assets_path
+                )
+                storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
+                hf_state_dict = sd_adapter.to_hf(model.state_dict())
+                dcp.load(hf_state_dict, storage_reader=storage_reader)
+                tt_state_dict = sd_adapter.from_hf(hf_state_dict)
+                set_model_state_dict(
+                    model=model,
+                    model_state_dict=tt_state_dict,
+                    options=StateDictOptions(strict=False),
+                )
 
     model.eval()
-    return model, device
+    return model, device, spmd_context
 
 
 # TODO: directly testing against VLLMGenerator with debug model to avoid OOM
@@ -271,7 +273,9 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     return LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
 
 
-def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
+def _sync_trainer_weights_to_vllm(
+    trainer_model, engine, *, generator_spmd_backend: str
+) -> None:
     """Copy the trainer model's weights into the vLLM model in-process."""
 
     wrapper = engine.model_executor.driver_worker.get_model()
@@ -284,14 +288,22 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
         if tparam is None:
             missing.append(name)
             continue
-        full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
+                full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
                 vparam.copy_(
                     distribute_tensor(full, vparam.device_mesh, vparam.placements)
                 )
             else:
-                vparam.copy_(full)
+                source = (
+                    tparam.to_local()
+                    if generator_spmd_backend == "spmd_types"
+                    and isinstance(tparam, DTensor)
+                    else (
+                        tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
+                    )
+                )
+                vparam.copy_(source)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -615,6 +627,8 @@ class BitwiseParityTestBase(unittest.TestCase):
             )
 
         config = cls.config_fn()
+        config.trainer.parallelism.spmd_backend = "spmd_types"
+        config.generator.parallelism.spmd_backend = "spmd_types"
         hf_path = os.environ.get(cls.hf_assets_env_var)
         if hf_path:
             config.hf_assets_path = hf_path
@@ -665,10 +679,15 @@ class BitwiseParityTestBase(unittest.TestCase):
         # GPU memory for vLLM to leave room for the trainer model.
         config.generator.gpu_memory_limit = 0.5
 
-        cls.model, cls.device = build_trainer_model(config)
+        cls.model, cls.device, cls.trainer_spmd_context = build_trainer_model(config)
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
-            _sync_trainer_weights_to_vllm(cls.model, cls.engine)
+            with cls.trainer_spmd_context():
+                _sync_trainer_weights_to_vllm(
+                    cls.model,
+                    cls.engine,
+                    generator_spmd_backend=config.generator.parallelism.spmd_backend,
+                )
 
         tokenizer = cls.engine.get_tokenizer()
         cls.prompt_ids = _make_prompt_tokens(
@@ -731,16 +750,20 @@ class BitwiseParityTestBase(unittest.TestCase):
         n = len(self.prompt_ids)
         mid = max(1, n // 2)
 
-        with torch.no_grad():
-            lps_partial = compute_trainer_prefill_logprobs(
-                model,
-                self.prompt_ids[:mid],
-                self.device,
-                attn_backend=self.attn_backend,
-            )
-            lps_full = compute_trainer_prefill_logprobs(
-                model, self.prompt_ids, self.device, attn_backend=self.attn_backend
-            )
+        with self.trainer_spmd_context():
+            with torch.no_grad():
+                lps_partial = compute_trainer_prefill_logprobs(
+                    model,
+                    self.prompt_ids[:mid],
+                    self.device,
+                    attn_backend=self.attn_backend,
+                )
+                lps_full = compute_trainer_prefill_logprobs(
+                    model,
+                    self.prompt_ids,
+                    self.device,
+                    attn_backend=self.attn_backend,
+                )
 
         if dist.get_rank() == 0:
             for i in range(mid):
@@ -765,10 +788,14 @@ class BitwiseParityTestBase(unittest.TestCase):
         model = self.model
         engine = self.engine
 
-        with torch.no_grad():
-            trainer_lps = compute_trainer_prefill_logprobs(
-                model, self.prompt_ids, self.device, attn_backend=self.attn_backend
-            )
+        with self.trainer_spmd_context():
+            with torch.no_grad():
+                trainer_lps = compute_trainer_prefill_logprobs(
+                    model,
+                    self.prompt_ids,
+                    self.device,
+                    attn_backend=self.attn_backend,
+                )
 
         vllm_lps = vllm_prefill(engine, self.prompt_ids)
 
@@ -812,6 +839,7 @@ class TestBitwiseParityVarlen(BitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_varlen_batch_invariant)
     attn_backend = "varlen"
+    sync_weights_from_trainer = True
 
 
 class TestBitwiseParityFlex(BitwiseParityTestBase):
@@ -820,6 +848,7 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant)
     attn_backend = "flex"
+    sync_weights_from_trainer = True
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):
