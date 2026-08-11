@@ -18,6 +18,7 @@ set -ex
 #    - Runs on a single GPU without torchrun or NCCL initialization
 #    - Useful for validating configuration and model setup
 #    Example: NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
+#    Set RANK to simulate a nonzero global rank, for example RANK=16.
 #
 # 2. "local_tensor" - Single-GPU debugging mode with simulated multi-GPU behavior
 #    - All communication and computation execute on a single shared GPU
