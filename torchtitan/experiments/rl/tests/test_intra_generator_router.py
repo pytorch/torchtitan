@@ -48,6 +48,19 @@ def test_least_loaded_balances_in_flight_count():
     assert router.reserve("r3", routing_session_id=None) == 0
 
 
+def test_least_loaded_cycles_between_tied_dp_ranks():
+    router = IntraGeneratorRouter.Config(
+        strategy=LeastLoadedRoutingStrategy.Config()
+    ).build(dp_degree=4)
+    # Each request is released before the next one is reserved, so every rank is
+    # tied at zero load on every call and only the tie-break decides.
+    chosen = []
+    for i in range(8):
+        chosen.append(router.reserve(f"r{i}", routing_session_id=None))
+        router.release(f"r{i}")
+    assert chosen == [0, 1, 2, 3, 0, 1, 2, 3]
+
+
 def test_release_frees_load():
     router = IntraGeneratorRouter.Config(
         strategy=LeastLoadedRoutingStrategy.Config()

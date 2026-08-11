@@ -77,21 +77,35 @@ class RoundRobinRoutingStrategy(RoutingStrategy):
 
 
 class LeastLoadedRoutingStrategy(RoutingStrategy):
-    """Pick the candidate with the least reserved load."""
+    """Pick the candidate with the least reserved load, cycling between ties."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pass
+
+    def __init__(self, config: Config):
+        del config
+        self._counter = itertools.count()
 
     def choose(
         self,
         routing_ctx: RoutingContext,
         candidates: Sequence[RoutingCandidate],
     ) -> RoutingCandidate:
-        """Return the candidate with the lowest reserved load."""
+        """Return a lowest-reserved-load candidate, cycling over tied ones.
+
+        Ties are common: a request arriving while the candidates are quiescent
+        sees all of them at zero load. Resolving every tie to the same candidate
+        is harmless on its own because the next request re-picks, but
+        ``StickySessionRoutingStrategy`` keeps a session on whichever candidate
+        this returns for the session's lifetime, so a fixed tie-break pins every
+        session started from an idle state onto one candidate.
+        """
 
         del routing_ctx
-        return min(candidates, key=lambda h: h.reserved_load)
+        lowest_load = min(h.reserved_load for h in candidates)
+        tied = [h for h in candidates if h.reserved_load == lowest_load]
+        return tied[next(self._counter) % len(tied)]
 
 
 class StickySessionRoutingStrategy(RoutingStrategy):
