@@ -81,6 +81,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=1,
             ),
@@ -199,6 +200,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
             ),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=8,  # TODO: TBD
                 tensor_parallel_degree=1,
                 expert_parallel_degree=8,

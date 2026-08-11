@@ -41,6 +41,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMCudagraphConfig,
     VLLMGenerator,
 )
+from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.models.vllm_registry import (
     InferenceParallelismConfig,
     register_to_vllm,
@@ -380,6 +381,15 @@ def test_inference_parallelism_disables_dense_sequence_parallelism():
     parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
 
     assert not parallelism.to_training().enable_sequence_parallel
+
+
+def test_rl_parallelism_defaults_to_spmd_types():
+    inference_parallelism = InferenceParallelismConfig()
+
+    assert inference_parallelism.spmd_backend == "spmd_types"
+    assert inference_parallelism.to_training().spmd_backend == "spmd_types"
+    assert VLLMGenerator.Config().parallelism.spmd_backend == "spmd_types"
+    assert PolicyTrainer.Config().parallelism.spmd_backend == "spmd_types"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

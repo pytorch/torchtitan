@@ -71,7 +71,9 @@ class PolicyTrainer(Actor, Configurable):
             default_factory=LRSchedulersContainer.Config
         )
         training: TrainingConfig = field(default_factory=TrainingConfig)
-        parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
+        parallelism: ParallelismConfig = field(
+            default_factory=lambda: ParallelismConfig(spmd_backend="spmd_types")
+        )
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         loss: BaseLoss.Config = field(default_factory=GRPOLoss.Config)

@@ -166,8 +166,9 @@ def _shared_experts_sharding_configs(
 ) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig, ShardingConfig]:
     """Configs for shared FeedForward parent and w1/w2/w3 linears."""
     # The parent FeedForward converts its input to Replicate once before the
-    # w1/w3 fork. w2 reduces its Partial output to the layout used for the
-    # routed + shared add: sequence-sharded with SP and Partial otherwise.
+    # w1/w3 fork. w2 reduces its Partial output to the final MoE boundary layout
+    # used for the routed + shared add: sequence-sharded when SP is enabled and
+    # Partial when SP is disabled.
     input_layout = (
         dense_sequence_parallel_placement()
         if enable_ep and enable_sp

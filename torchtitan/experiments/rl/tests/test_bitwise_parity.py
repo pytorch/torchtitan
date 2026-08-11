@@ -57,6 +57,10 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.spmd_types import (
+    set_current_spmd_mesh,
+    spmd_distribute_tensor,
+)
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
@@ -94,7 +98,7 @@ logger = logging.getLogger(__name__)
 # TODO: directly testing against PolicyTrainer with debug model to avoid OOM
 def build_trainer_model(
     config: Controller.Config,
-) -> tuple[torch.nn.Module, torch.device]:
+) -> tuple[torch.nn.Module, torch.device, dist_utils.SpmdContext]:
     """Build, parallelize, and load weights for the trainer model.
 
     Mirrors PolicyTrainer._build_model() without the Monarch actor framework.
@@ -108,14 +112,14 @@ def build_trainer_model(
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
-    parallel_dims = ParallelDims(
-        dp_shard=parallelism.data_parallel_shard_degree,
-        dp_replicate=parallelism.data_parallel_replicate_degree,
-        cp=parallelism.context_parallel_degree,
-        tp=parallelism.tensor_parallel_degree,
-        pp=parallelism.pipeline_parallel_degree,
-        ep=parallelism.expert_parallel_degree,
+    parallel_dims = ParallelDims.from_config(
+        parallelism,
         world_size=dist.get_world_size(),
+    )
+    dist_utils.set_spmd_backend(parallelism.spmd_backend)
+    train_context = dist_utils.get_spmd_context(
+        parallel_dims=parallel_dims,
+        spmd_typechecking=False,
     )
 
     dist_utils.set_determinism(
@@ -170,7 +174,7 @@ def build_trainer_model(
             )
 
     model.eval()
-    return model, device
+    return model, device, train_context
 
 
 # TODO: directly testing against VLLMGenerator with debug model to avoid OOM
@@ -277,9 +281,18 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     wrapper = engine.model_executor.driver_worker.get_model()
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
+    vllm_sd = vllm_model.state_dict()
+    state_layouts = {}
+    for module_name, module in vllm_model.named_modules():
+        sharding_config = getattr(module, "_sharding_config", None)
+        if sharding_config is None:
+            continue
+        for state_name, layout in sharding_config.state_shardings.items():
+            name = f"{module_name}.{state_name}" if module_name else state_name
+            state_layouts[name] = layout
 
     missing = []
-    for name, vparam in vllm_model.state_dict().items():
+    for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
         if tparam is None:
             missing.append(name)
@@ -287,11 +300,44 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
         full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
-                vparam.copy_(
-                    distribute_tensor(full, vparam.device_mesh, vparam.placements)
+                vllm_sd[name] = distribute_tensor(
+                    full, vparam.device_mesh, vparam.placements
                 )
+            elif wrapper.parallel_dims.spmd_backend == "spmd_types":
+                layout = state_layouts.get(name)
+                if layout is None:
+                    if vparam.shape == full.shape:
+                        vllm_sd[name] = full
+                        continue
+                    # Fused QKV state-dict hooks expose virtual TP-sharded
+                    # wq/wk/wv tensors rather than the configured wqkv state.
+                    tp_mesh = wrapper.parallel_dims.get_mesh("tp")
+                    shard_dims = [
+                        dim
+                        for dim, (global_size, local_size) in enumerate(
+                            zip(full.shape, vparam.shape, strict=True)
+                        )
+                        if global_size == local_size * tp_mesh.size()
+                    ]
+                    assert len(shard_dims) == 1
+                    local = full.chunk(tp_mesh.size(), dim=shard_dims[0])[
+                        tp_mesh.get_local_rank()
+                    ]
+                    assert local.shape == vparam.shape
+                    vllm_sd[name] = local
+                    continue
+                mesh = wrapper.parallel_dims.get_optional_mesh(
+                    [axis.value for axis in layout.axes()],
+                    include_singleton_axes=True,
+                )
+                assert mesh is not None
+                with set_current_spmd_mesh(mesh):
+                    local = spmd_distribute_tensor(full, mesh, layout)
+                vllm_sd[name] = local
             else:
-                vparam.copy_(full)
+                vllm_sd[name] = full
+
+    vllm_model.load_state_dict(vllm_sd)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -595,7 +641,7 @@ class BitwiseParityTestBase(unittest.TestCase):
     dump_folder_env_var: str = "RL_TEST_DUMP_FOLDER"
     # When True, vLLM skips its own checkpoint load and the trainer model's
     # weights (including attention sinks) are copied into the engine in-process.
-    sync_weights_from_trainer: bool = False
+    sync_weights_from_trainer: bool = True
 
     # Shared across all tests in the class (built once in setUpClass)
     model: torch.nn.Module
@@ -665,7 +711,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         # GPU memory for vLLM to leave room for the trainer model.
         config.generator.gpu_memory_limit = 0.5
 
-        cls.model, cls.device = build_trainer_model(config)
+        cls.model, cls.device, cls.train_context = build_trainer_model(config)
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
@@ -731,7 +777,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         n = len(self.prompt_ids)
         mid = max(1, n // 2)
 
-        with torch.no_grad():
+        with type(self).train_context(), torch.no_grad():
             lps_partial = compute_trainer_prefill_logprobs(
                 model,
                 self.prompt_ids[:mid],
@@ -765,7 +811,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         model = self.model
         engine = self.engine
 
-        with torch.no_grad():
+        with type(self).train_context(), torch.no_grad():
             trainer_lps = compute_trainer_prefill_logprobs(
                 model, self.prompt_ids, self.device, attn_backend=self.attn_backend
             )
@@ -850,7 +896,6 @@ class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(rl_grpo_gpt_oss_debug_varlen_batch_invariant)
     attn_backend = "varlen"
-    sync_weights_from_trainer = True
 
 
 if __name__ == "__main__":

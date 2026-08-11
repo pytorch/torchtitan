@@ -110,6 +110,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
@@ -164,6 +165,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
@@ -266,6 +268,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
@@ -326,6 +329,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
@@ -393,6 +397,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # forward (mixed_precision_param="bfloat16" is the default).
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
@@ -448,6 +453,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
@@ -502,6 +508,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
             ),
@@ -566,6 +573,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
@@ -708,6 +716,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             # forward (mixed_precision_param="bfloat16" is the default).
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
@@ -773,6 +782,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=2,
                 data_parallel_replicate_degree=1,
                 tensor_parallel_degree=2,
@@ -879,6 +889,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 decay_type="linear",
             ),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,

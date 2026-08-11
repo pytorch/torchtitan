@@ -33,7 +33,6 @@ from torchtitan.distributed.spmd_types import (
 from torchtitan.distributed.utils import (
     check_dtensor_placements_match,
     get_spmd_backend,
-    redistribute_dtensor,
 )
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
@@ -622,7 +621,7 @@ class Module(nn.Module, Configurable):
                 if not check_dtensor_placements_match(
                     value.placements, desired, value.ndim
                 ):
-                    value = redistribute_dtensor(value, desired)
+                    value = value.redistribute(placements=desired, async_op=True)
 
             new_kwargs[name] = value
 
@@ -703,7 +702,7 @@ class Module(nn.Module, Configurable):
             if isinstance(outputs, DTensor) and not check_dtensor_placements_match(
                 outputs.placements, desired, outputs.ndim
             ):
-                outputs = redistribute_dtensor(outputs, desired)
+                outputs = outputs.redistribute(placements=desired, async_op=True)
 
         return outputs
 

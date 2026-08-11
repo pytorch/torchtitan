@@ -107,6 +107,7 @@ def _qwen3_4b_dapo_math_config(
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_replicate_degree=1,
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
