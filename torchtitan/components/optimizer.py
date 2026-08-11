@@ -106,13 +106,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         regex pattern and a self-contained optimizer setup.
         Patterns are checked in order; first match wins."""
 
-        optimizer_init_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-        """Programmatic optimizer-wide constructor arguments keyed by name.
-
-        Use this for instance-wide objects such as communication bucket specs;
-        parameter-group hyperparameters belong in ``ParamGroupConfig``.
-        """
-
         implementation: Literal[
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
@@ -129,6 +122,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
           CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
           Only supported for Adam/AdamW. See docs/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
+        """
+
+        optimizer_init_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+        """Programmatic optimizer-wide constructor arguments keyed by name.
+
+        Use this for instance-wide objects such as communication bucket specs;
+        parameter-group hyperparameters belong in ``ParamGroupConfig``.
         """
 
     optimizers: list[T]
