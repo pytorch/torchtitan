@@ -102,7 +102,7 @@ def _silu_and_mul_forward_kernel(
     BLOCK_N: tl.constexpr,
 ) -> None:
     """Compute ``silu(gate) * up`` for optionally offset-limited rows."""
-    row_start = tl.program_id(0) * BLOCK_M
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
         row_limit = tl.load(offsets + NUM_OFFSETS - 1)
@@ -157,7 +157,7 @@ def _silu_and_mul_backward_kernel(
     BLOCK_N: tl.constexpr,
 ) -> None:
     """Backward for ``_silu_and_mul_forward_kernel`` over defined rows."""
-    row_start = tl.program_id(0) * BLOCK_M
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
         row_limit = tl.load(offsets + NUM_OFFSETS - 1)
@@ -555,11 +555,13 @@ class FusedGroupedExperts(GroupedExperts):
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
         w13_E_D_2F = w13.bfloat16().reshape(E, F * 2, D).transpose(-2, -1)
-        gate_up_R2F = torch._grouped_mm(x_RD.bfloat16(), w13_E_D_2F, offs=offsets_E)
+        gate_up_R2F = self._grouped_mm(
+            A=x_RD.bfloat16(), B_t=w13_E_D_2F, offs=offsets_E
+        )
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
         h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
-        return torch._grouped_mm(
-            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+        return self._grouped_mm(
+            A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
 
     @staticmethod

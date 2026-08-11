@@ -75,8 +75,9 @@ class _DispatchMetadataScratch(NamedTuple):
 
 @dataclass
 class _PendingEvent:
-    event: torch.cuda.Event
-    # Released after the main stream has joined the event.
+    source_event: torch.cuda.Event
+    ready_event: torch.cuda.Event
+    # Released once the source-copy completion is joined.
     retained: tuple[torch.Tensor, ...] = ()
 
 
@@ -229,8 +230,9 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             "to set hidden_dim, tokens_per_rank, and dtype."
         )
 
+    memory_policy = getattr(config.compile, "memory_policy", None)
     graph_remat_enabled = bool(
-        hasattr(config.compile, "memory_policy")
+        memory_policy is not None
         and config.compile.enable
         and getattr(config.compile, "enable_passes", False)
     )
@@ -240,6 +242,11 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         "selective_activation_remat_pass",
     }
     disabled_remat_passes = required_remat_passes & disabled_passes
+    if graph_remat_enabled and memory_policy != "full":
+        raise ValueError(
+            "MinimalAsyncEP requires --compile.memory_policy full when using "
+            "GraphTrainer rematerialization."
+        )
     if graph_remat_enabled and disabled_remat_passes:
         raise ValueError(
             "MinimalAsyncEP requires graph rematerialization; do not disable "
@@ -249,8 +256,8 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         config.activation_checkpoint, FullAC.Config
     ):
         raise ValueError(
-            "MinimalAsyncEP requires full recompute: enable GraphTrainer passes "
-            "or set activation-checkpoint:full."
+            "MinimalAsyncEP requires full recompute: set activation-checkpoint:full "
+            "or use GraphTrainer with --compile.memory_policy full."
         )
 
     overlap_config = getattr(config.compile, "ep_overlap", None)
@@ -503,18 +510,24 @@ def _record_pending_event(
     exchange: str,
     tensor: torch.Tensor,
     stream: torch.cuda.Stream,
+    source_event: torch.cuda.Event,
     retained: tuple[torch.Tensor, ...] = (),
 ) -> None:
     assert _buffer_state is not None
-    event = torch.cuda.Event()
-    event.record(stream)
+    ready_event = torch.cuda.Event()
+    ready_event.record(stream)
     key = _event_key(exchange, tensor)
     _buffer_state.pending_events.setdefault(key, deque()).append(
-        _PendingEvent(event, retained)
+        _PendingEvent(source_event, ready_event, retained)
     )
 
 
-def _wait_pending_event(exchange: str, tensor: torch.Tensor) -> None:
+def _wait_pending_event(
+    exchange: str,
+    tensor: torch.Tensor,
+    *,
+    source_only: bool = False,
+) -> None:
     assert _buffer_state is not None
     key = _event_key(exchange, tensor)
     events = _buffer_state.pending_events.get(key)
@@ -523,10 +536,15 @@ def _wait_pending_event(exchange: str, tensor: torch.Tensor) -> None:
             f"MinimalAsyncEP wait_{exchange} found no pending launch event for "
             f"tensor data_ptr={tensor.data_ptr()}."
         )
-    pending = events.popleft()
-    if not events:
-        del _buffer_state.pending_events[key]
-    torch.cuda.current_stream(tensor.device).wait_event(pending.event)
+    pending = events[0]
+    event = pending.source_event if source_only else pending.ready_event
+    torch.cuda.current_stream(tensor.device).wait_event(event)
+    if source_only:
+        pending.retained = ()
+    else:
+        events.popleft()
+        if not events:
+            del _buffer_state.pending_events[key]
 
 
 def _copy_rows_to_peers_async_cuda(
@@ -583,8 +601,16 @@ def _copy_rows_to_peers_async_cuda(
             num_valid_rows=num_valid_rows,
             num_ctas=_buffer_state.num_row_copy_ctas,
         )
+        source_event = torch.cuda.Event()
+        source_event.record(copy_stream)
         _wait_ready(pool.handle, _HIDDEN_READY_CHANNEL)
-        _record_pending_event(exchange, hidden_recv_view, copy_stream, retained)
+        _record_pending_event(
+            exchange,
+            hidden_recv_view,
+            copy_stream,
+            source_event,
+            retained,
+        )
     return hidden_recv_view
 
 
@@ -977,6 +1003,9 @@ _WAIT_OPS_LIB.define(
     "wait_dispatch_data(Tensor(a) pending, Tensor[] keepalives) -> Tensor(a)"
 )
 _WAIT_OPS_LIB.define(
+    "wait_combine_source(Tensor(a) pending, Tensor[] keepalives) -> Tensor(a)"
+)
+_WAIT_OPS_LIB.define(
     "wait_combine(Tensor(a) pending, Tensor[] keepalives) -> Tensor(a)"
 )
 
@@ -997,6 +1026,15 @@ def _wait_dispatch_data_impl(
 ) -> torch.Tensor:
     del keepalives
     _wait_pending_event("dispatch", pending)
+    return pending
+
+
+def _wait_combine_source_impl(
+    pending: torch.Tensor,
+    keepalives: list[torch.Tensor],
+) -> torch.Tensor:
+    del keepalives
+    _wait_pending_event("combine", pending, source_only=True)
     return pending
 
 
@@ -1030,10 +1068,20 @@ _WAIT_OPS_LIB.impl("wait_dispatch", _wait_dispatch_impl, "CompositeExplicitAutog
 _WAIT_OPS_LIB.impl(
     "wait_dispatch_data", _wait_dispatch_data_impl, "CompositeExplicitAutograd"
 )
+_WAIT_OPS_LIB.impl(
+    "wait_combine_source", _wait_combine_source_impl, "CompositeExplicitAutograd"
+)
 _WAIT_OPS_LIB.impl("wait_combine", _wait_combine_impl, "CompositeExplicitAutograd")
 wait_dispatch_op = torch.ops.minimal_async_ep.wait_dispatch.default
 _wait_dispatch_data_op = torch.ops.minimal_async_ep.wait_dispatch_data.default
+_wait_combine_source_op = torch.ops.minimal_async_ep.wait_combine_source.default
 wait_combine_op = torch.ops.minimal_async_ep.wait_combine.default
+
+
+def wait_combine(pending: torch.Tensor, keepalives: list[torch.Tensor]) -> torch.Tensor:
+    """Join combine source consumption, then remote output readiness."""
+    pending = _wait_combine_source_op(pending, keepalives)
+    return wait_combine_op(pending, [])
 
 
 class _WaitTensor(torch.autograd.Function):
@@ -1074,12 +1122,17 @@ def _wait_dispatch_data_autograd(pending, keepalives):
     return _WaitTensor.apply(pending, keepalives, _wait_dispatch_data_op)
 
 
+def _wait_combine_source_autograd(pending, keepalives):
+    return _WaitTensor.apply(pending, keepalives, _wait_combine_source_op)
+
+
 def _wait_combine_autograd(pending, keepalives):
     return _WaitTensor.apply(pending, keepalives, wait_combine_op)
 
 
 _WAIT_OPS_LIB.impl("wait_dispatch", _wait_dispatch_autograd, "Autograd")
 _WAIT_OPS_LIB.impl("wait_dispatch_data", _wait_dispatch_data_autograd, "Autograd")
+_WAIT_OPS_LIB.impl("wait_combine_source", _wait_combine_source_autograd, "Autograd")
 _WAIT_OPS_LIB.impl("wait_combine", _wait_combine_autograd, "Autograd")
 
 
@@ -1117,6 +1170,11 @@ def _wait_dispatch_data_functionalize(pending, keepalives):
     return _functionalize_wait(_wait_dispatch_data_op, pending, keepalives)
 
 
+@torch.library.impl(_WAIT_OPS_LIB, "wait_combine_source", "Functionalize")
+def _wait_combine_source_functionalize(pending, keepalives):
+    return _functionalize_wait(_wait_combine_source_op, pending, keepalives)
+
+
 @torch.library.impl(_WAIT_OPS_LIB, "wait_combine", "Functionalize")
 def _wait_combine_functionalize(pending, keepalives):
     return _functionalize_wait(wait_combine_op, pending, keepalives)
@@ -1124,66 +1182,8 @@ def _wait_combine_functionalize(pending, keepalives):
 
 torch.library.register_fake("minimal_async_ep::wait_dispatch")(_wait_dispatch_meta)
 torch.library.register_fake("minimal_async_ep::wait_dispatch_data")(_wait_tensor_meta)
+torch.library.register_fake("minimal_async_ep::wait_combine_source")(_wait_tensor_meta)
 torch.library.register_fake("minimal_async_ep::wait_combine")(_wait_tensor_meta)
-
-
-def dispatch(
-    dispatch_input: torch.Tensor,
-    topk_expert_ids_TK: torch.Tensor,  # noqa: N803
-    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
-    receive_capacity: int,
-    ep_size: int,
-    buffer_set: int = _DEFAULT_BUFFER_SET,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
-    """Launch dispatch, then wait before returning a readable hidden buffer."""
-    (
-        hidden_states,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        E_row_to_T_row_N,
-        T_row_to_E_row_N,
-        num_tokens_per_local_expert_e,
-    ) = dispatch_op(
-        dispatch_input,
-        topk_expert_ids_TK,
-        num_local_tokens_per_expert_E,
-        receive_capacity,
-        ep_size,
-        buffer_set,
-    )
-    hidden_states, num_tokens_per_local_expert_e = wait_dispatch_op(
-        hidden_states,
-        num_tokens_per_local_expert_e,
-        [
-            dispatch_input,
-            topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
-        ],
-    )
-    return (
-        hidden_states,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        E_row_to_T_row_N,
-        T_row_to_E_row_N,
-        num_tokens_per_local_expert_e,
-    )
 
 
 @torch.library.custom_op(
@@ -1371,7 +1371,7 @@ def combine_data(
         num_routed_rows,
         buffer_set,
     )
-    return wait_combine_op(
+    return wait_combine(
         routed_output,
         [x, combine_dst_ranks, combine_dst_rows, combine_num_valid_rows],
     )
@@ -1567,44 +1567,6 @@ def reduce_topk_no_scores_op_fake(
     return routed_output_ND.new_empty(num_tokens, routed_output_ND.shape[1])
 
 
-def combine(
-    x: torch.Tensor,
-    dispatch_dst_ranks: torch.Tensor,
-    dispatch_dst_rows: torch.Tensor,
-    combine_dst_ranks: torch.Tensor,
-    combine_dst_rows: torch.Tensor,
-    combine_num_valid_rows: torch.Tensor,
-    T_row_to_E_row_N: torch.Tensor,  # noqa: N803
-    E_row_to_T_row_N: torch.Tensor,  # noqa: N803
-    routed_scores_N: torch.Tensor,  # noqa: N803
-    num_tokens: int,
-    top_k: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Launch combine, wait, then reduce routed top-k rows."""
-    routed_output_ND = combine_op(  # noqa: N806
-        x,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        num_tokens * top_k,
-    )
-    routed_output_ND = wait_combine_op(
-        routed_output_ND,
-        [x, combine_dst_ranks, combine_dst_rows, combine_num_valid_rows],
-    )
-    out_TD = reduce_topk_op(  # noqa: N806
-        routed_output_ND,
-        T_row_to_E_row_N,
-        E_row_to_T_row_N,
-        routed_scores_N,
-        num_tokens,
-        top_k,
-    )
-    return out_TD, routed_output_ND
-
-
 def dispatch_setup_context(ctx, inputs, output):
     (
         dispatch_input,
@@ -1736,13 +1698,8 @@ for _side_effect_op in (
 
 __all__ = [
     "MinimalAsyncEPDispatchMetadata",
-    "combine",
     "combine_op",
-    "dispatch",
     "dispatch_op",
     "init_buffer",
     "maybe_update_minimal_async_ep_config",
-    "reduce_topk_op",
-    "wait_combine_op",
-    "wait_dispatch_op",
 ]
