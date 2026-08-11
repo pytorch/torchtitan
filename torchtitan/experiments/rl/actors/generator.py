@@ -216,9 +216,9 @@ class VLLMCudagraphConfig:
         self,
         *,
         max_num_seqs: int,
+        expert_sequence_parallel_size: int,
+        enable_sequence_parallel: bool,
         max_num_batched_tokens: int | None = None,
-        expert_sequence_parallel_size: int = 1,
-        enable_sequence_parallel: bool = False,
     ) -> CompilationConfig:
         """Build a vLLM ``CompilationConfig`` for the generator.
 
@@ -249,7 +249,10 @@ class VLLMCudagraphConfig:
             return CompilationConfig(
                 cudagraph_mode=CUDAGraphMode.NONE,
                 mode=CompilationMode.NONE,
-                pass_config=PassConfig(enable_sp=enable_sequence_parallel),
+                pass_config=PassConfig(
+                    enable_sp=enable_sequence_parallel,
+                    sp_min_token_num=1 if enable_sequence_parallel else None,
+                ),
             )
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
@@ -307,7 +310,10 @@ class VLLMCudagraphConfig:
             cudagraph_mode=self.mode,
             mode=CompilationMode.NONE,
             cudagraph_capture_sizes=sizes,
-            pass_config=PassConfig(enable_sp=enable_sequence_parallel),
+            pass_config=PassConfig(
+                enable_sp=enable_sequence_parallel,
+                sp_min_token_num=1 if enable_sequence_parallel else None,
+            ),
         )
 
 
