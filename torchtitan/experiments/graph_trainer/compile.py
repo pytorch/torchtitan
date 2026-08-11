@@ -66,6 +66,7 @@ def apply_compile(
     Args:
         model: The model to compile
         compile_config: Compilation configuration with mode and passes
+        parallelism: Parallelism configuration
         parallel_dims: Parallel dimensions
         dump_folder: Folder for dumping debug graphs
     """

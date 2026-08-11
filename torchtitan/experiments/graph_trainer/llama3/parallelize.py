@@ -67,6 +67,7 @@ def parallelize_llama(
     model = apply_compile(
         model,
         compile_config=compile_config,
+        parallelism=parallelism,
         parallel_dims=parallel_dims,
         dump_folder=dump_folder,
     )
