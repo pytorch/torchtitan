@@ -10,7 +10,6 @@ These helpers construct fully-specified sub-configs with all dimensional
 fields set at config creation time.
 """
 
-import dataclasses
 from collections.abc import Callable
 from typing import Literal
 
@@ -186,7 +185,6 @@ def make_gqa_config(
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
-    rope = dataclasses.replace(rope)
 
     if fuse_qkv:
         qkv = FusedQKVLinear.Config(
