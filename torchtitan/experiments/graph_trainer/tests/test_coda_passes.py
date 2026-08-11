@@ -15,6 +15,7 @@ from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_b2_dense_swiglu_backward_pass,
     fuse_b4_router_input_grad_add_pass,
     fuse_b6_bf16_weight_grad_cast_pass,
+    fuse_b7_attention_grad_merge_pass,
     fuse_f2_kv_rmsnorm_pass,
     fuse_f2_q_rmsnorm_pass,
     fuse_f3_residual_rmsnorm_pass,
@@ -778,6 +779,81 @@ class TestB4RouterInputGradAddPass(TestCase):
         self.assertEqual(self._flex_gemm_nodes(gm), [])
 
 
+class TestB7AttentionGradMergePass(TestCase):
+    def _trace(self, *, q_layer=3):
+        m, kv_width, q_width, model_width = 8, 16, 24, 512
+
+        def fn(kv_grad, kv_weight, q_grad, q_weight):
+            kv_input_grad = torch.ops.aten.mm.default(kv_grad, kv_weight)
+            kv_input_grad = torch.ops.aten.reshape.default(
+                kv_input_grad, [2, 4, model_width]
+            )
+            q_input_grad = torch.ops.aten.mm.default(q_grad, q_weight)
+            q_input_grad = torch.ops.aten.reshape.default(
+                q_input_grad, [2, 4, model_width]
+            )
+            return torch.ops.aten.add.Tensor(kv_input_grad, q_input_grad)
+
+        inputs = (
+            torch.randn(m, kv_width, dtype=torch.bfloat16) * 0.02,
+            torch.randn(kv_width, model_width, dtype=torch.bfloat16) * 0.02,
+            torch.randn(m, q_width, dtype=torch.bfloat16) * 0.02,
+            torch.randn(q_width, model_width, dtype=torch.bfloat16) * 0.02,
+        )
+        gm = make_fx(fn)(*inputs)
+        mm_nodes = [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+        mm_nodes[0].meta["custom"] = {
+            "module_fqn": "layers.3.attention.wkv_a",
+        }
+        mm_nodes[0].meta["autograd_backward"] = True
+        mm_nodes[1].meta["custom"] = {
+            "module_fqn": f"layers.{q_layer}.attention.wq_a",
+        }
+        mm_nodes[1].meta["autograd_backward"] = True
+        return gm, inputs
+
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_fuses_q_kv_input_gradient_add(self):
+        gm, inputs = self._trace()
+        expected = gm(*inputs)
+
+        fuse_b7_attention_grad_merge_pass(gm)
+
+        self.assertEqual(gm(*inputs), expected)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(len(fused[0].args[2]), 3)
+        fused_output = next(iter(fused[0].users))
+        self.assertEqual(fused_output.meta["val"].shape, (8, 512))
+        body = getattr(gm, fused[0].args[1].target)
+        targets = [node.target for node in body.graph.nodes]
+        self.assertEqual(targets.count(torch.ops.aten.add.Tensor), 1)
+
+    def test_does_not_fuse_different_layers(self):
+        gm, _ = self._trace(q_layer=4)
+
+        fuse_b7_attention_grad_merge_pass(gm)
+
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+    def test_does_not_fuse_forward_graph(self):
+        gm, _ = self._trace()
+        for node in gm.graph.nodes:
+            node.meta.pop("autograd_backward", None)
+
+        fuse_b7_attention_grad_merge_pass(gm)
+
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+
 class TestCodaPatternRegistry(TestCase):
     def test_resolves_configured_order(self):
         passes = get_coda_pattern_passes(
@@ -790,6 +866,7 @@ class TestCodaPatternRegistry(TestCase):
                 "f2_kv_rmsnorm",
                 "b4_router_input_grad_add",
                 "b6_bf16_weight_grad_cast",
+                "b7_attention_grad_merge",
             ]
         )
         self.assertEqual(
@@ -803,6 +880,7 @@ class TestCodaPatternRegistry(TestCase):
                 fuse_f2_kv_rmsnorm_pass,
                 fuse_b4_router_input_grad_add_pass,
                 fuse_b6_bf16_weight_grad_cast_pass,
+                fuse_b7_attention_grad_merge_pass,
             ],
         )
 

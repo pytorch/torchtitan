@@ -381,6 +381,37 @@ def _build_b4_router_input_grad_body(
     return body
 
 
+def _build_b7_attention_grad_merge_body(
+    mm: torch.fx.Node,
+    other_branch_2d: torch.fx.Node,
+    mm_is_lhs: bool,
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    inputs = []
+    for index, source in enumerate((*mm.args, other_branch_2d)):
+        placeholder = graph.placeholder(f"arg{index}")
+        if isinstance(source, torch.fx.Node):
+            placeholder.meta = dict(source.meta)
+        inputs.append(placeholder)
+
+    body_mm = graph.call_function(_MM, tuple(inputs[:2]), dict(mm.kwargs))
+    body_mm.meta = dict(mm.meta)
+    accumulator = graph.call_function(_TO_COPY, (body_mm,), {"dtype": torch.float32})
+    accumulator.meta = _copy_meta_with_dtype(mm, torch.float32, mm)
+    rounded = graph.call_function(_TO_COPY, (accumulator,), {"dtype": torch.bfloat16})
+    rounded.meta = _copy_meta_with_value_from(mm, mm)
+    add_args = (rounded, inputs[2]) if mm_is_lhs else (inputs[2], rounded)
+    total = graph.call_function(_ADD, add_args)
+    total.meta = _copy_meta_with_value_from(mm, mm, other_branch_2d)
+
+    graph.output((total,))
+    body = torch.fx.GraphModule(torch.nn.Module(), graph)
+    apply_flex_gemm_body_graph_passes(body, _MM)
+    for node in body.graph.nodes:
+        _tag_for_regional_inductor(node)
+    return body
+
+
 def _build_f3_residual_rmsnorm_first_body(
     mm: torch.fx.Node,
     addends_2d: tuple[torch.fx.Node, ...],
@@ -1447,6 +1478,132 @@ def fuse_b4_router_input_grad_add_pass(
     gm.graph.lint()
     gm.recompile()
     logger.info(f"B4 fused {num_fused} router input-gradient cast/add chains")
+    return gm
+
+
+def _match_b7_attention_grad_merge(
+    add: torch.fx.Node,
+) -> tuple[torch.fx.Node, torch.fx.Node, torch.fx.Node, torch.fx.Node, bool,] | None:
+    if add.target != _ADD or len(add.args) < 2 or add.kwargs.get("alpha", 1) != 1:
+        return None
+
+    branches = []
+    for index, operand in enumerate(add.args[:2]):
+        if (
+            not isinstance(operand, torch.fx.Node)
+            or operand.target not in (_RESHAPE, _VIEW)
+            or not operand.args
+            or not isinstance(operand.args[0], torch.fx.Node)
+        ):
+            return None
+        mm = operand.args[0]
+        if (
+            mm.target != _MM
+            or _sole_user(mm) is not operand
+            or _sole_user(operand) is not add
+            or mm.meta.get("autograd_backward") is not True
+        ):
+            return None
+        role = _layer_module_role(_module_fqn(mm))
+        if role is None:
+            return None
+        branches.append((index, mm, operand, role))
+
+    by_role = {role: (index, mm, reshape) for index, mm, reshape, (_, role) in branches}
+    if set(by_role) != {"attention.wkv_a", "attention.wq_a"}:
+        return None
+    kv_index, kv_mm, kv_reshape = by_role["attention.wkv_a"]
+    q_index, q_mm, q_reshape = by_role["attention.wq_a"]
+    kv_layer = next(layer for _, mm, _, (layer, _) in branches if mm is kv_mm)
+    q_layer = next(layer for _, mm, _, (layer, _) in branches if mm is q_mm)
+    if kv_layer != q_layer:
+        return None
+
+    q_shape = _node_shape(q_mm)
+    add_shape = _node_shape(add)
+    if (
+        q_shape is None
+        or len(q_shape) != 2
+        or _node_shape(kv_mm) != q_shape
+        or add_shape is None
+        or _node_shape(kv_reshape) != add_shape
+        or _node_shape(q_reshape) != add_shape
+        or _node_dtype(kv_mm) != torch.bfloat16
+        or _node_dtype(q_mm) != torch.bfloat16
+        or _node_dtype(add) != torch.bfloat16
+        or not all(
+            isinstance(node.meta.get("val"), torch.Tensor) for node in (kv_mm, q_mm)
+        )
+    ):
+        return None
+    assert kv_index != q_index
+    return q_mm, q_reshape, kv_mm, kv_reshape, q_index == 0
+
+
+def fuse_b7_attention_grad_merge_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Fuse the Q/KV attention input-gradient merge into the Q GEMM."""
+    del example_inputs
+    num_fused = 0
+    for add in list(gm.graph.nodes):
+        match = _match_b7_attention_grad_merge(add)
+        if match is None:
+            continue
+        q_mm, q_reshape, kv_mm, kv_reshape, q_is_lhs = match
+        q_shape = _node_shape(q_mm)
+        add_shape = _node_shape(add)
+        assert q_shape is not None
+        assert add_shape is not None
+        total_value = add.meta["val"]
+        assert isinstance(total_value, torch.Tensor)
+
+        body = _build_b7_attention_grad_merge_body(q_mm, kv_mm, q_is_lhs)
+        body_name = _next_submodule_name(gm, "_coda_b7_attention_grad_merge_body")
+        gm.add_module(body_name, body)
+        with gm.graph.inserting_before(q_mm):
+            body_ref = gm.graph.get_attr(body_name)
+            _tag_for_regional_inductor(body_ref)
+            fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    body_ref,
+                    tuple(q_mm.args) + (kv_mm,),
+                    dict(q_mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            total_2d_meta = _copy_meta_with_value(
+                total_value.reshape(q_shape),
+                kv_mm,
+                kv_reshape,
+                q_mm,
+                q_reshape,
+                add,
+            )
+            fused.meta = _copy_meta(kv_mm, kv_reshape, q_mm, q_reshape, add)
+            fused.meta["val"] = (total_2d_meta["val"],)
+            fused.meta.pop("tensor_meta", None)
+            _tag_for_regional_inductor(fused)
+            total_2d = gm.graph.call_function(operator.getitem, (fused, 0))
+            total_2d.meta = total_2d_meta
+            _tag_for_regional_inductor(total_2d)
+            total = gm.graph.call_function(_RESHAPE, (total_2d, list(add_shape)))
+            total.meta = _copy_meta_with_value(total_value.reshape(add_shape), add)
+            _tag_for_regional_inductor(total)
+
+        add.replace_all_uses_with(total)
+        gm.graph.erase_node(add)
+        gm.graph.erase_node(q_reshape)
+        gm.graph.erase_node(q_mm)
+        gm.graph.erase_node(kv_reshape)
+        num_fused += 1
+
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(f"B7 fused {num_fused} Q/KV attention input-gradient merges")
     return gm
 
 
@@ -2775,6 +2932,7 @@ CODA_PATTERN_PASSES: dict[str, Callable] = {
     "b2_dense_swiglu_backward": fuse_b2_dense_swiglu_backward_pass,
     "b4_router_input_grad_add": fuse_b4_router_input_grad_add_pass,
     "b6_bf16_weight_grad_cast": fuse_b6_bf16_weight_grad_cast_pass,
+    "b7_attention_grad_merge": fuse_b7_attention_grad_merge_pass,
     "f3_residual_rmsnorm": fuse_f3_residual_rmsnorm_pass,
     "f2_q_rmsnorm": fuse_f2_q_rmsnorm_pass,
     "f2_kv_rmsnorm": fuse_f2_kv_rmsnorm_pass,

@@ -769,6 +769,99 @@ GB300.
 Speedup: `9.29x`. The fused output had `max_abs_error=0.00048828125` and
 `mean_abs_error=1.494e-6` relative to eager.
 
+## B7 Q/KV attention input-gradient merge
+
+Pattern name: `b7_attention_grad_merge`
+
+The attention backward graph computes separate BF16 input gradients for
+`wkv_a` and `wq_a`, reshapes both to the residual-stream shape, and adds them
+before attention RMSNorm backward. The matcher requires both branches to be
+backward `mm` nodes from the same transformer layer, with exact
+`attention.wkv_a` and `attention.wq_a` module annotations, one reshape user per
+GEMM, and one common BF16 add. This prevents unrelated same-shape gradient
+adds from matching.
+
+The KV GEMM remains independent. The Q FlexGEMM captures its 2D BF16 output,
+rounds the Q accumulator to BF16 exactly where the original GEMM stored it,
+and performs the add in the original operand order. Its root-graph output is
+2D and the original 3D reshape remains after the HOP. The following
+`_fused_rms_norm_backward` is not part of this fusion.
+
+Real before sample:
+
+```python
+mm_583 = torch.ops.aten.mm.default(view_4484, slice_787_recomputed)
+view_4485 = torch.ops.aten.reshape.default(mm_583, [24, 4096, 7168])
+mm_587 = torch.ops.aten.mm.default(view_4492, _unsafe_view_2724)
+view_4493 = torch.ops.aten.reshape.default(mm_587, [24, 4096, 7168])
+add_368 = torch.ops.aten.add.Tensor(view_4485, view_4493)
+```
+
+Real after sample:
+
+```python
+flex_gemm = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_b7_attention_grad_merge_body_0,
+    (view_4492, _unsafe_view_2724, mm_583),
+    {},
+    {"backend": "QUACK"},
+)
+getitem_25338 = flex_gemm[0]  # bf16[98304, 7168]
+reshape_default = torch.ops.aten.reshape.default(
+    getitem_25338, [24, 4096, 7168]
+)
+```
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-b7-proof-final-20260810/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_b7_attention_grad_merge_pass_274.txt
+after_fuse_b7_attention_grad_merge_pass_275.txt
+```
+
+Pass diff for the root graph:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 2,087 | -61 |
+| root `add.Tensor` | 1,017 | 956 | -61 |
+| root `reshape.default` | 6,822 | 6,761 | -61 |
+| root `flex_gemm` | 0 | 61 | +61 |
+| root `get_attr` | 427 | 488 | +61 |
+| root `getitem` | 24,620 | 24,681 | +61 |
+
+All 61 transformer-layer Q/KV input-gradient merges fused. The proof run
+disabled regional Inductor to retain the rewrite as FX text, then OOMed on the
+known 192 GiB unfused FlexAttention allocation after all pass artifacts had
+been written.
+
+### GB300 microbenchmark
+
+The representative full shape uses a KV GEMM `(98,304, 576) @ (576, 7,168)`
+and a Q GEMM `(98,304, 1,536) @ (1,536, 7,168)`, followed by their BF16 add.
+Inputs were scaled by `0.02`; five warmups and 20 CUDA-event iterations were
+run on one GB300.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager two GEMMs + add | 2.195 ms | 2.149 ms | 2.285 ms |
+| KV GEMM + Q FlexGEMM add epilogue | 2.115 ms | 1.999 ms | 2.156 ms |
+
+Speedup: `1.04x`. The fused output was bitwise identical to eager
+(`max_abs_error=0`).
+
 ## F3 residual RMSNorm between GEMMs
 
 Pattern name: `f3_residual_rmsnorm`
