@@ -73,14 +73,6 @@ def reserve_symm_mem_workspace(
     ``features`` and keeping the factor of two bounds both at once, so a single
     reservation per layer covers whichever direction runs.
 
-    Deliberately not memoized on ``(group_name, min_size)``. ``get_symm_mem_workspace``
-    is already idempotent -- an already-large-enough workspace skips the allocation
-    and hits a per-group rendezvous cache, which is what the fused ops rely on every
-    forward -- so a local memo would only add a second source of truth that can
-    disagree with it. Group names are reused small integers and nothing clears
-    PyTorch's workspace dict, so a memo that outlived that dict would skip the
-    reservation while believing it had happened, putting lazy growth back inside
-    graph capture.
     """
     symm_mem = ensure_symm_mem_ops()
 

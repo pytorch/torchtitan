@@ -32,7 +32,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Shard
 
-from torchtitan.config import derive
 from torchtitan.distributed.dist_linear import (
     AllGatherLinear,
     LinearReduceScatter,
@@ -40,7 +39,6 @@ from torchtitan.distributed.dist_linear import (
 )
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -309,40 +307,9 @@ class DistGemmGQAttention(GQAttention):
     # ``set_gqa_attention_sharding``.
 
 
-def to_dist_gemm_attention(cfg: GQAttention.Config) -> DistGemmGQAttention.Config:
-    """Rebuild a stock GQAttention.Config onto the dist-GEMM projections.
-
-    Called from ``make_gqa_config`` once the stock config is assembled, rather
-    than having that function build two parallel config trees. Requires fused
-    QKV: the all-gather feeds a single wqkv GEMM, so there is no separate-wq/wk/wv
-    schedule to fall back on.
-    """
-    if not isinstance(cfg.qkv_linear, FusedQKVLinear.Config):
-        raise TypeError(
-            "gemm_backend='dist_gemm' requires GQAttention.qkv_linear to be "
-            f"FusedQKVLinear.Config, got {type(cfg.qkv_linear).__name__}. "
-            "Pass fuse_qkv=True to make_gqa_config."
-        )
-    wo_base = cfg.wo.sharding_config
-    return derive(
-        cfg,
-        DistGemmGQAttention.Config,
-        sharding_config=None,
-        qkv_linear=derive(cfg.qkv_linear, AllGatherFusedQKVLinear.Config),
-        wo=derive(
-            cfg.wo,
-            AttentionOutputLinear.Config,
-            sharding_config=ShardingConfig(
-                state_shardings=wo_base.state_shardings if wo_base else {}
-            ),
-        ),
-    )
-
-
 __all__ = [
     "AllGatherFusedQKVLinear",
     "AttentionOutputLinear",
     "DistGemmGQAttention",
     "maybe_update_dist_gemm_config",
-    "to_dist_gemm_attention",
 ]

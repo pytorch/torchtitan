@@ -9,6 +9,7 @@ import spmd_types as spmd
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
+from torchtitan.models.common.dist_gemm_attention import DistGemmGQAttention
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 DP = MeshAxisName.DP
@@ -168,9 +169,6 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     )
     # The dist-GEMM attention block runs both TP collectives inside its own
     # GEMMs, so it declares different activation contracts from the stock block.
-    # Imported here rather than at module scope to avoid an import cycle.
-    from torchtitan.models.common.dist_gemm_attention import DistGemmGQAttention
-
     dist_gemm = isinstance(attention_cfg, DistGemmGQAttention.Config)
 
     attn_x_layout = (

@@ -26,6 +26,11 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_gemm_attention import (
+    AllGatherFusedQKVLinear,
+    AttentionOutputLinear,
+    DistGemmGQAttention,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import (
@@ -202,8 +207,22 @@ def make_gqa_config(
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
     rope = dataclasses.replace(rope)
 
+    # The backend picks the classes; everything below builds the same shapes into
+    # whichever was chosen.
+    fused_qkv_cls, wo_cls, attention_cls = FusedQKVLinear, Linear, GQAttention
+    if gemm_backend == "dist_gemm":
+        if not fuse_qkv:
+            raise ValueError(
+                "gemm_backend='dist_gemm' requires fuse_qkv=True: the all-gather "
+                "feeds a single wqkv GEMM, so there is no separate wq/wk/wv "
+                "schedule to fall back on."
+            )
+        fused_qkv_cls = AllGatherFusedQKVLinear
+        wo_cls = AttentionOutputLinear
+        attention_cls = DistGemmGQAttention
+
     if fuse_qkv:
-        qkv = FusedQKVLinear.Config(
+        qkv = fused_qkv_cls.Config(
             head_dim=per_head_dim,
             n_heads=n_heads,
             n_kv_heads=n_kv,
@@ -235,13 +254,13 @@ def make_gqa_config(
             ),
         )
 
-    config = GQAttention.Config(
+    return attention_cls.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=Linear.Config(
+        wo=wo_cls.Config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,
@@ -250,13 +269,6 @@ def make_gqa_config(
         inner_attention=inner_attention,
         rope=rope,
     )
-    if gemm_backend == "dist_gemm":
-        # Imported here rather than at module scope: this pulls in the symmetric
-        # memory linear primitives, which are only meaningful under TP on CUDA.
-        from torchtitan.models.common.dist_gemm_attention import to_dist_gemm_attention
-
-        return to_dist_gemm_attention(config)
-    return config
 
 
 def make_ffn_config(
