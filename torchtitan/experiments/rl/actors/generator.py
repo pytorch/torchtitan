@@ -60,6 +60,42 @@ logger = logging.getLogger(__name__)
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
 
 
+def _get_spmd_state_dict_layouts(model: torch.nn.Module) -> dict[str, SpmdLayout]:
+    layouts: dict[str, SpmdLayout] = {}
+
+    for module_fqn, module in model.named_modules():
+        sharding_config = getattr(module, "_sharding_config", None)
+        if sharding_config is not None:
+            for state_name, layout in sharding_config.state_shardings.items():
+                fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
+                layouts[fqn] = layout
+
+            # FusedSwiGLU keeps its sharding on the fused w13 parameter, but
+            # its state dict exposes split w1.weight/w3.weight
+            # (_split_w13_on_save). Mirror w13's layout onto the split keys --
+            # slicing the gate/up dim of an S(0) w13 yields S(0) w1/w3, which
+            # is what the DTensor path gets implicitly.
+            w13_layout = sharding_config.state_shardings.get("w13")
+            if w13_layout is not None:
+                for proj_name in ("w1", "w3"):
+                    layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
+
+        if isinstance(module, FusedQKVLinear):
+            # FusedQKVLinear exposes split wq/wk/wv state-dict keys while the
+            # sharding layout lives on the fused wqkv parameter.
+            # TODO: This assumes fused and split QKV layouts stay equivalent.
+            # The load hook all-gathers anyway, so replace this with a less
+            # fragile fused-QKV state-dict path.
+            wqkv_sharding_config = getattr(module.wqkv, "_sharding_config", None)
+            if wqkv_sharding_config is None:
+                continue
+            for state_name, layout in wqkv_sharding_config.state_shardings.items():
+                for proj_name in ("wq", "wk", "wv"):
+                    layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
+
+    return layouts
+
+
 @dataclass(kw_only=True, slots=True)
 class _RequestMetricsInputs:
     """Raw inputs needed to build a request's vLLM metrics. Used to pass
@@ -1270,47 +1306,7 @@ class VLLMGenerator(Actor, Configurable):
         state-dict path, then put the local tensors back before load_state_dict.
         """
 
-        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
-            layouts: dict[str, SpmdLayout] = {}
-
-            for module_fqn, module in model.named_modules():
-                sharding_config = getattr(module, "_sharding_config", None)
-                if sharding_config is not None:
-                    for state_name, layout in sharding_config.state_shardings.items():
-                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
-                        layouts[fqn] = layout
-
-                    # FusedSwiGLU keeps its sharding on the fused w13 parameter,
-                    # but its state dict exposes split w1.weight/w3.weight
-                    # (_split_w13_on_save). Mirror w13's layout onto the split
-                    # keys -- slicing the gate/up dim of an S(0) w13 yields S(0)
-                    # w1/w3, which is what the DTensor path gets implicitly.
-                    w13_layout = sharding_config.state_shardings.get("w13")
-                    if w13_layout is not None:
-                        for proj_name in ("w1", "w3"):
-                            layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
-
-                if isinstance(module, FusedQKVLinear):
-                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
-                    # the sharding layout lives on the fused wqkv parameter.
-                    # TODO: This assumes fused and split QKV layouts stay
-                    # equivalent. The load hook all-gathers anyway, so replace
-                    # this with a less fragile fused-QKV state-dict path.
-                    wqkv_sharding_config = getattr(
-                        module.wqkv, "_sharding_config", None
-                    )
-                    if wqkv_sharding_config is None:
-                        continue
-                    for (
-                        state_name,
-                        layout,
-                    ) in wqkv_sharding_config.state_shardings.items():
-                        for proj_name in ("wq", "wk", "wv"):
-                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
-
-            return layouts
-
-        layouts = _fqn_to_spmd_layout(model.model)
+        layouts = _get_spmd_state_dict_layouts(model.model)
 
         dtensor_model_sd = dict(model_sd)
         with torch.no_grad():

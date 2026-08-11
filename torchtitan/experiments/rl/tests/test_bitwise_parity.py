@@ -62,6 +62,7 @@ from torchtitan.distributed.utils import (
     set_batch_invariance,
 )
 from torchtitan.experiments.rl.controller import Controller
+from torchtitan.experiments.rl.actors.generator import _get_spmd_state_dict_layouts
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
@@ -80,6 +81,7 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     VarlenMetadata,
 )
+from torchtitan.protocols.sharding import resolve_placements
 from torchtitan.tools import utils
 
 logging.basicConfig(level=logging.INFO)
@@ -281,6 +283,11 @@ def _sync_trainer_weights_to_vllm(
     wrapper = engine.model_executor.driver_worker.get_model()
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
+    layouts = (
+        _get_spmd_state_dict_layouts(vllm_model)
+        if generator_spmd_backend == "spmd_types"
+        else {}
+    )
 
     missing = []
     for name, vparam in vllm_model.state_dict().items():
@@ -294,16 +301,23 @@ def _sync_trainer_weights_to_vllm(
                 vparam.copy_(
                     distribute_tensor(full, vparam.device_mesh, vparam.placements)
                 )
-            else:
+            elif generator_spmd_backend == "spmd_types":
+                layout = layouts[name]
+                mesh = wrapper.parallel_dims.resolve_mesh(layout.axes())
+                full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
                 source = (
-                    tparam.to_local()
-                    if generator_spmd_backend == "spmd_types"
-                    and isinstance(tparam, DTensor)
-                    else (
-                        tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
-                    )
+                    distribute_tensor(
+                        full,
+                        mesh,
+                        resolve_placements(layout, mesh),
+                    ).to_local()
+                    if mesh is not None
+                    else full
                 )
                 vparam.copy_(source)
+            else:
+                full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
+                vparam.copy_(full)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
