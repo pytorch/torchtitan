@@ -18,11 +18,14 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
+from fla.modules import ShortConvolution
+from fla.modules.fused_norm_gate import rms_norm_gated
+from fla.modules.conv.causal_conv1d import causal_conv1d
 from fla.ops.kda import chunk_kda
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.models.common import Conv1d, Linear
+from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -47,34 +50,51 @@ from torchtitan.protocols.module import Module
 # T = flattened tokens, N = attention-residual entries.
 
 
-class KimiRMSNorm(RMSNorm):
-    """RMSNorm that applies its weight after casting back to the input dtype.
 
-    ``nn.RMSNorm`` scales by the weight while still in the reduction dtype,
-    which does not match the released Kimi implementation under BF16. Keeping
-    the subclass also exposes ``kimi_eps`` to ``_apply_attention_residual``,
-    which needs the epsilon to normalize residual entries by hand.
+
+class KimiShortConvolution(ShortConvolution, Module):
+    """KDA short causal convolution backed by FLA's fused kernel.
+
+    Matches the released Kimi K3 HuggingFace model, which builds FLA's
+    ``ShortConvolution`` per q/k/v projection. The Triton kernel runs only on
+    accelerator devices.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RMSNorm.Config):
-        pass
+    class Config(Module.Config):
+        hidden_size: int
+        kernel_size: int
+        activation: str = "silu"
 
     def __init__(self, config: Config):
-        super().__init__(config)
-        self.kimi_eps = config.eps
+        super().__init__(
+            hidden_size=config.hidden_size,
+            kernel_size=config.kernel_size,
+            activation=config.activation,
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        x_float = x.float()
-        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
-        x_float = x_float * torch.rsqrt(variance + self.kimi_eps)
-        assert self.weight is not None
-        return self.weight * x_float.to(input_dtype)
+    def forward(
+        self,
+        x_BLD: torch.Tensor,
+        **kwargs: object,
+    ) -> tuple[torch.Tensor, None]:
+        y_BLD, _ = causal_conv1d(
+            x=x_BLD,
+            weight=self.weight.squeeze(1),
+            activation=self.activation,
+            backend=self.backend,
+        )
+        return y_BLD, None
 
 
 class KimiRMSNormGated(Module):
-    """Per-head RMSNorm followed by a sigmoid output gate."""
+    """Per-head RMSNorm + sigmoid output gate backed by FLA's fused kernel.
+
+    Wraps the FLA functional ``rms_norm_gated`` behind the torchtitan
+    ``Module`` protocol so it participates in ``init_states``/``param_init``.
+    The wrapper owns the weight (ones-initialized, weight-only checkpoint
+    schema unchanged); the fused kernel receives it with ``bias=None``.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -87,12 +107,14 @@ class KimiRMSNormGated(Module):
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        x_float = x.float()
-        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
-        x_float = x_float * torch.rsqrt(variance + self.eps)
-        x_float = self.weight.float() * x_float
-        return (x_float * torch.sigmoid(gate.float())).to(input_dtype)
+        return rms_norm_gated(
+            x,
+            gate,
+            self.weight,
+            None,
+            activation="sigmoid",
+            eps=self.eps,
+        )
 
 
 class KimiFeedForward(FeedForward):
@@ -140,10 +162,10 @@ class KimiMLAAttention(BaseAttention):
         qk_rope_head_dim: int
         v_head_dim: int
         wq_a: Linear.Config
-        q_norm: KimiRMSNorm.Config
+        q_norm: RMSNorm.Config
         wq_b: Linear.Config
         wkv_a: Linear.Config
-        kv_norm: KimiRMSNorm.Config
+        kv_norm: RMSNorm.Config
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
@@ -284,13 +306,12 @@ class KimiDeltaAttention(Module):
         dim: int
         num_heads: int
         head_dim: int
-        conv_kernel_size: int
         q_proj: Linear.Config
         k_proj: Linear.Config
         v_proj: Linear.Config
-        q_conv: Conv1d.Config
-        k_conv: Conv1d.Config
-        v_conv: Conv1d.Config
+        q_conv: KimiShortConvolution.Config
+        k_conv: KimiShortConvolution.Config
+        v_conv: KimiShortConvolution.Config
         forget_a: Linear.Config
         forget_b: Linear.Config
         beta: Linear.Config
@@ -306,7 +327,6 @@ class KimiDeltaAttention(Module):
         super().__init__()
         self.num_heads = config.num_heads
         self.head_dim = config.head_dim
-        self.conv_kernel_size = config.conv_kernel_size
 
         self.q_proj = config.q_proj.build()
         self.k_proj = config.k_proj.build()
@@ -325,10 +345,6 @@ class KimiDeltaAttention(Module):
         self.A_log = nn.Parameter(torch.empty(config.num_heads))
         self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
 
-    def _causal_conv(self, x_BLC: torch.Tensor, conv: Conv1d) -> torch.Tensor:
-        x_BCL = F.pad(x_BLC.transpose(1, 2), (self.conv_kernel_size - 1, 0))
-        return F.silu(conv(x_BCL)).transpose(1, 2)
-
     def forward(
         self,
         x_BLD: torch.Tensor,
@@ -342,13 +358,13 @@ class KimiDeltaAttention(Module):
             )
 
         B, L, _ = x_BLD.shape
-        q_BLHK = self._causal_conv(self.q_proj(x_BLD), self.q_conv).view(
+        q_BLHK = self.q_conv(self.q_proj(x_BLD))[0].view(
             B, L, self.num_heads, self.head_dim
         )
-        k_BLHK = self._causal_conv(self.k_proj(x_BLD), self.k_conv).view(
+        k_BLHK = self.k_conv(self.k_proj(x_BLD))[0].view(
             B, L, self.num_heads, self.head_dim
         )
-        v_BLHV = self._causal_conv(self.v_proj(x_BLD), self.v_conv).view(
+        v_BLHV = self.v_conv(self.v_proj(x_BLD))[0].view(
             B, L, self.num_heads, self.head_dim
         )
         forget_BLHK = self.forget_b(self.forget_a(x_BLD)).view(
@@ -445,7 +461,7 @@ class KimiLatentMoE(Module):
         routed_down: Linear.Config
         routed_experts: KimiGroupedExperts.Config
         token_dispatcher: LocalTokenDispatcher.Config
-        routed_norm: KimiRMSNorm.Config
+        routed_norm: RMSNorm.Config
         routed_up: Linear.Config
         shared_experts: KimiFeedForward.Config
         load_balance_coeff: float | None = 1e-3
@@ -539,14 +555,14 @@ def _apply_attention_residual(
     prefix_sum_TD: torch.Tensor,
     block_residual_TND: torch.Tensor,
     projection: Linear,
-    norm: KimiRMSNorm,
+    norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32."""
 
     values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
     values_float = values_TND.float()
     variance = values_float.pow(2).mean(dim=-1, keepdim=True)
-    keys_TND = values_float * torch.rsqrt(variance + norm.kimi_eps)
+    keys_TND = values_float * torch.rsqrt(variance + norm.eps)
     score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
     scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
     probs_TN = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
@@ -565,11 +581,11 @@ class KimiK3TransformerBlock(Module):
         delta_attention: KimiDeltaAttention.Config | None
         feed_forward: KimiFeedForward.Config | None
         moe: KimiLatentMoE.Config | None
-        attention_norm: KimiRMSNorm.Config
-        ffn_norm: KimiRMSNorm.Config
-        attention_res_norm: KimiRMSNorm.Config
+        attention_norm: RMSNorm.Config
+        ffn_norm: RMSNorm.Config
+        attention_res_norm: RMSNorm.Config
         attention_res_proj: Linear.Config
-        ffn_res_norm: KimiRMSNorm.Config
+        ffn_res_norm: RMSNorm.Config
         ffn_res_proj: Linear.Config
 
     def __init__(self, config: Config):
@@ -670,7 +686,7 @@ class KimiK3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         layers: list[KimiK3TransformerBlock.Config]
-        output_res_norm: KimiRMSNorm.Config
+        output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
         spatial_merge_size: int = 2
