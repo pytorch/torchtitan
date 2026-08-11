@@ -864,6 +864,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             topk_scores_TK,
             num_local_experts,
             self.num_experts,
+            num_tokens_per_rank=x_TD.shape[0],
             cudagraphable=self.cudagraphable,
         )
 
