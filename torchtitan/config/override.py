@@ -475,10 +475,22 @@ def apply_overrides(
     _check_node_conflicts(claims)
 
     replacements: list[str] = []
+    # One replacement per claimed config *object*. A config reached from several
+    # parent slots is a single node of a DAG, and replacing it must not split it
+    # into per-slot copies: identity is meaningful to callers, e.g.
+    # ``RoPE.Config.build`` memoizes per config object, so layers sharing one
+    # rope config must keep sharing one module after an override.
+    # ``_resolve_active`` allows each override once, so its kwargs are fixed and
+    # the override alone identifies the replacement to reuse.
+    new_cfgs: dict[tuple[int, int], Configurable.Config] = {}
     for c in claims:
         # ``**{}`` for a bare (no-kwargs) entry is just ``factory(cfg)``; a kwarg
         # the factory does not accept raises TypeError here, naming the factory.
-        new_cfg = c.ov.factory(c.cfg, **c.kwargs)
+        cfg_key = (id(c.ov), id(c.cfg))
+        new_cfg = new_cfgs.get(cfg_key)
+        if new_cfg is None:
+            new_cfg = c.ov.factory(c.cfg, **c.kwargs)
+            new_cfgs[cfg_key] = new_cfg
         if isinstance(c.parent, list) and isinstance(c.attr, int):
             c.parent[c.attr] = new_cfg
         elif isinstance(c.attr, str):

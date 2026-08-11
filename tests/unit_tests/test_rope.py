@@ -8,6 +8,14 @@ import dataclasses
 import unittest
 
 import torch
+from torchtitan.config import (
+    apply_overrides,
+    clear_overrides,
+    Configurable,
+    derive,
+    override,
+    OverrideConfig,
+)
 from torchtitan.models.common.attention import (
     GQAttention,
     QKVLinear,
@@ -234,6 +242,159 @@ class TestPerLayerRoPECache(unittest.TestCase):
             len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}),
             len(layer_rope_cfgs),
         )
+
+
+def _attention_config(rope_cfg, *, dim=8, head_dim=4) -> GQAttention.Config:
+    """A minimal ``GQAttention.Config`` around ``rope_cfg``."""
+    return GQAttention.Config(
+        n_heads=2,
+        n_kv_heads=2,
+        head_dim=head_dim,
+        dim=dim,
+        qkv_linear=QKVLinear.Config(
+            head_dim=head_dim,
+            wq=Linear.Config(in_features=dim, out_features=dim),
+            wkv=Linear.Config(in_features=dim, out_features=dim),
+        ),
+        wo=Linear.Config(in_features=dim, out_features=dim),
+        inner_attention=ScaledDotProductAttention.Config(),
+        rope=rope_cfg,
+    )
+
+
+class TestRoPEConfigBuildReuse(unittest.TestCase):
+    """``RoPE.Config.build`` memoizes, so one config object means one module.
+
+    Reuse is opt-in through the config tree: layers handed the same config
+    object share a RoPE (and its cache); layers handed separate configs do not.
+    """
+
+    def test_same_config_object_builds_one_module(self):
+        cfg = ComplexRoPE.Config(dim=8, max_seq_len=16)
+
+        first, second = cfg.build(), cfg.build()
+
+        self.assertIs(first, second)
+        self.assertEqual(first.cache.data_ptr(), second.cache.data_ptr())
+
+    def test_separate_configs_build_distinct_modules(self):
+        first = ComplexRoPE.Config(dim=8, max_seq_len=16).build()
+        second = ComplexRoPE.Config(dim=8, max_seq_len=16).build()
+
+        self.assertIsNot(first, second)
+        self.assertNotEqual(first.cache.data_ptr(), second.cache.data_ptr())
+        torch.testing.assert_close(first.cache, second.cache)
+
+    def test_replace_builds_a_fresh_module(self):
+        """The memo must not survive ``replace``, or a retargeted config would
+        return a module built for the old field values."""
+        cfg = ComplexRoPE.Config(dim=8, max_seq_len=16)
+        original = cfg.build()
+
+        retargeted = dataclasses.replace(cfg, max_seq_len=32).build()
+
+        self.assertIsNot(retargeted, original)
+        self.assertEqual(retargeted.cache.shape[0], 32)
+        self.assertEqual(original.cache.shape[0], 16)
+
+    def test_building_does_not_change_config_identity_semantics(self):
+        """Building must not leak into equality or serialization, which config
+        dumps and comparisons rely on."""
+        cfg = ComplexRoPE.Config(dim=8, max_seq_len=16)
+        other = ComplexRoPE.Config(dim=8, max_seq_len=16)
+        before = cfg.to_dict()
+
+        cfg.build()
+
+        self.assertEqual(cfg, other)
+        self.assertEqual(cfg.to_dict(), before)
+
+    def test_layers_sharing_a_rope_config_share_one_cache(self):
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+        shared_a = _attention_config(rope_cfg).build()
+        shared_b = _attention_config(rope_cfg).build()
+
+        self.assertIs(shared_a.rope, shared_b.rope)
+        self.assertEqual(shared_a.rope.cache.data_ptr(), shared_b.rope.cache.data_ptr())
+
+    def test_sharing_survives_init_states(self):
+        """``init_states`` recomputes caches per module; a shared RoPE must
+        still end up with one cache holding the reference values."""
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+        shared_a = _attention_config(rope_cfg).build()
+        shared_b = _attention_config(rope_cfg).build()
+        unshared = _attention_config(ComplexRoPE.Config(dim=4, max_seq_len=16)).build()
+
+        for attention in (shared_a, shared_b, unshared):
+            attention.init_states(buffer_device=torch.device("cpu"))
+
+        self.assertIs(shared_a.rope, shared_b.rope)
+        torch.testing.assert_close(shared_a.rope.cache, unshared.rope.cache)
+
+    def test_shared_rope_does_not_change_attention_output(self):
+        torch.manual_seed(42)
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+        shared = _attention_config(rope_cfg).build()
+        unshared = _attention_config(ComplexRoPE.Config(dim=4, max_seq_len=16)).build()
+        unshared.load_state_dict(shared.state_dict())
+
+        x = torch.randn(2, 4, 8)
+
+        torch.testing.assert_close(shared(x, None), unshared(x, None))
+
+
+class _ReplacementRoPE(ComplexRoPE):
+    """Stand-in for an override replacement such as ``HelionComplexRoPE``."""
+
+    @dataclasses.dataclass(kw_only=True, slots=True)
+    class Config(ComplexRoPE.Config):
+        pass
+
+
+class _AttentionLayers(Configurable):
+    """Minimal config root holding several attention configs."""
+
+    @dataclasses.dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        layers: list = dataclasses.field(default_factory=list)
+
+    def __init__(self, config: Config):
+        self.config = config
+
+
+class TestRoPEOverrideReuse(unittest.TestCase):
+    """An override must not split a shared rope config into per-layer copies."""
+
+    def setUp(self):
+        clear_overrides()
+
+    def tearDown(self):
+        clear_overrides()
+
+    def test_override_keeps_one_module_for_a_shared_rope_config(self):
+        @override(target=ComplexRoPE.Config, exact=True)
+        def to_replacement_rope(cfg: ComplexRoPE.Config) -> _ReplacementRoPE.Config:
+            return derive(cfg, _ReplacementRoPE.Config)
+
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+        root = _AttentionLayers.Config(
+            layers=[
+                _attention_config(rope_cfg),
+                _attention_config(rope_cfg),
+            ]
+        )
+
+        replacements = apply_overrides(
+            OverrideConfig(imports=[f"{__name__}.to_replacement_rope"]), root
+        )
+
+        # One node claimed through two slots -> one replacement config ...
+        self.assertEqual(len(replacements), 2)
+        self.assertIs(root.layers[0].rope, root.layers[1].rope)
+        # ... so the layers still share one module and one cache.
+        first, second = root.layers[0].build(), root.layers[1].build()
+        self.assertIsInstance(first.rope, _ReplacementRoPE)
+        self.assertIs(first.rope, second.rope)
 
 
 class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
