@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Conv1d, Embedding, Linear
+from torchtitan.models.common import Embedding, Linear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
@@ -32,6 +32,7 @@ from .model import (
     KimiLatentMoE,
     KimiMLAAttention,
     KimiRMSNormGated,
+    KimiShortConvolution,
 )
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
@@ -180,13 +181,11 @@ def _kda_config(
 ) -> KimiDeltaAttention.Config:
     projection_dim = num_heads * head_dim
 
-    def conv() -> Conv1d.Config:
-        return Conv1d.Config(
-            in_channels=projection_dim,
-            out_channels=projection_dim,
+    def conv() -> KimiShortConvolution.Config:
+        return KimiShortConvolution.Config(
+            hidden_size=projection_dim,
             kernel_size=conv_kernel_size,
-            groups=projection_dim,
-            bias=False,
+            activation="silu",
             param_init=_CONV_INIT,
         )
 
@@ -194,7 +193,6 @@ def _kda_config(
         dim=dim,
         num_heads=num_heads,
         head_dim=head_dim,
-        conv_kernel_size=conv_kernel_size,
         q_proj=_linear(dim, projection_dim),
         k_proj=_linear(dim, projection_dim),
         v_proj=_linear(dim, projection_dim),
