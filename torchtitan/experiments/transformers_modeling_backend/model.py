@@ -9,6 +9,7 @@ import importlib
 import math
 import os
 from dataclasses import dataclass, field, fields, MISSING
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -20,6 +21,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
+from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -1040,6 +1042,44 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
+    def _build_forward_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        *,
+        parallel_dims: ParallelDims,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
+    ]:
+        """HF override of the input-build hook.
+
+        Two things to note about ``input_sharding`` here: this backend inherits
+        the base ``None`` (it declares no per-input SPMD layout), so the
+        SPMD-backend input wrapping in ``preprocess_inputs``
+        (``full_dtensor``/``spmd_types``) is a no-op for HF. That is consistent
+        with ``parallelize.py``, which only wires ``spmd_backend='default'`` and
+        raises ``NotImplementedError`` for the others -- so those backends are
+        never actually reached for this model. Context Parallel still applies:
+        ``input_sharding=None`` falls back to the default decoder shard dims in
+        ``prepare_context_parallel_input``, and the flex ``BlockMask`` below is
+        built from unsharded positions so CP can shard its Q axis.
+        """
+        inputs, labels, extra_kwargs, input_sharding = super()._build_forward_inputs(
+            input_dict, labels, parallel_dims=parallel_dims
+        )
+        # Build the attention mask here (mirroring `Decoder._build_forward_inputs`)
+        # whenever positions are present. Under CP this must happen before
+        # sharding so `prepare_context_parallel_input` can shard the mask's Q
+        # axis from unsharded positions; outside CP it means `forward()` receives
+        # a prebuilt mask and doesn't have to build one itself.
+        if "attention_masks" not in extra_kwargs:
+            positions = extra_kwargs.get("positions")
+            if positions is not None:
+                masks = self.get_attention_masks(positions=positions)
+                if masks is not None:
+                    extra_kwargs["attention_masks"] = masks
+        return inputs, labels, extra_kwargs, input_sharding
+
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).
 
@@ -1113,15 +1153,12 @@ class HFTransformerModel(BaseModel):
             # the sequence-sharded global positions (load-balancer permuted),
             # which is exactly what RoPE needs for each local shard -- a plain
             # arange would use the wrong positions.
+            #
+            # The BlockMask is prebuilt in ``_build_forward_inputs`` (under CP it
+            # must be, so the CP step can shard its Q axis from unsharded
+            # positions) and passed in via ``attention_masks``; direct callers
+            # (e.g. the numerical tests) likewise pass it explicitly.
             kwargs["position_ids"] = positions
-            # Build the BlockMask here rather than in the core
-            # trainer: the trainer only builds masks for Decoder.Config models,
-            # so this backend opts in by building its own (keeps trainer.py free
-            # of HF-backend special-casing). This outer forward runs eager (only
-            # the inner transformer blocks are compiled), so BlockMask creation
-            # here is safe.
-            if attention_masks is None:
-                attention_masks = self.get_attention_masks(positions)
         else:
             local_seq_len = self.max_seq_len
             local_seq_len //= (

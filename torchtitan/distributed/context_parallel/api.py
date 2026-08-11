@@ -14,7 +14,7 @@ from torch.distributed.tensor.experimental._attention import (
     _PTRRLoadBalancer,
 )
 from torch.nn.attention.flex_attention import BlockMask
-
+from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 from torchtitan.models.common.attention import AttentionMasksType
 
 if TYPE_CHECKING:
@@ -33,6 +33,20 @@ def validate_cp_backend(parallelism: "ParallelismConfig") -> None:
         )
 
 
+def cp_shard_dims(input_sharding: dict[str, SpmdLayout]) -> dict[str, int]:
+    """Derive ``{name: seq_dim}`` for inputs whose CP mesh axis is a Shard.
+
+    Inputs whose CP axis is Replicate/Partial (e.g. an image stream that is
+    not sequence-sharded) are omitted and thus left untouched by CP.
+    """
+    dims: dict[str, int] = {}
+    for name, layout in input_sharding.items():
+        cp_dim = layout.shard_dim(MeshAxisName.CP)
+        if cp_dim is not None:
+            dims[name] = cp_dim
+    return dims
+
+
 def prepare_context_parallel_input(
     inputs: torch.Tensor,
     labels: torch.Tensor,
@@ -41,48 +55,78 @@ def prepare_context_parallel_input(
     device: torch.device,
     load_balancer_type: str | None = "headtail",
     ptrr_mask_key: str | None = None,
+    input_sharding: dict[str, SpmdLayout] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-    """
-    Shard inputs, labels, positions, and attention masks for Context Parallel.
+    """Shard named tensors and attention masks for Context Parallel.
 
-    The caller must provide ``extra_kwargs["positions"]`` before calling this
-    function.  Position resolution (per-document vs sequential) is handled
-    upstream in ``post_dataloading_process``.
+    Each tensor named in ``shard_dims`` (resolved against
+    ``{"input": inputs, "labels": labels, **extra_kwargs}``) is sharded along
+    its declared sequence dimension using a single shared load balancer.
+    Attention masks (``BlockMask``) are sharded separately along their Q
+    sequence dimension. Position resolution (per-document vs sequential) is
+    handled upstream (the model's ``preprocess_inputs`` / the trainer).
 
     Args:
-        inputs: Input tensor of shape [batch_size, seq_len]
-        labels: Label tensor of shape [batch_size, seq_len]
-        extra_kwargs: Dictionary containing 'positions' (required) and
-            optionally 'attention_masks' to be sharded.
-        cp_mesh: Device mesh for context parallel dimension
-        device: Device for the tensors
+        inputs: Input tensor of shape [batch_size, seq_len].
+        labels: Label tensor of shape [batch_size, seq_len].
+        extra_kwargs: Additional model-forward kwargs. Tensor entries named in
+            ``shard_dims`` (e.g. 'positions') are sharded and written back;
+            'attention_masks', if present, is sharded along its Q seq dim.
+        cp_mesh: Device mesh for the context parallel dimension.
+        device: Device for the tensors.
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and the attention
             masks are a dict[str, BlockMask], selects which mask the
             PTRRLoadBalancer is built from. Ignored otherwise.
+        input_sharding: Per-input SPMD layout; the CP sequence dim for each
+            input is derived via ``cp_shard_dims`` (inputs whose CP axis is
+            Replicate/Partial are omitted and left untouched). When None,
+            defaults to sharding ``{"input": 1, "labels": 1, "positions": 1}``
+            (standard decoder inputs, for callers without a per-input layout).
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
-            - sharded_inputs: Inputs sharded along sequence dimension
-            - sharded_labels: Labels sharded along sequence dimension
-            - updated_extra_kwargs: Dict with sharded 'positions' and optionally
-              sharded 'attention_masks'
+            - sharded_inputs: Inputs sharded along the sequence dimension.
+            - sharded_labels: Labels sharded along the sequence dimension.
+            - updated_extra_kwargs: ``extra_kwargs`` with its sharded tensor
+              entries (e.g. 'positions') and 'attention_masks' updated.
     """
+    if input_sharding is not None:
+        shard_dims = cp_shard_dims(input_sharding)
+    else:
+        shard_dims = {"input": 1, "labels": 1, "positions": 1}
+
+    named: dict[str, torch.Tensor] = {"input": inputs, "labels": labels}
+    for k, v in extra_kwargs.items():
+        if isinstance(v, torch.Tensor):
+            named[k] = v
+
+    shard_names = [n for n in shard_dims if n in named]
+    if not shard_names:
+        return inputs, labels, extra_kwargs
+    buffers = tuple(named[n] for n in shard_names)
+    seq_dims = tuple(shard_dims[n] for n in shard_names)
+
     attention_masks = extra_kwargs.get("attention_masks", None)
-    positions = extra_kwargs["positions"]
-    (inputs, labels, positions), attention_masks = cp_shard(
+    sharded_buffers, attention_masks = cp_shard(
         cp_mesh,
-        (inputs, labels, positions),
+        buffers,
         attention_masks,
         load_balancer_type,
+        input_seq_dims=seq_dims,
         ptrr_mask_key=ptrr_mask_key,
     )
-    extra_kwargs["positions"] = positions
+
+    result = dict(zip(shard_names, sharded_buffers))
+    out_inputs = result.get("input", inputs)
+    out_labels = result.get("labels", labels)
+    for n in shard_names:
+        if n not in ("input", "labels"):
+            extra_kwargs[n] = result[n]
     if attention_masks is not None:
         extra_kwargs["attention_masks"] = attention_masks
-
-    return inputs, labels, extra_kwargs
+    return out_inputs, out_labels, extra_kwargs
 
 
 def cp_shard(
@@ -90,7 +134,7 @@ def cp_shard(
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
     load_balancer_type: str | None = "headtail",
-    input_seq_dim: int = 1,
+    input_seq_dims: int | tuple[int, ...] = 1,
     ptrr_mask_key: str | None = None,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
@@ -111,11 +155,10 @@ def cp_shard(
             - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
             - None: Disable load balancing
             Defaults to "headtail".
-        input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
-            which covers most use cases where tensors have shape
-            [batch_size, seq_len]. Can be changed by passing a
-            different value if your tensors use a different sequence
-            dimension layout.
+        input_seq_dims: Sequence dimension(s) for sharding. An int applies the
+            same dim to every tensor in ``inputs`` (default 1, covering the
+            common [batch_size, seq_len] layout). A tuple specifies a per-tensor
+            sequence dim and must have the same length as ``inputs``.
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and
             ``attention_masks`` is a dict[str, BlockMask], selects which mask in
             the dict the PTRRLoadBalancer is built from. The resulting balancer
@@ -133,7 +176,12 @@ def cp_shard(
         ValueError: If load_balancer_type is "ptrr" and attention_masks
             is None, or is a dict and ``ptrr_mask_key`` is not a valid key
     """
-    seq_len = inputs[0].size(input_seq_dim)
+    if isinstance(input_seq_dims, tuple):
+        assert len(input_seq_dims) == len(inputs)
+        seq_dims = input_seq_dims
+    else:
+        seq_dims = tuple(input_seq_dims for _ in inputs)
+    seq_len = inputs[0].size(seq_dims[0])
     cp_world_size = cp_mesh.size(0)
 
     load_balancer = None
@@ -190,7 +238,7 @@ def cp_shard(
         _context_parallel_shard(
             mesh=cp_mesh,
             buffers=inputs,
-            seq_dims=tuple(input_seq_dim for _ in inputs),
+            seq_dims=seq_dims,
             load_balancer=load_balancer,
         ),
     )

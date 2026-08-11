@@ -7,10 +7,12 @@
 import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
 
+from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -23,6 +25,7 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
     VarlenAttention,
 )
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -328,6 +331,33 @@ class Decoder(BaseModel):
                 get_efficient_causal_mask_mod_for_packed_document(positions),
             ],
         )
+
+    def _build_forward_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        *,
+        parallel_dims: ParallelDims,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
+    ]:
+        """Decoder default: split inputs, then build attention masks.
+
+        Masks are built only for the masked backends (Flex/Varlen) and only
+        when ``positions`` is present. A maskless backend (SDPA) still receives
+        positions for RoPE and relies on ``is_causal``.
+        """
+        inputs, labels, extra_kwargs, _ = super()._build_forward_inputs(
+            input_dict, labels, parallel_dims=parallel_dims
+        )
+        positions = extra_kwargs.get("positions", None)
+        if positions is not None:
+            inner = getattr(self.config.first_attention, "inner_attention", None)
+            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+                extra_kwargs["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                )
+        return inputs, labels, extra_kwargs, decoder_input_sharding()
 
     def get_attention_masks(
         self,
