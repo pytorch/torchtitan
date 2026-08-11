@@ -16,6 +16,7 @@ from torchtitan.config import (
     override,
     OverrideConfig,
 )
+from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.attention import (
     GQAttention,
     QKVLinear,
@@ -29,6 +30,7 @@ from torchtitan.models.common.rope import (
     RoPE,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
+from torchtitan.protocols.module import Module
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -197,7 +199,7 @@ class TestMRoPECache(unittest.TestCase):
         self.assertEqual(xk_out.shape, xk.shape)
 
 
-class TestPerLayerRoPECache(unittest.TestCase):
+class TestDecoderRoPEWiring(unittest.TestCase):
     def test_gqa_attention_uses_layer_rope_cache(self):
         torch.manual_seed(42)
         dim = 8
@@ -223,25 +225,67 @@ class TestPerLayerRoPECache(unittest.TestCase):
         self.assertIsNotNone(attention.rope)
         self.assertEqual(out.shape, x.shape)
 
-    def test_decoder_builds_distinct_rope_modules_per_attention_layer(self):
+    def test_decoder_shares_one_rope_module_across_attention_layers(self):
+        """Llama3 hands one rope config to every layer, so the built model has
+        one RoPE and one cache rather than a full-size copy per layer."""
         from torchtitan.models.llama3 import llama3_configs
 
         model = llama3_configs["debugmodel"]("flex").build()
+        model.init_states(buffer_device=torch.device("cpu"))
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
         self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
-        self.assertEqual(len({id(rope) for rope in layer_ropes}), len(layer_ropes))
+        self.assertEqual(len({id(rope) for rope in layer_ropes}), 1)
+        self.assertEqual(len({rope.cache.data_ptr() for rope in layer_ropes}), 1)
 
-    def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):
+    def test_decoder_keeps_rope_config_shared_across_seq_len_resize(self):
+        """``update_from_config`` resizes in place; replacing the config per
+        layer would silently undo the sharing."""
+        from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
         from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.trainer import Trainer
 
         cfg = llama3_configs["debugmodel"]("flex")
+        seq_len = 128
+        cfg.update_from_config(
+            config=Trainer.Config(
+                training=dataclasses.replace(TrainingConfig(), seq_len=seq_len),
+                parallelism=ParallelismConfig(),
+                debug=DebugConfig(),
+            )
+        )
         layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
 
+        self.assertEqual(len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}), 1)
+        self.assertEqual(cfg.max_seq_len, seq_len)
+        model = cfg.build()
         self.assertEqual(
-            len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}),
-            len(layer_rope_cfgs),
+            len({id(layer.attention.rope) for layer in model.layers.values()}), 1
         )
+
+    def test_shared_rope_is_parallelized_once(self):
+        """``Module.parallelize`` recurses per parent, so a shared RoPE is
+        reached once per layer; a second pass is still a caller error."""
+        rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
+
+        class TwoLayers(Module):
+            def __init__(self, first, second):
+                super().__init__()
+                self.first, self.second = first, second
+
+        # These configs carry no sharding_config, so parallelize walks the tree
+        # and returns per module without resolving any mesh.
+        parallel_dims = ParallelDims(
+            dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1
+        )
+        root = TwoLayers(
+            _attention_config(rope_cfg).build(), _attention_config(rope_cfg).build()
+        )
+        self.assertIs(root.first.rope, root.second.rope)
+        root.parallelize(parallel_dims)
+
+        with self.assertRaises(ValueError):
+            root.parallelize(parallel_dims)
 
 
 def _attention_config(rope_cfg, *, dim=8, head_dim=4) -> GQAttention.Config:
@@ -284,30 +328,6 @@ class TestRoPEConfigBuildReuse(unittest.TestCase):
         self.assertIsNot(first, second)
         self.assertNotEqual(first.cache.data_ptr(), second.cache.data_ptr())
         torch.testing.assert_close(first.cache, second.cache)
-
-    def test_replace_builds_a_fresh_module(self):
-        """The memo must not survive ``replace``, or a retargeted config would
-        return a module built for the old field values."""
-        cfg = ComplexRoPE.Config(dim=8, max_seq_len=16)
-        original = cfg.build()
-
-        retargeted = dataclasses.replace(cfg, max_seq_len=32).build()
-
-        self.assertIsNot(retargeted, original)
-        self.assertEqual(retargeted.cache.shape[0], 32)
-        self.assertEqual(original.cache.shape[0], 16)
-
-    def test_building_does_not_change_config_identity_semantics(self):
-        """Building must not leak into equality or serialization, which config
-        dumps and comparisons rely on."""
-        cfg = ComplexRoPE.Config(dim=8, max_seq_len=16)
-        other = ComplexRoPE.Config(dim=8, max_seq_len=16)
-        before = cfg.to_dict()
-
-        cfg.build()
-
-        self.assertEqual(cfg, other)
-        self.assertEqual(cfg.to_dict(), before)
 
     def test_layers_sharing_a_rope_config_share_one_cache(self):
         rope_cfg = ComplexRoPE.Config(dim=4, max_seq_len=16)
