@@ -187,23 +187,14 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         )
 
     def load_state_dict(self, state_dict):
-        if "labels_buffer" in state_dict:
-            self._inputs_buffer = state_dict["inputs_buffer"]
-            self._labels_buffer = state_dict["labels_buffer"]
-            self._positions_buffer = state_dict["positions_buffer"]
-        else:
-            # Checkpoints written before labels were buffered separately hold a
-            # raw, unshifted token stream in 'inputs_buffer'. It cannot be split
-            # into input/label pairs here without reintroducing the cross-document
-            # targets this shift exists to avoid, so drop the partial sample and
-            # resume at the next document boundary.
+        self._inputs_buffer = state_dict["inputs_buffer"]
+        self._labels_buffer = state_dict["labels_buffer"]
+        if "positions_buffer" not in state_dict:
             logger.warning(
-                "Checkpoint missing 'labels_buffer'. Dropping the buffered partial "
-                "sample; iteration resumes at the next document boundary."
+                "Checkpoint missing 'positions_buffer'. Falling back to empty buffer. "
+                "RoPE positions may be incorrect with block_causal attention."
             )
-            self._inputs_buffer = []
-            self._labels_buffer = []
-            self._positions_buffer = []
+        self._positions_buffer = state_dict.get("positions_buffer", [])
         # Older checkpoints predate per-epoch shuffle on re-loop; default to 0
         # so resuming those runs stays numerically identical (epoch 0 is never
         # shuffled).
