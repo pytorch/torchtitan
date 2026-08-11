@@ -92,7 +92,7 @@ _lib = torch.library.Library("deepep", "DEF")
 # whose static layout is already expert-grouped).
 _lib.define(
     "dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
-    "int num_experts, int num_tokens_per_rank, bool cudagraphable) "
+    "int num_experts, bool cudagraphable) "
     "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
 )
 # combine returns: combined_x. ``will_backward`` is the caller's outer grad state
@@ -132,7 +132,6 @@ def _dispatch_op_impl(
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
     num_experts: int,
-    num_tokens_per_rank: int,
     cudagraphable: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Execute DeepEP v2 dispatch.
@@ -162,13 +161,10 @@ def _dispatch_op_impl(
         topk_idx=topk_idx,
         topk_weights=topk_weights,
         num_experts=num_experts,
-        # Denote C = num_tokens_per_rank. DeepEP uses C as the per-rank layout stride
-        # (global token ID = rank * C + local token ID). With our no-CPU-sync
-        # expand path, C also determines recv_x's worst-case size. Use the current
-        # call or graph-bucket bound instead of the configured lifetime maximum to
-        # avoid a maximum-sized output on every call. ElasticBuffer was already
-        # preallocated for the lifetime maximum, and the handle retains C for combine.
-        num_max_tokens_per_rank=num_tokens_per_rank,
+        # Denote C = x.shape[0]. DeepEP uses C as the per-rank layout stride
+        # (global token ID = rank * C + local token ID) and, in expand mode,
+        # to size recv_x. MoE physically pads x so C is identical across ranks.
+        num_max_tokens_per_rank=x.shape[0],
         num_sms=num_sms,
         do_expand=cudagraphable,
         do_cpu_sync=not cudagraphable,
@@ -221,7 +217,7 @@ def _dispatch_backward(
     """
     global _buffer
     if grad_recv_x is None:
-        return None, None, None, None, None, None
+        return None, None, None, None, None
 
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before combine"
@@ -238,12 +234,11 @@ def _dispatch_backward(
     grad_topk_weights = (
         grad_scores.to(ctx.input_dtype) if grad_scores is not None else None
     )
-    # Order matches op inputs:
-    # x, topk_idx, topk_weights, num_experts, num_tokens_per_rank,
+    # Order matches op inputs: x, topk_idx, topk_weights, num_experts,
     # cudagraphable.
     # Backward only runs on the compact (cudagraphable=False) path; the expand layout is
     # inference-only ("must not be backward").
-    return grad_x, None, grad_topk_weights, None, None, None
+    return grad_x, None, grad_topk_weights, None, None
 
 
 @torch.library.impl(_lib, "combine", "CUDA")
@@ -462,7 +457,6 @@ def dispatch_tokens(
     num_local_experts: int,
     num_experts: int,
     *,
-    num_tokens_per_rank: int,
     cudagraphable: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
@@ -479,9 +473,6 @@ def dispatch_tokens(
         top_scores: Routing scores per token [num_tokens, top_k]
         num_local_experts: Number of experts on this rank
         num_experts: Total number of experts across all ranks
-        num_tokens_per_rank: Current per-rank dispatch capacity. DeepEP uses it
-            as the layout stride for this call. It must be identical across ranks
-            and no larger than the maximum fixed during buffer initialization.
         cudagraphable: If True, use the static, no-host-sync expand layout so the forward is
             cudagraph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -502,9 +493,9 @@ def dispatch_tokens(
 
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
-    assert num_tokens_per_rank <= buffer.num_max_tokens_per_rank, (
-        "DeepEP current logical capacity "
-        f"{num_tokens_per_rank} exceeds the "
+    assert hidden_states.shape[0] <= buffer.num_max_tokens_per_rank, (
+        "DeepEP input token count "
+        f"{hidden_states.shape[0]} exceeds the "
         f"preallocated capacity of {buffer.num_max_tokens_per_rank}."
     )
 
@@ -526,7 +517,6 @@ def dispatch_tokens(
         selected_experts_indices,
         top_scores,
         num_experts,
-        num_tokens_per_rank,
         cudagraphable,
     )
 
