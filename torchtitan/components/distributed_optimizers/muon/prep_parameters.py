@@ -25,7 +25,7 @@ from .storage_to_compute import _PreparedParameterComputeView, Owned
 
 __all__ = [
     "BatchedMatrixComputeView",
-    "MuonComputeSharding",
+    "MuonComputeShardingConfig",
     "Owned",
     "build_distributed_muon",
 ]
@@ -61,8 +61,8 @@ class BatchedMatrixComputeView:
         )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class MuonComputeSharding:
+@dataclass(frozen=True, kw_only=True, slots=True)
+class MuonComputeShardingConfig:
     """Define the logical Muon tensor and its compute placement.
 
     ``Owned`` balances complete 2D matrices across bucket participants.
@@ -73,22 +73,29 @@ class MuonComputeSharding:
     compute placement.
     """
 
+    placement: Owned | Shard
+
     # Applied before compute placement, so placement dimensions refer to the
     # viewed tensor. A future view_after_placement mode can apply a local view
     # after redistribution; that ordering is not supported yet.
     view_before_placement: BatchedMatrixComputeView | None = None
-    placement: Owned | Shard
 
     def __post_init__(self) -> None:
-        if type(self.placement) not in (Owned, Shard) or (
+        if type(self.placement) not in (Owned, Shard):
+            raise ValueError(
+                "MuonComputeShardingConfig.placement must be Owned or Shard"
+            )
+        if (
             self.view_before_placement is not None
             and type(self.view_before_placement) is not BatchedMatrixComputeView
         ):
-            raise TypeError(
-                "MuonComputeSharding requires a supported view and placement"
+            raise ValueError(
+                "MuonComputeShardingConfig.view_before_placement must be "
+                "BatchedMatrixComputeView or None"
             )
 
     def to_dict(self) -> dict:
+        """Serialize for JSON logging. Placements become repr strings."""
         return {"repr": repr(self)}
 
 

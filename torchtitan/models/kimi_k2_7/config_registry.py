@@ -15,7 +15,7 @@ from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import 
 )
 from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
-    MuonComputeSharding,
+    MuonComputeShardingConfig,
     Owned,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -207,9 +207,9 @@ def _distributed_muon_optimizer(
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
     per_head = _per_head_muon_sharding(num_heads=attention.n_heads)
-    query_shardings: dict[str, MuonComputeSharding] = (
+    query_shardings: dict[str, MuonComputeShardingConfig] = (
         {
-            "wq_a": MuonComputeSharding(placement=Owned()),
+            "wq_a": MuonComputeShardingConfig(placement=Owned()),
             "wq_b": per_head,
         }
         if attention.q_lora_rank
@@ -217,9 +217,9 @@ def _distributed_muon_optimizer(
     )
     attention_shardings = {
         **query_shardings,
-        "wkv_a": MuonComputeSharding(placement=Owned()),
+        "wkv_a": MuonComputeShardingConfig(placement=Owned()),
         "wkv_b": per_head,
-        "wo": MuonComputeSharding(placement=Owned()),
+        "wo": MuonComputeShardingConfig(placement=Owned()),
     }
     num_layers = len(model_config.layers)
     muon_kwargs = {
@@ -256,7 +256,7 @@ def _distributed_muon_optimizer(
                 optimizer_name="DistributedMuon",
                 optimizer_kwargs={
                     **muon_kwargs,
-                    "compute_sharding": MuonComputeSharding(placement=Shard(0)),
+                    "compute_sharding": MuonComputeShardingConfig(placement=Shard(0)),
                 },
             )
         )
@@ -274,7 +274,7 @@ def _distributed_muon_optimizer(
                 optimizer_name="DistributedMuon",
                 optimizer_kwargs={
                     **muon_kwargs,
-                    "compute_sharding": MuonComputeSharding(placement=Owned()),
+                    "compute_sharding": MuonComputeShardingConfig(placement=Owned()),
                 },
             )
         )
@@ -344,8 +344,8 @@ def _distributed_muon_optimizer(
     )
 
 
-def _per_head_muon_sharding(num_heads: int) -> MuonComputeSharding:
-    return MuonComputeSharding(
+def _per_head_muon_sharding(num_heads: int) -> MuonComputeShardingConfig:
+    return MuonComputeShardingConfig(
         view_before_placement=BatchedMatrixComputeView(
             num_matrices=num_heads,
         ),

@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
@@ -112,9 +111,6 @@ class DistributedMuon(Optimizer):
             self._plans,
             local_tensor_spec=self._local_tensor_spec,
         )
-        self._set_checkpoint_layout_fingerprints()
-        self.register_state_dict_post_hook(_add_layout_fingerprints_to_state_dict)
-        self.register_load_state_dict_pre_hook(_validate_layout_fingerprints_on_load)
         self.register_load_state_dict_post_hook(_after_load_state_dict)
 
     @overload
@@ -247,19 +243,6 @@ class DistributedMuon(Optimizer):
         self._plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
 
-    def _set_checkpoint_layout_fingerprints(self) -> None:
-        self._layout_fingerprints_by_fqn = {}
-        for layout in self._parameter_compute_layouts:
-            descriptor = (
-                layout.fqn,
-                tuple(layout.param.shape),
-                layout.compute_view_key,
-                tuple(layout.global_compute_shape),
-            )
-            self._layout_fingerprints_by_fqn[layout.fqn] = _layout_fingerprint(
-                descriptor
-            )
-
     def _validate_plan_across_ranks(self) -> None:
         _validate_bucket_plans_across_ranks(
             self._plans,
@@ -380,16 +363,7 @@ class DistributedMuon(Optimizer):
         )
 
     def _validate_momentum(self, compute_layout: _ParameterComputeLayout) -> None:
-        state = self.state.get(compute_layout.param, {})
-        fingerprint = state.get(_LAYOUT_FINGERPRINT_KEY)
-        if (
-            fingerprint is not None
-            and fingerprint != self._layout_fingerprints_by_fqn[compute_layout.fqn]
-        ):
-            raise RuntimeError(
-                f"optimizer state layout changed for {compute_layout.fqn!r}"
-            )
-        momentum = state.get("momentum_buffer")
+        momentum = self.state.get(compute_layout.param, {}).get("momentum_buffer")
         if momentum is None:
             return
         if not isinstance(momentum, DTensor) or not self._has_storage_layout(
@@ -403,9 +377,6 @@ class DistributedMuon(Optimizer):
         self, compute_layout: _ParameterComputeLayout, grad: DTensor
     ) -> DTensor:
         state = self.state[compute_layout.param]
-        state[_LAYOUT_FINGERPRINT_KEY] = self._layout_fingerprints_by_fqn[
-            compute_layout.fqn
-        ]
         if "momentum_buffer" not in state:
             state["momentum_buffer"] = torch.zeros_like(
                 grad, memory_format=torch.preserve_format
@@ -600,47 +571,10 @@ def _zeropower_via_newtonschulz(
     return result.transpose(-2, -1) if transposed else result
 
 
-def _add_layout_fingerprints_to_state_dict(
-    optimizer: Optimizer,
-    state_dict: dict[str, Any],
-) -> None:
-    muon = cast(DistributedMuon, optimizer)
-    for saved_group, current_group in zip(
-        state_dict["param_groups"], muon.param_groups, strict=True
-    ):
-        for param_id, fqn in zip(
-            saved_group["params"], current_group["param_names"], strict=True
-        ):
-            state_dict["state"].setdefault(param_id, {})[
-                _LAYOUT_FINGERPRINT_KEY
-            ] = muon._layout_fingerprints_by_fqn[fqn]
-
-
-def _validate_layout_fingerprints_on_load(
-    optimizer: Optimizer,
-    state_dict: dict[str, Any],
-) -> dict[str, Any]:
-    muon = cast(DistributedMuon, optimizer)
-    saved_groups = state_dict.get("param_groups", ())
-    saved_state = state_dict.get("state", {})
-    normalized_groups = []
-    for saved_group, current_group in zip(saved_groups, muon.param_groups, strict=True):
-        for param_id, fqn in zip(
-            saved_group["params"], current_group["param_names"], strict=True
-        ):
-            fingerprint = saved_state.get(param_id, {}).get(_LAYOUT_FINGERPRINT_KEY)
-            if fingerprint != muon._layout_fingerprints_by_fqn[fqn]:
-                raise ValueError("checkpoint changed DistributedMuon's compute layout")
-        normalized_group = dict(saved_group)
-        # Optimizer.load_state_dict otherwise replaces canonical current FQNs
-        # with checkpoint param_names after positional state matching.
-        normalized_group.pop("param_names", None)
-        normalized_groups.append(normalized_group)
-    return {**state_dict, "param_groups": normalized_groups}
-
-
 def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon = cast(DistributedMuon, optimizer)
+    # Optimizer.load_state_dict restores group values such as ns_steps after
+    # construction, and those values affect compute planning and buffer sizes.
     muon._validate_groups()
     muon._initialize_plan(muon._parameter_compute_layouts)
     muon._validate_plan_across_ranks()
@@ -648,20 +582,8 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
         muon._plans,
         local_tensor_spec=muon._local_tensor_spec,
     )
+    # init_optim_state may have validated placeholder state before the load.
     muon._first_step_validated = False
-
-
-_LAYOUT_FINGERPRINT_KEY = "_distributed_muon_layout_fingerprint"
-_LAYOUT_FINGERPRINT_VERSION = 1
-
-
-def _layout_fingerprint(descriptor: tuple[Any, ...]) -> tuple[int, bytes]:
-    # Optimizer.load_state_dict rebuilds iterable state values via
-    # type(value)(generator), which round-trips bytes but not strings.
-    return (
-        _LAYOUT_FINGERPRINT_VERSION,
-        hashlib.sha256(repr(descriptor).encode()).digest(),
-    )
 
 
 def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:

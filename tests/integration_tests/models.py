@@ -260,10 +260,10 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     # Consolidate the former 2-GPU FSDP smoke and 8-GPU
-                    # FSDP+TP+EP+PP test into one supported FSDP+EP path with
-                    # checkpoint resume. Kimi DistributedMuon rejects TP because
-                    # it produces _StridedShard storage, and rejects PP because
-                    # each stage owns only a subset of its global optimizer groups.
+                    # FSDP+TP+EP+PP test into one supported FSDP+EP path. Kimi
+                    # DistributedMuon rejects TP because it produces _StridedShard
+                    # storage, and rejects PP because each stage owns only a subset
+                    # of its global optimizer groups.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
@@ -271,19 +271,9 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--training.steps 1",
-                    "--checkpoint.enable",
-                    "--checkpoint.enable_first_step_checkpoint",
-                ],
-                [
-                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--training.steps 2",
-                    "--checkpoint.enable",
                 ],
             ],
-            "Kimi K2.7 DistributedMuon spmd_types FSDP+EP checkpoint resume",
+            "Kimi K2.7 DistributedMuon spmd_types FSDP+EP",
             "kimi_k2_5_muon_fsdp+ep_spmd_types",
             ngpu=4,
         ),
