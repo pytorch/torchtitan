@@ -9,6 +9,7 @@ import warnings
 from collections.abc import Callable
 
 import torch
+import torch._inductor.config
 import torch.fx.traceback as fx_traceback
 import torch.nn as nn
 from torch._subclasses.fake_tensor import FakeTensorMode

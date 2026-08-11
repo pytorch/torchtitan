@@ -78,7 +78,7 @@ def parallelize_qwen3_5(
         )
         if model.vision_encoder is not None:
             apply_compile(
-                model.vision_encoder,
+                model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
                 compile_config=compile_config,
                 parallel_dims=parallel_dims,
             )
