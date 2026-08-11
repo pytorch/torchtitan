@@ -210,7 +210,7 @@ def _build_muse_glimmer_layers(
                     max_seq_len=max_seq_len,
                     window_pattern=window_pattern,
                     attn_backend=attn_backend,
-                    rope=rope
+                    rope=rope,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
