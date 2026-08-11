@@ -262,8 +262,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     # Consolidate the former 2-GPU FSDP smoke and 8-GPU
                     # FSDP+TP+EP+PP test into one supported FSDP+EP path. Kimi
                     # DistributedMuon rejects TP because it produces _StridedShard
-                    # storage, and rejects PP because each stage owns only a subset
-                    # of its global optimizer groups.
+                    # storage. PP support follows in the next stack change.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",

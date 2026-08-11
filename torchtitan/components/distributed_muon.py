@@ -130,23 +130,23 @@ class MuonComputeShardingConfig:
 def build_distributed_muon(
     params: Iterable[dict[str, Any]],
     *,
+    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
     bucket_configs: Sequence[BucketConfig],
     **kwargs: Any,
 ) -> DistributedMuon:
     """Prepare named DTensor parameter groups and construct DistributedMuon.
 
-    Every group must provide aligned ``params`` and ``param_names`` plus one
-    ``compute_sharding`` contract. Parameter groups, bucket configuration, and
-    layouts are frozen after construction because optimizer state and
-    collectives depend on them.
+    Every group must provide aligned ``params`` and ``param_names``. Every
+    local parameter FQN must have one entry in ``compute_sharding_by_fqn``;
+    extra entries for parameters on other pipeline stages are ignored.
+    Parameter groups, compute sharding, bucket configuration, and layouts are
+    frozen after construction because optimizer state and collectives depend
+    on them.
     """
     prepared_params = []
     parameters_to_prepare = []
     for param_group in params:
         group = dict(param_group)
-        compute_sharding = group.pop("compute_sharding")
-        compute_view = compute_sharding.view_before_placement
-        group["_compute_placement"] = compute_sharding.placement
         raw_params = group.get("params", ())
         group_params = (
             (raw_params,) if isinstance(raw_params, Tensor) else tuple(raw_params)
@@ -159,11 +159,14 @@ def build_distributed_muon(
         group["param_names"] = param_names
 
         for param, fqn in zip(group_params, param_names, strict=True):
-            parameters_to_prepare.append((param, fqn, compute_view))
+            if fqn not in compute_sharding_by_fqn:
+                raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
+            parameters_to_prepare.append((param, fqn, compute_sharding_by_fqn[fqn]))
         prepared_params.append(group)
 
-    prepared_compute_views = {}
-    for param, fqn, compute_view in parameters_to_prepare:
+    prepared_compute_layouts = {}
+    for param, fqn, compute_sharding in parameters_to_prepare:
+        compute_view = compute_sharding.view_before_placement
         global_storage_shape = torch.Size(param.shape)
         resolved_view = None
         if compute_view is not None and any(
@@ -213,15 +216,16 @@ def build_distributed_muon(
                 f"Muon parameter {fqn!r} compute shape "
                 f"{tuple(global_compute_shape)} must be 2D or batch-first 3D"
             )
-        prepared_compute_views[fqn] = _PreparedParameterComputeView(
+        prepared_compute_layouts[fqn] = _PreparedParameterComputeLayout(
             compute_view_key=compute_view_key,
+            compute_placement=compute_sharding.placement,
             global_compute_shape=global_compute_shape,
             local_storage_view=local_storage_view,
         )
     return DistributedMuon(
         prepared_params,
         _bucket_configs=tuple(bucket_configs),
-        _prepared_compute_views=prepared_compute_views,
+        _prepared_compute_layouts=prepared_compute_layouts,
         **kwargs,
     )
 
@@ -244,7 +248,7 @@ class DistributedMuon(Optimizer):
         params: Iterable[dict[str, Any]],
         *,
         _bucket_configs: Sequence[BucketConfig],
-        _prepared_compute_views: Mapping[str, _PreparedParameterComputeView],
+        _prepared_compute_layouts: Mapping[str, _PreparedParameterComputeLayout],
         lr: float = 1e-3,
         weight_decay: float = 0.1,
         momentum: float = 0.95,
@@ -265,15 +269,9 @@ class DistributedMuon(Optimizer):
             "adjust_lr_fn": adjust_lr_fn,
         }
         self._first_step_validated = False
-        self._prepared_compute_views = dict(_prepared_compute_views)
+        self._prepared_compute_layouts = dict(_prepared_compute_layouts)
         super().__init__(params, defaults)
         tensor_device = self._validate_parameter_storage()
-        group_compute_placements = []
-        for group in self.param_groups:
-            compute_placement = group.pop("_compute_placement", None)
-            group_compute_placements.append(compute_placement)
-        self._group_compute_placements = tuple(group_compute_placements)
-
         self._validate_groups()
         compute_layouts = self._build_parameter_compute_layouts()
         self._specs = _bind_bucket_configs(
@@ -379,8 +377,7 @@ class DistributedMuon(Optimizer):
 
         compute_layouts = []
         for group_index, fqn, param in parameters:
-            compute_placement = self._group_compute_placements[group_index]
-            prepared = self._prepared_compute_views[fqn]
+            prepared = self._prepared_compute_layouts[fqn]
             global_compute_shape = torch.Size(prepared.global_compute_shape)
             local_storage_view = prepared.local_storage_view
             resolved_transition = _resolve_storage_to_compute_transition(
@@ -388,7 +385,7 @@ class DistributedMuon(Optimizer):
                 param,
                 global_compute_shape,
                 local_storage_view,
-                compute_placement,
+                prepared.compute_placement,
             )
             compute_layouts.append(
                 _ParameterComputeLayout(
@@ -440,7 +437,6 @@ class DistributedMuon(Optimizer):
     ) -> tuple[Any, ...]:
         return (
             compute_layout.fqn,
-            compute_layout.group_index,
             tuple(compute_layout.param.shape),
             tuple(compute_layout.param.stride()),
             str(compute_layout.param.dtype),
@@ -705,8 +701,9 @@ def _validate_batched_matrix_storage_alignment(
 
 
 @dataclass(frozen=True, slots=True)
-class _PreparedParameterComputeView:
+class _PreparedParameterComputeLayout:
     compute_view_key: tuple[Any, ...]
+    compute_placement: Owned | Replicate | Shard
     global_compute_shape: torch.Size
     local_storage_view: Tensor | None
 
