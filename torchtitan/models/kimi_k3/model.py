@@ -18,14 +18,11 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
-from fla.modules import ShortConvolution
-from fla.modules.fused_norm_gate import rms_norm_gated
-from fla.modules.conv.causal_conv1d import causal_conv1d
 from fla.ops.kda import chunk_kda
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.models.common import Linear
+from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -85,13 +82,7 @@ class KimiShortConvolution(ShortConvolution, Module):
         return y_BLD, None
 
 class KimiRMSNormGated(Module):
-    """Per-head RMSNorm + sigmoid output gate backed by FLA's fused kernel.
-
-    Wraps the FLA functional ``rms_norm_gated`` behind the torchtitan
-    ``Module`` protocol so it participates in ``init_states``/``param_init``.
-    The wrapper owns the weight (ones-initialized, weight-only checkpoint
-    schema unchanged); the fused kernel receives it with ``bias=None``.
-    """
+    """Per-head RMSNorm followed by a sigmoid output gate."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -104,14 +95,12 @@ class KimiRMSNormGated(Module):
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        return rms_norm_gated(
-            x,
-            gate,
-            self.weight,
-            None,
-            activation="sigmoid",
-            eps=self.eps,
-        )
+        input_dtype = x.dtype
+        x_float = x.float()
+        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+        x_float = x_float * torch.rsqrt(variance + self.eps)
+        x_float = self.weight.float() * x_float
+        return (x_float * torch.sigmoid(gate.float())).to(input_dtype)
 
 
 class KimiFeedForward(FeedForward):
@@ -303,12 +292,13 @@ class KimiDeltaAttention(Module):
         dim: int
         num_heads: int
         head_dim: int
+        conv_kernel_size: int
         q_proj: Linear.Config
         k_proj: Linear.Config
         v_proj: Linear.Config
-        q_conv: KimiShortConvolution.Config
-        k_conv: KimiShortConvolution.Config
-        v_conv: KimiShortConvolution.Config
+        q_conv: Conv1d.Config
+        k_conv: Conv1d.Config
+        v_conv: Conv1d.Config
         forget_a: Linear.Config
         forget_b: Linear.Config
         beta: Linear.Config
@@ -324,6 +314,7 @@ class KimiDeltaAttention(Module):
         super().__init__()
         self.num_heads = config.num_heads
         self.head_dim = config.head_dim
+        self.conv_kernel_size = config.conv_kernel_size
 
         self.q_proj = config.q_proj.build()
         self.k_proj = config.k_proj.build()
@@ -342,6 +333,10 @@ class KimiDeltaAttention(Module):
         self.A_log = nn.Parameter(torch.empty(config.num_heads))
         self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
 
+    def _causal_conv(self, x_BLC: torch.Tensor, conv: Conv1d) -> torch.Tensor:
+        x_BCL = F.pad(x_BLC.transpose(1, 2), (self.conv_kernel_size - 1, 0))
+        return F.silu(conv(x_BCL)).transpose(1, 2)
+
     def forward(
         self,
         x_BLD: torch.Tensor,
@@ -355,13 +350,13 @@ class KimiDeltaAttention(Module):
             )
 
         B, L, _ = x_BLD.shape
-        q_BLHK = self.q_conv(self.q_proj(x_BLD))[0].view(
+        q_BLHK = self._causal_conv(self.q_proj(x_BLD), self.q_conv).view(
             B, L, self.num_heads, self.head_dim
         )
-        k_BLHK = self.k_conv(self.k_proj(x_BLD))[0].view(
+        k_BLHK = self._causal_conv(self.k_proj(x_BLD), self.k_conv).view(
             B, L, self.num_heads, self.head_dim
         )
-        v_BLHV = self.v_conv(self.v_proj(x_BLD))[0].view(
+        v_BLHV = self._causal_conv(self.v_proj(x_BLD), self.v_conv).view(
             B, L, self.num_heads, self.head_dim
         )
         forget_BLHK = self.forget_b(self.forget_a(x_BLD)).view(
@@ -519,18 +514,18 @@ class KimiLatentMoE(Module):
         # Every expert's weights are packed into one grouped-mm call, so an
         # expert with zero assigned tokens still sits in the autograd graph
         # and receives an all-zero gradient rather than None.
-        routed_input_RD, num_tokens_per_expert_E, metadata = (
-            self.token_dispatcher.dispatch(
-                latent_TD, weights_TK, expert_ids_TK, num_tokens_per_expert_E
-            )
+        (
+            routed_input_RD,
+            num_tokens_per_expert_E,
+            metadata,
+        ) = self.token_dispatcher.dispatch(
+            latent_TD, weights_TK, expert_ids_TK, num_tokens_per_expert_E
         )
         routed_output_RD = self.routed_experts(routed_input_RD, num_tokens_per_expert_E)
         routed_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
             latent_TD,
-            num_local_tokens_after_padding=T,
-            local_seq_len_after_padding=L,
         )
 
         routed_BLD = self.routed_up(self.routed_norm(routed_TD.view(B, L, latent_dim)))
