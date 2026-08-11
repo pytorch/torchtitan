@@ -849,6 +849,7 @@ def dispatch_op(
     receive_capacity: int,
     ep_size: int,
     buffer_set: int = _DEFAULT_BUFFER_SET,
+    buffer_reuse_dependency: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -873,6 +874,9 @@ def dispatch_op(
         Pending ``hidden_states`` and local-expert counts, plus routing metadata
         used after the dispatch wait by combine and backward.
     """
+    # Populated by the overlap scheduler when this launch reuses a symmetric
+    # receive buffer whose preceding generation has graph-visible readers.
+    del buffer_reuse_dependency
     assert _buffer_state is not None
 
     T_row_to_expert_N = topk_expert_ids_TK.reshape(-1)  # noqa: N806
@@ -959,6 +963,7 @@ def dispatch_op_fake(
     receive_capacity: int,
     ep_size: int,
     buffer_set: int = _DEFAULT_BUFFER_SET,
+    buffer_reuse_dependency: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -970,7 +975,7 @@ def dispatch_op_fake(
     torch.Tensor,
     torch.Tensor,
 ]:
-    del buffer_set
+    del buffer_set, buffer_reuse_dependency
     num_routed_rows = topk_expert_ids_TK.numel()
     num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
     return (
@@ -1575,6 +1580,7 @@ def dispatch_setup_context(ctx, inputs, output):
         _receive_capacity,
         _ep_size,
         buffer_set,
+        _buffer_reuse_dependency,
     ) = inputs
     (
         _hidden_states,
@@ -1623,8 +1629,8 @@ def dispatch_autograd_backward(ctx, grad_hidden, *unused_grads):
         ctx.top_k,
     )
 
-    # Grads for dispatch inputs, capacity, EP size, and buffer set.
-    return grad_input, None, None, None, None, None
+    # Grads for dispatch inputs, capacity, EP size, buffer set, and dependency.
+    return grad_input, None, None, None, None, None, None
 
 
 def combine_setup_context(ctx, inputs, output):

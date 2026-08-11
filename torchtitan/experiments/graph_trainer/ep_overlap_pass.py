@@ -26,6 +26,9 @@ For each selected forward/backward region:
   from the launch/wait op names;
 * marker counts and labels must match across chunks;
 * forward emits marker pairs in chunk order 0 then 1, backward emits 1 then 0;
+* a later MinimalAsyncEP dispatch that uses the same buffer set depends on the
+  prior dispatch's routed-expert output, which keeps the static receive buffer
+  live until its forward readers have launched;
 * MoE-root chunking pairs both chunks' first-marker setup before launching the
   first marker pair; wider transformer-root chunking keeps the regular
   wait-gated per-chunk closure schedule for every marker;
@@ -123,6 +126,26 @@ def _minimal_async_ep_op_name(node: fx.Node) -> str | None:
     if getattr(target, "namespace", None) != "minimal_async_ep":
         return None
     return target._schema.name.rsplit("::", 1)[-1]
+
+
+def _minimal_async_ep_buffer_set(node: fx.Node) -> int:
+    schema = node.target._schema
+    index = next(
+        index
+        for index, argument in enumerate(schema.arguments)
+        if argument.name == "buffer_set"
+    )
+    value = node.kwargs.get(
+        "buffer_set",
+        node.args[index]
+        if len(node.args) > index
+        else schema.arguments[index].default_value,
+    )
+    if not isinstance(value, int):
+        raise ValueError(
+            f"ep_overlap expected a concrete buffer_set for {node.name}, got {value!r}."
+        )
+    return value
 
 
 def _is_minimal_async_ep_wait(node: fx.Node) -> bool:
@@ -963,6 +986,51 @@ def _phase_order_deps(
     return deps
 
 
+def _add_minimal_async_ep_buffer_reuse_dependencies(
+    gm: fx.GraphModule,
+    scheduled_regions: list[_ScheduledRegion],
+) -> None:
+    """Expose MinimalAsyncEP's hidden dispatch-buffer reuse to the FX graph."""
+    scheduled_nodes = {
+        node
+        for scheduled in scheduled_regions
+        for body in scheduled.region.bodies_by_chunk.values()
+        for node in body.nodes
+    }
+    pending: dict[int, fx.Node] = {}
+    previous_release: dict[int, fx.Node] = {}
+    for node in gm.graph.nodes:
+        if node not in scheduled_nodes:
+            continue
+        name = _minimal_async_ep_op_name(node)
+        if name not in {"dispatch", "combine"}:
+            continue
+        buffer_set = _minimal_async_ep_buffer_set(node)
+        if name == "dispatch":
+            if buffer_set in pending:
+                raise ValueError(
+                    "ep_overlap found two MinimalAsyncEP dispatches for buffer set "
+                    f"{buffer_set} without an intervening combine."
+                )
+            if dependency := previous_release.get(buffer_set):
+                kwargs = dict(node.kwargs)
+                kwargs["buffer_reuse_dependency"] = dependency
+                node.kwargs = kwargs
+            pending[buffer_set] = node
+        elif buffer_set in pending:
+            release = node.args[0]
+            assert isinstance(release, fx.Node)
+            previous_release[buffer_set] = release
+            del pending[buffer_set]
+
+    if pending:
+        dispatch = next(iter(pending.values()))
+        raise ValueError(
+            "ep_overlap found a MinimalAsyncEP dispatch without a matching combine: "
+            f"{dispatch.name}."
+        )
+
+
 def _apply_schedule(
     gm: fx.GraphModule,
     scheduled_regions: list[_ScheduledRegion],
@@ -1027,6 +1095,10 @@ def _schedule_ep_overlap_regions(
     )
 
     if scheduled_regions and reorder:
+        _add_minimal_async_ep_buffer_reuse_dependencies(
+            gm,
+            scheduled_regions,
+        )
         _apply_schedule(gm, scheduled_regions)
     elif require_token_exchange:
         raise ValueError(
