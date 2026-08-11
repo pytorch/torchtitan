@@ -46,7 +46,7 @@ def apply_compile(
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    maybe_enable_async_tp(
+    _maybe_enable_async_tp(
         compile_config,
         parallel_dims.get_dense_tp_mesh() if parallel_dims.tp_enabled else None,
     )
@@ -72,7 +72,7 @@ def apply_compile(
     logger.info("Compiling each TransformerBlock with torch.compile")
 
 
-def maybe_enable_async_tp(
+def _maybe_enable_async_tp(
     compile_config: CompileConfig,
     tp_mesh: DeviceMesh | None,
 ) -> None:
@@ -81,6 +81,9 @@ def maybe_enable_async_tp(
         return
 
     group_name = tp_mesh.get_group().group_name
+    # TODO: Remove this call once PyTorch automatically registers symmetric
+    # memory for process groups used by async TP:
+    # https://github.com/pytorch/pytorch/issues/193027
     from torch.distributed._symmetric_memory import (
         enable_symm_mem_for_group,  # pyrefly: ignore [deprecated]
     )

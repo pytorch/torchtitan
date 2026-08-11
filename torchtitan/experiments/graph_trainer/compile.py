@@ -22,8 +22,9 @@ import warnings
 import torch
 import torch.nn as nn
 
+from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compile import maybe_enable_async_tp
+from torchtitan.distributed.compile import _maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     get_transformer_block_buckets,
 )
@@ -73,7 +74,7 @@ def apply_compile(
     if not compile_config.enable:
         return model
 
-    maybe_enable_async_tp(
+    _maybe_enable_async_tp(
         compile_config,
         parallel_dims.get_dense_tp_mesh() if parallel_dims.tp_enabled else None,
     )
