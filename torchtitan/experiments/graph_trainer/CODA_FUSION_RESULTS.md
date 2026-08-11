@@ -1160,6 +1160,96 @@ Speedup: `0.87x`. The residual output was bitwise exact. Both projected outputs
 had `max_abs_error=0.0625`; their mean absolute errors were `0.00223414` and
 `0.00223534`. This does not justify a custom kernel under the project policy.
 
+## B5 MLA projection and RMSNorm backward
+
+Pattern name: `b5_mla_rmsnorm_backward`.
+
+The pass matches only backward BF16 input-gradient GEMMs from
+`layers.*.attention.wkv_b` and `layers.*.attention.wq_b` whose sole reshape
+feeds `_fused_rms_norm_backward` with both `dx` and `dweight` requested. The
+FlexGEMM preserves the original BF16 GEMM store and emits 128-column partials
+of `x_hat * grad_x_hat`. Regional Inductor then completes the row dot product,
+`dx`, and the independent token-axis `dweight` reduction. The latter cannot be
+put in the same FlexGEMM body because the two reductions use different grouped
+layouts.
+
+Real before sample from the layer-60 KV path:
+
+```python
+mm_581 = torch.ops.aten.mm.default(view_4476, _unsafe_view_2729)
+view_4477 = torch.ops.aten.reshape.default(mm_581, [24, 4096, 512])
+_fused_rms_norm_backward_2 = (
+    torch.ops.aten._fused_rms_norm_backward.default(
+        view_4477,
+        getitem_8778_recomputed,
+        [512],
+        alias_473,
+        _unsafe_view_2728,
+        [True, True],
+    )
+)
+```
+
+Real after sample:
+
+```python
+flex_gemm = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_b5_mla_rmsnorm_body_0,
+    (
+        view_4476,
+        _unsafe_view_2729,
+        reshape_default,
+        reshape_default_1,
+        reshape_default_2,
+    ),
+    {},
+    {"backend": "QUACK"},
+)
+rounded = flex_gemm[0]
+partial_row_dot = flex_gemm[1]  # f32[98304, 4]
+row_dot = torch.ops.aten.sum.dim_IntList(partial_row_dot, [-1], True)
+grad_input = torch.ops.aten.sub.Tensor(grad_x_hat, correction)
+grad_weight = torch.ops.aten.sum.dim_IntList(grad_weight_terms, [0])
+```
+
+Proof artifacts:
+
+- Before:
+  `outputs/profiling/dsv3_fake/graph/coda-b5-proof-20260810/tlparse/-_-_-_-/before_fuse_b5_mla_rmsnorm_backward_pass_274.txt`
+- After:
+  `outputs/profiling/dsv3_fake/graph/coda-b5-proof-20260810/tlparse/-_-_-_-/after_fuse_b5_mla_rmsnorm_backward_pass_275.txt`
+
+The DSV3-671B fake-backend proof used local batch 24, sequence 4,096, EP64,
+FSDP256, full activation checkpointing, and `c4_test`. It fused all 122 grounded
+chains, two per transformer layer. Root `mm` and
+`_fused_rms_norm_backward` counts each fell by 122; 122 FlexGEMMs were added.
+The remaining 123 RMSNorm backward nodes are outside the MLA pattern. As in the
+other proof runs, execution later OOMed on the known 192 GiB unfused
+FlexAttention allocation after all graph artifacts were written.
+
+### GB300 microbenchmarks
+
+Both real shapes used `M=98,304`, BF16 inputs scaled by `0.02`, `rstd` sampled
+from `[0.5, 1.5]`, five warmups, and 20 CUDA-event samples on one GB300. The KV
+case is `(98,304, 32,768) @ (32,768, 512)`; the Q case is
+`(98,304, 24,576) @ (24,576, 1,536)`.
+
+| Shape | Implementation | Median | Min | Max |
+| --- | --- | ---: | ---: | ---: |
+| KV, `N=512` | eager GEMM + fused RMSNorm backward | 1.975 ms | 1.966 ms | 2.100 ms |
+| KV, `N=512` | FlexGEMM row partial + compiled completion | 2.558 ms | 2.523 ms | 2.915 ms |
+| Q, `N=1,536` | eager GEMM + fused RMSNorm backward | 4.218 ms | 3.960 ms | 4.410 ms |
+| Q, `N=1,536` | FlexGEMM row partial + compiled completion | 5.454 ms | 5.194 ms | 5.733 ms |
+
+The FlexGEMM path is `0.772x` eager for KV and `0.773x` for Q, about 29% slower
+in both cases. It remains accepted under the project policy that permits a
+FlexGEMM pattern without a speedup. KV `dweight` was bitwise exact; KV `dx` had
+`max_abs_error=7.451e-9` and `mean_abs_error=1.573e-16`. Q `dx` had
+`max_abs_error=5.821e-11` and `mean_abs_error=5.951e-19`; Q `dweight` had
+`max_abs_error=4.768e-7` and `mean_abs_error=3.104e-10`. These differences come
+from the 128-column partial reduction order and require convergence validation.
+
 ## CODA-kernels comparison
 
 CODA-kernels was measured from `~/local/coda-kernels` on branch
@@ -1241,6 +1331,7 @@ convergence validation.
 | `f2_q_rmsnorm` | QKV square-sum and RMS-scaled GEMM primitives | no exact 1,536-wide segmented boundary wrapper |
 | `f2_kv_rmsnorm` | RMS-scaled GEMM primitives | no exact 512-plus-64 tail/RoPE wrapper |
 | `b4_router_input_grad_add` | no public residual-add-only GEMM | FlexGEMM/eager only |
+| `b5_mla_rmsnorm_backward` | `gemm_residual_partial_rmsnorm_bwd` has a different residual/`ZdZ` contract | FlexGEMM/eager measured above; no exact CODA row |
 | `b7_attention_grad_merge` | no public captured-add-only GEMM | FlexGEMM/eager only |
 | `f3_residual_rmsnorm` | residual partial RMSNorm plus RMS-scaled GEMM | measured with F4 above |
 

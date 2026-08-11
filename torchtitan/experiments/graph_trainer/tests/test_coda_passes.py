@@ -15,6 +15,7 @@ from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_b1_lm_head_input_grad_cast_pass,
     fuse_b2_dense_swiglu_backward_pass,
     fuse_b4_router_input_grad_add_pass,
+    fuse_b5_mla_rmsnorm_backward_pass,
     fuse_b6_bf16_weight_grad_cast_pass,
     fuse_b7_attention_grad_merge_pass,
     fuse_f2_kv_rmsnorm_pass,
@@ -957,6 +958,85 @@ class TestB4RouterInputGradAddPass(TestCase):
         self.assertEqual(self._flex_gemm_nodes(gm), [])
 
 
+class TestB5MLARMSNormBackwardPass(TestCase):
+    def _trace(self, *, module_fqn="layers.3.attention.wkv_b"):
+        m, k, n = 8, 16, 512
+
+        def fn(a, b, x, rstd, gamma):
+            grad = torch.ops.aten.mm.default(a, b)
+            grad = torch.ops.aten.reshape.default(grad, [2, 4, n])
+            return torch.ops.aten._fused_rms_norm_backward.default(
+                grad, x, [n], rstd, gamma, [True, True]
+            )
+
+        inputs = (
+            torch.randn(m, k, dtype=torch.bfloat16) * 0.02,
+            torch.randn(k, n, dtype=torch.bfloat16) * 0.02,
+            torch.randn(2, 4, n, dtype=torch.bfloat16) * 0.02,
+            torch.rand(2, 4, 1, dtype=torch.float32) + 0.5,
+            torch.randn(n, dtype=torch.bfloat16) * 0.02,
+        )
+        gm = make_fx(fn, tracing_mode="fake")(*inputs)
+        mm = next(
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        )
+        mm.meta["custom"] = {"module_fqn": module_fqn}
+        mm.meta["autograd_backward"] = True
+        norm = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._fused_rms_norm_backward.default
+        )
+        norm.meta["autograd_backward"] = True
+        return gm, inputs
+
+    def _expected(self, inputs):
+        a, b, x, rstd, gamma = inputs
+        n = x.shape[-1]
+        grad = torch.mm(a, b).reshape_as(x).float()
+        x_hat = x.float() * rstd
+        grad_x_hat = grad * gamma.float()
+        row_dot = (x_hat * grad_x_hat).sum(-1, keepdim=True)
+        grad_input = ((grad_x_hat - (x_hat / n) * row_dot) * rstd).bfloat16()
+        grad_weight = (grad * x_hat).reshape(-1, n).sum(0).bfloat16()
+        return grad_input, grad_weight
+
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_fuses_mla_projection_and_rmsnorm_backward_partials(self):
+        gm, inputs = self._trace()
+        expected = self._expected(inputs)
+
+        fuse_b5_mla_rmsnorm_backward_pass(gm)
+
+        actual = gm(*inputs)
+        self.assertEqual(actual, expected, exact_dtype=True)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(len(fused[0].args[2]), 5)
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._fused_rms_norm_backward.default
+                for node in gm.graph.nodes
+            )
+        )
+        body = getattr(gm, fused[0].args[1].target)
+        targets = [node.target for node in body.graph.nodes]
+        self.assertEqual(targets.count(torch.ops.aten.sum.dim_IntList), 1)
+
+    def test_does_not_fuse_non_mla_projection(self):
+        gm, _ = self._trace(module_fqn="layers.3.feed_forward.w2")
+
+        fuse_b5_mla_rmsnorm_backward_pass(gm)
+
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+
 class TestB7AttentionGradMergePass(TestCase):
     def _trace(self, *, q_layer=3):
         m, kv_width, q_width, model_width = 8, 16, 24, 512
@@ -1044,6 +1124,7 @@ class TestCodaPatternRegistry(TestCase):
                 "f2_q_rmsnorm",
                 "f2_kv_rmsnorm",
                 "b4_router_input_grad_add",
+                "b5_mla_rmsnorm_backward",
                 "b6_bf16_weight_grad_cast",
                 "b7_attention_grad_merge",
             ]
@@ -1059,6 +1140,7 @@ class TestCodaPatternRegistry(TestCase):
                 fuse_f2_q_rmsnorm_pass,
                 fuse_f2_kv_rmsnorm_pass,
                 fuse_b4_router_input_grad_add_pass,
+                fuse_b5_mla_rmsnorm_backward_pass,
                 fuse_b6_bf16_weight_grad_cast_pass,
                 fuse_b7_attention_grad_merge_pass,
             ],

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 import operator
 from collections.abc import Callable, Iterable
 
@@ -27,6 +28,8 @@ _ALIAS = torch.ops.aten.alias.default
 _CONSTANT_PAD_ND = torch.ops.aten.constant_pad_nd.default
 _COPY_ = torch.ops.aten.copy_.default
 _FUSED_RMS_NORM = torch.ops.aten._fused_rms_norm.default
+_FUSED_RMS_NORM_BACKWARD = torch.ops.aten._fused_rms_norm_backward.default
+_DIV_SCALAR = torch.ops.aten.div.Scalar
 _MEAN_DIM = torch.ops.aten.mean.dim
 _MUL = torch.ops.aten.mul.Tensor
 _POW_SCALAR = torch.ops.aten.pow.Tensor_Scalar
@@ -37,9 +40,12 @@ _SPLIT_WITH_SIZES = torch.ops.aten.split_with_sizes.default
 _SIGMOID = torch.ops.aten.sigmoid.default
 _SILU = torch.ops.aten.silu.default
 _SILU_BACKWARD = torch.ops.aten.silu_backward.default
+_SUB = torch.ops.aten.sub.Tensor
+_SUM_DIM = torch.ops.aten.sum.dim_IntList
 _TO_COPY = torch.ops.aten._to_copy.default
 _VIEW = torch.ops.aten.view.default
 _COMPILE_WITH_INDUCTOR = "compile_with_inductor"
+_CODA_RMSNORM_BACKWARD_GROUP = 128
 _CODA_RMSNORM_GROUP = 512
 _CODA_KV_RMSNORM_GROUP = 64
 _CODA_KV_ACTIVE_WIDTH = 512
@@ -476,6 +482,82 @@ def _build_b7_attention_grad_merge_body(
     total.meta = _copy_meta_with_value_from(mm, mm, other_branch_2d)
 
     graph.output((total,))
+    body = torch.fx.GraphModule(torch.nn.Module(), graph)
+    apply_flex_gemm_body_graph_passes(body, _MM)
+    for node in body.graph.nodes:
+        _tag_for_regional_inductor(node)
+    return body
+
+
+def _build_b5_mla_rmsnorm_backward_body(
+    mm: torch.fx.Node,
+    norm_input_2d: torch.fx.Node,
+    rstd_2d: torch.fx.Node,
+    gamma_2d: torch.fx.Node,
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    inputs = []
+    for index, source in enumerate((*mm.args, norm_input_2d, rstd_2d, gamma_2d)):
+        placeholder = graph.placeholder(f"arg{index}")
+        if isinstance(source, torch.fx.Node):
+            placeholder.meta = dict(source.meta)
+        inputs.append(placeholder)
+
+    body_mm = graph.call_function(_MM, tuple(inputs[:2]), dict(mm.kwargs))
+    body_mm.meta = dict(mm.meta)
+    accumulator = graph.call_function(_TO_COPY, (body_mm,), {"dtype": torch.float32})
+    accumulator.meta = _copy_meta_with_dtype(mm, torch.float32, mm)
+    rounded = graph.call_function(_TO_COPY, (accumulator,), {"dtype": torch.bfloat16})
+    rounded.meta = _copy_meta_with_value_from(mm, mm)
+    rounded_fp32 = graph.call_function(_TO_COPY, (rounded,), {"dtype": torch.float32})
+    rounded_fp32.meta = _copy_meta_with_dtype(mm, torch.float32, mm)
+    norm_input_fp32 = graph.call_function(
+        _TO_COPY, (inputs[2],), {"dtype": torch.float32}
+    )
+    norm_input_fp32.meta = _copy_meta_with_dtype(
+        norm_input_2d, torch.float32, norm_input_2d
+    )
+    x_hat = graph.call_function(_MUL, (norm_input_fp32, inputs[3]))
+    x_hat.meta = _copy_meta_with_dtype(
+        norm_input_2d, torch.float32, norm_input_2d, rstd_2d
+    )
+    gamma_fp32 = graph.call_function(_TO_COPY, (inputs[4],), {"dtype": torch.float32})
+    gamma_fp32.meta = _copy_meta_with_dtype(gamma_2d, torch.float32, gamma_2d)
+    grad_x_hat = graph.call_function(_MUL, (rounded_fp32, gamma_fp32))
+    grad_x_hat.meta = _copy_meta_with_dtype(mm, torch.float32, mm, gamma_2d)
+    row_products = graph.call_function(_MUL, (x_hat, grad_x_hat))
+    row_products.meta = _copy_meta_with_dtype(
+        mm, torch.float32, mm, norm_input_2d, rstd_2d, gamma_2d
+    )
+
+    mm_shape = _node_shape(mm)
+    assert mm_shape is not None
+    grouped = graph.call_function(
+        _VIEW,
+        (
+            row_products,
+            [mm_shape[0], -1, _CODA_RMSNORM_BACKWARD_GROUP],
+        ),
+    )
+    row_products_value = row_products.meta.get("val")
+    if isinstance(row_products_value, torch.Tensor):
+        grouped.meta = _copy_meta_with_value(
+            row_products_value.reshape(mm_shape[0], -1, _CODA_RMSNORM_BACKWARD_GROUP),
+            mm,
+            norm_input_2d,
+        )
+    else:
+        grouped.meta = _copy_meta(mm, norm_input_2d)
+    partial_row_dot = graph.call_function(_SUM_DIM, (grouped, [-1]))
+    grouped_value = grouped.meta.get("val")
+    if isinstance(grouped_value, torch.Tensor):
+        partial_row_dot.meta = _copy_meta_with_value(
+            grouped_value.sum(-1), mm, norm_input_2d, rstd_2d, gamma_2d
+        )
+    else:
+        partial_row_dot.meta = _copy_meta(mm, norm_input_2d, rstd_2d, gamma_2d)
+
+    graph.output((rounded, partial_row_dot))
     body = torch.fx.GraphModule(torch.nn.Module(), graph)
     apply_flex_gemm_body_graph_passes(body, _MM)
     for node in body.graph.nodes:
@@ -1805,6 +1887,275 @@ def fuse_b7_attention_grad_merge_pass(
     gm.graph.lint()
     gm.recompile()
     logger.info(f"B7 fused {num_fused} Q/KV attention input-gradient merges")
+    return gm
+
+
+def _match_b5_mla_rmsnorm_backward(
+    norm: torch.fx.Node,
+) -> tuple[
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+] | None:
+    if norm.target != _FUSED_RMS_NORM_BACKWARD or len(norm.args) < 6:
+        return None
+    grad_view, norm_input, normalized_shape, rstd, gamma, output_mask = norm.args[:6]
+    if (
+        not isinstance(grad_view, torch.fx.Node)
+        or grad_view.target not in (_RESHAPE, _VIEW)
+        or not grad_view.args
+        or not isinstance(grad_view.args[0], torch.fx.Node)
+        or _sole_user(grad_view) is not norm
+        or not isinstance(norm_input, torch.fx.Node)
+        or not isinstance(rstd, torch.fx.Node)
+        or not isinstance(gamma, torch.fx.Node)
+        or not isinstance(normalized_shape, (list, tuple))
+        or len(normalized_shape) != 1
+        or list(output_mask) != [True, True]
+        or norm.meta.get("autograd_backward") is not True
+    ):
+        return None
+    mm = grad_view.args[0]
+    module_fqn = _module_fqn(mm)
+    if (
+        mm.target != _MM
+        or _sole_user(mm) is not grad_view
+        or mm.meta.get("autograd_backward") is not True
+        or module_fqn is None
+        or not module_fqn.endswith((".attention.wkv_b", ".attention.wq_b"))
+    ):
+        return None
+
+    mm_shape = _node_shape(mm)
+    grad_shape = _node_shape(grad_view)
+    input_shape = _node_shape(norm_input)
+    rstd_shape = _node_shape(rstd)
+    gamma_shape = _node_shape(gamma)
+    if (
+        mm_shape is None
+        or len(mm_shape) != 2
+        or grad_shape is None
+        or input_shape != grad_shape
+        or rstd_shape != (*grad_shape[:-1], 1)
+        or gamma_shape != (grad_shape[-1],)
+        or normalized_shape[0] != grad_shape[-1]
+        or mm_shape != (math.prod(grad_shape[:-1]), grad_shape[-1])
+        or grad_shape[-1] % _CODA_RMSNORM_BACKWARD_GROUP != 0
+        or _node_dtype(mm) != torch.bfloat16
+        or _node_dtype(grad_view) != torch.bfloat16
+        or _node_dtype(norm_input) != torch.bfloat16
+        or _node_dtype(rstd) != torch.float32
+        or _node_dtype(gamma) != torch.bfloat16
+    ):
+        return None
+
+    outputs: dict[int, torch.fx.Node] = {}
+    for user in norm.users:
+        if (
+            user.target is not operator.getitem
+            or len(user.args) < 2
+            or user.args[0] is not norm
+            or user.args[1] not in (0, 1)
+        ):
+            return None
+        outputs[user.args[1]] = user
+    if set(outputs) != {0, 1}:
+        return None
+    if (
+        _node_shape(outputs[0]) != input_shape
+        or _node_dtype(outputs[0]) != torch.bfloat16
+        or _node_shape(outputs[1]) != gamma_shape
+        or _node_dtype(outputs[1]) != torch.bfloat16
+    ):
+        return None
+    return mm, grad_view, norm_input, rstd, gamma, outputs[0], outputs[1]
+
+
+def fuse_b5_mla_rmsnorm_backward_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Fuse MLA input-gradient GEMMs with RMSNorm backward row partials."""
+    del example_inputs
+    num_fused = 0
+    for norm in list(gm.graph.nodes):
+        match = _match_b5_mla_rmsnorm_backward(norm)
+        if match is None:
+            continue
+        mm, grad_view, norm_input, rstd, gamma, grad_input, grad_weight = match
+        mm_shape = _node_shape(mm)
+        input_shape = _node_shape(norm_input)
+        assert mm_shape is not None
+        assert input_shape is not None
+        mm_value = mm.meta["val"]
+        norm_input_value = norm_input.meta["val"]
+        rstd_value = rstd.meta["val"]
+        gamma_value = gamma.meta["val"]
+        assert isinstance(mm_value, torch.Tensor)
+        assert isinstance(norm_input_value, torch.Tensor)
+        assert isinstance(rstd_value, torch.Tensor)
+        assert isinstance(gamma_value, torch.Tensor)
+
+        with gm.graph.inserting_before(norm):
+            norm_input_2d = gm.graph.call_function(
+                _RESHAPE, (norm_input, list(mm_shape))
+            )
+            norm_input_2d_value = norm_input_value.reshape(mm_shape)
+            norm_input_2d.meta = _copy_meta_with_value(
+                norm_input_2d_value, norm_input, norm
+            )
+            _tag_for_regional_inductor(norm_input_2d)
+            rstd_2d = gm.graph.call_function(_RESHAPE, (rstd, [mm_shape[0], 1]))
+            rstd_2d_value = rstd_value.reshape(mm_shape[0], 1)
+            rstd_2d.meta = _copy_meta_with_value(rstd_2d_value, rstd, norm)
+            _tag_for_regional_inductor(rstd_2d)
+            gamma_2d = gm.graph.call_function(_RESHAPE, (gamma, [1, mm_shape[1]]))
+            gamma_2d_value = gamma_value.reshape(1, mm_shape[1])
+            gamma_2d.meta = _copy_meta_with_value(gamma_2d_value, gamma, norm)
+            _tag_for_regional_inductor(gamma_2d)
+
+            body = _build_b5_mla_rmsnorm_backward_body(
+                mm, norm_input_2d, rstd_2d, gamma_2d
+            )
+            body_name = _next_submodule_name(gm, "_coda_b5_mla_rmsnorm_body")
+            gm.add_module(body_name, body)
+            body_ref = gm.graph.get_attr(body_name)
+            _tag_for_regional_inductor(body_ref)
+            fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    body_ref,
+                    tuple(mm.args) + (norm_input_2d, rstd_2d, gamma_2d),
+                    dict(mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+
+            x_hat_value = norm_input_2d_value.float() * rstd_2d_value
+            grad_x_hat_value = mm_value.float() * gamma_2d_value.float()
+            row_products_value = x_hat_value * grad_x_hat_value
+            partial_value = row_products_value.reshape(
+                mm_shape[0], -1, _CODA_RMSNORM_BACKWARD_GROUP
+            ).sum(-1)
+            fused.meta = _copy_meta(mm, norm_input, rstd, gamma, norm)
+            fused.meta["val"] = (mm_value, partial_value)
+            fused.meta.pop("tensor_meta", None)
+            _tag_for_regional_inductor(fused)
+            rounded = gm.graph.call_function(operator.getitem, (fused, 0))
+            rounded.meta = _copy_meta_with_value(mm_value, mm, grad_view, norm)
+            _tag_for_regional_inductor(rounded)
+            partial = gm.graph.call_function(operator.getitem, (fused, 1))
+            partial.meta = _copy_meta_with_value(
+                partial_value, mm, norm_input, rstd, gamma, norm
+            )
+            _tag_for_regional_inductor(partial)
+
+            row_dot = gm.graph.call_function(_SUM_DIM, (partial, [-1], True))
+            row_dot_value = partial_value.sum(-1, keepdim=True)
+            row_dot.meta = _copy_meta_with_value(
+                row_dot_value, mm, norm_input, rstd, gamma, norm
+            )
+            _tag_for_regional_inductor(row_dot)
+            rounded_fp32 = gm.graph.call_function(
+                _TO_COPY, (rounded,), {"dtype": torch.float32}
+            )
+            rounded_fp32.meta = _copy_meta_with_value(mm_value.float(), mm, norm)
+            _tag_for_regional_inductor(rounded_fp32)
+            norm_input_fp32 = gm.graph.call_function(
+                _TO_COPY, (norm_input_2d,), {"dtype": torch.float32}
+            )
+            norm_input_fp32.meta = _copy_meta_with_value(
+                norm_input_2d_value.float(), norm_input, norm
+            )
+            _tag_for_regional_inductor(norm_input_fp32)
+            x_hat = gm.graph.call_function(_MUL, (norm_input_fp32, rstd_2d))
+            x_hat.meta = _copy_meta_with_value(x_hat_value, norm_input, rstd, norm)
+            _tag_for_regional_inductor(x_hat)
+            gamma_fp32 = gm.graph.call_function(
+                _TO_COPY, (gamma_2d,), {"dtype": torch.float32}
+            )
+            gamma_fp32.meta = _copy_meta_with_value(gamma_2d_value.float(), gamma, norm)
+            _tag_for_regional_inductor(gamma_fp32)
+            grad_x_hat = gm.graph.call_function(_MUL, (rounded_fp32, gamma_fp32))
+            grad_x_hat.meta = _copy_meta_with_value(grad_x_hat_value, mm, gamma, norm)
+            _tag_for_regional_inductor(grad_x_hat)
+            scaled_x_hat = gm.graph.call_function(_DIV_SCALAR, (x_hat, mm_shape[1]))
+            scaled_x_hat_value = x_hat_value / mm_shape[1]
+            scaled_x_hat.meta = _copy_meta_with_value(
+                scaled_x_hat_value, norm_input, norm
+            )
+            _tag_for_regional_inductor(scaled_x_hat)
+            correction = gm.graph.call_function(_MUL, (scaled_x_hat, row_dot))
+            correction_value = scaled_x_hat_value * row_dot_value
+            correction.meta = _copy_meta_with_value(
+                correction_value, mm, norm_input, rstd, gamma, norm
+            )
+            _tag_for_regional_inductor(correction)
+            centered = gm.graph.call_function(_SUB, (grad_x_hat, correction))
+            centered_value = grad_x_hat_value - correction_value
+            centered.meta = _copy_meta_with_value(
+                centered_value, mm, norm_input, rstd, gamma, norm
+            )
+            _tag_for_regional_inductor(centered)
+            grad_input_fp32 = gm.graph.call_function(_MUL, (centered, rstd_2d))
+            grad_input_fp32_value = centered_value * rstd_2d_value
+            grad_input_fp32.meta = _copy_meta_with_value(
+                grad_input_fp32_value, mm, norm_input, rstd, gamma, norm
+            )
+            _tag_for_regional_inductor(grad_input_fp32)
+            grad_input_2d = gm.graph.call_function(
+                _TO_COPY, (grad_input_fp32,), {"dtype": torch.bfloat16}
+            )
+            grad_input_2d_value = grad_input_fp32_value.to(torch.bfloat16)
+            grad_input_2d.meta = _copy_meta_with_value(grad_input_2d_value, grad_input)
+            _tag_for_regional_inductor(grad_input_2d)
+            new_grad_input = gm.graph.call_function(
+                _RESHAPE, (grad_input_2d, list(input_shape))
+            )
+            new_grad_input.meta = _copy_meta_with_value(
+                grad_input_2d_value.reshape(input_shape), grad_input
+            )
+            _tag_for_regional_inductor(new_grad_input)
+
+            grad_weight_terms = gm.graph.call_function(_MUL, (rounded_fp32, x_hat))
+            grad_weight_terms_value = mm_value.float() * x_hat_value
+            grad_weight_terms.meta = _copy_meta_with_value(
+                grad_weight_terms_value, mm, norm_input, rstd, norm
+            )
+            _tag_for_regional_inductor(grad_weight_terms)
+            grad_weight_fp32 = gm.graph.call_function(
+                _SUM_DIM, (grad_weight_terms, [0])
+            )
+            grad_weight_fp32_value = grad_weight_terms_value.sum(0)
+            grad_weight_fp32.meta = _copy_meta_with_value(
+                grad_weight_fp32_value, grad_weight
+            )
+            _tag_for_regional_inductor(grad_weight_fp32)
+            new_grad_weight = gm.graph.call_function(
+                _TO_COPY, (grad_weight_fp32,), {"dtype": torch.bfloat16}
+            )
+            new_grad_weight.meta = _copy_meta_with_value(
+                grad_weight_fp32_value.to(torch.bfloat16), grad_weight
+            )
+            _tag_for_regional_inductor(new_grad_weight)
+
+        grad_input.replace_all_uses_with(new_grad_input)
+        grad_weight.replace_all_uses_with(new_grad_weight)
+        gm.graph.erase_node(grad_input)
+        gm.graph.erase_node(grad_weight)
+        gm.graph.erase_node(norm)
+        gm.graph.erase_node(grad_view)
+        gm.graph.erase_node(mm)
+        num_fused += 1
+
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(f"B5 fused {num_fused} MLA GEMM plus RMSNorm backward chains")
     return gm
 
 
@@ -3349,6 +3700,7 @@ CODA_PATTERN_PASSES: dict[str, Callable] = {
     "b1_lm_head_input_grad_cast": fuse_b1_lm_head_input_grad_cast_pass,
     "b2_dense_swiglu_backward": fuse_b2_dense_swiglu_backward_pass,
     "b4_router_input_grad_add": fuse_b4_router_input_grad_add_pass,
+    "b5_mla_rmsnorm_backward": fuse_b5_mla_rmsnorm_backward_pass,
     "b6_bf16_weight_grad_cast": fuse_b6_bf16_weight_grad_cast_pass,
     "b7_attention_grad_merge": fuse_b7_attention_grad_merge_pass,
     "f3_residual_rmsnorm": fuse_f3_residual_rmsnorm_pass,
