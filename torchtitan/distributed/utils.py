@@ -27,7 +27,7 @@ from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import device_module, device_type
+from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -529,7 +529,7 @@ def init_distributed(
         import torch.distributed.config as dist_config
 
         dist_config.use_torchcomms = True
-        device_id = torch.device(device_type, int(os.environ["LOCAL_RANK"]))
+        device_id = get_local_device()
 
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),

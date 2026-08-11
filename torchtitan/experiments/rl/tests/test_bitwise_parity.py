@@ -102,9 +102,7 @@ def build_trainer_model(
     model_spec = config.model_spec
     hf_assets_path = config.hf_assets_path
 
-    device_type = utils.device_type
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device = torch.device(f"{device_type}:{local_rank}")
+    device = utils.get_local_device()
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
@@ -149,7 +147,7 @@ def build_trainer_model(
         ac_config=trainer_config.ac_config,
         dump_folder=trainer_config.dump_folder,
     )
-    model.to_empty(device=device_type)
+    model.to_empty(device=device)
     with torch.no_grad():
         model.init_weights(buffer_device=None)
 
