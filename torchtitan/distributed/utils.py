@@ -406,19 +406,23 @@ def get_spmd_context(
     return context
 
 
-def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
+def init_fake_mode(
+    world_size: int,
+    comm_mode: str = "fake_backend",
+    *,
+    rank: int = 0,
+) -> None:
     """Initialize fake backend
 
     Args:
         world_size: The number of GPUs to simulate
         comm_mode: Communication mode ("fake_backend" or "local_tensor")
+        rank: Global rank to simulate
 
-    Returns:
-        The world size
     """
     torch.distributed.init_process_group(
         "fake",
-        rank=0,
+        rank=rank,
         world_size=world_size,
     )
 
@@ -456,7 +460,18 @@ def init_distributed(
             raise ValueError(
                 f"NGPU environment variable must be a valid integer, got: {ngpu_str}"
             ) from e
-        init_fake_mode(world_size, comm_config.mode)
+        rank_str = os.environ.get("RANK", "0")
+        try:
+            rank = int(rank_str)
+        except ValueError as e:
+            raise ValueError(
+                f"RANK environment variable must be a valid integer, got: {rank_str}"
+            ) from e
+        if not 0 <= rank < world_size:
+            raise ValueError(
+                f"RANK must be in [0, {world_size}) for fake mode, got: {rank}"
+            )
+        init_fake_mode(world_size, comm_config.mode, rank=rank)
         return world_size
 
     def _warn_overwrite_env(env, val):

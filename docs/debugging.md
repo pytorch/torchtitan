@@ -6,8 +6,10 @@ MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --profiler.enable_memory_s
 ```
 * `--profiler.enable_memory_snapshot`: to enable memory profiling
 * `--profiler.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`./outputs/memory_snapshot/` by default)
+* `--profiler.memory_snapshot_freq`: controls how often regular memory snapshots are taken. When unset, it defaults to `--profiler.profile_freq` for backward compatibility.
 	+ In case of OOMs, the snapshots will be in `./outputs/memory_snapshot/iteration_x_exit`.
-	+ Regular snapshots (taken every `profiler.profile_freq` iterations) will be in `memory_snapshot/iteration_x`.
+	+ Regular snapshots will be in `memory_snapshot/iteration_x`.
+	+ For example, set `--profiler.memory_snapshot_freq 3` to take a snapshot every three iterations independently of trace profiling.
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
