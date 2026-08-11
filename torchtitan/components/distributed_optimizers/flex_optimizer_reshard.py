@@ -24,7 +24,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from types import ModuleType
-from typing import Any, cast, Generic, TypeAlias, TypeVar
+from typing import Any, cast, Generic, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -866,6 +866,26 @@ class _BufferSlot:
         return _reserved_view(reserved.storage_scratch, math.prod(shape)).view(shape)
 
 
+_LocalWorkT = TypeVar("_LocalWorkT", contravariant=True)
+
+
+class _LocalBucketExecutor(Protocol[_LocalWorkT]):
+    """Optimizer-owned execution for work that needs no redistribution."""
+
+    def _plan_local_bucket(
+        self,
+        local_work: tuple[_LocalWorkT, ...],
+    ) -> dict[_BufferKey, int]:
+        ...
+
+    def _execute_local_bucket(
+        self,
+        local_work: tuple[_LocalWorkT, ...],
+        slot: _BufferSlot,
+    ) -> None:
+        ...
+
+
 @dataclass(slots=True)
 class _PipelineSlot:
     """Persistent buffer keepalive and reusable cross-stream handoff events."""
@@ -917,15 +937,24 @@ class _CommunicationContext:
         )
 
 
-def _include_compute_scratch_requirement(
+def _include_local_compute_scratch_requirements(
     requirements: dict[_BufferKey, _BufferRequirements],
-    item: _ItemT,
+    work: tuple[_ItemT, ...],
     local_tensor_spec: Callable[[_ItemT], tuple[torch.Size, torch.dtype, torch.device]],
+    local_bucket_executor: _LocalBucketExecutor[_ItemT] | None,
 ) -> None:
-    shape, dtype, device = local_tensor_spec(item)
-    requirements.setdefault(
-        (device, dtype), _BufferRequirements()
-    ).include_compute_scratch(math.prod(shape))
+    if local_bucket_executor is not None:
+        for key, numel in local_bucket_executor._plan_local_bucket(work).items():
+            requirements.setdefault(key, _BufferRequirements()).include_compute_scratch(
+                numel
+            )
+        return
+
+    for item in work:
+        shape, dtype, device = local_tensor_spec(item)
+        requirements.setdefault(
+            (device, dtype), _BufferRequirements()
+        ).include_compute_scratch(math.prod(shape))
 
 
 class _BucketedRedistributionRuntime(Generic[_ItemT]):
@@ -941,8 +970,11 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     updates its runtime-owned input in place, and ``finalize`` consumes a
     runtime-owned result before reuse. Callbacks run under the stream selected
     by the runtime and must not retain tensors, synchronize, or call
-    ``Tensor.record_stream()``. Local-only buckets are prefetch barriers, so
-    no later redistributed ``prepare`` runs before an intervening local bucket.
+    ``Tensor.record_stream()``. An optional ``local_bucket_executor`` may batch
+    local work, but must plan and report its maximum scratch size through
+    ``reserve_buffers`` before it is passed to ``run``. Local-only buckets are
+    prefetch barriers, so no later redistributed ``prepare`` runs before an
+    intervening local bucket.
 
     Any exception is fatal: parameters or optimizer state may already be
     updated and communication may be in flight, so callers must not reuse this
@@ -969,6 +1001,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         local_tensor_spec: Callable[
             [_ItemT], tuple[torch.Size, torch.dtype, torch.device]
         ],
+        local_bucket_executor: _LocalBucketExecutor[_ItemT] | None = None,
     ) -> None:
         """Eagerly grow runtime-owned tensors to the plans' maximum sizes."""
         context = self._context
@@ -993,12 +1026,12 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         redistributed_index = 0
         for plan in plans:
             if isinstance(plan, _LocalBucketPlan):
-                for item in plan.items:
-                    _include_compute_scratch_requirement(
-                        local_requirements,
-                        item,
-                        local_tensor_spec,
-                    )
+                _include_local_compute_scratch_requirements(
+                    local_requirements,
+                    plan.items,
+                    local_tensor_spec,
+                    local_bucket_executor,
+                )
                 continue
 
             assert context is not None
@@ -1030,12 +1063,12 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 compute_partition = redistribution_plan.compute_partition(participant)
                 if compute_numel := math.prod(compute_partition.tensor_shape):
                     plan_requirements.include_compute_scratch(compute_numel)
-            for item in plan.unredistributed_items:
-                _include_compute_scratch_requirement(
-                    requirements,
-                    item,
-                    local_tensor_spec,
-                )
+            _include_local_compute_scratch_requirements(
+                requirements,
+                plan.unredistributed_items,
+                local_tensor_spec,
+                local_bucket_executor,
+            )
 
         self._local_slot.reserve(
             local_requirements,
@@ -1070,6 +1103,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         prepare: Callable[[_ItemT, Tensor], None],
         compute: Callable[[_ItemT, Tensor], None],
         finalize: Callable[[_ItemT, Tensor], None],
+        local_bucket_executor: _LocalBucketExecutor[_ItemT] | None = None,
     ) -> None:
         context = self._context
         handle = (
@@ -1111,13 +1145,14 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 if isinstance(plan, _LocalBucketPlan):
                     assert not prefetched
                     with handle.stream(caller):
-                        self._compute_without_redistribution(
+                        self._run_local_bucket(
                             plan.items,
                             self._local_slot,
                             local_tensor_spec=local_tensor_spec,
                             prepare=prepare,
                             compute=compute,
                             finalize=finalize,
+                            local_bucket_executor=local_bucket_executor,
                         )
                     next_plan_to_prefetch = plan_index + 1
                     continue
@@ -1168,6 +1203,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                     prepare=prepare,
                     compute=compute,
                     finalize=finalize,
+                    local_bucket_executor=local_bucket_executor,
                 )
                 if previous_work is not None:
                     self._release(previous_work, caller)
@@ -1241,16 +1277,18 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         prepare: Callable[[_ItemT, Tensor], None],
         compute: Callable[[_ItemT, Tensor], None],
         finalize: Callable[[_ItemT, Tensor], None],
+        local_bucket_executor: _LocalBucketExecutor[_ItemT] | None,
     ) -> None:
         handle = context.device_handle
         with handle.stream(caller_stream):
-            _BucketedRedistributionRuntime._compute_without_redistribution(
+            _BucketedRedistributionRuntime._run_local_bucket(
                 work.plan.unredistributed_items,
                 slot.buffers,
                 local_tensor_spec=local_tensor_spec,
                 prepare=prepare,
                 compute=compute,
                 finalize=finalize,
+                local_bucket_executor=local_bucket_executor,
             )
             caller_stream.wait_event(slot.compute_input_ready)
             _compute_redistributed(
@@ -1283,8 +1321,8 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         caller_stream.wait_event(work.slot.done)
 
     @staticmethod
-    def _compute_without_redistribution(
-        items: Sequence[_ItemT],
+    def _run_local_bucket(
+        work: tuple[_ItemT, ...],
         slot: _BufferSlot,
         *,
         local_tensor_spec: Callable[
@@ -1293,8 +1331,12 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         prepare: Callable[[_ItemT, Tensor], None],
         compute: Callable[[_ItemT, Tensor], None],
         finalize: Callable[[_ItemT, Tensor], None],
+        local_bucket_executor: _LocalBucketExecutor[_ItemT] | None,
     ) -> None:
-        for item in items:
+        if local_bucket_executor is not None:
+            local_bucket_executor._execute_local_bucket(work, slot)
+            return
+        for item in work:
             shape, dtype, device = local_tensor_spec(item)
             prepared = slot.compute_buffer(shape, dtype=dtype, device=device)
             prepare(item, prepared)
