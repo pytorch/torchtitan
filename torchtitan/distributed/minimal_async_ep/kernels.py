@@ -308,17 +308,6 @@ def _copy_rows_to_peer_ptrs_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
-    """Copy rows into peer symmetric hidden buffers through pointer tables.
-
-    ``dst_ranks`` selects the peer buffer, ``dst_rows`` selects the row within
-    that peer buffer, and ``src_rows`` optionally gathers rows from ``src``.
-    ``num_valid_rows`` optionally limits the copy to the active prefix.
-
-    Example:
-        With ``src=[[10], [20], [30]]``, ``dst_ranks=[1, 0]``,
-        ``dst_rows=[3, 4]``, and ``src_rows=[2, 0]``, peer 1 row 3 receives
-        ``[30]`` and peer 0 row 4 receives ``[10]``.
-    """
     row_start = tl.program_id(0) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_NUM_VALID_ROWS:
