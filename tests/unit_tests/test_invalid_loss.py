@@ -34,6 +34,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config.training.max_norm = 1.0
         trainer.device = torch.device("cpu")
         trainer.gradient_accumulation_steps = 1
+        trainer.num_pipeline_parallel_microbatches = 1
         trainer.step = 1
         trainer.ntokens_seen = 0
 
