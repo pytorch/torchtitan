@@ -33,14 +33,14 @@ every FSDP2 shard already contained complete heads.
 
 The split-head case was rejected because:
 
-- `muon/prep_parameters.py` required every local row count and global row offset
-  to be a multiple of `R`.
+- `components/distributed_muon.py` required every local row count and global
+  row offset to be a multiple of `R`.
 - Preparation eagerly viewed each local storage shard as a batch of complete
   matrices.
 - The original distributed Muon implementation treated `Shard(0)` as a
   local-compute-only placement.
-- `flex_optimizer_reshard.py` only supported local computation or redistribution
-  of a complete tensor to one `Owned` rank.
+- The FlexShard planner only supported local computation or redistribution of
+  a complete tensor to one `Owned` rank.
 - The reshard runtime assumed one input and output span per redistributed
   parameter and that every compute destination received the full tensor.
 
@@ -80,16 +80,17 @@ endpoint routes. Cumulative compute load breaks exact per-bucket ties.
 `(primary load, secondary load, stable key)` triples; the adapter supplies the
 Muon-specific costs and FQNs as deterministic keys.
 
-`muon/distributed_muon.py` owns the optimizer runtime and its private Tensor-level
-Muon operations. `muon/prep_parameters.py` is the trainer-facing adapter for
-parameter views and groups, while `muon/storage_to_compute.py` owns transition
-policy and route construction.
+`components/distributed_muon.py` owns public configuration, parameter
+preparation, the optimizer, and its private Tensor-level Muon operations.
+`components/_distributed_muon_planner.py` owns Muon transition policy and
+view-aware route construction. `distributed/flex_shard/` owns generic bucket,
+region, packed-collective, buffer, stream, and pipeline machinery.
 
 ## Implementation plan
 
 ### 1. Separate storage metadata from the compute view
 
-Update `torchtitan/components/distributed_optimizers/muon/prep_parameters.py`:
+Update `torchtitan/components/distributed_muon.py`:
 
 - Continue validating the global 2D shape and resolving `H`, `R`, and `C`.
 - Continue requiring supported, contiguous storage layouts.
@@ -104,8 +105,8 @@ Update `torchtitan/components/distributed_optimizers/muon/prep_parameters.py`:
 
 ### 2. Resolve an explicit storage-to-compute transition
 
-Update `muon/storage_to_compute.py` for placement planning and
-`muon/distributed_muon.py` for the optimizer runtime:
+Update `components/_distributed_muon_planner.py` for placement planning and
+`components/distributed_muon.py` for the optimizer runtime:
 
 - Represent storage-to-compute behavior with explicit transitions: no
   redistribution, whole-tensor single-participant compute, or dimension-0
@@ -118,8 +119,8 @@ Update `muon/storage_to_compute.py` for placement planning and
 
 ### 3. Add head-aware reshard planning
 
-Update
-`torchtitan/components/distributed_optimizers/flex_optimizer_reshard.py`:
+Update `torchtitan/distributed/flex_shard/_optimizer_reshard_schedule.py` and the Muon-specific
+planner:
 
 - Generalize the bucket planner beyond local and whole-tensor `Owned` work.
 - Keep optimizer-specific compute placement and balancing outside the generic
@@ -251,7 +252,7 @@ are intentionally omitted to keep the test footprint minimal.
 ## Suggested implementation sequence
 
 1. Generalize route representation and validation in
-   `flex_optimizer_reshard.py`, with CPU tests.
+   `distributed/flex_shard/_optimizer_reshard_schedule.py`, with CPU tests.
 2. Extend packed preparation, assembly, and finalization to multiple spans.
 3. Wire the matrix-batch transition into Muon while preserving the local and
    `Owned` paths.
