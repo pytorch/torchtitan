@@ -6,28 +6,37 @@
 
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+from spmd_types import SpmdType
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
-
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    set_current_spmd_mesh,
+)
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
+    FlexAttention,
     VarlenAttention,
     VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     multimodal_context,
     scatter_vision_embeds,
 )
+from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
     get_nparams_and_active_nparams,
@@ -37,7 +46,7 @@ from torchtitan.protocols.module import Module
 
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
-from .sharding import annotate_qwen35_input_spmd_types, set_qwen35_sharding_config
+from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
@@ -245,15 +254,18 @@ class Qwen35Model(Decoder):
       text batches use the plain 1D positions
     - MoE variant: routed experts + shared expert with sigmoid gate
 
-    MRoPE positions (``mrope_positions``, shape ``(num_tokens, 3)``) are built by
-    the dataloader and forwarded to every pipeline stage, so RoPE stays consistent
-    across stages even though the raw vision inputs (``pixel_values``/``grid_thw``)
-    only reach the first stage. Text batches carry no ``mrope_positions`` and use
-    the 1D ``positions`` instead.
+    MRoPE positions (shape ``(num_tokens, 3)``) are built by the dataloader as
+    ``mrope_positions``. After building the attention masks from the 2D
+    ``positions``, ``preprocess_inputs`` picks which one the RoPE layers see:
+    ``mrope_positions`` when present (multimodal), else the 2D ``positions`` --
+    the chosen tensor overwrites the single ``positions`` input. This keeps RoPE
+    consistent across every pipeline stage even though the raw vision inputs
+    (``pixel_values``/``grid_thw``) only reach the first stage. The per-layer
+    MRoPE dispatches on the position rank.
 
     Forward pass flow::
 
-        forward(tokens, pixel_values, grid_thw, mrope_positions, ...)
+        forward(tokens, pixel_values, grid_thw, positions, ...)
           │
           ├─ _prepare_multimodal_embeds
           │    ├─ tok_embeddings(tokens)              → text embeddings
@@ -262,7 +274,7 @@ class Qwen35Model(Decoder):
           │    ├─ get_vision_positions              → locate vision regions
           │    └─ _scatter_vision_embeds                → scatter into text sequence
           │
-          └─ transformer layers (hybrid), each given (mrope_positions or positions)
+          └─ transformer layers (hybrid), each given ``positions`` (3D or 2D)
                └─ for each layer:
                     ├─ full attention (every Nth):  QK-norm → partial RoPE → SDPA → gate
                     │    (the layer's MRoPE builds the cos/sin cache from positions)
@@ -347,6 +359,75 @@ class Qwen35Model(Decoder):
 
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        batch: dict[str, Any] = dict(input_dict)
+
+        # Attention masks are built from the 1D ``positions``.
+        positions = batch.get("positions")
+        if positions is not None:
+            inner = self.config.first_full_attention_backend
+            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+
+        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
+
+        # RoPE uses the 3D MRoPE positions when present (multimodal), else the
+        # same 2D positions. Collapse both into the single ``positions`` input.
+        mrope_positions = batch.pop("mrope_positions", None)
+        if mrope_positions is None:
+            rope_positions = positions
+        else:
+            rope_positions = mrope_positions
+            # MRoPE positions fold to ``(tokens, 3)`` (2D); replicate the
+            # trailing component axis instead of the 1D token layout.
+            input_sharding["positions"] = SpmdType(
+                {
+                    MeshAxisName.DP: spmd.V,
+                    MeshAxisName.CP: spmd.V,
+                    MeshAxisName.TP: spmd.R,
+                },
+                partition_spec=spmd.PartitionSpec(
+                    (MeshAxisName.DP, MeshAxisName.CP), None
+                ),
+            )
+        assert rope_positions is not None, (
+            "Qwen3.5 needs RoPE positions: the batch must provide "
+            "'positions' or 'mrope_positions'."
+        )
+        batch["positions"] = rope_positions
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                input_sharding,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        if parallelism.spmd_backend == "spmd_types":
+            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+            # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
+            # nested inside attention_masks, must be annotated at its container.
+            attention_masks = batch.get("attention_masks")
+            if attention_masks is not None:
+                with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+                    annotate_deltanet_cu_seqlens(attention_masks)
+
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
 
     def get_attention_masks(
         self,
@@ -489,20 +570,9 @@ class Qwen35Model(Decoder):
         grid_thw_videos: torch.Tensor | None = None,
         attention_masks: Qwen35AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
-        mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
         with multimodal_context():
-            if get_spmd_backend() == "spmd_types":
-                annotate_qwen35_input_spmd_types(
-                    attention_masks=attention_masks,
-                    mrope_positions=mrope_positions,
-                    pixel_values=pixel_values,
-                    pixel_values_videos=pixel_values_videos,
-                    grid_thw=grid_thw,
-                    grid_thw_videos=grid_thw_videos,
-                )
-
             if self.tok_embeddings is not None:
                 x = self._prepare_multimodal_embeds(
                     tokens,
@@ -522,11 +592,11 @@ class Qwen35Model(Decoder):
                 spmd.PartitionSpec(("dp", "cp"), None),
             )
 
-        # 3D MRoPE positions for multimodal batches, else 2D text positions.
-        rope_positions = mrope_positions if mrope_positions is not None else positions
-        assert rope_positions is not None
+        # ``positions`` is 3D MRoPE (batch, seq, 3) for multimodal batches and
+        # 2D (batch, seq) for text; ``preprocess_inputs`` resolved which one to
+        # forward. The per-layer MRoPE dispatches on rank.
         for layer in self.layers.values():
-            x = layer(x, attention_masks, rope_positions)
+            x = layer(x, attention_masks, positions)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

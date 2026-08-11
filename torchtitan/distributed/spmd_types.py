@@ -17,7 +17,6 @@ import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-
 from torchtitan.distributed.parallel_dims import (
     MeshAxisName,
     ParallelDims,
@@ -193,43 +192,39 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
 
 
 def annotate_input_spmd_types(
-    parallel_dims: ParallelDims,
-    inputs: torch.Tensor,
-    labels: torch.Tensor,
-    extra_kwargs: dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-    """Annotate decoder inputs/labels with SPMD types.
+    parallel_dims: "ParallelDims",
+    input_dict: dict[str, Any],
+    input_sharding: dict[str, spmd.SpmdType],
+) -> dict[str, Any]:
+    """Annotate named forward inputs with SPMD types from ``input_sharding``.
 
-    Hardcodes the standard decoder convention: inputs and positions are
-    ``S(0)@DP, S(0)@CP, R@TP``; labels are
-    ``S(0)@DP, S(0)@CP, I@TP``.
+    ``input_dict`` maps each name ('input', 'labels', and extra forward kwargs)
+    to its value. Each named tensor is asserted against its own layout.
+    Non-tensor kwargs (e.g. ``attention_masks`` containers, ``special_tokens``)
+    are left untouched. Every *tensor* input, however, must have a layout entry:
+    a tensor with no entry raises rather than being silently left untyped.
+    Tensors nested inside container kwargs are not reachable here and must
+    be annotated at their construction site.
     """
-    token_type = (
-        {
-            MeshAxisName.DP: spmd.V,
-            MeshAxisName.CP: spmd.V,
-            MeshAxisName.TP: spmd.R,
-        },
-        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
-    )
-    label_type = (
-        {
-            MeshAxisName.DP: spmd.V,
-            MeshAxisName.CP: spmd.V,
-            MeshAxisName.TP: spmd.I,
-        },
-        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
-    )
-
     mesh = parallel_dims.spmd_dense_mesh()
+    untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
-        spmd.assert_type(inputs, *token_type)
-        spmd.assert_type(labels, *label_type)
-        if "positions" in extra_kwargs and isinstance(
-            extra_kwargs["positions"], torch.Tensor
-        ):
-            spmd.assert_type(extra_kwargs["positions"], *token_type)
-    return inputs, labels, extra_kwargs
+        for name, value in input_dict.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            layout = input_sharding.get(name)
+            if layout is None:
+                untyped.append(name)
+                continue
+            spmd.assert_type(value, layout)
+    if untyped:
+        raise ValueError(
+            "spmd_types backend requires an SPMD layout for every tensor input, "
+            f"but these have no entry in input_sharding: {sorted(untyped)}. Add "
+            "them to the input layout the model declares in ``preprocess_inputs``, "
+            "or annotate nested/container tensors at their construction site."
+        )
+    return input_dict
 
 
 def _per_axis_types(
@@ -360,16 +355,12 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
             src_axes = (
                 ()
                 if src_entry is None
-                else src_entry
-                if isinstance(src_entry, tuple)
-                else (src_entry,)
+                else src_entry if isinstance(src_entry, tuple) else (src_entry,)
             )
             dst_axes = (
                 ()
                 if dst_entry is None
-                else dst_entry
-                if isinstance(dst_entry, tuple)
-                else (dst_entry,)
+                else dst_entry if isinstance(dst_entry, tuple) else (dst_entry,)
             )
             if src_axes == dst_axes:
                 continue
