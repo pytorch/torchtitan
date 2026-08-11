@@ -259,10 +259,10 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    # One four-GPU smoke path covers PP=2, FSDP=2, and EP=2. PP
-                    # leaves some global optimizer groups absent on an individual
-                    # stage, exercising stage-local Muon state. TP remains
-                    # unsupported because it can produce _StridedShard storage.
+                    # One four-GPU smoke path covers PP=2, FSDP=2, and EP=2.
+                    # Each PP stage consumes its local subset of the global Muon
+                    # compute-sharding map. TP remains unsupported because it can
+                    # produce _StridedShard storage.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
