@@ -103,7 +103,6 @@ def reserve_for_layer(
     tokens_per_rank: int | None,
     in_features: int,
     out_features: int,
-    dtype: torch.dtype,
 ) -> None:
     """Reserve this layer's share of the workspace, if the token count is known.
 
@@ -111,6 +110,12 @@ def reserve_for_layer(
     runtime config (inference-only callers, unit tests). Reserving is then simply
     skipped and the ops size the workspace lazily on first use, as they always
     have -- correct, just without the graph-capture guarantee.
+
+    Sized as float32 rather than the layer's actual dtype. Only under-reserving is
+    dangerous -- it puts growth back inside graph capture -- and the collective
+    runs in ``training.mixed_precision_param``, which is independent of the dtype
+    the weight happens to hold here. Both are ``bfloat16 | float32``, so float32
+    is an upper bound over every combination and needs nothing plumbed in.
     """
     if tokens_per_rank is None:
         return
@@ -118,7 +123,7 @@ def reserve_for_layer(
         tp_group,
         tokens_per_rank=tokens_per_rank // tp_group.size(),
         features=max(in_features, out_features),
-        dtype=dtype,
+        dtype=torch.float32,
     )
 
 
@@ -139,7 +144,6 @@ def maybe_update_dist_gemm_config(model_config: object, config: object) -> None:
     if not cfgs:
         return
 
-    from torchtitan.config import TORCH_DTYPE_MAP
     from torchtitan.trainer import Trainer
 
     if not isinstance(config, Trainer.Config):
@@ -147,10 +151,8 @@ def maybe_update_dist_gemm_config(model_config: object, config: object) -> None:
         return
 
     tokens_per_rank = config.training.local_batch_size * config.training.seq_len
-    dtype = TORCH_DTYPE_MAP[config.training.mixed_precision_param]
     for cfg in cfgs:
         cfg.tokens_per_rank = tokens_per_rank
-        cfg.param_dtype = dtype
 
 
 def walk_configs(root: object) -> Iterator[object]:
@@ -176,15 +178,18 @@ class AllGatherFusedQKVLinear(FusedQKVLinear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(FusedQKVLinear.Config):
-        # Filled in by maybe_update_dist_gemm_config from the runtime config.
+        # The workspace reservation needs the token count, and it is the one
+        # dimension the module cannot recover on its own: K and N come off the
+        # weight, but M is batch x seq_len, known only to the runtime config,
+        # which `parallelize` is not handed. So `maybe_update_dist_gemm_config`
+        # stamps it here at config-construction time, where both are in scope,
+        # and `parallelize` reads it back off the built module.
         tokens_per_rank: int | None = None
-        param_dtype: torch.dtype | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.tp_group: dist.ProcessGroup | None = None
         self.tokens_per_rank = config.tokens_per_rank
-        self.param_dtype = config.param_dtype
 
     def parallelize(self, parallel_dims: "ParallelDims") -> None:
         tp_mesh = parallel_dims.get_optional_mesh("tp")
@@ -197,7 +202,6 @@ class AllGatherFusedQKVLinear(FusedQKVLinear):
                 tokens_per_rank=self.tokens_per_rank,
                 in_features=in_features,
                 out_features=out_features // self.tp_group.size(),
-                dtype=self.param_dtype or self.wqkv.weight.dtype,
             )
         super().parallelize(parallel_dims)
 
@@ -256,15 +260,14 @@ class AttentionOutputLinear(Linear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
-        # Filled in by maybe_update_dist_gemm_config from the runtime config.
+        # See AllGatherFusedQKVLinear.Config: M is the one dimension the module
+        # cannot recover from its own weight, so the runtime config stamps it here.
         tokens_per_rank: int | None = None
-        param_dtype: torch.dtype | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.tp_group: dist.ProcessGroup | None = None
         self.tokens_per_rank = config.tokens_per_rank
-        self.param_dtype = config.param_dtype
 
     def parallelize(self, parallel_dims: "ParallelDims") -> None:
         tp_mesh = parallel_dims.get_optional_mesh("tp")
@@ -277,7 +280,6 @@ class AttentionOutputLinear(Linear):
                 tokens_per_rank=self.tokens_per_rank,
                 in_features=in_features // self.tp_group.size(),
                 out_features=out_features,
-                dtype=self.param_dtype or self.weight.dtype,
             )
         super().parallelize(parallel_dims)
 
