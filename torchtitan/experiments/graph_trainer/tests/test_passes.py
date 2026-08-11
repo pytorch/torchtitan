@@ -4141,6 +4141,63 @@ class TestChunkPasses(TestCase):
             [ready_wait],
         )
 
+    def test_ep_overlap_preserves_minimal_async_ep_dispatch_buffer_lifetime(self):
+        from torchtitan.distributed.minimal_async_ep import api
+
+        def exchanges(x, expert_ids, counts):
+            outputs = []
+            for buffer_set in (0, 1, 0, 1):
+                dispatched = api.dispatch_op(x, expert_ids, counts, 16, 2, buffer_set)
+                hidden, _ = api.wait_dispatch_op(
+                    dispatched[0], dispatched[8], [x, expert_ids, counts]
+                )
+                expert_output = torch.sin(hidden)
+                combined = api.combine_op(
+                    expert_output,
+                    *dispatched[1:6],
+                    8,
+                    buffer_set,
+                )
+                outputs.append(api.wait_combine(combined, [expert_output]))
+            return outputs
+
+        gm = make_fx(exchanges, tracing_mode="fake")(
+            torch.randn(4, 8),
+            torch.tensor([[0, 1], [1, 2], [2, 3], [3, 0]]),
+            torch.full((4,), 2, dtype=torch.int64),
+        )
+        blocks: list[list[torch.fx.Node]] = []
+        for node in gm.graph.nodes:
+            if node.target is torch.ops.minimal_async_ep.dispatch.default:
+                blocks.append([])
+            if blocks and node.op == "call_function":
+                blocks[-1].append(node)
+
+        dispatches, releases = [], []
+        for block_idx, block in enumerate(blocks):
+            chunk_id = block_idx % 2
+            fqn = f"layers.{block_idx // 2}.moe"
+            for node in block:
+                self._mark_chunk_body(node, fqn=fqn, chunk_id=chunk_id)
+            dispatch = next(
+                node
+                for node in block
+                if node.target is torch.ops.minimal_async_ep.dispatch.default
+            )
+            combine = next(
+                node
+                for node in block
+                if node.target is torch.ops.minimal_async_ep.combine.default
+            )
+            dispatches.append(dispatch)
+            releases.append(combine.args[0])
+
+        self._schedule_ep_overlap_and_order(gm)
+        self.assertNotIn("buffer_reuse_dependency", dispatches[0].kwargs)
+        self.assertNotIn("buffer_reuse_dependency", dispatches[1].kwargs)
+        self.assertIs(dispatches[2].kwargs["buffer_reuse_dependency"], releases[0])
+        self.assertIs(dispatches[3].kwargs["buffer_reuse_dependency"], releases[1])
+
     def test_ep_overlap_keeps_transformer_batch_first_marker_wait_gated(self):
         c10d = torch.ops._c10d_functional
 
