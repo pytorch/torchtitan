@@ -7,7 +7,7 @@
 import dataclasses
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -15,6 +15,9 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.fx.experimental.symbolic_shapes import guard_or_false
 
 from torchtitan.protocols.module import Module
+
+if TYPE_CHECKING:
+    from torchtitan.distributed import ParallelDims
 
 __all__ = [
     "ComplexRoPE",
@@ -210,6 +213,21 @@ class RoPE(Module):
             buffer_device = self.cache.device
         with torch.device(buffer_device):
             self.cache = self._precompute_cache()
+
+    def parallelize(self, parallel_dims: "ParallelDims") -> None:
+        """When several layers share this module, parallelize only once.
+
+        ``Module.parallelize`` recurses per parent, so a RoPE shared by N
+        attention layers (see ``Config.build``) is reached N times in one pass,
+        where the base implementation treats the second visit as a caller
+        error. Here the visits are equivalent -- every layer holds the same
+        ``sharding_config`` object -- so the first parent to arrive shards the
+        cache and the rest are no-ops. Modules with parameters keep the strict
+        base behavior.
+        """
+        if self._parallelized:
+            return
+        super().parallelize(parallel_dims)
 
 
 class ComplexRoPE(RoPE):
