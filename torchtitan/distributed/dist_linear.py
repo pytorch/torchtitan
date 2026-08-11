@@ -117,7 +117,7 @@ class AllGatherLinear(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         x_shard_m: torch.Tensor,
         w_shard_n: torch.Tensor,
@@ -151,7 +151,7 @@ class AllGatherLinear(torch.autograd.Function):
         return y_shard_n
 
     @staticmethod
-    def backward(ctx, grad_y_shard_n: torch.Tensor):
+    def backward(ctx, grad_y_shard_n: torch.Tensor):  # pyrefly: ignore[bad-override]
         # dgrad and wgrad are independent, and each is a fused collective+matmul
         # in its own right: dgrad is the dual of the forward gather (matmul then
         # reduce-scatter back to a sequence shard), wgrad gathers the saved
@@ -209,7 +209,7 @@ class LinearReduceScatter(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         x_shard_k: torch.Tensor,
         w_shard_k: torch.Tensor,
@@ -238,7 +238,7 @@ class LinearReduceScatter(torch.autograd.Function):
         return y_shard_m
 
     @staticmethod
-    def backward(ctx, grad_y_shard_m: torch.Tensor):
+    def backward(ctx, grad_y_shard_m: torch.Tensor):  # pyrefly: ignore[bad-override]
         # One gather serves both grads: the fused all-gather-matmul returns the
         # full dy alongside dgrad, so wgrad is a plain local matmul on it. dbias
         # is the only term needing a second collective, since each rank's dy

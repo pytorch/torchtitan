@@ -317,8 +317,8 @@ class DistGemmGQAttention(GQAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
-        qkv_linear: AllGatherFusedQKVLinear.Config
-        wo: AttentionOutputLinear.Config
+        qkv_linear: AllGatherFusedQKVLinear.Config  # pyrefly: ignore[bad-override]
+        wo: AttentionOutputLinear.Config  # pyrefly: ignore[bad-override]
 
     def parallelize(self, parallel_dims: "ParallelDims") -> None:
         # AllGatherFusedQKVLinear owns the attention input all-gather explicitly.

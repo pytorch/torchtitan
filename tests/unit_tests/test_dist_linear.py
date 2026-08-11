@@ -15,6 +15,8 @@ transposed gradient slips in, it shows up as a large error on exactly one of the
 tensors below, which localizes the bug immediately.
 """
 
+import unittest
+
 import torch
 import torch.nn.functional as F
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -25,6 +27,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.dist_linear import AllGatherLinear, LinearReduceScatter
 
 
+# DTensorTestBase falls back to a CPU/gloo mesh when CUDA is unavailable, so
+# without this guard the CPU CI job runs these for real and dies in the
+# dispatcher: the symm_mem ops have no CPU kernel.
+@unittest.skipUnless(torch.cuda.is_available(), "symmetric memory requires CUDA")
 class TestDistLinearPrimitives(DTensorTestBase):
     """Forward and backward parity against an unsharded reference."""
 
