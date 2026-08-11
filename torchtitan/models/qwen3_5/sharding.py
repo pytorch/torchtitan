@@ -34,7 +34,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
-from torchtitan.models.common.vision_sharding import (
+from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
     set_vision_transformer_block_sharding_config,
     vision_colwise_config,
@@ -214,10 +214,10 @@ def _set_shared_expert_gate_sharding(
 
     The common MoE sharding handles the shared FFN (w1/w2/w3) and the
     module-boundary gather that feeds the gate a Replicate ``x``. Here we only
-    add the gate: its weight is Replicate and its output is Replicate, so
-    ``sigmoid(gate(x)) * ffn(x)`` is ``Replicate * Partial = Partial`` with no
-    extra collective. ``getattr`` keeps this a no-op when the MoE has no shared
-    expert (``None``); Qwen3.5's shared expert always carries the gate.
+    add the gate: its weight and local output are Replicate, then the output is
+    sliced into the sequence-sharded layout produced by the shared FFN before
+    the pointwise multiply. ``getattr`` keeps this a no-op when the MoE has no
+    shared expert (``None``); Qwen3.5's shared expert always carries the gate.
     """
     gate = getattr(shared_experts, "gate", None)
     if gate is None:
@@ -228,7 +228,7 @@ def _set_shared_expert_gate_sharding(
             "bias": dense_param_placement(tp=spmd.R),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.R),
-        out_dst_shardings=dense_activation_placement(tp=spmd.R),
+        out_dst_shardings=dense_sequence_parallel_placement(),
     )
 
 
@@ -334,22 +334,13 @@ def _set_deltanet_sharding(
     deltanet_cfg.norm.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"x": _norm_plc, "gate": _norm_plc},
-        in_dst_shardings={"x": _norm_plc, "gate": _norm_plc},
         out_src_shardings=_norm_plc,
-        out_dst_shardings=_norm_plc,
     )
 
     # GatedDeltaKernel: local_map converts DTensor q/k/v/g/beta to local.
     _kernel_plc = dense_activation_placement(tp=spmd.S(2))
     deltanet_cfg.kernel.sharding_config = ShardingConfig(
         in_src_shardings={
-            "xq_BLNK": _kernel_plc,
-            "xk_BLNK": _kernel_plc,
-            "xv_BLNV": _kernel_plc,
-            "g_BLN": _kernel_plc,
-            "beta_BLN": _kernel_plc,
-        },
-        in_dst_shardings={
             "xq_BLNK": _kernel_plc,
             "xk_BLNK": _kernel_plc,
             "xv_BLNV": _kernel_plc,
@@ -370,5 +361,4 @@ def _set_deltanet_sharding(
         in_src_shardings={"x_BLD": attention_input_layout},
         in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_sequence_parallel_placement(),
-        out_dst_shardings=dense_sequence_parallel_placement(),
     )

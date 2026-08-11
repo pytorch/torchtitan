@@ -443,7 +443,7 @@ class Qwen35VisionEncoder(Module):
         x = x + learned_pos
 
         mask_mod = get_vision_block_mask_mod(num_patch)
-        # BlockMask creation and use in FlexAttention are blackboxed by typechecking.
+        # BlockMask creation and use in FlexAttention are blackboxed from typechecking.
         with spmd.no_typecheck():
             attention_mask = compiled_create_block_mask(
                 mask_mod,
