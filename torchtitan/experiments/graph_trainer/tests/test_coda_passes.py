@@ -463,25 +463,27 @@ class TestF3ResidualRMSNormPass(TestCase):
             mm_nodes[2].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w3"}
         return gm, inputs
 
-    def _expected(self, inputs):
-        a, first_weight, residual, gamma, second_weight, third_weight = inputs
-        first = torch.mm(a, first_weight).reshape(2, 4, 512)
-        total = residual + first
-        total_2d = total.reshape(8, 512)
-        weighted = (total_2d.float() * gamma).bfloat16()
-        partial_mean_square = total_2d.float().reshape(8, -1, 512).square().mean(-1)
-        rstd = (partial_mean_square.mean(-1, keepdim=True) + 1e-5).rsqrt()
-        second = (torch.mm(weighted, second_weight).float() * rstd).bfloat16()
-        third = (torch.mm(weighted, third_weight).float() * rstd).bfloat16()
-        normalized = (total_2d.float() * rstd * gamma).bfloat16()
-        return second, third, total, rstd, normalized
-
     def _flex_gemm_nodes(self, gm):
         return [
             node
             for node in gm.graph.nodes
             if node.target == torch.ops.higher_order.flex_gemm
         ]
+
+    def _plain_mm_nodes(self, gm):
+        return [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+
+    def _assert_outputs_close(self, actual, expected):
+        self.assertEqual(len(actual), len(expected))
+        for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+            torch.testing.assert_close(
+                actual_tensor,
+                expected_tensor,
+                atol=1e-3,
+                rtol=2e-2,
+            )
 
     def _trace_swiglu_chain(self, *, return_saved=False):
         m, k, n, p = 8, 16, 512, 64
@@ -529,30 +531,17 @@ class TestF3ResidualRMSNormPass(TestCase):
         mm_nodes[2].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w3"}
         return gm, inputs
 
-    def _expected_swiglu(self, inputs):
-        a, first_weight, residual, gamma, w1_weight, w3_weight = inputs
-        first = torch.mm(a, first_weight).reshape(2, 4, 512)
-        total = residual + first
-        total_2d = total.reshape(8, 512)
-        weighted = (total_2d.float() * gamma).bfloat16()
-        partial = total_2d.float().reshape(8, -1, 512).square().mean(-1)
-        rstd = (partial.mean(-1, keepdim=True) + 1e-5).rsqrt()
-        w1 = (torch.mm(weighted, w1_weight).float() * rstd).bfloat16()
-        w3 = (torch.mm(weighted, w3_weight).float() * rstd).bfloat16()
-        product = torch.nn.functional.silu(w1) * w3
-        return product.reshape(2, 4, 64), total, rstd, w1, w3
-
-    def test_reparameterizes_same_layer_residual_norm(self):
+    def test_fuses_attention_output_residual_into_ffn_norm(self):
         gm, inputs = self._trace_chain()
-        expected_second, expected_third, expected_total, _, _ = self._expected(inputs)
+        expected = gm(*inputs)
 
         fuse_f3_residual_rmsnorm_pass(gm)
 
-        actual_second, actual_third, actual_total = gm(*inputs)
-        torch.testing.assert_close(actual_second, expected_second, atol=1e-3, rtol=2e-2)
-        torch.testing.assert_close(actual_third, expected_third, atol=1e-3, rtol=2e-2)
-        self.assertEqual(actual_total, expected_total)
-        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
+        actual = gm(*inputs)
+        self._assert_outputs_close(actual, expected)
+        self.assertEqual(actual[2], expected[2])
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 1)
+        self.assertEqual(len(self._plain_mm_nodes(gm)), 2)
         self.assertFalse(
             any(
                 node.target == torch.ops.aten._fused_rms_norm.default
@@ -562,14 +551,14 @@ class TestF3ResidualRMSNormPass(TestCase):
 
     def test_composes_dense_swiglu_epilogues(self):
         gm, inputs = self._trace_swiglu_chain()
-        expected_product, expected_total, _, _, _ = self._expected_swiglu(inputs)
+        expected = gm(*inputs)
 
         fuse_f3_residual_rmsnorm_pass(gm)
         fuse_f4_dense_swiglu_pass(gm)
 
-        product, total = gm(*inputs)
-        self.assertEqual(product, expected_product)
-        self.assertEqual(total, expected_total)
+        actual = gm(*inputs)
+        self._assert_outputs_close(actual, expected)
+        self.assertEqual(actual[1], expected[1])
         self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
         body_targets = [
             [node.target for node in getattr(gm, fused.args[1].target).graph.nodes]
@@ -583,53 +572,36 @@ class TestF3ResidualRMSNormPass(TestCase):
         )
         self.assertTrue(
             any(
-                targets.count(torch.ops.aten.mul.Tensor) == 2
+                targets.count(torch.ops.aten.mul.Tensor) == 1
                 for targets in body_targets
             )
         )
 
     def test_composes_recomputed_dense_swiglu_and_preserves_saved_values(self):
         gm, inputs = self._trace_swiglu_chain(return_saved=True)
-        (
-            expected_product,
-            expected_total,
-            expected_rstd,
-            expected_w1,
-            expected_w3,
-        ) = self._expected_swiglu(inputs)
+        expected = gm(*inputs)
 
         fuse_f3_residual_rmsnorm_pass(gm)
 
-        product, total, rstd, w1, w3 = gm(*inputs)
-        self.assertEqual(product, expected_product)
-        self.assertEqual(total, expected_total)
-        self.assertEqual(rstd, expected_rstd.reshape(2, 4, 1))
-        self.assertEqual(w1, expected_w1.reshape(2, 4, 64))
-        self.assertEqual(w3, expected_w3.reshape(2, 4, 64))
-        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
+        actual = gm(*inputs)
+        self._assert_outputs_close(actual, expected)
+        self.assertEqual(actual[1], expected[1])
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 1)
+        self.assertEqual(len(self._plain_mm_nodes(gm)), 2)
 
-    def test_rewrites_cross_layer_recompute_and_preserves_saved_values(self):
+    def test_fuses_feed_forward_output_into_next_attention_norm(self):
         gm, inputs = self._trace_chain(cross_layer=True, return_saved=True)
-        (
-            expected_second,
-            expected_third,
-            expected_total,
-            expected_rstd,
-            normalized,
-        ) = self._expected(inputs)
+        expected = gm(*inputs)
 
         fuse_f3_residual_rmsnorm_pass(gm)
 
-        second, third, total, rstd, second_input, third_input = gm(*inputs)
-        torch.testing.assert_close(second, expected_second, atol=1e-3, rtol=2e-2)
-        torch.testing.assert_close(third, expected_third, atol=1e-3, rtol=2e-2)
-        self.assertEqual(total, expected_total)
-        self.assertEqual(rstd, expected_rstd.reshape(2, 4, 1))
-        self.assertEqual(second_input, normalized)
-        self.assertEqual(third_input, normalized)
-        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
+        actual = gm(*inputs)
+        self._assert_outputs_close(actual, expected)
+        self.assertEqual(actual[2], expected[2])
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 1)
+        self.assertEqual(len(self._plain_mm_nodes(gm)), 2)
 
-    def test_reparameterizes_moe_output_residual_norm(self):
+    def test_fuses_shared_expert_output_into_next_attention_norm(self):
         m, k, n, p, q = 8, 16, 512, 64, 96
 
         def fn(
@@ -680,31 +652,39 @@ class TestF3ResidualRMSNormPass(TestCase):
         norm.meta["custom"] = {"module_fqn": "layers.4.attention_norm"}
         mm_nodes[1].meta["custom"] = {"module_fqn": "layers.4.attention.wq_a"}
         mm_nodes[2].meta["custom"] = {"module_fqn": "layers.4.attention.wkv_a"}
-
-        a, first_weight, routed, residual, gamma, second_weight, third_weight = inputs
-        first = torch.mm(a, first_weight).reshape(2, 4, n)
-        expected_total = residual + (routed + first)
-        total_2d = expected_total.reshape(m, n)
-        weighted = (total_2d.float() * gamma).bfloat16()
-        partial = total_2d.float().reshape(m, -1, 512).square().mean(-1)
-        rstd = (partial.mean(-1, keepdim=True) + 1e-5).rsqrt()
-        expected_second = (torch.mm(weighted, second_weight).float() * rstd).bfloat16()
-        expected_third = (torch.mm(weighted, third_weight).float() * rstd).bfloat16()
+        expected = gm(*inputs)
 
         fuse_f3_residual_rmsnorm_pass(gm)
 
-        actual_second, actual_third, actual_total = gm(*inputs)
-        torch.testing.assert_close(actual_second, expected_second, atol=1e-3, rtol=2e-2)
-        torch.testing.assert_close(actual_third, expected_third, atol=1e-3, rtol=2e-2)
-        self.assertEqual(actual_total, expected_total)
-        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
+        actual = gm(*inputs)
+        self._assert_outputs_close(actual, expected)
+        self.assertEqual(actual[2], expected[2])
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 1)
+        self.assertEqual(len(self._plain_mm_nodes(gm)), 2)
 
-    def test_does_not_fuse_incomplete_projection_set(self):
-        gm, _ = self._trace_chain()
+    def test_does_not_require_downstream_projection_roles(self):
+        gm, inputs = self._trace_chain()
         mm_nodes = [
             node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
         ]
+        mm_nodes[1].meta["custom"] = {"module_fqn": "unrelated.first"}
         mm_nodes[2].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w2"}
+        expected = gm(*inputs)
+
+        fuse_f3_residual_rmsnorm_pass(gm)
+
+        self._assert_outputs_close(gm(*inputs), expected)
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 1)
+        self.assertEqual(len(self._plain_mm_nodes(gm)), 2)
+
+    def test_does_not_fuse_mismatched_boundary_roles(self):
+        gm, _ = self._trace_chain()
+        norm = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._fused_rms_norm.default
+        )
+        norm.meta["custom"] = {"module_fqn": "layers.3.attention_norm"}
 
         fuse_f3_residual_rmsnorm_pass(gm)
 
@@ -1156,9 +1136,13 @@ class TestCodaPatternRegistry(TestCase):
                 ["b6_bf16_weight_grad_cast", "b6_bf16_weight_grad_cast"]
             )
 
-    def test_rejects_f4_before_f3(self):
-        with self.assertRaisesRegex(ValueError, "requires f3_residual_rmsnorm before"):
-            get_coda_pattern_passes(["f4_dense_swiglu", "f3_residual_rmsnorm"])
+    def test_allows_f4_before_f3(self):
+        passes = get_coda_pattern_passes(["f4_dense_swiglu", "f3_residual_rmsnorm"])
+
+        self.assertEqual(
+            passes,
+            [fuse_f4_dense_swiglu_pass, fuse_f3_residual_rmsnorm_pass],
+        )
 
 
 if __name__ == "__main__":

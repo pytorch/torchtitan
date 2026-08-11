@@ -965,7 +965,43 @@ Speedup: `1.04x`. The fused output was bitwise identical to eager
 
 Pattern name: `f3_residual_rmsnorm`
 
-This pass implements the paper's central GEMM-residual-RMSNorm-GEMM
+### Current terminal implementation
+
+The current pass implements two GEMM-residual-RMSNorm epilogues and stops at
+the normalized activation:
+
+```text
+F3-A: layers.L.attention.wo + residual -> layers.L.ffn_norm
+
+F3-B: layers.L.feed_forward.w2 + residual
+      -> layers.L+1.attention_norm
+
+F3-B: layers.L.moe.shared_experts.w2 + routed output + residual
+      -> layers.L+1.attention_norm
+```
+
+Each match creates one FlexGEMM. Its body preserves the source graph's BF16
+GEMM store and addition order, then returns the raw residual sum and
+512-column FP32 mean-square partials. The root graph reduces the partials,
+forms `rstd`, applies `rstd` and gamma to the raw sum in FP32, and stores the
+normalized BF16 activation. The raw sum and optional saved `rstd` remain
+available for checkpointed backward.
+
+This terminal form does not inspect or rewrite consumers of the norm. The
+following Q/KV, dense SwiGLU, router, shared-expert, and routed grouped GEMMs
+remain available to F2, F4, F6, and distMoE. F3 and F4 consequently have no
+pass-order dependency.
+
+The focused CPU tests cover both boundary families, the shared-expert two-add
+form, saved forward values, arbitrary downstream consumers, F4 composition,
+and invalid module-role pairs. The full CODA pass test file has 37 passing
+tests. A refreshed DSV3-671B fake-backend graph proof and GB300 benchmark are
+still required; the counts and timings below predate the terminal rewrite.
+
+### Superseded cross-GEMM implementation
+
+The following evidence records the earlier implementation of the paper's
+central GEMM-residual-RMSNorm-GEMM
 reparameterization. It follows PyTorch's end-to-end FlexGEMM coverage in
 `test_mm_coda_rmsnorm_rewrite_e2e`: the first FlexGEMM emits a gamma-weighted
 activation and 512-column mean-square partials, a small root-graph reduction
@@ -1250,9 +1286,11 @@ FlexGEMM pattern without a speedup. KV `dweight` was bitwise exact; KV `dx` had
 `max_abs_error=4.768e-7` and `mean_abs_error=3.104e-10`. These differences come
 from the 128-column partial reduction order and require convergence validation.
 
-## Composed graph proof
+## Historical composed graph proof
 
-All 11 FlexGEMM patterns were enabled together after
+This proof predates the terminal F3 implementation above. Its F3 row, total
+FlexGEMM count, and composed F3/F4 conclusions must not be used to validate the
+current pass. All 11 FlexGEMM patterns were enabled together after
 `joint_transformer_block_bucketing_reordering_pass`. The DSV3-671B fake-backend
 run used FSDP256, EP64, local batch 24, sequence length 4,096, full activation
 checkpointing, force-balanced MoE routing, deterministic seed 42, and
@@ -1375,7 +1413,7 @@ the paired eager GEMMs. Its final product had `max_abs_error=6.104e-5` and
 `mean_abs_error=8.497e-7`; CODA applies SwiGLU to the FP32 accumulator before
 the BF16 output store, unlike the graph's explicit BF16 intermediate.
 
-### Composed F3 and F4 dense boundary
+### Historical composed F3 and F4 dense boundary
 
 Real shape: `(98,304, 16,384) @ (16,384, 7,168)`, followed by two
 `(98,304, 7,168) @ (7,168, 18,432)` projections. CODA uses
