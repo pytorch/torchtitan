@@ -92,20 +92,32 @@ class GroupedExperts(Module):
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         h_RF = F.silu(
-            torch._grouped_mm(
-                x_RD.bfloat16(),
-                w1_EFD.bfloat16().transpose(-2, -1),
+            self._grouped_mm(
+                A=x_RD.bfloat16(),
+                B_t=w1_EFD.bfloat16().transpose(-2, -1),
                 offs=offsets_E,
             )
         )
-        h_RF = h_RF * torch._grouped_mm(
-            x_RD.bfloat16(),
-            w3_EFD.bfloat16().transpose(-2, -1),
+        h_RF = h_RF * self._grouped_mm(
+            A=x_RD.bfloat16(),
+            B_t=w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
-        return torch._grouped_mm(
-            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+        return self._grouped_mm(
+            A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
+
+    def _grouped_mm(
+        self, *, A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
+    ) -> torch.Tensor:
+        """Grouped matmul of ``A @ B_t`` with per-expert token offsets.
+
+        Overridable seam for low-precision variants (e.g. the MXFP8 converter
+        swaps this for a dynamically-quantized scaled grouped GEMM). Keeping the
+        op here -- rather than behind a tensor-subclass ``__torch_function__`` --
+        means it is captured by FX tracers such as graph_trainer's make_fx path.
+        """
+        return torch._grouped_mm(A, B_t, offs=offs)
 
 
 class RoutedExperts(Module):
@@ -128,8 +140,6 @@ class RoutedExperts(Module):
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
-        *,
-        num_local_tokens_after_seq_dim_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -163,7 +173,6 @@ class RoutedExperts(Module):
             routed_output_RD,
             metadata,
             x_TD,
-            num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
@@ -362,18 +371,11 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
-        # TODO(pianpwk): Remove this once MoE combine can derive the local
-        # sequence shape directly from the input layout.
-        seq_dim_tp_sharded: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
-        self.seq_dim_tp_sharded = config.seq_dim_tp_sharded
-        # Sequence-shard count used by EP padding/combine. Set in
-        # parallelize(); stays 1 unless both EP and TP/SP are active.
-        self.expert_sequence_parallel_size = 1
         self.routed_experts = config.routed_experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -414,51 +416,10 @@ class MoE(Module):
         input is redistributed from sp_layout to desired_input_layouts;
         output is redistributed to sp_layout. MoE.forward() operates on
         DTensors; the DTensor->local conversion happens at the GroupedExperts
-        boundary. GroupedExperts operates on local tensors.
+        boundary. GroupedExperts operates on local tensors. When EP internally
+        sequence-shards tokens across TP, the caller must provide a TP-divisible
+        sequence length.
         """
-        # ---------------------------------------------------------------------
-        # TODO: Temporary workaround for #3622. Remove it once short-sequence
-        # routing counts can remain Partial.
-        # Real padding when seq_len < expert_sequence_parallel_size: EP routes over
-        # sequence-parallel token shards. A sequence shorter than
-        # ``expert_sequence_parallel_size`` cannot shard across all EP sequence
-        # shards, so physically pad to ``expert_sequence_parallel_size`` and trim
-        # before returning.
-        # Virtual padding then pads each batch's sequence length up to a multiple
-        # of ``expert_sequence_parallel_size`` without materializing padded tokens.
-        B, L, D = x_BLD.shape
-        expert_sequence_parallel_size = self.expert_sequence_parallel_size
-        if not isinstance(x_BLD, DTensor) and self.seq_dim_tp_sharded:
-            # Local dense activation with SP enabled guarantees even CP*TP
-            # sequence sharding, so L is already the local TP sequence length
-            # to use for combine indexing.
-            seq_pad = 0
-            seq_dim_pad_tokens = 0
-            num_local_tokens_after_seq_dim_padding = B * L
-        else:
-            # This covers default/full_dtensor, plus spmd_types inference
-            # where CP/SP are off and local sequence length equals global
-            # sequence length. Compute the local TP stride from the unsplit
-            # MoE-region sequence length.
-            seq_pad = (
-                expert_sequence_parallel_size - L
-                if L < expert_sequence_parallel_size
-                else 0
-            )
-            if seq_pad:
-                x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
-                L = L + seq_pad
-            seq_dim_pad_tokens = (-L) % expert_sequence_parallel_size
-            local_batch_size = (
-                x_BLD._local_tensor.shape[0] if isinstance(x_BLD, DTensor) else B
-            )
-            num_local_tokens_after_seq_dim_padding = (
-                local_batch_size
-                * (L + seq_dim_pad_tokens)
-                // expert_sequence_parallel_size
-            )
-        # ---------------------------------------------------------------------
-
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
         (
@@ -491,9 +452,6 @@ class MoE(Module):
             topk_scores_BLK,
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
-            num_local_tokens_after_seq_dim_padding=(
-                num_local_tokens_after_seq_dim_padding
-            ),
         )
 
         # shared_experts runs in parallel with deepep combine communication.
@@ -509,39 +467,9 @@ class MoE(Module):
 
             sync_combine()
 
-        if seq_dim_pad_tokens:
-            # Combine returns a sequence-dim padded local shard for each batch
-            # row. The input was not physically padded, so trim that logical
-            # sequence tail before adding the shared expert output.
-            out_BLD = out_BLD[:, :L, :]
-
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
-
-        # ---------------------------------------------------------------------
-        # TODO: Temporary workaround for #3622. Paired with the short-sequence
-        # padding above; remove it once short-sequence routing counts can remain
-        # Partial.
-        if seq_pad:
-            # Drop the tokens padded on for SP sharding, restoring (B, L, D).
-            out_BLD = out_BLD[:, : L - seq_pad, :]
-        # ---------------------------------------------------------------------
         return out_BLD
-
-    def parallelize(self, parallel_dims) -> None:
-        """Parallelize children, then derive the EP sequence-shard count.
-
-        The short-sequence padding in ``forward`` only matters when the EP
-        all-to-all routes tokens across TP-axis (SP) sequence shards, i.e. when
-        both EP and TP/SP are active. Both are read from ``parallel_dims``, so
-        MoE owns ``expert_sequence_parallel_size`` without inspecting the token
-        dispatcher. Otherwise it stays 1 and no padding is applied.
-        """
-        super().parallelize(parallel_dims)
-        ep_mesh = parallel_dims.get_optional_mesh("ep")
-        tp_mesh = parallel_dims.get_optional_mesh("tp")
-        if ep_mesh is not None and tp_mesh is not None:
-            self.expert_sequence_parallel_size = tp_mesh.size()
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:

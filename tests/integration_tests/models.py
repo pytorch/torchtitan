@@ -13,7 +13,9 @@ from tests.integration_tests import OverrideDefinitions
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
     """Use ``backend`` for every variant, or return an unsupported test unchanged."""
     if backend == "spmd_types" and any(
-        "--module qwen3_5" in arg for variant in t.override_args for arg in variant
+        "--module qwen3_5" in arg or "--module kimi_k2_7" in arg
+        for variant in t.override_args
+        for arg in variant
     ):
         return t
 
@@ -61,7 +63,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel_mtp",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
@@ -69,8 +71,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "torchtitan.overrides.helion_rope.helion_complex_rope",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP+compile (+ Helion RoPE override)",
-            "deepseek_v3_fsdp+ep+compile",
+            "DeepSeek V3 MTP FSDP+EP+compile",
+            "deepseek_v3_mtp_fsdp+ep+compile",
             ngpu=4,
             # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
             # H100/GB200; skip on ROCm where they are unvalidated.
@@ -187,6 +189,23 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3_5 --config qwen35_debugmodel_varlen_attn",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    # First-run FLA/TileLang kernel compile and autotune exceed
+                    # the default 100s train timeout.
+                    "--comm.train_timeout_seconds 600",
+                    "activation-checkpoint:selective",
+                ]
+            ],
+            "Qwen3.5 FSDP+TP+VARLEN_ATTN + per op SAC",
+            "qwen3_5_fsdp+tp+varlen_attn+per_op_sac",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
         # Integration Test Cases for gpt-oss
         OverrideDefinitions(
             [
@@ -218,6 +237,52 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ],
             "Gpt-oss PP+FSDP+CP+EP+SACOP",
             "gpt_oss_pp+fsdp+cp+ep+sacop",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module gpt_oss --config gpt_oss_debugmodel",
+                    "--training.global_batch_size 64",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.expert_parallel_degree 4",
+                    "activation-checkpoint:selective",
+                ],
+            ],
+            "Gpt-oss PP+FSDP+EP+SACOP with VarlenAttention",
+            "gpt_oss_pp+fsdp+ep+sacop",
+            ngpu=8,
+        ),
+        # Integration Test Cases for Kimi K2.7
+        OverrideDefinitions(
+            [
+                [
+                    # Do not enable --debug.spmd_typechecking: multimodal pixel
+                    # tensors from the dataloader are not SPMD-annotated yet.
+                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
+                    "--parallelism.spmd_backend spmd_types",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "Kimi K2.7 multimodal spmd_types FSDP",
+            "kimi_k2_5_mm_fsdp_spmd_types",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
+                    "--training.local_batch_size 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "Kimi K2.7 multimodal FSDP+TP+EP+PP",
+            "kimi_k2_5_mm_fsdp+tp+ep+pp",
             ngpu=8,
         ),
     ]

@@ -42,6 +42,11 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 # torchtitan ConfigParser registered below.
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
+# Selects the experiment-owned runner that pads tokens for dense and expert SP.
+TORCHTITAN_WORKER_CLS = (
+    "torchtitan.experiments.rl.models.vllm_worker.TorchTitanGPUWorker"
+)
+
 
 @dataclass(kw_only=True, slots=True)
 class InferenceParallelismConfig:
@@ -68,6 +73,9 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. 1 means disabled."""
 
+    enable_sequence_parallel: bool = False
+    """Enable dense sequence parallelism across the tensor-parallel axis."""
+
     spmd_backend: Literal["default", "spmd_types"] = "default"
     """SPMD backend used by TorchTitan model parallelization in the generator."""
 
@@ -76,6 +84,13 @@ class InferenceParallelismConfig:
 
     enable_sequence_parallel: bool = False
     """Whether to enable sequence parallelism inside the TorchTitan model."""
+
+    @property
+    def expert_sequence_parallel_size(self) -> int:
+        """TP-axis shard count used internally by expert-parallel MoE."""
+        if self.expert_parallel_degree <= 1:
+            return 1
+        return self.tensor_parallel_degree
 
     def to_training(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
