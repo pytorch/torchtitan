@@ -71,6 +71,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
 from torchtitan.experiments.rl.models.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
+    TORCHTITAN_WORKER_CLS,
     VLLM_MODEL_NAME,
 )
 from torchtitan.models.common.attention import (
@@ -235,6 +236,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
+        worker_cls=TORCHTITAN_WORKER_CLS,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=not gen_config.cudagraph.enable,
@@ -260,8 +262,11 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     )
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
+    expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        expert_sequence_parallel_size=expert_sequence_parallel_size,
+        enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
