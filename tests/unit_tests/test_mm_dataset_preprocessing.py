@@ -116,6 +116,29 @@ class TestResizeToPatchBudget(unittest.TestCase):
         )
         self.assertEqual((rh, rw, ph, pw), (height, width, 0, 0))
 
+    def test_rejects_impossible_patch_budgets(self):
+        with self.assertRaisesRegex(ValueError, "max_patches must be at least 4"):
+            resize_to_patch_budget(
+                100,
+                100,
+                patch_size=self.PS,
+                merge_size=self.MERGE,
+                max_patches=-1,
+                max_patches_per_side=self.SIDE,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "max_patches_per_side must be at least merge_size"
+        ):
+            resize_to_patch_budget(
+                100,
+                100,
+                patch_size=self.PS,
+                merge_size=self.MERGE,
+                max_patches=self.LIMIT,
+                max_patches_per_side=1,
+            )
+
 
 class TestProcessImagePatchBudget(unittest.TestCase):
     def test_navit_pads_to_factor_multiple(self):

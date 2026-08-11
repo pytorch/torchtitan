@@ -175,6 +175,18 @@ def resize_to_patch_budget(
         ``(resize_h, resize_w, pad_h, pad_w)`` -- resize to the first two, then
         pad right/bottom by the last two.
     """
+    factor = patch_size * merge_size
+    min_patches = merge_size**2
+    if max_patches < min_patches:
+        raise ValueError(
+            f"max_patches must be at least {min_patches} when merge_size={merge_size}"
+        )
+    if max_patches_per_side < merge_size:
+        raise ValueError(
+            "max_patches_per_side must be at least merge_size, "
+            f"got {max_patches_per_side} and {merge_size}"
+        )
+
     num_patches_h = max(1.0, height // patch_size)
     num_patches_w = max(1.0, width // patch_size)
     num_patches = num_patches_h * num_patches_w
@@ -189,18 +201,6 @@ def resize_to_patch_budget(
     w = max(1, int(width * scale))
     h = min(h, max_patches_per_side * patch_size)
     w = min(w, max_patches_per_side * patch_size)
-
-    factor = patch_size * merge_size
-    min_patches = merge_size**2
-    if max_patches < min_patches:
-        raise ValueError(
-            f"max_patches must be at least {min_patches} when merge_size={merge_size}"
-        )
-    if max_patches_per_side < merge_size:
-        raise ValueError(
-            "max_patches_per_side must be at least merge_size, "
-            f"got {max_patches_per_side} and {merge_size}"
-        )
 
     # Padding to ``factor`` can push an otherwise valid resize back over the
     # patch budget. Reduce the shared (aspect-preserving) scale to the next
