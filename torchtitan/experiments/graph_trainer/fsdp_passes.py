@@ -150,6 +150,10 @@ def _reorder_overlap_nodes(
         _stable_topological_sort(graph, overlap_deps)
     else:
         _move_overlap_nodes(graph, overlap_deps, bucketed_node_types)
+        # Preserve every legal overlap move while restoring ordering for data
+        # dependencies that an AP redistribution chain can make incompatible
+        # with a requested prefetch move.
+        _stable_topological_sort(graph, {})
 
 
 def _get_or_create_extra_pg(
@@ -289,6 +293,23 @@ class FSDPParamOrderBucketer(ManualOverlapPreservingBucketer):
         module_fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
         param_idx = self.fsdp_param_module_order.get(module_fqn, len(self.node_idx))
         return (param_idx, self.node_idx[node])
+
+    def _split_independent_collectives(
+        self,
+        coll_nodes: OrderedSet[fx.Node],
+        scope_nodes: list[fx.Node],
+    ) -> list[list[fx.Node]]:
+        # AutoParallel can place redistribution nodes outside the FQN bucket
+        # whose collective produced/consumed values still connect collectives
+        # inside that bucket. The upstream dependency scan only sees
+        # scope_nodes, so it can incorrectly merge dependent collectives and
+        # create a cycle. Keep bucket membership scoped by FQN, but determine
+        # independence over the complete graph.
+        del scope_nodes
+        self.node_idx = {node: idx for idx, node in enumerate(self.graph.nodes)}
+        return super()._split_independent_collectives(
+            coll_nodes, list(self.graph.nodes)
+        )
 
     def _bucket_group(self, coll_nodes: list[fx.Node]) -> None:
         if self.fsdp_param_module_order:
