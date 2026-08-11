@@ -373,9 +373,6 @@ class MoE(Module):
         super().__init__()
 
         num_experts = config.num_experts
-        # Sequence-shard count used by EP padding/combine. Set in
-        # parallelize(); stays 1 unless both EP and TP are active.
-        self.expert_sequence_parallel_size = 1
         self.routed_experts = config.routed_experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -416,18 +413,10 @@ class MoE(Module):
         input is redistributed from sp_layout to desired_input_layouts;
         output is redistributed to sp_layout. MoE.forward() operates on
         DTensors; the DTensor->local conversion happens at the GroupedExperts
-        boundary. GroupedExperts operates on local tensors.
+        boundary. GroupedExperts operates on local tensors. When EP internally
+        sequence-shards tokens across TP, the caller must provide a TP-divisible
+        sequence length.
         """
-        # For MoE-internal sequence sharding, physically pad L to a TP multiple
-        # so each TP rank gets the same local token count and combine output shape.
-        # TODO(jessicazhong): Move sequence padding outside the model code; until
-        # then, assume the global sequence length is evenly divisible by the TP
-        # size when dense SP is enabled.
-        original_L = x_BLD.shape[1]
-        seq_pad = (-original_L) % self.expert_sequence_parallel_size
-        if seq_pad:
-            x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
-
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
         (
@@ -468,28 +457,7 @@ class MoE(Module):
 
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
-
-        if seq_pad:
-            out_BLD = out_BLD[:, :original_L, :]
-
         return out_BLD
-
-    def parallelize(self, parallel_dims) -> None:
-        """Parallelize children, then derive the EP sequence-shard count.
-
-        The sequence padding in ``forward`` only matters when EP routes tokens
-        across TP-axis sequence shards. Both degrees are read from
-        ``parallel_dims``, so MoE owns ``expert_sequence_parallel_size`` without
-        inspecting the token dispatcher. Otherwise it stays 1 and no padding is
-        applied.
-        """
-        super().parallelize(parallel_dims)
-        # TODO: Remove this parallel_dims mesh lookup after DTensor backend
-        # is deprecated. spmd_types can derive this size from its global context.
-        ep_mesh = parallel_dims.get_optional_mesh("ep")
-        tp_mesh = parallel_dims.get_optional_mesh("tp")
-        if ep_mesh is not None and tp_mesh is not None:
-            self.expert_sequence_parallel_size = tp_mesh.size()
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
