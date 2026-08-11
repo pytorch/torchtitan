@@ -54,6 +54,12 @@ def decoder_vocab_size(model_spec: ModelSpec) -> int:
     return model_config.vocab_size
 
 
+# How the TP collectives around the attention projections are run. "default"
+# leaves them to the framework; "dist_gemm" folds each into its adjacent GEMM
+# via symmetric memory (async-TP). See make_gqa_config.
+GemmBackend = Literal["default", "dist_gemm"]
+
+
 def get_attention_config(
     backend: str,
 ) -> Module.Config:
@@ -182,8 +188,16 @@ def make_gqa_config(
     head_dim: int | None = None,
     fuse_qkv: bool = False,
     qk_norm: RMSNorm.Config | None = None,
+    gemm_backend: GemmBackend = "default",
 ) -> GQAttention.Config:
-    """Build a fully-specified GQAttention.Config."""
+    """Build a fully-specified GQAttention.Config.
+
+    ``gemm_backend`` selects how the TP collectives around the QKV and output
+    projections are run. ``"default"`` leaves them to the framework, as separate
+    collectives either side of the GEMM. ``"dist_gemm"`` folds each into its
+    adjacent GEMM via symmetric memory (async-TP), which requires
+    ``fuse_qkv=True`` and CUDA.
+    """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
     rope = dataclasses.replace(rope)
@@ -221,7 +235,7 @@ def make_gqa_config(
             ),
         )
 
-    return GQAttention.Config(
+    config = GQAttention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
@@ -236,6 +250,13 @@ def make_gqa_config(
         inner_attention=inner_attention,
         rope=rope,
     )
+    if gemm_backend == "dist_gemm":
+        # Imported here rather than at module scope: this pulls in the symmetric
+        # memory linear primitives, which are only meaningful under TP on CUDA.
+        from torchtitan.models.common.dist_gemm_attention import to_dist_gemm_attention
+
+        return to_dist_gemm_attention(config)
+    return config
 
 
 def make_ffn_config(

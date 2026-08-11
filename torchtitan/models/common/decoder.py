@@ -159,8 +159,10 @@ class Decoder(BaseModel):
 
             update_ep_token_dispatcher_config(self, config)
 
-            # Imported lazily: the dist-GEMM override is opt-in and CUDA-only.
-            from torchtitan.overrides.dist_gemm_attention import (
+            # Imported here rather than at module scope to avoid a cycle:
+            # dist_gemm_attention imports attention.py, which this module also
+            # pulls in. A no-op unless a layer selected gemm_backend="dist_gemm".
+            from torchtitan.models.common.dist_gemm_attention import (
                 maybe_update_dist_gemm_config,
             )
 

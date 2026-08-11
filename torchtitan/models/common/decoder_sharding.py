@@ -166,25 +166,48 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         f"set_gqa_attention_sharding requires GQAttention.Config, "
         f"got {type(attention_cfg).__name__}"
     )
+    # The dist-GEMM attention block runs both TP collectives inside its own
+    # GEMMs, so it declares different activation contracts from the stock block.
+    # Imported here rather than at module scope to avoid an import cycle.
+    from torchtitan.models.common.dist_gemm_attention import DistGemmGQAttention
+
+    dist_gemm = isinstance(attention_cfg, DistGemmGQAttention.Config)
+
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
-    attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={
-            "x_BLD": attn_x_layout,
-        },
-        in_dst_shardings={
-            "x_BLD": dense_activation_placement(tp=spmd.R),
-        },
+    # dist-GEMM: AllGatherFusedQKVLinear consumes the sequence shard directly, so
+    # there is no attention-boundary all-gather left for the block to declare.
+    attention_cfg.sharding_config = (
+        None
+        if dist_gemm
+        else ShardingConfig(
+            in_src_shardings={
+                "x_BLD": attn_x_layout,
+            },
+            in_dst_shardings={
+                "x_BLD": dense_activation_placement(tp=spmd.R),
+            },
+        )
     )
     if attention_cfg.rope is not None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
     set_qkv_linear_sharding(attention_cfg.qkv_linear)
-    attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+
+    wo_config = rowwise_config(output_sp=enable_sp)
+    if dist_gemm:
+        # A stock rowwise linear emits a Partial over its slice of K and lets the
+        # framework reduce-scatter it. AttentionOutputLinear collapses those two
+        # steps -- the reduce-scatter happens inside the fused op -- so it returns
+        # the final Shard(1) directly and never produces a Partial. Keep only the
+        # parameter shardings: with the output already in its final layout there
+        # is nothing left to check or redistribute.
+        wo_config = ShardingConfig(state_shardings=wo_config.state_shardings)
+    attention_cfg.wo.sharding_config = wo_config
 
 
 def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:

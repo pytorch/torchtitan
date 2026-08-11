@@ -15,23 +15,24 @@ parameter layouts and only move the TP collective into the GEMM, using
 Those primitives live under ``torchtitan/distributed`` rather than here, because
 nothing about them is attention-specific: FFN and MoE projections can use the
 same pair. What stays in this module is the wiring -- the QKV-specific reshaping
-around the collective, and the override registrations.
+around the collective.
 
-The ``dist_gemm_attention`` override only wires these blocks into
-:class:`GQAttention` and removes the parent attention-boundary all-gather.
+:class:`DistGemmGQAttention` wires these blocks into :class:`GQAttention` and
+removes the parent attention-boundary all-gather. It is selected by passing
+``gemm_backend="dist_gemm"`` to ``make_gqa_config``; see
+``torchtitan/models/common/config_utils.py``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Shard
 
-from torchtitan.config import derive, override
+from torchtitan.config import derive
 from torchtitan.distributed.dist_linear import (
     AllGatherLinear,
     LinearReduceScatter,
@@ -128,19 +129,17 @@ def reserve_for_layer(
 
 
 def maybe_update_dist_gemm_config(model_config: object, config: object) -> None:
-    """Fill dist-GEMM linear configs from the runtime config.
+    """Fill dist-GEMM attention configs from the runtime config.
 
     The reservation needs the token count per step, which only the runtime config
     knows, so it is stamped onto the module configs here and consumed later in
-    ``parallelize``. Mirrors ``maybe_update_minimal_async_ep_config``.
+    ``parallelize``. Mirrors ``update_ep_token_dispatcher_config``.
     """
-    cfgs = [
-        cfg
-        for cfg in walk_configs(model_config)
-        if isinstance(
-            cfg, (AllGatherFusedQKVLinear.Config, AttentionOutputLinear.Config)
-        )
-    ]
+    cfgs = []
+    for layer_cfg in getattr(model_config, "layers", []):
+        attn_cfg = getattr(layer_cfg, "attention", None)
+        if isinstance(attn_cfg, DistGemmGQAttention.Config):
+            cfgs.extend((attn_cfg.qkv_linear, attn_cfg.wo))
     if not cfgs:
         return
 
@@ -153,24 +152,6 @@ def maybe_update_dist_gemm_config(model_config: object, config: object) -> None:
     tokens_per_rank = config.training.local_batch_size * config.training.seq_len
     for cfg in cfgs:
         cfg.tokens_per_rank = tokens_per_rank
-
-
-def walk_configs(root: object) -> Iterator[object]:
-    """Yield every dataclass reachable from ``root``, itself included."""
-    seen: set[int] = set()
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        if is_dataclass(node) and not isinstance(node, type):
-            yield node
-            stack.extend(getattr(node, f.name, None) for f in fields(node))
-        elif isinstance(node, (list, tuple)):
-            stack.extend(node)
-        elif isinstance(node, dict):
-            stack.extend(node.values())
 
 
 class AllGatherFusedQKVLinear(FusedQKVLinear):
@@ -322,86 +303,46 @@ class DistGemmGQAttention(GQAttention):
         qkv_linear: AllGatherFusedQKVLinear.Config  # pyrefly: ignore[bad-override]
         wo: AttentionOutputLinear.Config  # pyrefly: ignore[bad-override]
 
-    def parallelize(self, parallel_dims: "ParallelDims") -> None:
-        # AllGatherFusedQKVLinear owns the attention input all-gather explicitly.
-        self._sharding_config = None
-
-        # Redeclare wo's output contract, which has to happen here rather than in
-        # the override factory.
-        #
-        # A stock rowwise linear produces a Partial sum over its slice of K and
-        # lets the framework reduce-scatter it, so `set_gqa_attention_sharding`
-        # gives wo a `rowwise_config()`: out_src=Partial, out_dst=Shard(1).
-        # AttentionOutputLinear collapses those two steps -- the reduce-scatter
-        # happens inside the fused op -- so its forward returns Shard(1) directly
-        # and never produces a Partial. Left alone, the module fails its own
-        # out_src check with "output DTensor has placements (Shard(dim=1),), but
-        # out_src_shardings expects (Partial(sum),)".
-        #
-        # The override factory does install a corrected config, but the model's
-        # sharding setup runs afterwards and overwrites it (last writer wins), so
-        # the correction has to be applied here, after super() would have consumed
-        # it. Only the parameter shardings are kept: with the output already in its
-        # final layout there is nothing left to check or redistribute.
-        wo_sharding = getattr(self.wo, "_sharding_config", None)
-        if wo_sharding is not None:
-            self.wo._sharding_config = ShardingConfig(
-                state_shardings=wo_sharding.state_shardings
-            )
-
-        super().parallelize(parallel_dims)
+    # No parallelize override: both contracts this block needs -- no
+    # attention-boundary all-gather, and a wo that emits its final Shard(1)
+    # rather than a Partial -- are declared up front by
+    # ``set_gqa_attention_sharding``.
 
 
-@override(
-    target=FusedQKVLinear.Config,
-    description="Use symm_mem fused all-gather matmul for fused-QKV projection.",
-    exact=True,
-)
-def all_gather_fused_qkv(cfg: FusedQKVLinear.Config) -> AllGatherFusedQKVLinear.Config:
-    return derive(cfg, AllGatherFusedQKVLinear.Config)
+def to_dist_gemm_attention(cfg: GQAttention.Config) -> DistGemmGQAttention.Config:
+    """Rebuild a stock GQAttention.Config onto the dist-GEMM projections.
 
-
-@override(
-    target=Linear.Config,
-    description="Fuse the TP reduce-scatter into the attention output projection.",
-    exact=True,
-)
-def attention_output_linear(cfg: Linear.Config) -> AttentionOutputLinear.Config:
-    base = cfg.sharding_config
-    state_shardings = base.state_shardings if base is not None else {}
-    return derive(
-        cfg,
-        AttentionOutputLinear.Config,
-        sharding_config=ShardingConfig(state_shardings=state_shardings),
-    )
-
-
-@override(
-    target=GQAttention.Config,
-    description="Use distributed QKV and WO projections inside GQA attention.",
-    exact=True,
-)
-def dist_gemm_attention(cfg: GQAttention.Config) -> DistGemmGQAttention.Config:
+    Called from ``make_gqa_config`` once the stock config is assembled, rather
+    than having that function build two parallel config trees. Requires fused
+    QKV: the all-gather feeds a single wqkv GEMM, so there is no separate-wq/wk/wv
+    schedule to fall back on.
+    """
     if not isinstance(cfg.qkv_linear, FusedQKVLinear.Config):
         raise TypeError(
-            "dist_gemm_attention requires GQAttention.qkv_linear to be "
-            f"FusedQKVLinear.Config, got {type(cfg.qkv_linear).__name__}"
+            "gemm_backend='dist_gemm' requires GQAttention.qkv_linear to be "
+            f"FusedQKVLinear.Config, got {type(cfg.qkv_linear).__name__}. "
+            "Pass fuse_qkv=True to make_gqa_config."
         )
+    wo_base = cfg.wo.sharding_config
     return derive(
         cfg,
         DistGemmGQAttention.Config,
         sharding_config=None,
-        qkv_linear=all_gather_fused_qkv(cfg.qkv_linear),
-        wo=attention_output_linear(cfg.wo),
+        qkv_linear=derive(cfg.qkv_linear, AllGatherFusedQKVLinear.Config),
+        wo=derive(
+            cfg.wo,
+            AttentionOutputLinear.Config,
+            sharding_config=ShardingConfig(
+                state_shardings=wo_base.state_shardings if wo_base else {}
+            ),
+        ),
     )
 
 
 __all__ = [
     "AllGatherFusedQKVLinear",
-    "DistGemmGQAttention",
     "AttentionOutputLinear",
-    "all_gather_fused_qkv",
-    "dist_gemm_attention",
+    "DistGemmGQAttention",
     "maybe_update_dist_gemm_config",
-    "attention_output_linear",
+    "to_dist_gemm_attention",
 ]
