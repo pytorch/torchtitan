@@ -61,8 +61,8 @@ from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.actors.generator import _get_spmd_state_dict_layouts
+from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
@@ -283,6 +283,7 @@ def _sync_trainer_weights_to_vllm(
     wrapper = engine.model_executor.driver_worker.get_model()
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
+    vllm_sd = vllm_model.state_dict()
     layouts = (
         _get_spmd_state_dict_layouts(vllm_model)
         if generator_spmd_backend == "spmd_types"
@@ -290,7 +291,7 @@ def _sync_trainer_weights_to_vllm(
     )
 
     missing = []
-    for name, vparam in vllm_model.state_dict().items():
+    for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
         if tparam is None:
             missing.append(name)
@@ -318,6 +319,11 @@ def _sync_trainer_weights_to_vllm(
             else:
                 full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
                 vparam.copy_(full)
+
+    # Fused modules expose hook-produced split tensors in state_dict(). Reload
+    # the filled state dict so their load hooks merge those tensors back into
+    # the fused parameters used by forward().
+    vllm_model.load_state_dict(vllm_sd, strict=False)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -693,7 +699,8 @@ class BitwiseParityTestBase(unittest.TestCase):
         # GPU memory for vLLM to leave room for the trainer model.
         config.generator.gpu_memory_limit = 0.5
 
-        cls.model, cls.device, cls.trainer_spmd_context = build_trainer_model(config)
+        cls.model, cls.device, trainer_spmd_context = build_trainer_model(config)
+        cls.trainer_spmd_context = staticmethod(trainer_spmd_context)
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             with cls.trainer_spmd_context():
