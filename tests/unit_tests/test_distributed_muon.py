@@ -26,7 +26,7 @@ from torchtitan.components.distributed_optimizers.muon import (
     BatchedMatrixComputeView,
     build_distributed_muon,
     distributed_muon as distributed_muon_module,
-    MuonComputeSharding,
+    MuonComputeShardingConfig,
     Owned,
 )
 from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
@@ -77,12 +77,14 @@ class TestDistributedMuon(DTensorTestBase):
                     {
                         "params": [redistributed],
                         "param_names": ["layers.0.redistributed"],
-                        "compute_sharding": MuonComputeSharding(placement=Owned()),
+                        "compute_sharding": MuonComputeShardingConfig(
+                            placement=Owned()
+                        ),
                     },
                     {
                         "params": [stacks["layers.0.oversharded"]],
                         "param_names": ["layers.0.oversharded"],
-                        "compute_sharding": MuonComputeSharding(
+                        "compute_sharding": MuonComputeShardingConfig(
                             view_before_placement=BatchedMatrixComputeView(
                                 num_matrices=3,
                             ),
@@ -98,7 +100,7 @@ class TestDistributedMuon(DTensorTestBase):
                             "layers.0.local.w1",
                             "layers.0.local.w3",
                         ],
-                        "compute_sharding": MuonComputeSharding(
+                        "compute_sharding": MuonComputeShardingConfig(
                             view_before_placement=BatchedMatrixComputeView(
                                 num_matrices=4,
                             ),

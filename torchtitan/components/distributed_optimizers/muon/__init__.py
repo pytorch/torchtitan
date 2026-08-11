@@ -10,7 +10,7 @@ from .distributed_muon import DistributedMuon
 from .prep_parameters import (
     BatchedMatrixComputeView,
     build_distributed_muon,
-    MuonComputeSharding,
+    MuonComputeShardingConfig,
     Owned,
 )
 
@@ -19,6 +19,6 @@ __all__ = [
     "BatchedMatrixComputeView",
     "build_distributed_muon",
     "DistributedMuon",
-    "MuonComputeSharding",
+    "MuonComputeShardingConfig",
     "Owned",
 ]
