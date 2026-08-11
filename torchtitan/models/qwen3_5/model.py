@@ -803,8 +803,6 @@ class Qwen35Model(Decoder):
         Returns:
             List of (item_idx, sample_idx, vision_start, n_tokens) tuples
         """
-        # TODO(model-qwen-media-regions): Validate per-kind placeholder count and
-        # run length before vision scatter.
         vision_mask = tokens == vision_token_id
         flat_mask = vision_mask.view(-1)
         prev_mask = torch.cat(

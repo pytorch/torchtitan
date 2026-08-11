@@ -11,7 +11,6 @@ Below is an example validation config:
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
-    TextCollator,
 )
 from torchtitan.components.validate import Validator
 from torchtitan.hf_datasets.text_datasets import DATASETS
@@ -23,7 +22,6 @@ validator=Validator.Config(
         dataset=ConcatThenSplitPackingConfig(
             dataset=DATASETS["c4_validation"],
         ),
-        collator=TextCollator.Config(),
         repeat=False,
     ),
 ),

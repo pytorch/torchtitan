@@ -300,15 +300,3 @@ class FluxValidationDatasetConfig:
             # Convert after filtering so index gaps do not skip parts of that cycle.
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
         return dataset.map_with_index(_add_validation_timestep)
-
-
-def get_flux_image_size(dataset: GrainDatasetConfig) -> int:
-    """Return the image size configured by a Flux dataset processor."""
-    if isinstance(dataset, FluxValidationDatasetConfig):
-        dataset = dataset.dataset
-    if not isinstance(dataset, SingleDatasetConfig):
-        raise ValueError("Flux dataloader dataset must be a SingleDatasetConfig")
-    processor = dataset.processor
-    if not isinstance(processor, FluxSampleProcessor.Config):
-        raise ValueError("Flux dataloader dataset must use FluxSampleProcessor.Config")
-    return processor.img_size

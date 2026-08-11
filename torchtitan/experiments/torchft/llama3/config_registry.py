@@ -7,7 +7,6 @@
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
-    TextCollator,
 )
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
@@ -57,7 +56,6 @@ def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            collator=TextCollator.Config(),
         ),
         checkpoint=TorchFTCheckpointManager.Config(
             interval=10,

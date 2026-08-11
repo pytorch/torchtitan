@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import torch
 
-from torchtitan.components.data.collators import DefaultCollator, TextCollator
+from torchtitan.components.data.collators import Collator, TextCollator, TrainerBatch
 from torchtitan.components.data.dataset import (
     DatasetConcatConfig,
     DatasetMixConfig,
@@ -93,11 +93,29 @@ class RowToTokens(SampleProcessor):
 
     def __call__(self, sample, rng):
         del rng
-        input_ids = np.asarray(sample["tokens"], dtype=np.int64)
+        tokens = np.asarray(sample["tokens"], dtype=np.int64)
+        if len(tokens) < 2:
+            return None
         return TextSequence(
-            input_ids=input_ids,
-            labels=input_ids.copy(),
+            input_ids=tokens[:-1],
+            labels=tokens[1:],
         )
+
+
+class PairCollator(Collator):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Collator.Config):
+        pass
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext):
+        del config, context
+
+    def __call__(self, rows) -> TrainerBatch:
+        inputs, labels = zip(*rows)
+        return {
+            key: torch.stack([row[key] for row in inputs])
+            for key in inputs[0]
+        }, torch.stack(labels)
 
 
 class VerifyFilterOrder(SampleProcessor):
@@ -846,26 +864,6 @@ def test_packing_yields_rows_and_loader_batches(packing_type):
     assert labels.shape == (2, 8)
 
 
-def test_default_collator_returns_trainer_batch_tuple():
-    rows = [
-        ({"input": torch.tensor([1])}, torch.tensor([2])),
-        ({"input": torch.tensor([3])}, torch.tensor([4])),
-    ]
-
-    batch = DefaultCollator.Config().build(context=CONTEXT)(rows)
-
-    assert isinstance(batch, tuple)
-    assert batch[0]["input"].tolist() == [[1], [3]]
-    assert batch[1].tolist() == [[2], [4]]
-
-
-def test_default_collator_rejects_rows_without_trainer_batch_pairs():
-    collator = DefaultCollator.Config().build(context=CONTEXT)
-
-    with pytest.raises(TypeError, match="model_inputs, labels"):
-        collator([{"input": torch.tensor([1])}])
-
-
 def test_first_fit_num_packing_bins_is_independent_of_local_batch_size(monkeypatch):
     captured = {}
 
@@ -937,8 +935,9 @@ def test_first_fit_positions_reset_per_document():
         )
     )
 
-    assert packed.positions[:5].tolist() == [0, 1, 0, 1, 2]
-    assert (packed.labels[5:] == IGNORE_INDEX).all()
+    assert packed.positions[:3].tolist() == [0, 0, 1]
+    assert packed.labels[:3].tolist() == [2, 4, 5]
+    assert (packed.labels[3:] == IGNORE_INDEX).all()
 
 
 def test_nested_packing_preserves_inner_document_boundaries():
@@ -962,24 +961,25 @@ def test_nested_packing_preserves_inner_document_boundaries():
         )
     )
 
-    assert packed.positions[:5].tolist() == [0, 1, 0, 1, 2]
+    assert packed.positions[:3].tolist() == [0, 0, 1]
+    assert packed.labels[:3].tolist() == [2, 4, 5]
 
 
 def test_unpacked_text_collator_creates_range_positions():
     sequence = TextSequence(
         input_ids=np.asarray([1, 2, 3]),
-        labels=np.asarray([1, 2, 3]),
+        labels=np.asarray([2, 3, 4]),
     )
 
     inputs, labels = TextCollator.Config().build(context=CONTEXT)([sequence])
 
     assert inputs["input"][0, :3].tolist() == [1, 2, 3]
     assert inputs["positions"][0, :3].tolist() == [0, 1, 2]
-    assert labels[0, :3].tolist() == [2, 3, IGNORE_INDEX]
+    assert labels[0, :3].tolist() == [2, 3, 4]
     assert (labels[0, 3:] == IGNORE_INDEX).all()
 
 
-def test_pack_then_pack_then_collate_shifts_once():
+def test_pack_then_pack_then_collate_preserves_aligned_pairs():
     documents = SingleDatasetConfig(
         source=RowsSourceConfig(
             rows=(
@@ -1001,8 +1001,9 @@ def test_pack_then_pack_then_collate_shifts_once():
 
     inputs, labels = TextCollator.Config().build(context=CONTEXT)([packed])
 
-    assert inputs["input"][0, :5].tolist() == [1, 2, 3, 4, 5]
-    assert labels[0, :5].tolist() == [2, IGNORE_INDEX, 4, 5, IGNORE_INDEX]
+    assert inputs["input"][0, :3].tolist() == [1, 3, 4]
+    assert labels[0, :3].tolist() == [2, 4, 5]
+    assert inputs["positions"][0, :3].tolist() == [0, 0, 1]
 
 
 class SftTokens(SampleProcessor):
@@ -1016,12 +1017,12 @@ class SftTokens(SampleProcessor):
     def __call__(self, sample, rng):
         del sample, rng
         return TextSequence(
-            input_ids=np.asarray([1, 10, 11, 20, 21, 2]),
-            labels=np.asarray([IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, 20, 21, 2]),
+            input_ids=np.asarray([1, 10, 11, 20, 21]),
+            labels=np.asarray([IGNORE_INDEX, IGNORE_INDEX, 20, 21, 2]),
         )
 
 
-def test_sft_labels_survive_packing_and_shift():
+def test_sft_labels_survive_packing_and_collation():
     recipe = FirstFitPackingConfig(
         dataset=SingleDatasetConfig(
             source=RowsSourceConfig(rows=({"id": 0}, {"id": 1})),
@@ -1049,7 +1050,8 @@ def test_text_processor_leaves_positions_unmaterialized():
 
     assert sequence is not None
     assert sequence.positions is None
-    assert np.array_equal(sequence.input_ids, sequence.labels)
+    assert sequence.input_ids.tolist() == [1, 114, 111, 118, 118, 121]
+    assert sequence.labels.tolist() == [114, 111, 118, 118, 121, 2]
 
 
 def test_text_processor_returns_none_for_short_row():
@@ -1074,7 +1076,9 @@ def test_single_dataset_post_filter_removes_none():
         dataset_iteration_policy=dataset_iteration_policy(),
     )
 
-    assert [sequence.input_ids.tolist() for sequence in dataset] == [[1, 10, 2]]
+    sequences = list(dataset)
+    assert [sequence.input_ids.tolist() for sequence in sequences] == [[1, 10]]
+    assert [sequence.labels.tolist() for sequence in sequences] == [[10, 2]]
 
 
 def test_chat_processor_masks_prompt_and_trains_assistant():
@@ -1097,9 +1101,9 @@ def test_chat_processor_masks_prompt_and_trains_assistant():
     )
     prompt_length = len(FakeTokenizer().encode(prompt, add_bos=True, add_eos=False))
 
-    assert (token_sequence.labels[:prompt_length] == IGNORE_INDEX).all()
-    assert (token_sequence.labels[prompt_length:] != IGNORE_INDEX).all()
-    assert token_sequence.input_ids[-1] == FakeTokenizer.eos_id
+    assert (token_sequence.labels[: prompt_length - 1] == IGNORE_INDEX).all()
+    assert (token_sequence.labels[prompt_length - 1 :] != IGNORE_INDEX).all()
+    assert token_sequence.labels[-1] == FakeTokenizer.eos_id
 
 
 def test_chat_processor_rejects_non_single_turn_messages():
@@ -1482,17 +1486,19 @@ def test_concat_then_split_normalizes_split_continuation_positions():
     )
 
     assert rows[0].input_ids.tolist() == [0, 1, 2, 3, 4]
-    assert rows[1].input_ids.tolist() == [5, 6, 7, 8, 9]
+    assert rows[1].input_ids.tolist() == [5, 6, 7, 8, 0]
+    assert rows[0].labels.tolist() == [1, 2, 3, 4, 5]
+    assert rows[1].labels.tolist() == [6, 7, 8, 9, IGNORE_INDEX]
     assert rows[0].positions.tolist() == [0, 1, 2, 3, 4]
-    assert rows[1].positions.tolist() == [0, 1, 2, 3, 4]
+    assert rows[1].positions.tolist() == [0, 1, 2, 3, 0]
 
     collator = TextCollator.Config().build(context=replace(CONTEXT, seq_len=5))
     first_inputs, first_labels = collator([rows[0]])
     second_inputs, second_labels = collator([rows[1]])
 
     assert first_inputs["input"].tolist() == [[0, 1, 2, 3, 4]]
-    assert first_labels.tolist() == [[1, 2, 3, 4, IGNORE_INDEX]]
-    assert second_inputs["input"].tolist() == [[5, 6, 7, 8, 9]]
+    assert first_labels.tolist() == [[1, 2, 3, 4, 5]]
+    assert second_inputs["input"].tolist() == [[5, 6, 7, 8, 0]]
     assert second_labels.tolist() == [[6, 7, 8, 9, IGNORE_INDEX]]
 
 
@@ -1531,30 +1537,30 @@ def test_concat_then_split_resets_positions_between_documents():
         )
     )
 
-    assert sequence.input_ids.tolist() == [1, 10, 2, 1, 20, 21, 2, 0, 0]
+    assert sequence.input_ids.tolist() == [1, 10, 1, 20, 21, 0, 0, 0, 0]
     assert sequence.labels.tolist() == [
-        1,
         10,
         2,
-        1,
         20,
         21,
         2,
         IGNORE_INDEX,
         IGNORE_INDEX,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
     ]
-    assert sequence.positions.tolist() == [0, 1, 2, 0, 1, 2, 3, 0, 0]
+    assert sequence.positions.tolist() == [0, 1, 0, 1, 2, 0, 0, 0, 0]
 
     inputs, labels = TextCollator.Config().build(context=CONTEXT)([sequence])
-    assert inputs["input"].tolist() == [[1, 10, 2, 1, 20, 21, 2, 0, 0]]
+    assert inputs["input"].tolist() == [[1, 10, 1, 20, 21, 0, 0, 0, 0]]
     assert labels.tolist() == [
         [
             10,
             2,
-            IGNORE_INDEX,
             20,
             21,
             2,
+            IGNORE_INDEX,
             IGNORE_INDEX,
             IGNORE_INDEX,
             IGNORE_INDEX,
@@ -1577,6 +1583,7 @@ def finite_rows_loader():
     )
     loader = GrainDataLoader.Config(
         dataset=SingleDatasetConfig(source=RowsSourceConfig(rows=rows)),
+        collator=PairCollator.Config(),
         shuffle=False,
         repeat=False,
         num_prefetch_batches=1,
@@ -1737,7 +1744,18 @@ def test_first_fit_oversized_row_does_not_discard_buffered_row():
         )
     )
 
-    assert sequence.input_ids.tolist() == [1, 2, 3, 4, 5, 6, 10, 11, 12]
+    assert sequence.input_ids.tolist() == [1, 2, 3, 4, 5, 10, 11, 0, 0]
+    assert sequence.labels.tolist() == [
+        2,
+        3,
+        4,
+        5,
+        6,
+        11,
+        12,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
+    ]
 
 
 def test_loader_passes_read_options_to_map_conversion(monkeypatch):

@@ -15,7 +15,7 @@ import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 
-from torchtitan.components.data.collators import Collator, DefaultCollator, TrainerBatch
+from torchtitan.components.data.collators import Collator, TextCollator, TrainerBatch
 from torchtitan.components.data.dataset import DatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -56,7 +56,7 @@ class GrainDataLoader(BaseDataLoader):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
         dataset: DatasetConfig
-        collator: Collator.Config = field(default_factory=DefaultCollator.Config)
+        collator: Collator.Config = field(default_factory=TextCollator.Config)
         seed: int = 42
         shuffle: bool = True
         repeat: bool = True

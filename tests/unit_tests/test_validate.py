@@ -71,9 +71,8 @@ def _generic_validator(loader):
 
 @pytest.mark.parametrize("raises", [False, True])
 def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
-    loader = _ClosableLoader(
-        [({"input": torch.ones(1, 1)}, torch.ones(1, 1, dtype=torch.long))]
-    )
+    row = ({"input": torch.ones(1, 1)}, torch.ones(1, 1, dtype=torch.long))
+    loader = _ClosableLoader([row, row])
     validator = _generic_validator(loader)
     model = _FailingModel() if raises else nn.Identity()
     monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
@@ -125,17 +124,14 @@ def _flux_validator(loader):
 
 @pytest.mark.parametrize("raises", [False, True])
 def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
-    loader = _ClosableLoader(
-        [
-            (
-                {
-                    "prompt": "test",
-                    "timestep": torch.tensor([0.5]),
-                },
-                torch.zeros(1, 1, 2, 2),
-            )
-        ]
+    row = (
+        {
+            "prompt": "test",
+            "timestep": torch.tensor([0.5]),
+        },
+        torch.zeros(1, 1, 2, 2),
     )
+    loader = _ClosableLoader([row, row])
     validator = _flux_validator(loader)
 
     def preprocess_data(**kwargs):
@@ -165,3 +161,51 @@ def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
         validator.validate([_FluxModel()], step=1)
 
     assert loader.closed
+
+
+def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
+    labels = torch.zeros(1, 3, 6, 10)
+    loader = _ClosableLoader(
+        [
+            (
+                {
+                    "prompt": "test",
+                    "timestep": torch.tensor([0.5]),
+                },
+                labels,
+            )
+        ]
+    )
+    validator = _flux_validator(loader)
+    validator.config.save_img_count = 1
+    generated = {}
+
+    def generate_image(**kwargs):
+        generated.update(kwargs)
+        return torch.zeros(3, kwargs["img_height"], kwargs["img_width"])
+
+    monkeypatch.setattr(flux_validate_module, "generate_image", generate_image)
+    monkeypatch.setattr(flux_validate_module, "save_image", lambda **kwargs: None)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(
+        flux_validate_module,
+        "preprocess_data",
+        lambda **kwargs: {
+            **kwargs["batch"],
+            "img_encodings": torch.zeros(1, 1, 2, 2),
+            "clip_encodings": torch.zeros(1, 1),
+            "t5_encodings": torch.zeros(1, 1, 1),
+        },
+    )
+    monkeypatch.setattr(flux_validate_module, "pack_latents", lambda value: value)
+    monkeypatch.setattr(
+        flux_validate_module,
+        "create_position_encoding_for_latents",
+        lambda *args: torch.zeros(1, 1, 3),
+    )
+    monkeypatch.setattr(flux_validate_module.dist_utils, "device_type", "cpu")
+
+    validator.validate([_FluxModel()], step=1)
+
+    assert generated["img_height"] == 6
+    assert generated["img_width"] == 10

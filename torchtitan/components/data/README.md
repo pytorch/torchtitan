@@ -47,7 +47,6 @@ from torchtitan.components.data import (
     GrainDataLoader,
     IndexedJsonlSource,
     SingleDatasetConfig,
-    TextCollator,
 )
 from torchtitan.hf_datasets.text_datasets import TextProcessor
 
@@ -70,7 +69,6 @@ books_packed_ds = ConcatThenSplitPackingConfig(dataset=books_ds)
 
 config.dataloader = GrainDataLoader.Config(
     dataset=books_packed_ds,
-    collator=TextCollator.Config(),
 )
 ```
 
@@ -155,9 +153,11 @@ class TokensToTextSequence(SampleProcessor):
 
     def __call__(self, token_ids, rng):
         del rng
+        if len(token_ids) < 2:
+            return None
         return TextSequence(
-            input_ids=token_ids,
-            labels=token_ids.copy(),
+            input_ids=token_ids[:-1],
+            labels=token_ids[1:],
         )
 
 
@@ -167,6 +167,7 @@ token_documents_ds = SingleDatasetConfig(
         document_offsets_path="document_offsets.npy",
     ),
     processor=TokensToTextSequence.Config(),
+    post_filters=(lambda sample: sample is not None,),
 )
 
 packed_tokens_ds = ConcatThenSplitPackingConfig(
@@ -184,7 +185,6 @@ from torchtitan.components.data import (
     GrainDataLoader,
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
-    TextCollator,
 )
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
@@ -210,11 +210,11 @@ gsm8k_packed_ds = FirstFitPackingConfig(dataset=gsm8k_ds)
 
 config.dataloader = GrainDataLoader.Config(
     dataset=gsm8k_packed_ds,
-    collator=TextCollator.Config(),
 )
 ```
 
-`ChatProcessor` applies the tokenizer's chat template and sets prompt labels to `IGNORE_INDEX`.
+`ChatProcessor` applies the tokenizer's chat template, creates next-token input
+and label pairs, and sets prompt labels to `IGNORE_INDEX`.
 
 # Mixing datasets
 
@@ -330,7 +330,6 @@ import grain.python as grain
 
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_pretraining_ds,
-    collator=TextCollator.Config(),
     seed=42,
     shuffle=True,
     repeat=True,

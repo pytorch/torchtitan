@@ -37,12 +37,16 @@ class DatasetConfig(Protocol):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class TextSequence:
-    """Token-aligned text preserved through composition and packing."""
+    """Next-token-aligned text preserved through composition and packing.
+
+    NOTE: It is the dataset's processor responsability to shift tokens into
+    aligned input and label pairs. The trainer does not do it.
+    """
 
     input_ids: np.ndarray
-    """Unshifted token IDs."""
+    """Tokens provided to the model."""
     labels: np.ndarray
-    """Token-aligned target IDs, with `IGNORE_INDEX` where loss is disabled."""
+    """Target for each input token, with `IGNORE_INDEX` where loss is disabled."""
     positions: np.ndarray | None = None
     """Per-token positions; `None` until packing or collation materializes them."""
 

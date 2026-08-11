@@ -11,7 +11,6 @@ from dataclasses import dataclass, field, replace
 import spmd_types as spmd
 import torch
 
-from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
@@ -23,15 +22,10 @@ from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
-    IMAGE_LATENT_SIZE_RATIO,
     pack_latents,
-    PATCH_HEIGHT,
-    PATCH_WIDTH,
     preprocess_data,
 )
 from torchtitan.trainer import Trainer
-
-from .flux_datasets import get_flux_image_size
 
 
 class FluxTrainer(Trainer):
@@ -46,21 +40,6 @@ class FluxTrainer(Trainer):
         inference: Inference = field(default_factory=Inference)
 
     def __init__(self, config: Config):
-        # Compute image token count: autoencoder downscales the image,
-        # then pack_latents tiles the latent into 2×2 patches.
-        if not isinstance(config.dataloader, GrainDataLoader.Config):
-            raise ValueError(
-                "FluxTrainer requires GrainDataLoader.Config for dataloader"
-            )
-        img_size = get_flux_image_size(config.dataloader.dataset)
-        ae_downscale = IMAGE_LATENT_SIZE_RATIO
-        latent_side_width = img_size // ae_downscale // PATCH_WIDTH
-        latent_side_height = img_size // ae_downscale // PATCH_HEIGHT
-        seq_len_img = latent_side_width * latent_side_height
-
-        seq_len_txt = config.tokenizer.max_t5_encoding_len
-        config.training.seq_len = seq_len_img + seq_len_txt
-
         super().__init__(config)
 
         # Set random seed, and maybe enable deterministic mode

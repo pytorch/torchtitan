@@ -11,7 +11,6 @@ from torchtitan.components.data import (
     GrainDataLoader,
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
-    TextCollator,
 )
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
@@ -50,7 +49,6 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
@@ -85,7 +83,9 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -117,7 +117,9 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
             seq_len=2048,
             steps=1000,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
         metrics=MetricsProcessor.Config(log_freq=10),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -153,7 +155,6 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
@@ -209,7 +210,6 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
                     post_filters=(lambda sample: sample is not None,),
                 ),
             ),
-            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
@@ -272,7 +272,6 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
                     post_filters=(lambda sample: sample is not None,),
                 ),
             ),
-            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(

@@ -9,6 +9,12 @@ import unittest
 import torch
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.config import ConfigManager
+from torchtitan.models.flux.config_registry import (
+    flux_debugmodel,
+    flux_dev,
+    flux_schnell,
+)
+from torchtitan.models.flux.flux_datasets import FluxSampleProcessor
 
 
 class TestFluxDataLoader(unittest.TestCase):
@@ -42,6 +48,20 @@ class TestFluxDataLoader(unittest.TestCase):
         self.assertTrue(
             torch.equal(labels, torch.stack([row["image"] for row in rows]))
         )
+
+    def test_recipe_sequence_length_matches_dataset_geometry(self):
+        for recipe, expected_seq_len in (
+            (flux_debugmodel, 512),
+            (flux_dev, 768),
+            (flux_schnell, 512),
+        ):
+            with self.subTest(recipe=recipe.__name__):
+                config = recipe()
+                processor = config.dataloader.dataset.processor
+
+                self.assertIsInstance(processor, FluxSampleProcessor.Config)
+                self.assertEqual(processor.img_size, 256)
+                self.assertEqual(config.training.seq_len, expected_seq_len)
 
     def test_validation_timestep_preserves_sample(self):
         from torchtitan.models.flux.flux_datasets import _add_validation_timestep

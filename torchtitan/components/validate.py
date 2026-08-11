@@ -16,7 +16,6 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
-    TextCollator,
 )
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader
@@ -90,7 +89,6 @@ class Validator(BaseValidator):
                 dataset=ConcatThenSplitPackingConfig(
                     dataset=DATASETS["c4_validation"],
                 ),
-                collator=TextCollator.Config(),
                 repeat=False,
             )
         )

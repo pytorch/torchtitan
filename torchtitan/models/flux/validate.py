@@ -6,7 +6,6 @@
 
 import os
 from dataclasses import dataclass, field, replace
-from typing import cast
 
 import torch
 import torch.nn as nn
@@ -26,7 +25,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools.logging import logger
 
 from .configs import SamplingConfig
-from .flux_datasets import FluxValidationDatasetConfig, get_flux_image_size
+from .flux_datasets import FluxValidationDatasetConfig
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
@@ -174,17 +173,16 @@ class FluxValidator(Validator):
             prompt = input_dict.pop("prompt")
             if not isinstance(prompt, list):
                 prompt = [prompt]
+            img_height, img_width = labels.shape[-2:]
             for p in prompt:
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
-                dataloader = cast(GrainDataLoader.Config, self.dl_config)
-                img_size = get_flux_image_size(dataloader.dataset)
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,
-                    img_height=16 * (img_size // 16),
-                    img_width=16 * (img_size // 16),
+                    img_height=img_height,
+                    img_width=img_width,
                     enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
                     denoising_steps=self.config.sampling.denoising_steps,
                     classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,

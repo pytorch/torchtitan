@@ -6,7 +6,6 @@
 
 from torchtitan.components.data.collators import (
     Collator,
-    DefaultCollator,
     TextCollator,
     TrainerBatch,
 )
@@ -41,7 +40,6 @@ __all__ = [
     "DatasetConfig",
     "DatasetIterationPolicy",
     "DatasetMixConfig",
-    "DefaultCollator",
     "FirstFitPackingConfig",
     "GrainDataLoader",
     "HuggingFaceRandomAccessSource",

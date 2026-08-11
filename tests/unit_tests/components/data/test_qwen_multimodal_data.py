@@ -7,18 +7,20 @@
 from dataclasses import dataclass
 
 import grain.python as grain
+import numpy as np
 import pytest
 import torch
 
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
-from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MMSamplePackingConfig,
     MultiModalProcessor,
 )
+from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
+from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
 from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
 
 
@@ -93,6 +95,56 @@ class _RowsSourceConfig:
 
 def test_multimodal_registry_does_not_enable_packing():
     assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
+
+
+def test_multimodal_processor_forwards_resize_config():
+    captured = {}
+
+    def process_sample(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    processor = MultiModalProcessor.Config(
+        sample_processor=process_sample,
+        resize_fn=resize_to_patch_budget,
+        max_patches=123,
+        max_patches_per_side=45,
+    ).build(context=CONTEXT)
+
+    assert processor({}, np.random.default_rng(0)) is None
+    assert captured["resize_fn"] is resize_to_patch_budget
+    assert captured["max_patches"] == 123
+    assert captured["max_patches_per_side"] == 45
+
+
+@pytest.mark.parametrize(
+    "recipe_name",
+    [
+        "kimi_k2_5_debugmodel",
+        "kimi_vl_a3b",
+    ],
+)
+def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
+    base_dataset = MM_DATASETS[
+        "cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"
+    ]
+    base_processor = base_dataset.processor
+
+    config = getattr(kimi_configs, recipe_name)()
+    dataset = config.dataloader.dataset
+    collator = config.dataloader.collator
+
+    assert isinstance(dataset, SingleDatasetConfig)
+    assert dataset is not base_dataset
+    assert isinstance(dataset.processor, MultiModalProcessor.Config)
+    assert dataset.processor is not base_processor
+    assert dataset.processor.resize_fn is resize_to_patch_budget
+    assert dataset.processor.max_patches == 16_384
+    assert isinstance(collator, MultiModalCollator.Config)
+    assert collator.patch_order == "raster"
+    assert MM_DATASETS[
+        "cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"
+    ] is base_dataset
 
 
 @pytest.mark.parametrize(
@@ -234,11 +286,11 @@ def test_multimodal_packing_uses_seq_len():
     assert len(row["input_ids"]) == CONTEXT.seq_len
 
 
-def test_multimodal_collator_masks_cross_sample_target():
+def test_multimodal_collator_preserves_aligned_labels():
     collator = MultiModalCollator.Config().build(context=CONTEXT)
     packed = {
         "input_ids": torch.tensor([1, 2, 3, 4]),
-        "labels": torch.tensor([1, 2, 3, 4]),
+        "labels": torch.tensor([2, 9, 4, 10]),
         "positions": torch.tensor([0, 1, 0, 1]),
         "pixel_values": [],
         "pixel_values_videos": [],
@@ -246,7 +298,7 @@ def test_multimodal_collator_masks_cross_sample_target():
 
     _, labels = collator([packed])
 
-    assert labels[0, :4].tolist() == [2, IGNORE_INDEX, 4, IGNORE_INDEX]
+    assert labels[0, :4].tolist() == [2, 9, 4, 10]
 
 
 def test_mm_finite_underfilled_tail_flushes():

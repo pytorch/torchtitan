@@ -147,7 +147,7 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
 
 
 class TestChatDatasetShiftedTokens(unittest.TestCase):
-    """Inputs keep `seq_len`; labels shift left and pad the final target."""
+    """The processor creates next-token pairs before collation."""
 
     def test_shifted_by_one(self):
         tokenizer = _load_tokenizer()
@@ -164,7 +164,8 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             full_tokens.append(tokenizer.eos_id)
 
         self.assertEqual(
-            inputs["input"][0].tolist()[: len(full_tokens)], full_tokens
+            inputs["input"][0].tolist()[: len(full_tokens) - 1],
+            full_tokens[:-1],
         )
 
         prompt_text = tokenizer.apply_chat_template(

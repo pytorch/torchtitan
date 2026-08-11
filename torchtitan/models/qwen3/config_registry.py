@@ -13,7 +13,6 @@ from torchtitan.components.data import (
     GrainDataLoader,
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
-    TextCollator,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
@@ -48,7 +47,6 @@ def qwen3_debugmodel() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -162,7 +160,6 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -197,7 +194,6 @@ def qwen3_0_6b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -227,7 +223,6 @@ def qwen3_1_7b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -282,7 +277,6 @@ def qwen3_14b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -318,7 +312,6 @@ def qwen3_30b_a3b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -354,7 +347,6 @@ def qwen3_32b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -399,7 +391,6 @@ def qwen3_moe_debug() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -448,7 +439,6 @@ def qwen3_moe_deepep() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            collator=TextCollator.Config(),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -514,7 +504,6 @@ def sft_qwen3_8b_math() -> Trainer.Config:
                     post_filters=(lambda sample: sample is not None,),
                 ),
             ),
-            collator=TextCollator.Config(),
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,

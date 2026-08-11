@@ -13,7 +13,6 @@ from typing import Any, TypeAlias
 
 import numpy as np
 import torch
-from torch.utils.data import default_collate
 
 from torchtitan.components.data.dataset import TextSequence
 from torchtitan.components.data.types import DatasetBuildContext
@@ -36,28 +35,8 @@ class Collator(Configurable, ABC):
         ...
 
 
-class DefaultCollator(Collator):
-    """Stacks rows with PyTorch default collation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Collator.Config):
-        pass
-
-    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
-        del config, context
-
-    def __call__(self, rows: Sequence[Any]) -> TrainerBatch:
-        batch = default_collate(list(rows))
-        if not isinstance(batch, (list, tuple)) or len(batch) != 2:
-            raise TypeError(
-                "DefaultCollator rows must contain (model_inputs, labels) pairs"
-            )
-        model_inputs, labels = batch
-        return model_inputs, labels
-
-
 class TextCollator(Collator):
-    """Pads token-aligned text and creates next-token trainer batches."""
+    """Pads next-token-aligned text rows into trainer batches."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
@@ -90,40 +69,7 @@ class TextCollator(Collator):
             )
             positions[row_index, :length] = torch.as_tensor(row_positions)
 
-        input_ids, labels, positions = shift_causal_labels(
-            input_ids,
-            labels,
-            positions,
-        )
         return {
             "input": input_ids,
             "positions": positions,
         }, labels
-
-
-def shift_causal_labels(
-    input_ids: torch.Tensor,
-    labels: torch.Tensor,
-    positions: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Shift labels left and mask targets that cross document boundaries.
-
-    Args:
-        input_ids: `[batch, seq]` unshifted model inputs.
-        labels: `[batch, seq]` token-aligned labels.
-        positions: `[batch, seq]` positions that reset to zero at each document.
-
-    Example:
-
-        input_ids = [10, 11, 20, 21]
-        positions = [ 0,  1,  0,  1]
-        labels    = [10, 11, 20, 21]
-        # shifted labels -> [11, IGNORE_INDEX, 21, IGNORE_INDEX]
-    """
-    shifted_labels = torch.nn.functional.pad(
-        labels[..., 1:],
-        (0, 1),
-        value=IGNORE_INDEX,
-    )
-    shifted_labels[..., :-1].masked_fill_(positions[..., 1:] == 0, IGNORE_INDEX)
-    return input_ids, shifted_labels, positions
