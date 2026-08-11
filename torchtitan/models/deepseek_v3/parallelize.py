@@ -14,18 +14,18 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.full_dtensor import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
     validate_config,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.deepseek_v3 import DeepSeekV3Model
+from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.deepseek_v3.mtp import apply_fsdp_to_mtp_decoder
 
 
 def parallelize_deepseekv3(
-    model: DeepSeekV3Model,
+    model: Decoder,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
@@ -81,7 +81,8 @@ def parallelize_deepseekv3(
             )
             edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-    apply_fsdp_to_decoder(
+    apply_fsdp_to_mtp_decoder(
+        # pyrefly: ignore [bad-argument-type]
         model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
