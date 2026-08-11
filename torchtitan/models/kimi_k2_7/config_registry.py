@@ -10,10 +10,7 @@ from typing import cast
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
-    BucketConfig,
-)
-from torchtitan.components.distributed_optimizers.muon import (
+from torchtitan.components.distributed_muon import (
     BatchedMatrixComputeView,
     MuonComputeShardingConfig,
     Owned,
@@ -25,6 +22,7 @@ from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfi
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
@@ -206,7 +204,12 @@ def _distributed_muon_optimizer(
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
-    per_head = _per_head_muon_sharding(num_heads=attention.n_heads)
+    per_head = MuonComputeShardingConfig(
+        placement=Shard(0),
+        view_before_placement=BatchedMatrixComputeView(
+            num_matrices=attention.n_heads,
+        ),
+    )
     query_shardings: dict[str, MuonComputeShardingConfig] = (
         {
             "wq_a": MuonComputeShardingConfig(placement=Owned()),
@@ -341,15 +344,6 @@ def _distributed_muon_optimizer(
                 "bucket_configs": bucket_configs,
             }
         },
-    )
-
-
-def _per_head_muon_sharding(num_heads: int) -> MuonComputeShardingConfig:
-    return MuonComputeShardingConfig(
-        view_before_placement=BatchedMatrixComputeView(
-            num_matrices=num_heads,
-        ),
-        placement=Shard(0),
     )
 
 
