@@ -64,6 +64,7 @@ __all__ = [
     "get_efficient_causal_mask_mod_for_packed_document",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
+    "local_head_split",
 ]
 
 
@@ -81,6 +82,15 @@ class VarlenMetadata(NamedTuple):
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+
+
+@spmd.local_map(
+    in_types=(spmd.PartitionSpec("dp", None, "tp"), None),
+    out_types=spmd.PartitionSpec("dp", None, "tp", None),
+)
+def local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
+    # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
+    return t.view(t.shape[0], t.shape[1], -1, head_dim)
 
 
 class VarlenAttention(Module):
