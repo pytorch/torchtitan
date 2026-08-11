@@ -274,8 +274,6 @@ class VLLMAttentionWrapper(Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
 
-        from vllm.config import get_current_vllm_config
-
         vllm_config = get_current_vllm_config()
         tp_degree = vllm_config.parallel_config.tensor_parallel_size
 
