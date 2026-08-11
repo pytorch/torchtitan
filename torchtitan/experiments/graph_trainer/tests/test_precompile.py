@@ -377,11 +377,10 @@ class TestCudagraphPass(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_minimal_async_ep_custom_ops_are_wrapped_by_cudagraph_pass(self):
         """MinimalAsyncEP custom ops should not force cudagraph_pass fallback."""
-        from torchtitan.distributed.minimal_async_ep import (
-            combine_op,
-            dispatch_op,
+        from torchtitan.distributed.minimal_async_ep import combine_op, dispatch_op
+        from torchtitan.distributed.minimal_async_ep.api import (
             reduce_topk_op,
-            wait_combine_op,
+            wait_combine,
             wait_dispatch_op,
         )
         from torchtitan.experiments.graph_trainer.passes import cudagraph_pass
@@ -401,7 +400,7 @@ class TestCudagraphPass(unittest.TestCase):
                 dispatched[5],
                 8,
             )
-            combined = wait_combine_op(combined, [expert_output, *dispatched[3:6]])
+            combined = wait_combine(combined, [expert_output, *dispatched[3:6]])
             return reduce_topk_op(combined, dispatched[7], dispatched[6], scores, 4, 2)
 
         gm = make_fx(exchange, tracing_mode="fake")(
