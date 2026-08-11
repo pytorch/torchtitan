@@ -111,13 +111,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         regex pattern and a self-contained optimizer setup.
         Patterns are checked in order; first match wins."""
 
-        optimizer_init_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-        """Programmatic optimizer-wide constructor arguments keyed by name.
-
-        Use this for instance-wide objects such as communication bucket specs;
-        parameter-group hyperparameters belong in ``ParamGroupConfig``.
-        """
-
         implementation: Literal[
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
@@ -134,6 +127,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
           CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
           Only supported for Adam/AdamW. See docs/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
+        """
+
+        optimizer_init_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+        """Programmatic optimizer-wide constructor arguments keyed by name.
+
+        Use this for instance-wide objects such as communication bucket specs;
+        parameter-group hyperparameters belong in ``ParamGroupConfig``.
         """
 
         def build(self, **kwargs):
@@ -298,6 +298,57 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             self._register_bf16_optimizer_state_hook()
         self._post_init(assigned_params)
 
+    def _log_optimizer(
+        self, optimizer: Optimizer, part_idx: int, patterns: list[str]
+    ) -> None:
+        """Log one optimizer's param-group assignments (patterns are logging-only)."""
+        _KEY_KWARGS = {
+            "lr",
+            "weight_decay",
+            "betas",
+            "eps",
+            "momentum",
+            "nesterov",
+            "fused",
+            "foreach",
+        }
+        opt_name = type(optimizer).__name__
+        for group, pattern in zip(optimizer.param_groups, patterns):
+            num_params = len(group["params"])
+            kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
+            logger.info(
+                f"Optimizer {opt_name} (model_part={part_idx}): "
+                f"{num_params} params [{pattern}] {kwargs}"
+            )
+
+    def _validate_params(self, all_params: list[nn.Parameter]) -> None:
+        """Verify every trainable param is assigned to exactly one optimizer."""
+        expected = {
+            id(p)
+            for model in self.model_parts
+            for p in model.parameters()
+            if p.requires_grad
+        }
+        actual = {id(p) for p in all_params}
+        assert expected == actual, (
+            f"Parameter mismatch: {len(expected)} trainable params in model, "
+            f"{len(actual)} in optimizers"
+        )
+
+    @staticmethod
+    def _collect_assigned_params(
+        param_groups_by_part: list[
+            tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]
+        ],
+    ) -> list[nn.Parameter]:
+        return [
+            param
+            for groups_by_opt_name, _ in param_groups_by_part
+            for opt_param_groups in groups_by_opt_name.values()
+            for group in opt_param_groups
+            for param in group["params"]
+        ]
+
     @staticmethod
     def _validate_param_group_matches(
         param_group_configs: list[ParamGroupConfig],
@@ -345,57 +396,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 "Parameter mismatch on at least one pipeline stage: every "
                 "trainable parameter must be assigned to an optimizer"
             )
-
-    @staticmethod
-    def _collect_assigned_params(
-        param_groups_by_part: list[
-            tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]
-        ],
-    ) -> list[nn.Parameter]:
-        return [
-            param
-            for groups_by_opt_name, _ in param_groups_by_part
-            for opt_param_groups in groups_by_opt_name.values()
-            for group in opt_param_groups
-            for param in group["params"]
-        ]
-
-    def _log_optimizer(
-        self, optimizer: Optimizer, part_idx: int, patterns: list[str]
-    ) -> None:
-        """Log one optimizer's param-group assignments (patterns are logging-only)."""
-        _KEY_KWARGS = {
-            "lr",
-            "weight_decay",
-            "betas",
-            "eps",
-            "momentum",
-            "nesterov",
-            "fused",
-            "foreach",
-        }
-        opt_name = type(optimizer).__name__
-        for group, pattern in zip(optimizer.param_groups, patterns):
-            num_params = len(group["params"])
-            kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
-            logger.info(
-                f"Optimizer {opt_name} (model_part={part_idx}): "
-                f"{num_params} params [{pattern}] {kwargs}"
-            )
-
-    def _validate_params(self, all_params: list[nn.Parameter]) -> None:
-        """Verify every trainable param is assigned to exactly one optimizer."""
-        expected = {
-            id(p)
-            for model in self.model_parts
-            for p in model.parameters()
-            if p.requires_grad
-        }
-        actual = {id(p) for p in all_params}
-        assert expected == actual, (
-            f"Parameter mismatch: {len(expected)} trainable params in model, "
-            f"{len(actual)} in optimizers"
-        )
 
     def __iter__(self) -> Iterator[T]:
         return iter(self.optimizers)
