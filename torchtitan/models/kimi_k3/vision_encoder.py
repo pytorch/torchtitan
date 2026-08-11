@@ -19,39 +19,15 @@ Shape suffixes:
 - M = maximum merged tokens per item (padded)
 """
 
-import math
 from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import VisionMLP
 from torchtitan.protocols.module import Module, ModuleDict
-
-
-class KimiExactGELU(Module):
-    """Exact GELU used by the released Kimi vision projector.
-
-    The explicit FP32 form is mathematically equivalent to
-    ``nn.GELU(approximate="none")`` while avoiding device-specific fused
-    approximations in the numerical reference path.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        x_float = x.float()
-        return (0.5 * x_float * (1.0 + torch.erf(x_float / math.sqrt(2.0)))).to(
-            input_dtype
-        )
 
 
 def _get_temporal_pos_embed(
@@ -357,7 +333,7 @@ class KimiK3VisionProjector(Module):
         linear_1: Linear.Config
         linear_2: Linear.Config
         post_norm: RMSNorm.Config
-        activation: KimiExactGELU.Config = field(default_factory=KimiExactGELU.Config)
+        activation: GELU.Config = field(default_factory=GELU.Config)
 
     def __init__(self, config: Config):
         super().__init__()
