@@ -42,6 +42,7 @@ _REPLICATE_NORM = ShardingConfig(
     state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM},
     in_src_shardings={"input": _REPLICATE_ACT},
     in_dst_shardings={"input": _REPLICATE_ACT},
+    out_src_shardings=_REPLICATE_ACT,
     out_dst_shardings=_REPLICATE_ACT,
 )
 
@@ -112,6 +113,7 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
         state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM},
         in_src_shardings={"input": _REPLICATE_ACT},
         in_dst_shardings={"input": _REPLICATE_ACT},
+        out_src_shardings=_REPLICATE_ACT,
         out_dst_shardings=_REPLICATE_ACT,
     )
 
