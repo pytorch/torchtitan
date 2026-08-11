@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from datetime import timedelta
 from typing import Protocol, TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
@@ -23,7 +24,7 @@ from spmd_types.checker import typecheck as spmd_typecheck
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import Placement, Shard
+from torch.distributed.tensor.placement_types import Partial, Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.tools.logging import logger
@@ -73,6 +74,44 @@ def check_dtensor_placements_match(
             return False
 
     return True
+
+
+def redistribute_dtensor(
+    tensor: DTensor,
+    placements: tuple[Placement, ...],
+) -> DTensor:
+    """Redistribute a DTensor, including the local ``Shard -> Partial`` case."""
+    changed_mesh_axes = [
+        mesh_axis
+        for mesh_axis, (src, dst) in enumerate(
+            zip(tensor.placements, placements, strict=True)
+        )
+        if src != dst
+    ]
+    if len(changed_mesh_axes) == 1:
+        mesh_axis = changed_mesh_axes[0]
+        src = tensor.placements[mesh_axis]
+        dst = placements[mesh_axis]
+        if isinstance(src, Shard) and isinstance(dst, Partial):
+            # DTensor does not expose redistribution to Partial. Convert the
+            # local shard to a zero-filled partial contribution explicitly.
+            local_partial = spmd.convert(
+                tensor.to_local(),
+                tensor.device_mesh.get_group(mesh_axis),
+                src=spmd.S(src.dim),
+                dst=spmd.P,
+                expert_mode=True,
+            )
+            return DTensor.from_local(
+                local_partial,
+                tensor.device_mesh,
+                placements,
+                shape=tensor.shape,
+                stride=tensor.stride(),
+                run_check=False,
+            )
+
+    return tensor.redistribute(placements=placements, async_op=True)
 
 
 def _dist_reduce(

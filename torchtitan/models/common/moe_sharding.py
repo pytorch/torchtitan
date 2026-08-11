@@ -167,8 +167,7 @@ def _shared_experts_sharding_configs(
     """Configs for shared FeedForward parent and w1/w2/w3 linears."""
     # The parent FeedForward converts its input to Replicate once before the
     # w1/w3 fork. w2 reduces its Partial output to the layout used for the
-    # routed + shared add: sequence-sharded with SP, Replicate with EP-only,
-    # and Partial with pure TP.
+    # routed + shared add: sequence-sharded with SP and Partial otherwise.
     input_layout = (
         dense_sequence_parallel_placement()
         if enable_ep and enable_sp
@@ -178,7 +177,7 @@ def _shared_experts_sharding_configs(
     desired_output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I if enable_ep else spmd.P)
+        else dense_activation_placement(tp=spmd.P)
     )
     return (
         ShardingConfig(
@@ -228,7 +227,7 @@ def _routed_experts_sharding_configs(
     desired_experts_output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I if enable_ep else spmd.P)
+        else dense_activation_placement(tp=spmd.P)
     )
 
     return (
@@ -282,7 +281,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I if enable_ep else spmd.P)
+        else dense_activation_placement(tp=spmd.P)
     )
     return ShardingConfig(
         state_shardings={
