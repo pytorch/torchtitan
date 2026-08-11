@@ -36,6 +36,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
+    TORCHTITAN_WORKER_CLS,
 )
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.tools.utils import has_cuda_capability
@@ -142,6 +143,7 @@ def generate() -> None:
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
+        worker_cls=TORCHTITAN_WORKER_CLS,
         # Use external_launcher only when launched via torchrun (multi-GPU);
         # for single-GPU, let vLLM pick the default executor.
         distributed_executor_backend=("external_launcher"),
@@ -163,9 +165,12 @@ def generate() -> None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
+    expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
+        expert_sequence_parallel_size=expert_sequence_parallel_size,
+        enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config

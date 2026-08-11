@@ -32,6 +32,7 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
+    local_head_split,
     VarlenAttention,
     VarlenMetadata,
 )
@@ -226,15 +227,6 @@ class GatedDeltaKernel(Module):
         return result[0]
 
 
-@spmd.local_map(
-    in_types=(spmd.PartitionSpec("dp", None, "tp"), None),
-    out_types=spmd.PartitionSpec("dp", None, "tp", None),
-)
-def _local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
-    # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
-    return t.view(t.shape[0], t.shape[1], -1, head_dim)
-
-
 class GatedDeltaNet(Module):
     """Gated DeltaNet linear attention.
 
@@ -329,6 +321,7 @@ class GatedDeltaNet(Module):
         cu_seqlens: torch.Tensor | None = None,
         cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # varlen attention path
         if cu_seqlens is not None:
             if isinstance(x_BLD, DTensor):
 
@@ -345,24 +338,27 @@ class GatedDeltaNet(Module):
                     )
 
                 return self._local_map_conv(x_BLD, conv, _conv_varlen, cu_seqlens)
-            if get_spmd_backend() == "spmd_types":
+            else:
                 return _causal_conv1d_varlen(
                     x_BLD,
                     conv.weight,
                     cu_seqlens,
                     cu_seqlens_cpu,
                 )
-            return _causal_conv1d_varlen(
-                x_BLD,
-                conv.weight,
-                cu_seqlens,
-                cu_seqlens_cpu,
-            )
 
+        # standard fixed-length convolution path
         x_BDL = F.pad(x_BLD.transpose(1, 2), [self.conv_kernel_size - 1, 0])
 
-        def _conv(x_local_BDL: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
-            # groups == local out-channels for depthwise channel-sharded conv.
+        @spmd.local_map(
+            in_types=(
+                {"dp": spmd.S(0), "tp": spmd.S(1)},
+                {"dp": spmd.R, "tp": spmd.S(0)},
+            ),
+            out_types={"dp": spmd.S(0), "tp": spmd.S(1)},
+        )
+        def _local_depthwise_conv1d(
+            x_local_BDL: torch.Tensor, w_local: torch.Tensor
+        ) -> torch.Tensor:
             return F.conv1d(
                 x_local_BDL,
                 w_local,
@@ -376,18 +372,9 @@ class GatedDeltaNet(Module):
         if isinstance(x_BDL, DTensor):
             # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
             # groups lands in a released torch.
-            x_BDL = self._local_map_conv(x_BDL, conv, _conv)
-        elif get_spmd_backend() == "spmd_types":
-            conv_spmd = spmd.local_map(
-                in_types=(
-                    {"dp": spmd.S(0), "tp": spmd.S(1)},
-                    {"dp": spmd.R, "tp": spmd.S(0)},
-                ),
-                out_types={"dp": spmd.S(0), "tp": spmd.S(1)},
-            )(_conv)
-            x_BDL = conv_spmd(x_BDL, conv.weight)
+            x_BDL = self._local_map_conv(x_BDL, conv, _local_depthwise_conv1d)
         else:
-            x_BDL = conv(x_BDL)
+            x_BDL = _local_depthwise_conv1d(x_BDL, conv.weight)
         return F.silu(x_BDL).transpose(1, 2)
 
     def forward(
@@ -430,22 +417,22 @@ class GatedDeltaNet(Module):
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xq_BLNK = _local_head_split(xq_BLNK, self.key_head_dim)
+        xq_BLNK = local_head_split(xq_BLNK, self.key_head_dim)
         xk_BLNK = self._causal_conv(
             _maybe_flatten(self.in_proj_k(x_BLD)),
             self.conv_k,
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xk_BLNK = _local_head_split(xk_BLNK, self.key_head_dim)
+        xk_BLNK = local_head_split(xk_BLNK, self.key_head_dim)
         xv_BLNV = self._causal_conv(
             _maybe_flatten(self.in_proj_v(x_BLD)),
             self.conv_v,
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xv_BLNV = _local_head_split(xv_BLNV, self.value_head_dim)
-        xz_BLNV = _local_head_split(
+        xv_BLNV = local_head_split(xv_BLNV, self.value_head_dim)
+        xz_BLNV = local_head_split(
             _maybe_flatten(self.in_proj_z(x_BLD)), self.value_head_dim
         )
         xa_BLN = _maybe_flatten(self.in_proj_a(x_BLD))
@@ -537,10 +524,10 @@ class Qwen35Attention(BaseAttention):
         B, L, _ = x_BLD.shape
 
         # wq is 2x wider: produces query + gate
-        xq_gate_BLN2H = _local_head_split(self.wq(x_BLD), self.head_dim * 2)
+        xq_gate_BLN2H = local_head_split(self.wq(x_BLD), self.head_dim * 2)
         xq_BLNH, gate_BLNH = xq_gate_BLN2H.chunk(2, dim=-1)
-        xk_BLNH = _local_head_split(self.wk(x_BLD), self.head_dim)
-        xv_BLNH = _local_head_split(self.wv(x_BLD), self.head_dim)
+        xk_BLNH = local_head_split(self.wk(x_BLD), self.head_dim)
+        xv_BLNH = local_head_split(self.wv(x_BLD), self.head_dim)
 
         # QK norm (before RoPE)
         xq_BLNH = self.q_norm(xq_BLNH)
