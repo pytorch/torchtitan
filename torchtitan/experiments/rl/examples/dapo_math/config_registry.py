@@ -130,6 +130,7 @@ def _qwen3_4b_dapo_math_config(
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 tensor_parallel_degree=1,
             ),

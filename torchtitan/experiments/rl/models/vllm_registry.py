@@ -68,7 +68,7 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. 1 means disabled."""
 
-    spmd_backend: Literal["default", "spmd_types"] = "spmd_types"
+    spmd_backend: Literal["default", "spmd_types"] = "default"
     """SPMD backend used by TorchTitan model parallelization in the generator."""
 
     def to_training(self) -> ParallelismConfig:

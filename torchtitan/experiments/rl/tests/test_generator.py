@@ -283,7 +283,7 @@ def test_decode_metrics_absent_for_single_generated_token():
 # --- config guards (weight-sync invariants) ---
 
 # A valid inference parallelism; the weight-sync guards run after it is accepted.
-_PARALLELISM = InferenceParallelismConfig()
+_PARALLELISM = InferenceParallelismConfig(spmd_backend="spmd_types")
 
 
 def test_batch_invariant_requires_prefix_cache_reset():
@@ -378,17 +378,19 @@ def test_cudagraph_rejects_nonpositive_max_num_seqs():
 
 
 def test_inference_parallelism_disables_dense_sequence_parallelism():
-    parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
+    parallelism = InferenceParallelismConfig(
+        tensor_parallel_degree=4, spmd_backend="spmd_types"
+    )
 
     assert not parallelism.to_training().enable_sequence_parallel
 
 
-def test_rl_parallelism_defaults_to_spmd_types():
-    inference_parallelism = InferenceParallelismConfig()
+def test_rl_parallelism_selects_spmd_types_explicitly():
+    inference_parallelism = InferenceParallelismConfig(spmd_backend="spmd_types")
 
     assert inference_parallelism.spmd_backend == "spmd_types"
     assert inference_parallelism.to_training().spmd_backend == "spmd_types"
-    assert VLLMGenerator.Config().parallelism.spmd_backend == "spmd_types"
+    assert VLLMGenerator.Config().parallelism.spmd_backend == "default"
     assert PolicyTrainer.Config().parallelism.spmd_backend == "spmd_types"
 
 

@@ -125,6 +125,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
@@ -180,6 +181,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
             ),
@@ -283,6 +285,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
@@ -339,6 +342,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
@@ -409,6 +413,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 # Must match the trainer's TP for bitwise parity: a different TP
                 # degree changes reduction order / sharding in the parallel
@@ -468,6 +473,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
@@ -523,6 +529,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 tensor_parallel_degree=8,
             ),
@@ -592,6 +599,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             # piecewise/full graph capture rejects.
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
                 expert_parallel_degree=4,
@@ -735,6 +743,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
                 expert_parallel_degree=4,
@@ -800,6 +809,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
                 expert_parallel_degree=4,
@@ -906,6 +916,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
+                spmd_backend="spmd_types",
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
             ),
