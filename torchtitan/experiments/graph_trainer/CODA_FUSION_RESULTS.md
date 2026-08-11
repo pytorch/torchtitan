@@ -1159,3 +1159,90 @@ uses the same input scaling, warmups, and iteration count.
 Speedup: `0.87x`. The residual output was bitwise exact. Both projected outputs
 had `max_abs_error=0.0625`; their mean absolute errors were `0.00223414` and
 `0.00223534`. This does not justify a custom kernel under the project policy.
+
+## CODA-kernels comparison
+
+CODA-kernels was measured from `~/local/coda-kernels` on branch
+`gb300-perf-v061`, commit `b5afe0d`. The branch starts from CODA commit
+`c9c4447`, the last commit with a coherent Quack 0.6.1 API, and adds SM100/110
+GEMM dispatch. CODA `main` at `8c7c4d5` starts a Quack 0.6.2 migration but mixes
+the old batch-last ABI with new epilogue imports and does not run as checked
+out.
+
+The two implementations require dependency-isolated runs:
+
+- PyTorch FlexGEMM: CUTLASS DSL 4.5.2 and PyTorch's vendored Quack.
+- CODA-kernels: Quack 0.6.1 and CUTLASS DSL 4.6.1 with the CUDA 13 library
+  package, needed to import `GemmSm100` on this CUDA 13.0 host.
+
+Both runs used BF16 tensors scaled by `0.02`, five warmups, 20 CUDA-event
+samples, and one GB300. The tables therefore compare steady-state GPU time but
+not a single shared Python process. This matters for small differences: the F4
+eager median was `3.482 ms` in the CODA process and `3.613 ms` in the earlier
+FlexGEMM process.
+
+### F4 shared-expert SwiGLU
+
+Real shape: `M=98,304`, `K=7,168`, `P=2,048`. CODA interleaves W1/W3 columns
+and executes one `gemm_swiglu` with a `K x 2P` weight. This performs the same
+GEMM FLOPs as the two eager/FlexGEMM projections and returns the combined raw
+preactivation plus the final `P`-wide product.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager two GEMMs + SiLU + multiply | 3.482 ms | 3.359 ms | 3.743 ms |
+| two PyTorch QUACK FlexGEMMs | 3.711 ms | 3.619 ms | 4.069 ms |
+| CODA `gemm_swiglu` (autotuned) | 3.583 ms | 3.529 ms | 3.853 ms |
+
+CODA is `1.036x` faster than FlexGEMM but `0.972x` versus its paired eager
+baseline. That difference is within the observed cross-process eager drift, so
+there is no defensible F4 winner. CODA's preactivation was bitwise exact versus
+the paired eager GEMMs. Its final product had `max_abs_error=6.104e-5` and
+`mean_abs_error=8.497e-7`; CODA applies SwiGLU to the FP32 accumulator before
+the BF16 output store, unlike the graph's explicit BF16 intermediate.
+
+### Composed F3 and F4 dense boundary
+
+Real shape: `(98,304, 16,384) @ (16,384, 7,168)`, followed by two
+`(98,304, 7,168) @ (7,168, 18,432)` projections. CODA uses
+`gemm_residual_partial_rmsnorm` followed by one interleaved
+`gemm_rmsnorm_swiglu`, reducing three GEMMs to two without changing the total
+FLOPs.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager full graph boundary | 48.657 ms | 46.389 ms | 51.643 ms |
+| three composed PyTorch QUACK FlexGEMMs | 48.837 ms | 46.274 ms | 51.238 ms |
+| two CODA GEMMs, SM100 default config | 46.715 ms | 45.555 ms | 47.510 ms |
+
+The CODA row is `1.045x` faster than FlexGEMM and `1.042x` faster than the
+recorded eager median. It is not an autotuned result: CODA's full search was
+stopped after more than 20 minutes while tuning the second GEMM. The measured
+config was its SM100 default, `tile_m=256`, `tile_n=256`, `cluster_m=2`, and
+`cluster_n=1`.
+
+This CODA path is not currently a drop-in numerical replacement. It adds the
+residual in the GEMM accumulator, while the source graph stores BF16 before the
+residual add. Against an `addmm`-ordered reference, the residual had
+`max_abs_error=0.001953` and `mean_abs_error=6.117e-5`; the final product had
+`max_abs_error=0.0001221` and `mean_abs_error=2.161e-6`. The result is a useful
+performance bound, but landing it requires an explicit numerical policy and
+convergence validation.
+
+### Pattern coverage
+
+| GraphTrainer pattern | Existing CODA-kernels analogue | Comparison status |
+| --- | --- | --- |
+| `b1_lm_head_input_grad_cast` | none with the required FP32 post-store cast | FlexGEMM/eager only |
+| `b6_bf16_weight_grad_cast` | none with the required FP32 post-store cast | FlexGEMM/eager only |
+| `f6_router_sigmoid_bias` | no public sigmoid-plus-bias GEMM | FlexGEMM/eager only |
+| `f4_dense_swiglu` | `gemm_swiglu` | measured above |
+| `b2_dense_swiglu_backward` | `gemm_swiglu_bwd_zdz` | ABI mismatch: CODA emits packed interleaved `dZ` and a full-row `ZdZ`; the graph consumes separate W1/W3 branches |
+| `f2_q_rmsnorm` | QKV square-sum and RMS-scaled GEMM primitives | no exact 1,536-wide segmented boundary wrapper |
+| `f2_kv_rmsnorm` | RMS-scaled GEMM primitives | no exact 512-plus-64 tail/RoPE wrapper |
+| `b4_router_input_grad_add` | no public residual-add-only GEMM | FlexGEMM/eager only |
+| `b7_attention_grad_merge` | no public captured-add-only GEMM | FlexGEMM/eager only |
+| `f3_residual_rmsnorm` | residual partial RMSNorm plus RMS-scaled GEMM | measured with F4 above |
+
+The routed grouped-GEMM opportunities remain assigned to distMoE. They were
+not included in this comparison.
