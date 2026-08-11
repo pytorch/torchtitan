@@ -52,7 +52,7 @@ and matrix products must cover the complete `[R, C]` head matrix.
 Keep the existing configuration:
 
 ```python
-MuonComputeSharding(
+MuonComputeShardingConfig(
     view_before_placement=BatchedMatrixComputeView(num_matrices=num_heads),
     placement=Shard(0),
 )
@@ -110,11 +110,6 @@ Update `muon/storage_to_compute.py` for placement planning and
 - Represent storage-to-compute behavior with explicit transitions: no
   redistribution, whole-tensor single-participant or replicated compute, or
   dimension-0 sharded compute with view-aware repartitioning.
-- Fingerprint the mathematical matrix view: FQN, global storage shape, compute
-  view, and global compute shape. Do not fingerprint `Owned`, `Replicate`, or
-  `Shard` execution distribution.
-- Do not include generated routes, participant choices, world size, buckets,
-  or storage alignment in the checkpoint fingerprint.
 - Keep gradients and momentum in their original FSDP2 DTensor layout.
 - Update momentum and prepare the Nesterov direction before redistribution,
   because these operations are elementwise and commute with repartitioning.
@@ -234,16 +229,14 @@ are intentionally omitted to keep the test footprint minimal.
 ### FSDP2+EP integration test
 
 - Keep the inherited Kimi debug recipe on four GPUs with actual FSDP2
-  (`dp_shard=4`) and EP=2. This is an end-to-end checkpoint smoke test; four
+  (`dp_shard=4`) and EP=2. This is an end-to-end topology smoke test; four
   storage ranks divide its 16 attention heads evenly, so split-head behavior
   is covered by the numerical test above.
-- Save a full checkpoint after step 1, relaunch from that checkpoint, and
-  complete step 2.
 
 ## Validation and performance acceptance
 
 - Run the focused distributed Muon numerical test.
-- Run the two-phase FSDP2+EP Kimi checkpoint integration.
+- Run the single-step FSDP2+EP Kimi integration smoke test.
 - Run pre-commit checks on the changed files.
 - Compare the aligned path before and after the change with deterministic
   settings to prove that the existing path is unchanged.
@@ -274,9 +267,7 @@ Status: complete as of 2026-08-07.
 The implementation now supports exact one-dimensional FSDP2 `Shard(0)`
 storage whose row boundaries split logical QKV heads. It keeps aligned heads
 on the local fast path and redistributes split heads through the existing
-packed all-to-all transport. The optimizer state fingerprint describes the
-mathematical matrix view and remains independent of execution distribution,
-generated routes, buckets, and world size.
+packed all-to-all transport.
 
 Development validation before the final test consolidation included:
 
@@ -295,8 +286,8 @@ Retained validation:
   matrices across storage ranks and compares Owned and batched Shard updates
   and momentum with `torch.optim.Muon` before and after a flat optimizer
   checkpoint restore.
-- The inherited four-GPU Kimi FSDP2+EP integration saves a full checkpoint
-  after step 1, reloads it in a fresh launch, and completes step 2.
+- The inherited four-GPU Kimi FSDP2+EP integration completes one training step
+  as a topology smoke test.
 
 Additional development validation results:
 

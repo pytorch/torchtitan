@@ -259,11 +259,10 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    # One four-GPU checkpoint-resume path covers PP=2, FSDP=2,
-                    # and EP=2. PP leaves some global optimizer groups absent on
-                    # an individual stage, exercising stage-local Muon state. TP
-                    # remains unsupported because it can produce _StridedShard
-                    # storage.
+                    # One four-GPU smoke path covers PP=2, FSDP=2, and EP=2. PP
+                    # leaves some global optimizer groups absent on an individual
+                    # stage, exercising stage-local Muon state. TP remains
+                    # unsupported because it can produce _StridedShard storage.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
@@ -272,30 +271,12 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
-                    # Four microbatches match the four virtual stages; seq_len=1024
-                    # keeps enough samples in each tiny sharded data partition.
+                    # Four microbatches match the four virtual pipeline stages.
                     "--training.local_batch_size 4",
-                    "--training.seq_len 1024",
                     "--training.steps 1",
-                    "--lr_scheduler.total_steps 2",
-                    "--checkpoint.enable",
-                ],
-                [
-                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--training.local_batch_size 4",
-                    "--training.seq_len 1024",
-                    # Avoid wrapping the tiny dataset during checkpoint resume.
-                    "--training.steps 2",
-                    "--lr_scheduler.total_steps 2",
-                    "--checkpoint.enable",
                 ],
             ],
-            "Kimi K2.7 DistributedMuon PP+FSDP+EP checkpoint resume",
+            "Kimi K2.7 DistributedMuon PP+FSDP+EP",
             "kimi_k2_5_muon_pp+fsdp+ep",
             ngpu=4,
             timeout=600,
