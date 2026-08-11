@@ -995,6 +995,13 @@ GEMM after the routed expert collective. It captures both the routed result and
 the residual in their original BF16 addition order; it does not rewrite either
 grouped expert GEMM.
 
+For the first form, F3 also recognizes the exact dense SwiGLU epilogues handled
+by F4. Its W1 FlexGEMM applies `rstd` and SiLU, then the W3 FlexGEMM applies
+`rstd` and multiplies by the captured W1 activation. This keeps both fusions on
+the six overlapping original/recomputed boundaries. When both patterns are
+enabled, `f3_residual_rmsnorm` must therefore precede `f4_dense_swiglu`; config
+validation rejects the reverse order instead of silently losing F3 coverage.
+
 Real before sample from layer 0:
 
 ```python
@@ -1029,20 +1036,20 @@ rstd = torch.ops.aten.rsqrt.default(
         torch.ops.aten.mean.dim(partial_mean_square, [-1], True), 1e-05
     )
 )
-w1 = torch.ops.higher_order.flex_gemm(
+activated = torch.ops.higher_order.flex_gemm(
     torch.ops.aten.mm.default,
-    _coda_f3_residual_second_body_0,
+    _coda_f3_f4_silu_body_0,
     (weighted, t_5, rstd),
     {},
     {"backend": "QUACK"},
 )[0]
-w3 = torch.ops.higher_order.flex_gemm(
+gate, product = torch.ops.higher_order.flex_gemm(
     torch.ops.aten.mm.default,
-    _coda_f3_residual_second_body_1,
-    (weighted, t_6, rstd),
+    _coda_f3_f4_mul_body_0,
+    (weighted, t_6, rstd, activated),
     {},
     {"backend": "QUACK"},
-)[0]
+)
 ```
 
 Real MoE-output before and after samples from layer 3:
@@ -1083,58 +1090,59 @@ batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
 Artifact root:
 
 ```text
-outputs/profiling/dsv3_fake/graph/coda-f3-proof-20260810/tlparse/-_-_-_-
+outputs/profiling/dsv3_fake/graph/coda-all-composed-f3-f4-20260810/tlparse/-_-_-_-
 ```
 
 Before and after dumps:
 
 ```text
-before_fuse_f3_residual_rmsnorm_pass_274.txt
-after_fuse_f3_residual_rmsnorm_pass_275.txt
+before_fuse_f3_residual_rmsnorm_pass_278.txt
+after_fuse_f3_residual_rmsnorm_pass_279.txt
 ```
 
 Pass diff for the root graph:
 
 | Operation | Before | After | Delta |
 | --- | ---: | ---: | ---: |
-| root `mm.default` | 2,148 | 1,950 | -198 |
+| root `mm.default` | 2,024 | 1,826 | -198 |
 | root `_fused_rms_norm.default` | 490 | 424 | -66 |
-| root `add.Tensor` | 1,017 | 894 | -123 |
-| root `flex_gemm` | 0 | 198 | +198 |
-| root `get_attr` | 427 | 625 | +198 |
-| root `getitem` | 24,620 | 24,881 | +261 |
+| root `add.Tensor` | 959 | 836 | -123 |
+| root `flex_gemm` | 124 | 322 | +198 |
+| root `get_attr` | 551 | 749 | +198 |
+| root `getitem` | 24,802 | 25,072 | +270 |
 | root `mean.dim` | 0 | 66 | +66 |
 | root `add.Scalar` | 0 | 66 | +66 |
 | root `rsqrt.default` | 0 | 66 | +66 |
-| root `_to_copy.default` | 2,486 | 2,489 | +3 |
-| root `mul.Tensor` | 1,249 | 1,255 | +6 |
-| root `reshape.default` | 6,822 | 6,882 | +60 |
+| root `_to_copy.default` | 2,478 | 2,481 | +3 |
+| root `reshape.default` | 6,938 | 7,007 | +69 |
+| root `silu.default` | 238 | 232 | -6 |
 
 All six original dense boundaries, 57 original MoE-output boundaries, and three
 within-layer recomputed dense boundaries fused, covering 132 downstream
-projections. Cross-layer residual outputs are `MUST_SAVE` under full activation
-checkpointing, so their backward-side norms have no recomputed producer GEMM to
-fuse. The proof run then OOMed on the known 192 GiB unfused FlexAttention
-allocation after all pass artifacts were written.
+projections and six dense SwiGLU epilogues. The following F4 pass fused all 116
+remaining, non-overlapping SwiGLU chains. Cross-layer residual outputs are
+`MUST_SAVE` under full activation checkpointing, so their backward-side norms
+have no recomputed producer GEMM to fuse. The proof run then OOMed on the known
+192 GiB unfused FlexAttention allocation after all pass artifacts were written.
 
 ### GB300 microbenchmarks
 
 The representative attention-to-dense-FFN boundary uses BF16 tensors with
 `M=98,304`, attention width `16,384`, model width `7,168`, and two FFN
 projections of width `18,432`. It includes all three GEMMs, the residual add,
-RMSNorm, partial-statistics reduction, and row-scale epilogues. Inputs were
-scaled by `0.02`; five warmups and 20 CUDA-event iterations were run on one
-GB300.
+RMSNorm, partial-statistics reduction, row-scale epilogues, SiLU, and the final
+gate multiply. Inputs were scaled by `0.02`; five warmups and 20 CUDA-event
+iterations were run on one GB300.
 
 | Implementation | Median | Min | Max |
 | --- | ---: | ---: | ---: |
-| eager three GEMMs + residual RMSNorm | 47.514 ms | 45.148 ms | 51.077 ms |
-| three QUACK FlexGEMMs + partial reduction | 50.049 ms | 48.385 ms | 50.740 ms |
+| eager full boundary | 48.657 ms | 46.389 ms | 51.643 ms |
+| three composed QUACK FlexGEMMs | 48.837 ms | 46.274 ms | 51.238 ms |
 
-Speedup: `0.95x`. This remains under the project policy that accepts FlexGEMM
-fusions without a speedup. The residual output was bitwise exact. Both
-projected outputs had `max_abs_error=0.0625`; their mean absolute errors were
-`0.00224166` and `0.00224173`. Moving `rstd` across the downstream GEMMs changes
+Speedup: `1.00x` (`0.996x`; FlexGEMM is 0.4% slower). This remains under the
+project policy that accepts FlexGEMM fusions without a speedup. The residual
+output was bitwise exact. The final SwiGLU output had `max_abs_error=0.5` and
+`mean_abs_error=0.00283090`. Moving `rstd` across the downstream GEMMs changes
 rounding, so this pattern requires convergence validation.
 
 The representative MoE-output boundary uses a shared-expert W2 GEMM with

@@ -482,6 +482,65 @@ class TestF3ResidualRMSNormPass(TestCase):
             if node.target == torch.ops.higher_order.flex_gemm
         ]
 
+    def _trace_swiglu_chain(self, *, return_saved=False):
+        m, k, n, p = 8, 16, 512, 64
+
+        def fn(a, first_weight, residual, gamma, w1_weight, w3_weight):
+            first = torch.ops.aten.mm.default(a, first_weight)
+            first = torch.ops.aten.reshape.default(first, [2, 4, n])
+            total = torch.ops.aten.add.Tensor(residual, first)
+            normalized, rstd = torch.ops.aten._fused_rms_norm.default(
+                total, [n], gamma, 1e-5
+            )
+            w1_input = torch.ops.aten.reshape.default(normalized, [m, n])
+            w1 = torch.ops.aten.mm.default(w1_input, w1_weight)
+            w1 = torch.ops.aten.reshape.default(w1, [2, 4, p])
+            activated = torch.ops.aten.silu.default(w1)
+            w3_input = torch.ops.aten.reshape.default(normalized, [m, n])
+            w3 = torch.ops.aten.mm.default(w3_input, w3_weight)
+            w3 = torch.ops.aten.reshape.default(w3, [2, 4, p])
+            product = torch.ops.aten.mul.Tensor(activated, w3)
+            return (product, total, rstd, w1, w3) if return_saved else (product, total)
+
+        inputs = (
+            torch.randn(m, k, dtype=torch.bfloat16) * 0.02,
+            torch.randn(k, n, dtype=torch.bfloat16) * 0.02,
+            torch.randn(2, 4, n, dtype=torch.bfloat16) * 0.02,
+            torch.ones(n, dtype=torch.bfloat16),
+            torch.randn(n, p, dtype=torch.bfloat16) * 0.02,
+            torch.randn(n, p, dtype=torch.bfloat16) * 0.02,
+        )
+        gm = torch.fx.symbolic_trace(fn)
+        gm.graph.eliminate_dead_code()
+        gm.recompile()
+        FakeTensorProp(gm).propagate(*inputs)
+        mm_nodes = [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+        norm = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._fused_rms_norm.default
+        )
+        mm_nodes[0].meta["custom"] = {"module_fqn": "layers.2.attention.wo"}
+        norm.meta["custom"] = {"module_fqn": "layers.2.ffn_norm"}
+        mm_nodes[1].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w1"}
+        mm_nodes[2].meta["custom"] = {"module_fqn": "layers.2.feed_forward.w3"}
+        return gm, inputs
+
+    def _expected_swiglu(self, inputs):
+        a, first_weight, residual, gamma, w1_weight, w3_weight = inputs
+        first = torch.mm(a, first_weight).reshape(2, 4, 512)
+        total = residual + first
+        total_2d = total.reshape(8, 512)
+        weighted = (total_2d.float() * gamma).bfloat16()
+        partial = total_2d.float().reshape(8, -1, 512).square().mean(-1)
+        rstd = (partial.mean(-1, keepdim=True) + 1e-5).rsqrt()
+        w1 = (torch.mm(weighted, w1_weight).float() * rstd).bfloat16()
+        w3 = (torch.mm(weighted, w3_weight).float() * rstd).bfloat16()
+        product = torch.nn.functional.silu(w1) * w3
+        return product.reshape(2, 4, 64), total, rstd, w1, w3
+
     def test_reparameterizes_same_layer_residual_norm(self):
         gm, inputs = self._trace_chain()
         expected_second, expected_third, expected_total, _, _ = self._expected(inputs)
@@ -499,6 +558,54 @@ class TestF3ResidualRMSNormPass(TestCase):
                 for node in gm.graph.nodes
             )
         )
+
+    def test_composes_dense_swiglu_epilogues(self):
+        gm, inputs = self._trace_swiglu_chain()
+        expected_product, expected_total, _, _, _ = self._expected_swiglu(inputs)
+
+        fuse_f3_residual_rmsnorm_pass(gm)
+        fuse_f4_dense_swiglu_pass(gm)
+
+        product, total = gm(*inputs)
+        self.assertEqual(product, expected_product)
+        self.assertEqual(total, expected_total)
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
+        body_targets = [
+            [node.target for node in getattr(gm, fused.args[1].target).graph.nodes]
+            for fused in self._flex_gemm_nodes(gm)
+        ]
+        self.assertTrue(
+            any(
+                targets.count(torch.ops.aten.silu.default) == 1
+                for targets in body_targets
+            )
+        )
+        self.assertTrue(
+            any(
+                targets.count(torch.ops.aten.mul.Tensor) == 2
+                for targets in body_targets
+            )
+        )
+
+    def test_composes_recomputed_dense_swiglu_and_preserves_saved_values(self):
+        gm, inputs = self._trace_swiglu_chain(return_saved=True)
+        (
+            expected_product,
+            expected_total,
+            expected_rstd,
+            expected_w1,
+            expected_w3,
+        ) = self._expected_swiglu(inputs)
+
+        fuse_f3_residual_rmsnorm_pass(gm)
+
+        product, total, rstd, w1, w3 = gm(*inputs)
+        self.assertEqual(product, expected_product)
+        self.assertEqual(total, expected_total)
+        self.assertEqual(rstd, expected_rstd.reshape(2, 4, 1))
+        self.assertEqual(w1, expected_w1.reshape(2, 4, 64))
+        self.assertEqual(w3, expected_w3.reshape(2, 4, 64))
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 3)
 
     def test_rewrites_cross_layer_recompute_and_preserves_saved_values(self):
         gm, inputs = self._trace_chain(cross_layer=True, return_saved=True)
@@ -931,9 +1038,9 @@ class TestCodaPatternRegistry(TestCase):
             [
                 "b1_lm_head_input_grad_cast",
                 "f6_router_sigmoid_bias",
+                "f3_residual_rmsnorm",
                 "f4_dense_swiglu",
                 "b2_dense_swiglu_backward",
-                "f3_residual_rmsnorm",
                 "f2_q_rmsnorm",
                 "f2_kv_rmsnorm",
                 "b4_router_input_grad_add",
@@ -946,9 +1053,9 @@ class TestCodaPatternRegistry(TestCase):
             [
                 fuse_b1_lm_head_input_grad_cast_pass,
                 fuse_f6_router_sigmoid_bias_pass,
+                fuse_f3_residual_rmsnorm_pass,
                 fuse_f4_dense_swiglu_pass,
                 fuse_b2_dense_swiglu_backward_pass,
-                fuse_f3_residual_rmsnorm_pass,
                 fuse_f2_q_rmsnorm_pass,
                 fuse_f2_kv_rmsnorm_pass,
                 fuse_b4_router_input_grad_add_pass,
@@ -966,6 +1073,10 @@ class TestCodaPatternRegistry(TestCase):
             get_coda_pattern_passes(
                 ["b6_bf16_weight_grad_cast", "b6_bf16_weight_grad_cast"]
             )
+
+    def test_rejects_f4_before_f3(self):
+        with self.assertRaisesRegex(ValueError, "requires f3_residual_rmsnorm before"):
+            get_coda_pattern_passes(["f4_dense_swiglu", "f3_residual_rmsnorm"])
 
 
 if __name__ == "__main__":
