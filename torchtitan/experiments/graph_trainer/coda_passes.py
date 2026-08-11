@@ -23,12 +23,15 @@ from torchtitan.tools.logging import logger
 _MM = torch.ops.aten.mm.default
 _ADD = torch.ops.aten.add.Tensor
 _ADD_SCALAR = torch.ops.aten.add.Scalar
+_CONSTANT_PAD_ND = torch.ops.aten.constant_pad_nd.default
 _FUSED_RMS_NORM = torch.ops.aten._fused_rms_norm.default
 _MEAN_DIM = torch.ops.aten.mean.dim
 _MUL = torch.ops.aten.mul.Tensor
 _POW_SCALAR = torch.ops.aten.pow.Tensor_Scalar
 _RESHAPE = torch.ops.aten.reshape.default
 _RSQRT = torch.ops.aten.rsqrt.default
+_SLICE = torch.ops.aten.slice.Tensor
+_SPLIT_WITH_SIZES = torch.ops.aten.split_with_sizes.default
 _SIGMOID = torch.ops.aten.sigmoid.default
 _SILU = torch.ops.aten.silu.default
 _SILU_BACKWARD = torch.ops.aten.silu_backward.default
@@ -36,6 +39,9 @@ _TO_COPY = torch.ops.aten._to_copy.default
 _VIEW = torch.ops.aten.view.default
 _COMPILE_WITH_INDUCTOR = "compile_with_inductor"
 _CODA_RMSNORM_GROUP = 512
+_CODA_KV_RMSNORM_GROUP = 64
+_CODA_KV_ACTIVE_WIDTH = 512
+_CODA_KV_TAIL_WIDTH = 64
 
 
 def _node_dtype(node: torch.fx.Node) -> torch.dtype | None:
@@ -2329,12 +2335,449 @@ def fuse_f2_q_rmsnorm_pass(
     return gm
 
 
+def _match_f2_kv_rmsnorm(
+    norm: torch.fx.Node,
+) -> tuple[
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node,
+    torch.fx.Node | None,
+    float,
+] | None:
+    if norm.target != _FUSED_RMS_NORM or len(norm.args) < 4:
+        return None
+    norm_input, normalized_shape, gamma, eps = norm.args[:4]
+    if (
+        not isinstance(norm_input, torch.fx.Node)
+        or norm_input.target is not operator.getitem
+        or len(norm_input.args) < 2
+        or norm_input.args[1] != 0
+        or not isinstance(gamma, torch.fx.Node)
+        or normalized_shape != [_CODA_KV_ACTIVE_WIDTH]
+        or not isinstance(eps, float)
+    ):
+        return None
+    split = norm_input.args[0]
+    if (
+        not isinstance(split, torch.fx.Node)
+        or split.target != _SPLIT_WITH_SIZES
+        or len(split.args) < 3
+        or not isinstance(split.args[1], (list, tuple))
+        or list(split.args[1]) != [_CODA_KV_ACTIVE_WIDTH, _CODA_KV_TAIL_WIDTH]
+        or split.args[2] != -1
+    ):
+        return None
+    first_reshape = split.args[0]
+    if (
+        not isinstance(first_reshape, torch.fx.Node)
+        or first_reshape.target not in (_RESHAPE, _VIEW)
+        or not first_reshape.args
+        or not isinstance(first_reshape.args[0], torch.fx.Node)
+        or _sole_user(first_reshape) is not split
+    ):
+        return None
+    first_mm = first_reshape.args[0]
+    if first_mm.target != _MM or _sole_user(first_mm) is not first_reshape:
+        return None
+
+    split_outputs = {}
+    for user in split.users:
+        if (
+            user.target is not operator.getitem
+            or len(user.args) < 2
+            or not isinstance(user.args[1], int)
+            or user.args[1] in split_outputs
+        ):
+            return None
+        split_outputs[user.args[1]] = user
+    if set(split_outputs) != {0, 1} or split_outputs[0] is not norm_input:
+        return None
+    tail = split_outputs[1]
+
+    norm_outputs: dict[int, torch.fx.Node] = {}
+    for user in norm.users:
+        if (
+            user.target is not operator.getitem
+            or len(user.args) < 2
+            or not isinstance(user.args[1], int)
+            or user.args[1] in norm_outputs
+        ):
+            return None
+        norm_outputs[user.args[1]] = user
+    if set(norm_outputs) not in ({0}, {0, 1}):
+        return None
+    norm_output = norm_outputs[0]
+    rstd_output = norm_outputs.get(1)
+    is_recomputed = rstd_output is not None
+    second_input = _sole_user(norm_output)
+    if second_input is None or second_input.target not in (_RESHAPE, _VIEW):
+        return None
+    second_mms = [
+        user
+        for user in second_input.users
+        if user.target == _MM and user.args and user.args[0] is second_input
+    ]
+    if len(second_mms) != 1:
+        return None
+    second_mm = second_mms[0]
+
+    if not is_recomputed and (
+        _sole_user(norm_input) is not norm or _sole_user(second_input) is not second_mm
+    ):
+        return None
+    if rstd_output is not None:
+        rstd_shape = _node_shape(rstd_output)
+        norm_input_shape = _node_shape(norm_input)
+        if (
+            _node_dtype(rstd_output) != torch.float32
+            or norm_input_shape is None
+            or rstd_shape != (*norm_input_shape[:-1], 1)
+        ):
+            return None
+
+    fqns = tuple(_module_fqn(node) for node in (first_mm, norm, second_mm))
+    if any(fqn is None or "." not in fqn for fqn in fqns):
+        return None
+    first_fqn, norm_fqn, second_fqn = fqns
+    assert first_fqn is not None
+    assert norm_fqn is not None
+    assert second_fqn is not None
+    first_parent, first_role = first_fqn.rsplit(".", 1)
+    norm_parent, norm_role = norm_fqn.rsplit(".", 1)
+    second_parent, second_role = second_fqn.rsplit(".", 1)
+    if (
+        first_parent != norm_parent
+        or first_parent != second_parent
+        or (first_role, norm_role, second_role) != ("wkv_a", "kv_norm", "wkv_b")
+    ):
+        return None
+
+    first_shape = _node_shape(first_mm)
+    first_reshape_shape = _node_shape(first_reshape)
+    norm_input_shape = _node_shape(norm_input)
+    second_input_shape = _node_shape(second_input)
+    if (
+        first_shape is None
+        or len(first_shape) != 2
+        or first_shape[-1] != _CODA_KV_ACTIVE_WIDTH + _CODA_KV_TAIL_WIDTH
+        or first_reshape_shape is None
+        or first_reshape_shape[-1] != first_shape[-1]
+        or norm_input_shape is None
+        or norm_input_shape[-1] != _CODA_KV_ACTIVE_WIDTH
+        or _node_shape(tail) != (*norm_input_shape[:-1], _CODA_KV_TAIL_WIDTH)
+        or _node_shape(norm_output) != norm_input_shape
+        or second_input_shape != (first_shape[0], _CODA_KV_ACTIVE_WIDTH)
+        or _node_shape(gamma) != (_CODA_KV_ACTIVE_WIDTH,)
+    ):
+        return None
+    tensor_nodes = (
+        first_mm,
+        first_reshape,
+        norm_input,
+        tail,
+        gamma,
+        norm_output,
+        second_input,
+        second_mm,
+    )
+    if any(_node_dtype(node) != torch.bfloat16 for node in tensor_nodes):
+        return None
+    if not all(
+        isinstance(node.meta.get("val"), torch.Tensor)
+        for node in (first_mm, gamma, second_mm)
+    ):
+        return None
+    return (
+        first_mm,
+        first_reshape,
+        split,
+        norm_input,
+        tail,
+        norm,
+        norm_output,
+        second_input,
+        second_mm,
+        gamma,
+        rstd_output,
+        eps,
+    )
+
+
+def fuse_f2_kv_rmsnorm_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Reparameterize segmented MLA KV RMSNorm across two GEMMs."""
+    del example_inputs
+    num_original_fused = 0
+    num_recomputed_fused = 0
+    for norm in list(gm.graph.nodes):
+        match = _match_f2_kv_rmsnorm(norm)
+        if match is None:
+            continue
+        (
+            first_mm,
+            first_reshape,
+            split,
+            norm_input,
+            tail,
+            norm,
+            norm_output,
+            second_input,
+            second_mm,
+            gamma,
+            rstd_output,
+            eps,
+        ) = match
+        del first_reshape, split, tail
+        first_shape = _node_shape(first_mm)
+        norm_input_shape = _node_shape(norm_input)
+        assert first_shape is not None
+        assert norm_input_shape is not None
+        first_value = first_mm.meta["val"]
+        gamma_value = gamma.meta["val"]
+        second_value = second_mm.meta["val"]
+        assert isinstance(first_value, torch.Tensor)
+        assert isinstance(gamma_value, torch.Tensor)
+        assert isinstance(second_value, torch.Tensor)
+        preserve_saved_values = rstd_output is not None
+
+        with gm.graph.inserting_before(first_mm):
+            gamma_2d = gm.graph.call_function(
+                _RESHAPE,
+                (gamma, [1, _CODA_KV_ACTIVE_WIDTH]),
+            )
+            gamma_2d_value = gamma_value.reshape(1, _CODA_KV_ACTIVE_WIDTH)
+            gamma_2d.meta = _copy_meta_with_value(gamma_2d_value, gamma)
+            _tag_for_regional_inductor(gamma_2d)
+            gamma_full = gm.graph.call_function(
+                _CONSTANT_PAD_ND,
+                (gamma_2d, [0, _CODA_KV_TAIL_WIDTH], 1.0),
+            )
+            gamma_full_value = torch.nn.functional.pad(
+                gamma_2d_value, (0, _CODA_KV_TAIL_WIDTH), value=1.0
+            )
+            gamma_full.meta = _copy_meta_with_value(gamma_full_value, gamma, gamma_2d)
+            _tag_for_regional_inductor(gamma_full)
+
+            first_body = _build_f2_q_rmsnorm_first_body(
+                first_mm,
+                gamma_full,
+                _CODA_KV_RMSNORM_GROUP,
+                preserve_raw=True,
+            )
+            first_body_name = _next_submodule_name(gm, "_coda_f2_kv_first_body")
+            gm.add_module(first_body_name, first_body)
+            first_body_ref = gm.graph.get_attr(first_body_name)
+            _tag_for_regional_inductor(first_body_ref)
+            first_fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    first_body_ref,
+                    tuple(first_mm.args) + (gamma_full,),
+                    dict(first_mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            weighted_full_value = (first_value.float() * gamma_full_value).to(
+                torch.bfloat16
+            )
+            partial_value = (
+                first_value.float()
+                .reshape(first_shape[0], -1, _CODA_KV_RMSNORM_GROUP)
+                .square()
+                .mean(-1)
+            )
+            weighted_full_meta = _copy_meta_with_value(
+                weighted_full_value, first_mm, norm_input, norm, norm_output, gamma
+            )
+            raw_meta = _copy_meta_with_value_from(first_mm, first_mm, norm_input, norm)
+            partial_meta = _copy_meta_with_value(
+                partial_value, first_mm, norm_input, norm
+            )
+            first_fused.meta = _copy_meta(first_mm, norm_input, norm, norm_output)
+            first_fused.meta["val"] = (
+                weighted_full_meta["val"],
+                raw_meta["val"],
+                partial_meta["val"],
+            )
+            first_fused.meta.pop("tensor_meta", None)
+            _tag_for_regional_inductor(first_fused)
+
+            weighted_full = gm.graph.call_function(operator.getitem, (first_fused, 0))
+            weighted_full.meta = weighted_full_meta
+            _tag_for_regional_inductor(weighted_full)
+            raw = gm.graph.call_function(operator.getitem, (first_fused, 1))
+            raw.meta = raw_meta
+            _tag_for_regional_inductor(raw)
+            partial = gm.graph.call_function(operator.getitem, (first_fused, 2))
+            partial.meta = partial_meta
+            _tag_for_regional_inductor(partial)
+
+            weighted = gm.graph.call_function(
+                _SLICE,
+                (weighted_full, 1, 0, _CODA_KV_ACTIVE_WIDTH),
+            )
+            weighted_value = weighted_full_value[:, :_CODA_KV_ACTIVE_WIDTH]
+            weighted.meta = _copy_meta_with_value(
+                weighted_value, first_mm, norm_input, norm, norm_output, gamma
+            )
+            _tag_for_regional_inductor(weighted)
+            partial_active = gm.graph.call_function(
+                _SLICE,
+                (
+                    partial,
+                    1,
+                    0,
+                    _CODA_KV_ACTIVE_WIDTH // _CODA_KV_RMSNORM_GROUP,
+                ),
+            )
+            partial_active_value = partial_value[
+                :, : _CODA_KV_ACTIVE_WIDTH // _CODA_KV_RMSNORM_GROUP
+            ]
+            partial_active.meta = _copy_meta_with_value(
+                partial_active_value, first_mm, norm_input, norm
+            )
+            _tag_for_regional_inductor(partial_active)
+            mean_square = gm.graph.call_function(
+                _MEAN_DIM, (partial_active, [-1], True)
+            )
+            mean_square_value = partial_active_value.mean(-1, keepdim=True)
+            mean_square.meta = _copy_meta_with_value(mean_square_value, first_mm, norm)
+            _tag_for_regional_inductor(mean_square)
+            stabilized = gm.graph.call_function(_ADD_SCALAR, (mean_square, eps))
+            stabilized_value = mean_square_value + eps
+            stabilized.meta = _copy_meta_with_value(stabilized_value, first_mm, norm)
+            _tag_for_regional_inductor(stabilized)
+            rstd = gm.graph.call_function(_RSQRT, (stabilized,))
+            rstd_value = stabilized_value.rsqrt()
+            rstd.meta = _copy_meta_with_value(rstd_value, first_mm, norm)
+            _tag_for_regional_inductor(rstd)
+
+            saved_norm_output = None
+            saved_rstd_output = None
+            if preserve_saved_values:
+                assert rstd_output is not None
+                raw_active = gm.graph.call_function(
+                    _SLICE,
+                    (raw, 1, 0, _CODA_KV_ACTIVE_WIDTH),
+                )
+                raw_active_value = first_value[:, :_CODA_KV_ACTIVE_WIDTH]
+                raw_active.meta = _copy_meta_with_value(
+                    raw_active_value, first_mm, norm_input, norm
+                )
+                _tag_for_regional_inductor(raw_active)
+                raw_active_fp32 = gm.graph.call_function(
+                    _TO_COPY, (raw_active,), {"dtype": torch.float32}
+                )
+                raw_active_fp32.meta = _copy_meta_with_value(
+                    raw_active_value.float(), first_mm, norm_input, norm
+                )
+                _tag_for_regional_inductor(raw_active_fp32)
+                normalized_fp32 = gm.graph.call_function(_MUL, (raw_active_fp32, rstd))
+                normalized_fp32_value = raw_active_value.float() * rstd_value
+                normalized_fp32.meta = _copy_meta_with_value(
+                    normalized_fp32_value, first_mm, norm_input, norm
+                )
+                _tag_for_regional_inductor(normalized_fp32)
+                normalized_weighted_fp32 = gm.graph.call_function(
+                    _MUL, (normalized_fp32, gamma_2d)
+                )
+                normalized_weighted_value = normalized_fp32_value * gamma_2d_value
+                normalized_weighted_fp32.meta = _copy_meta_with_value(
+                    normalized_weighted_value, norm_input, norm, norm_output, gamma
+                )
+                _tag_for_regional_inductor(normalized_weighted_fp32)
+                saved_norm_output = gm.graph.call_function(
+                    _TO_COPY,
+                    (normalized_weighted_fp32,),
+                    {"dtype": torch.bfloat16},
+                )
+                saved_norm_output.meta = _copy_meta_with_value(
+                    normalized_weighted_value.to(torch.bfloat16), second_input
+                )
+                _tag_for_regional_inductor(saved_norm_output)
+                rstd_output_shape = _node_shape(rstd_output)
+                assert rstd_output_shape is not None
+                saved_rstd_output = gm.graph.call_function(
+                    _RESHAPE, (rstd, list(rstd_output_shape))
+                )
+                saved_rstd_output.meta = _copy_meta_with_value(
+                    rstd_value.reshape(rstd_output_shape), rstd_output
+                )
+                _tag_for_regional_inductor(saved_rstd_output)
+
+        second_body = _build_f2_q_rmsnorm_second_body(second_mm, rstd)
+        second_body_name = _next_submodule_name(gm, "_coda_f2_kv_second_body")
+        gm.add_module(second_body_name, second_body)
+        with gm.graph.inserting_before(second_mm):
+            second_body_ref = gm.graph.get_attr(second_body_name)
+            _tag_for_regional_inductor(second_body_ref)
+            second_fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    second_body_ref,
+                    (weighted, second_mm.args[1], rstd),
+                    dict(second_mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            second_meta = _copy_meta_with_value(
+                second_value, norm, norm_output, second_input, second_mm
+            )
+            second_fused.meta = _copy_meta(norm, norm_output, second_input, second_mm)
+            second_fused.meta["val"] = (second_meta["val"],)
+            second_fused.meta.pop("tensor_meta", None)
+            _tag_for_regional_inductor(second_fused)
+            output = gm.graph.call_function(operator.getitem, (second_fused, 0))
+            output.meta = second_meta
+            _tag_for_regional_inductor(output)
+
+        second_mm.replace_all_uses_with(output)
+        gm.graph.erase_node(second_mm)
+        if preserve_saved_values:
+            assert saved_norm_output is not None
+            assert saved_rstd_output is not None
+            assert rstd_output is not None
+            second_input.replace_all_uses_with(saved_norm_output)
+            rstd_output.replace_all_uses_with(saved_rstd_output)
+            gm.graph.erase_node(rstd_output)
+            num_recomputed_fused += 1
+        else:
+            num_original_fused += 1
+        gm.graph.erase_node(second_input)
+        gm.graph.erase_node(norm_output)
+        gm.graph.erase_node(norm)
+        if not preserve_saved_values:
+            gm.graph.erase_node(norm_input)
+        first_mm.replace_all_uses_with(raw)
+        gm.graph.erase_node(first_mm)
+
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(
+        f"F2-KV fused {num_original_fused} original and "
+        f"{num_recomputed_fused} recomputed segmented RMSNorm chains"
+    )
+    return gm
+
+
 CODA_PATTERN_PASSES: dict[str, Callable] = {
     "b2_dense_swiglu_backward": fuse_b2_dense_swiglu_backward_pass,
     "b4_router_input_grad_add": fuse_b4_router_input_grad_add_pass,
     "b6_bf16_weight_grad_cast": fuse_b6_bf16_weight_grad_cast_pass,
     "f3_residual_rmsnorm": fuse_f3_residual_rmsnorm_pass,
     "f2_q_rmsnorm": fuse_f2_q_rmsnorm_pass,
+    "f2_kv_rmsnorm": fuse_f2_kv_rmsnorm_pass,
     "f4_dense_swiglu": fuse_f4_dense_swiglu_pass,
     "f6_router_sigmoid_bias": fuse_f6_router_sigmoid_bias_pass,
 }

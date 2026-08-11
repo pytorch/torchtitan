@@ -15,6 +15,7 @@ from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_b2_dense_swiglu_backward_pass,
     fuse_b4_router_input_grad_add_pass,
     fuse_b6_bf16_weight_grad_cast_pass,
+    fuse_f2_kv_rmsnorm_pass,
     fuse_f2_q_rmsnorm_pass,
     fuse_f3_residual_rmsnorm_pass,
     fuse_f4_dense_swiglu_pass,
@@ -629,6 +630,104 @@ class TestF2QRMSNormPass(TestCase):
         )
 
 
+class TestF2KVRMSNormPass(TestCase):
+    def _trace_kv_chain(self, *, return_saved=False):
+        m, k, full_width, active_width, output_width = 8, 16, 576, 512, 96
+
+        def fn(a, first_weight, gamma, second_weight):
+            first = torch.ops.aten.mm.default(a, first_weight)
+            first = torch.ops.aten.reshape.default(first, [2, 4, full_width])
+            active, tail = torch.ops.aten.split_with_sizes.default(
+                first, [active_width, full_width - active_width], -1
+            )
+            normalized, rstd = torch.ops.aten._fused_rms_norm.default(
+                active, [active_width], gamma, 1e-5
+            )
+            second_input = torch.ops.aten.reshape.default(normalized, [m, active_width])
+            output = torch.ops.aten.mm.default(second_input, second_weight)
+            if return_saved:
+                return output, tail, rstd, active, second_input
+            return output, tail
+
+        inputs = (
+            torch.randn(m, k, dtype=torch.bfloat16) * 0.02,
+            torch.randn(k, full_width, dtype=torch.bfloat16) * 0.02,
+            torch.ones(active_width, dtype=torch.bfloat16),
+            torch.randn(active_width, output_width, dtype=torch.bfloat16) * 0.02,
+        )
+        gm = torch.fx.symbolic_trace(fn)
+        gm.graph.eliminate_dead_code()
+        gm.recompile()
+        FakeTensorProp(gm).propagate(*inputs)
+        mm_nodes = [
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        ]
+        norm = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._fused_rms_norm.default
+        )
+        mm_nodes[0].meta["custom"] = {"module_fqn": "layers.0.attention.wkv_a"}
+        norm.meta["custom"] = {"module_fqn": "layers.0.attention.kv_norm"}
+        mm_nodes[1].meta["custom"] = {"module_fqn": "layers.0.attention.wkv_b"}
+        return gm, inputs
+
+    def _expected(self, inputs):
+        a, first_weight, gamma, second_weight = inputs
+        first = torch.mm(a, first_weight)
+        active = first[:, :512]
+        tail = first[:, 512:].reshape(2, 4, 64)
+        gamma_full = torch.nn.functional.pad(gamma.reshape(1, 512), (0, 64), value=1)
+        weighted = (first.float() * gamma_full).bfloat16()[:, :512]
+        partial = first.float().reshape(8, -1, 64).square().mean(-1)[:, :8]
+        rstd = (partial.mean(-1, keepdim=True) + 1e-5).rsqrt()
+        output = (torch.mm(weighted, second_weight).float() * rstd).bfloat16()
+        normalized = (active.float() * rstd * gamma).bfloat16()
+        return output, tail, rstd, active, normalized
+
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_reparameterizes_segmented_kv_norm(self):
+        gm, inputs = self._trace_kv_chain()
+        expected_output, expected_tail, _, _, _ = self._expected(inputs)
+
+        fuse_f2_kv_rmsnorm_pass(gm)
+
+        actual_output, actual_tail = gm(*inputs)
+        torch.testing.assert_close(actual_output, expected_output, atol=1e-3, rtol=2e-2)
+        self.assertEqual(actual_tail, expected_tail)
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 2)
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._fused_rms_norm.default
+                for node in gm.graph.nodes
+            )
+        )
+
+    def test_preserves_recomputed_values_and_raw_tail(self):
+        gm, inputs = self._trace_kv_chain(return_saved=True)
+        expected_output, expected_tail, rstd, active, normalized = self._expected(
+            inputs
+        )
+
+        fuse_f2_kv_rmsnorm_pass(gm)
+
+        actual_output, actual_tail, actual_rstd, actual_active, actual_normalized = gm(
+            *inputs
+        )
+        torch.testing.assert_close(actual_output, expected_output, atol=1e-3, rtol=2e-2)
+        self.assertEqual(actual_tail, expected_tail)
+        self.assertEqual(actual_rstd, rstd.reshape(2, 4, 1))
+        self.assertEqual(actual_active, active.reshape(2, 4, 512))
+        self.assertEqual(actual_normalized, normalized)
+        self.assertEqual(len(self._flex_gemm_nodes(gm)), 2)
+
+
 class TestB4RouterInputGradAddPass(TestCase):
     def _trace(self, module_fqn):
         x = torch.randn(8, 16)
@@ -688,6 +787,7 @@ class TestCodaPatternRegistry(TestCase):
                 "b2_dense_swiglu_backward",
                 "f3_residual_rmsnorm",
                 "f2_q_rmsnorm",
+                "f2_kv_rmsnorm",
                 "b4_router_input_grad_add",
                 "b6_bf16_weight_grad_cast",
             ]
@@ -700,6 +800,7 @@ class TestCodaPatternRegistry(TestCase):
                 fuse_b2_dense_swiglu_backward_pass,
                 fuse_f3_residual_rmsnorm_pass,
                 fuse_f2_q_rmsnorm_pass,
+                fuse_f2_kv_rmsnorm_pass,
                 fuse_b4_router_input_grad_add_pass,
                 fuse_b6_bf16_weight_grad_cast_pass,
             ],

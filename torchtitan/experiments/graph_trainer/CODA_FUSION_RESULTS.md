@@ -549,10 +549,128 @@ variant, raw Q was bitwise exact, saved `rstd` had `max_abs_error=5.722e-6`,
 and reconstructed normalized Q had `max_abs_error=0.015625` and
 `mean_abs_error=3.656e-8`.
 
-The 512-of-576 KV chain is intentionally excluded. It requires a segmented
-reduction and a separate 64-column RoPE epilogue, which current FlexGEMM does
-not express. This F2 pass requires convergence validation because moving the
-row scale across BF16 GEMMs changes rounding.
+This F2-Q pass requires convergence validation because moving the row scale
+across BF16 GEMMs changes rounding. The separate F2-KV pass below handles the
+512-of-576 KV chain without moving RoPE into the GEMM epilogue.
+
+## F2 MLA KV projection and segmented RMSNorm
+
+Pattern name: `f2_kv_rmsnorm`
+
+This pass rewrites the grounded segmented MLA KV chain:
+
+```text
+mm(wkv_a) -> split [512, 64] -> RMSNorm(kv_norm) -> mm(wkv_b)
+                            -> 64-column RoPE tail
+```
+
+The first FlexGEMM retains its physical 576-column output. The 512-element norm
+weight is padded with 64 ones, so the epilogue emits a gamma-weighted full-width
+value, a raw full-width auxiliary, and nine 64-column mean-square partials. The
+root graph uses the first eight partials to form `rstd`; the ninth corresponds
+to the unnormalized RoPE tail. The second FlexGEMM consumes the first 512
+weighted columns and applies `rstd` after `wkv_b` accumulation. The raw
+auxiliary continues through the original split, preserving the RoPE tail and
+the rematerialized RMSNorm-backward input.
+
+Real before sample:
+
+```python
+mm_2 = torch.ops.aten.mm.default(view_10, t_2)
+kv = torch.ops.aten.reshape.default(mm_2, [24, 4096, 576])
+kv, k_pe = torch.ops.aten.split_with_sizes.default(kv, [512, 64], -1)
+norm = torch.ops.aten._fused_rms_norm.default(
+    kv, [512], kv_norm_weight, 1e-05
+)
+mm_3 = torch.ops.aten.mm.default(norm[0].reshape(98304, 512), t_3)
+```
+
+Real after sample:
+
+```python
+gamma = torch.ops.aten.reshape.default(kv_norm_weight, [1, 512])
+gamma_full = torch.ops.aten.constant_pad_nd.default(gamma, [0, 64], 1.0)
+first = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f2_kv_first_body_0,
+    (view_10, t_2, gamma_full),
+    {},
+    {"backend": "QUACK"},
+)
+weighted_full, raw_full, partials = first
+weighted = torch.ops.aten.slice.Tensor(weighted_full, 1, 0, 512)
+active_partials = torch.ops.aten.slice.Tensor(partials, 1, 0, 8)
+rstd = torch.ops.aten.rsqrt.default(
+    torch.ops.aten.add.Scalar(
+        torch.ops.aten.mean.dim(active_partials, [-1], True), 1e-05
+    )
+)
+second = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_f2_kv_second_body_0,
+    (weighted, t_3, rstd),
+    {},
+    {"backend": "QUACK"},
+)
+```
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-f2-kv-proof-20260810/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_f2_kv_rmsnorm_pass_274.txt
+after_fuse_f2_kv_rmsnorm_pass_275.txt
+```
+
+Pass diff for the root graph:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 1,904 | -244 |
+| root `_fused_rms_norm.default` | 490 | 368 | -122 |
+| root `flex_gemm` | 0 | 244 | +244 |
+| root `get_attr` | 427 | 671 | +244 |
+| root `getitem` | 24,620 | 24,864 | +244 |
+| root `mean.dim` | 0 | 122 | +122 |
+| root `add.Scalar` | 0 | 122 | +122 |
+| root `rsqrt.default` | 0 | 122 | +122 |
+| root `_to_copy.default` | 2,486 | 2,608 | +122 |
+| root `constant_pad_nd.default` | 3,904 | 4,026 | +122 |
+| root `mul.Tensor` | 1,249 | 1,371 | +122 |
+| root `reshape.default` | 6,822 | 6,883 | +61 |
+| root `slice.Tensor` | 615 | 920 | +305 |
+
+All 61 original and 61 rematerialized KV chains fused. The raw 576-column
+auxiliary preserves all 122 existing split/RoPE paths. The proof run disabled
+regional Inductor to retain the rewrite as FX text, then OOMed on the known
+192 GiB unfused FlexAttention allocation after all artifacts were written.
+
+### GB300 microbenchmark
+
+The representative chain uses BF16 tensors with `M=98,304`, input width
+`7,168`, WKV-A width `576`, active RMSNorm width `512`, and WKV-B output width
+`32,768`. Five warmups and 20 CUDA-event iterations were run on one GB300.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager WKV-A + segmented RMSNorm + WKV-B | 2.816 ms | 2.654 ms | 3.602 ms |
+| two QUACK FlexGEMMs + partial reduction | 3.516 ms | 3.435 ms | 4.559 ms |
+
+Speedup: `0.80x`. This is retained under the project policy that accepts
+FlexGEMM fusions without a speedup. The raw RoPE tail was bitwise exact. The
+WKV-B output had `max_abs_error=0.015625` and `mean_abs_error=0.000596412`.
+Moving `rstd` across WKV-B requires convergence validation. This result does
+not justify a custom kernel.
 
 ## B4 router input-gradient cast and add
 
