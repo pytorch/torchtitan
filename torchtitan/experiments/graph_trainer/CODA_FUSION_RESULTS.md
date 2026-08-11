@@ -1250,6 +1250,47 @@ FlexGEMM pattern without a speedup. KV `dweight` was bitwise exact; KV `dx` had
 `max_abs_error=4.768e-7` and `mean_abs_error=3.104e-10`. These differences come
 from the 128-column partial reduction order and require convergence validation.
 
+## Composed graph proof
+
+All 11 FlexGEMM patterns were enabled together after
+`joint_transformer_block_bucketing_reordering_pass`. The DSV3-671B fake-backend
+run used FSDP256, EP64, local batch 24, sequence length 4,096, full activation
+checkpointing, force-balanced MoE routing, deterministic seed 42, and
+`c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-all-proof-20260810/tlparse/-_-_-_-
+```
+
+| Pass | Grounded matches | FlexGEMMs added |
+| --- | ---: | ---: |
+| B1 LM-head input-gradient cast | 8 | 8 |
+| F6 router sigmoid and bias | 116 | 116 |
+| F3 residual RMSNorm | 66 boundaries across 132 projections | 198 |
+| F4 dense/shared-expert SwiGLU | 116 chains | 232 |
+| B2 dense/shared-expert SwiGLU backward | 61 derivative + 61 add chains | 122 |
+| F2 MLA Q RMSNorm | 62 | 124 |
+| F2 MLA KV RMSNorm | 62 | 124 |
+| B4 router input-gradient add | 58 | 58 |
+| B5 MLA RMSNorm backward | 122 | 122 |
+| B6 BF16 weight-gradient cast | 496 | 496 |
+| B7 attention input-gradient merge | 61 | 61 |
+
+The final root graph has 1,661 FlexGEMMs. Relative to the post-bucketing graph,
+root `mm.default` fell from 2,148 to 487, `sigmoid.default` from 116 to zero,
+`_fused_rms_norm.default` from 490 to 300, and
+`_fused_rms_norm_backward.default` from 245 to 123. F3 ran before F4, so its
+six dense SwiGLU epilogues were retained inside the composed F3 boundary while
+F4 handled the remaining 116 shared-expert chains. Every isolated pattern
+retained its expected match count.
+
+The run disabled regional Inductor and CUDA graphs to preserve every pass dump.
+After all 19 configured graph passes and artifacts completed, execution hit the
+known 192 GiB allocation in unfused FlexAttention. This failure is downstream
+of the rewrite proof and is not a CODA pass failure.
+
 ## CODA-kernels comparison
 
 CODA-kernels was measured from `~/local/coda-kernels` on branch
