@@ -81,10 +81,10 @@ Muon-local `_balance_loads_across_partitions` helper accepts
 Muon-specific costs and FQNs as deterministic keys.
 
 `components/distributed_muon.py` owns public configuration, parameter
-preparation, the optimizer, and its private Tensor-level Muon operations.
-`components/_distributed_muon_planner.py` owns Muon transition policy and
-view-aware route construction. `distributed/flex_shard/` owns generic bucket,
-region, packed-collective, buffer, stream, and pipeline machinery.
+preparation, Muon transition policy, view-aware route construction, the
+optimizer, and its private Tensor-level Muon operations.
+`distributed/flex_shard/` owns generic bucket, region, packed-collective,
+buffer, stream, and pipeline machinery.
 
 ## Implementation plan
 
@@ -105,8 +105,8 @@ Update `torchtitan/components/distributed_muon.py`:
 
 ### 2. Resolve an explicit storage-to-compute transition
 
-Update `components/_distributed_muon_planner.py` for placement planning and
-`components/distributed_muon.py` for the optimizer runtime:
+Update `components/distributed_muon.py` for Muon placement scheduling and the
+optimizer runtime:
 
 - Represent storage-to-compute behavior with explicit transitions: no
   redistribution, whole-tensor single-participant or replicated compute, or
