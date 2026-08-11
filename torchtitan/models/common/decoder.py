@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -203,9 +202,9 @@ class Decoder(BaseModel):
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
                     if attention_cfg is not None:
-                        attention_cfg.rope = dataclasses.replace(
-                            attention_cfg.rope, max_seq_len=seq_len
-                        )
+                        # Resize in place so layers sharing one rope config keep
+                        # sharing it, and with it one module and one cache.
+                        attention_cfg.rope.max_seq_len = seq_len
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance
