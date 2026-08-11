@@ -142,7 +142,7 @@ def _make_gptoss_attn_config(
         sliding_window_size=sliding_window_size,
         inner_attention=inner_attention,
         param_init=sinks_init,
-        rope=dataclasses.replace(rope),
+        rope=rope,
     )
 
 
