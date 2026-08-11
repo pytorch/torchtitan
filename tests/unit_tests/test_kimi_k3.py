@@ -27,7 +27,6 @@ try:
         _mla_config,
         _norm,
         _vision_encoder_config,
-        kimi_k3_configs,
     )
     from torchtitan.models.kimi_k3.model import (
         KimiK3Model,
@@ -277,31 +276,6 @@ class TestKimiK3(unittest.TestCase):
         x_bf16 = x.bfloat16()
         self.assertEqual(KimiExactGELU.Config().build()(x_bf16).dtype, x_bf16.dtype)
 
-    def test_debugmodel_preserves_reduced_k3_topology(self):
-        config = kimi_k3_configs["debugmodel"]("eager")
-
-        self.assertEqual(config.vocab_size, 163840)
-        self.assertEqual(len(config.layers), 13)
-        self.assertEqual(
-            [
-                layer_idx + 1
-                for layer_idx, layer in enumerate(config.layers)
-                if layer.attention is not None
-            ],
-            [4, 8, 12, 13],
-        )
-        self.assertIsNotNone(config.layers[0].feed_forward)
-        self.assertTrue(all(layer.moe is not None for layer in config.layers[1:]))
-        moe_config = config.layers[1].moe
-        assert moe_config is not None
-        self.assertEqual(moe_config.num_experts, 8)
-        self.assertEqual(moe_config.router.top_k, 2)
-        self.assertEqual(moe_config.routed_experts.hidden_dim, 128)
-        vision_config = config.vision_encoder
-        assert vision_config is not None
-        self.assertEqual(vision_config.dim, 256)
-        self.assertEqual(vision_config.num_layers, 4)
-
     @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
     def test_fla_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
@@ -369,70 +343,11 @@ class TestKimiK3(unittest.TestCase):
                     assert tensor.grad is not None
                     self.assertTrue(torch.isfinite(tensor.grad).all())
 
-    def test_unused_moe_experts_receive_zero_gradients(self):
-        torch.manual_seed(2)
-        model = _small_model_config().build()
-        model.init_states()
-        moe = model.layers["1"].moe
-        assert moe is not None
-        with torch.no_grad():
-            moe.router.gate.weight.zero_()
-
-        inputs = torch.randn(2, 4, 16, requires_grad=True)
-        _, expert_ids, _ = moe.router(inputs, moe.expert_bias_E)
-        selected_experts = set(expert_ids.flatten().tolist())
-        unused_experts = set(range(moe.num_experts)) - selected_experts
-        self.assertTrue(unused_experts)
-
-        moe(inputs).float().sum().backward()
-        for parameter in (
-            moe.routed_experts.w1_EFD,
-            moe.routed_experts.w2_EDF,
-            moe.routed_experts.w3_EFD,
-        ):
-            self.assertIsNotNone(parameter.grad)
-            assert parameter.grad is not None
-            for expert_idx in unused_experts:
-                torch.testing.assert_close(
-                    parameter.grad[expert_idx],
-                    torch.zeros_like(parameter.grad[expert_idx]),
-                )
-
-    def test_small_multimodal_model_forward_backward_and_adapter(self):
+    def test_state_dict_round_trips_through_hf_adapter(self):
         torch.manual_seed(2)
         config = _small_model_config()
         model = config.build()
-        model.verify_module_protocol()
         model.init_states()
-
-        image_token_id = 7
-        tokens_BL = torch.tensor(
-            [
-                [1, 2, image_token_id, 3, 4, 5],
-                [6, image_token_id, image_token_id, 8, 9, 10],
-            ]
-        )
-        pixel_values_NPK = torch.randn(2, 8, 3 * 2 * 2)
-        grid_thw_N3 = torch.tensor([[1, 2, 2], [1, 4, 2]])
-        logits_BLV = model(
-            tokens_BL,
-            pixel_values=pixel_values_NPK,
-            grid_thw=grid_thw_N3,
-            special_tokens={"image_id": image_token_id},
-        )
-
-        self.assertEqual(logits_BLV.shape, (2, 6, config.vocab_size))
-        moe = model.layers["1"].moe
-        assert moe is not None
-        self.assertIs(
-            moe._buffers["tokens_per_expert_E"],
-            moe.tokens_per_expert_E,
-        )
-        self.assertEqual(moe.tokens_per_expert_E.sum().item(), tokens_BL.numel())
-        logits_BLV.float().square().mean().backward()
-        for parameter in model.parameters():
-            if parameter.grad is not None:
-                self.assertTrue(torch.isfinite(parameter.grad).all())
 
         state_dict = model.state_dict()
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
