@@ -351,10 +351,12 @@ def _run_deepseek_v3_ep_overlap_loss_compare() -> bool:
     )
 
 
-def _run_minimal_async_ep_graph_chunk_loss_compare() -> bool:
+def _run_minimal_async_ep_graph_chunk_loss_compare(
+    chunk_options: str = DSV3_EP_OVERLAP_OPTIONS,
+) -> bool:
     """Compare MinimalAsyncEP graph chunking with eager chunking exactly."""
     common_options = (
-        DSV3_EP_OVERLAP_OPTIONS
+        chunk_options
         + " --compile.memory_policy full"
         + " --compile.inductor_compilation regional"
         + " --debug.moe_force_load_balance"
@@ -672,6 +674,13 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_minimal_async_ep_graph_chunk_vs_eager_chunked(self):
         self.assertTrue(_run_minimal_async_ep_graph_chunk_loss_compare())
+
+    def test_moe_minimal_async_ep_moe_seq_graph_chunk_vs_eager_chunked(self):
+        self.assertTrue(
+            _run_minimal_async_ep_graph_chunk_loss_compare(
+                DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS
+            )
+        )
 
     def test_moe_dsv3_ep_overlap_moe_seq_aot_fx_trace_vs_eager_chunked(self):
         self.assertTrue(_run_deepseek_v3_ep_overlap_moe_seq_loss_compare())
