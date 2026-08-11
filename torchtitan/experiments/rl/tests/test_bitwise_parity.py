@@ -892,6 +892,7 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     attn_backend = "varlen"
     min_world_size = 4
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
+    sync_weights_from_trainer = True
 
 
 class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):

@@ -151,6 +151,7 @@ def spmd_layout_to_dtensor_placements(
             dtensor_placement = Shard(axis_type.dim)
 
         if axis_name == MeshAxisName.DP:
+            result[MeshAxisName.DP] = dtensor_placement
             result[MeshAxisName.DP_REPLICATE] = dtensor_placement
             result[MeshAxisName.DP_SHARD] = dtensor_placement
         else:
