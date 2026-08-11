@@ -34,7 +34,6 @@ try:
         KimiKDAKernel,
     )
     from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
-    from torchtitan.models.kimi_k3.vision_encoder import KimiExactGELU
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest(
         f"Kimi K3 optional dependency unavailable: {exc.name}"
@@ -266,16 +265,6 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
-    def test_exact_gelu_matches_pytorch_reference(self):
-        x = torch.linspace(-4.0, 4.0, 257)
-        actual = KimiExactGELU.Config().build()(x)
-        expected = F.gelu(x, approximate="none")
-
-        torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
-
-        x_bf16 = x.bfloat16()
-        self.assertEqual(KimiExactGELU.Config().build()(x_bf16).dtype, x_bf16.dtype)
-
     @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
     def test_fla_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)

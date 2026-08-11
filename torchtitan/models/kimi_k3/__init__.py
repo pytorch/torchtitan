@@ -36,7 +36,6 @@ from .model import (
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import (
-    KimiExactGELU,
     KimiK3VisionAttention,
     KimiK3VisionBlock,
     KimiK3VisionEncoder,
@@ -347,7 +346,7 @@ def _vision_encoder_config(
                 eps=1e-5,
                 param_init=_NORM_INIT,
             ),
-            activation=KimiExactGELU.Config(),
+            activation=GELU.Config(),
         ),
         param_init=_POS_EMBED_INIT,
     )
