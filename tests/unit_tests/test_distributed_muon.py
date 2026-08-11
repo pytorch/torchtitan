@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import torch
+import torchtitan.components.distributed_muon as distributed_muon_module
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -19,19 +20,14 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.distributed_optimizers.flex_optimizer_reshard import (
-    BucketConfig,
-)
-from torchtitan.components.distributed_optimizers.muon import (
+from torchtitan.components.distributed_muon import (
+    _adjust_muon_learning_rate,
     BatchedMatrixComputeView,
     build_distributed_muon,
-    distributed_muon as distributed_muon_module,
     MuonComputeShardingConfig,
     Owned,
 )
-from torchtitan.components.distributed_optimizers.muon.distributed_muon import (
-    _adjust_muon_learning_rate,
-)
+from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -231,6 +227,9 @@ class TestDistributedMuon(DTensorTestBase):
         redistributed = make_parameter(redistributed_value)
         stacks = {name: make_parameter(value) for name, value in values.items()}
         optimizer = make_optimizer(redistributed, stacks)
+        runtime = optimizer._redistribution_runtime
+        self.assertIsNotNone(runtime._context)
+        self.assertEqual(len(runtime._context.slots), 2)
 
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
         reference_stacks = {

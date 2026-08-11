@@ -18,8 +18,9 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from ..flex_optimizer_reshard import (
+from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
     _BucketPlanningContext,
+    _build_replicated_to_dim0_shard_plan,
     _build_single_participant_redistribution_plan,
     _dtensor_storage_regions,
     _ParticipantPartition,
@@ -301,73 +302,6 @@ def _build_parameter_redistribution_plan(
         participants=group.participants,
         storage_shape=tuple(compute_layout.param.shape),
         compute_shape=tuple(compute_layout.global_compute_shape),
-    )
-
-
-def _build_replicated_to_dim0_shard_plan(
-    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
-    *,
-    participants: tuple[int, ...],
-    logical_shape: tuple[int, ...],
-) -> _RedistributionPlan:
-    """Partition replicated native tensor storage along compute dimension 0."""
-    full_region = _TensorRegion(
-        offsets=(0,) * len(logical_shape),
-        shape=logical_shape,
-    )
-    _require_valid_plan(
-        tuple(storage_regions) == ((participants, full_region),),
-        "dim-0 sharded compute requires replicated storage",
-    )
-
-    storage_partitions = tuple(
-        _ParticipantPartition(
-            participant=participant,
-            tensor_shape=logical_shape,
-            logical_regions=(full_region,),
-        )
-        for participant in participants
-    )
-    compute_partitions = []
-    storage_to_compute_routes = []
-    for participant_index, participant in enumerate(participants):
-        local_dim0, dim0_offset = Shard.local_shard_size_and_offset(
-            logical_shape[0],
-            len(participants),
-            participant_index,
-        )
-        local_shape = (local_dim0, *logical_shape[1:])
-        logical_region = _TensorRegion(
-            offsets=(dim0_offset,) + (0,) * (len(logical_shape) - 1),
-            shape=local_shape,
-        )
-        tensor_region = _TensorRegion(
-            offsets=(0,) * len(logical_shape),
-            shape=local_shape,
-        )
-        compute_partitions.append(
-            _ParticipantPartition(
-                participant=participant,
-                tensor_shape=local_shape,
-                logical_regions=(logical_region,),
-            )
-        )
-        if not logical_region.numel:
-            continue
-        storage_to_compute_routes.append(
-            _TensorRegionRoute(
-                logical_region=logical_region,
-                source=_RouteEndpoint(logical_region, participants),
-                destination=_RouteEndpoint(tensor_region, (participant,)),
-            )
-        )
-
-    return _RedistributionPlan(
-        participants=participants,
-        logical_shape=logical_shape,
-        storage_partitions=storage_partitions,
-        compute_partitions=tuple(compute_partitions),
-        storage_to_compute_routes=tuple(storage_to_compute_routes),
     )
 
 

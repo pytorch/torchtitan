@@ -61,6 +61,8 @@ Test scripts:
 
 ## TODO
 
+- Add DistributedMuon support for TP-produced `_StridedShard` parameter
+  layouts; tracked in [#3353](https://github.com/pytorch/torchtitan/issues/3353).
 - Add a video dataset training pipeline.
 - Add INT4 (compressed-tensors) checkpoint loading. The released K2.5, K2.6,
   and K2.7-Code 1T checkpoints are INT4 group-quantized; the inherited
