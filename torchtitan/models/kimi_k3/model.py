@@ -50,43 +50,6 @@ from torchtitan.protocols.module import Module
 # T = flattened tokens, N = attention-residual entries.
 
 
-
-
-class KimiShortConvolution(ShortConvolution, Module):
-    """KDA short causal convolution backed by FLA's fused kernel.
-
-    Matches the released Kimi K3 HuggingFace model, which builds FLA's
-    ``ShortConvolution`` per q/k/v projection. The Triton kernel runs only on
-    accelerator devices.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        hidden_size: int
-        kernel_size: int
-        activation: str = "silu"
-
-    def __init__(self, config: Config):
-        super().__init__(
-            hidden_size=config.hidden_size,
-            kernel_size=config.kernel_size,
-            activation=config.activation,
-        )
-
-    def forward(
-        self,
-        x_BLD: torch.Tensor,
-        **kwargs: object,
-    ) -> tuple[torch.Tensor, None]:
-        y_BLD, _ = causal_conv1d(
-            x=x_BLD,
-            weight=self.weight.squeeze(1),
-            activation=self.activation,
-            backend=self.backend,
-        )
-        return y_BLD, None
-
-
 class KimiRMSNormGated(Module):
     """Per-head RMSNorm + sigmoid output gate backed by FLA's fused kernel.
 
