@@ -144,9 +144,11 @@ def run_with_realtime_output(cmd: str, logfile: str, env: dict[str, Any]) -> Non
 
 
 def extract_losses_from_tensorboard(
-    job_dump_folder: str, tb_folder: str
+    job_dump_folder: str,
+    tb_folder: str,
+    scalar_tag: str = TB_LOSS_TAG,
 ) -> dict[int, float]:
-    """Extract full-precision loss values from TensorBoard event files.
+    """Extract full-precision scalar values from TensorBoard event files.
 
     The TB directory is cleared before each run (see ``run_training``), so
     there is exactly one timestamped subdirectory.  We find it and point
@@ -157,7 +159,7 @@ def extract_losses_from_tensorboard(
         tb_folder: The TB subfolder name (e.g., "tb_baseline")
 
     Returns:
-        Dictionary mapping step number to full-precision loss value.
+        Dictionary mapping step number to the selected scalar value.
     """
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
@@ -183,7 +185,6 @@ def extract_losses_from_tensorboard(
     event_acc = EventAccumulator(event_dir)
     event_acc.Reload()
 
-    scalar_tag = TB_LOSS_TAG
     available_tags = event_acc.Tags().get("scalars", [])
 
     if scalar_tag not in available_tags:  # pyrefly: ignore [not-iterable]

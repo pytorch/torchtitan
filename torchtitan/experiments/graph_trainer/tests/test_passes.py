@@ -64,8 +64,10 @@ from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
 )
 from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     _apply_schedule,
+    _is_minimal_async_ep_wait,
     _schedule_ep_overlap_regions,
     _ScheduledRegion,
+    _token_exchange_wait_users,
 )
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     CHUNK_SYMBOL_HINTS_META,
@@ -4107,6 +4109,46 @@ class TestChunkPasses(TestCase):
             ],
         )
 
+    def test_ep_overlap_finds_ready_wait_in_production_combine_graph(self):
+        from torchtitan.distributed.minimal_async_ep import api
+
+        def combine(x, dst_ranks, dst_rows, num_valid_rows):
+            return api.combine_data(
+                x,
+                dst_ranks,
+                dst_rows,
+                num_valid_rows,
+                num_routed_rows=4,
+            )
+
+        gm = make_fx(combine, tracing_mode="fake")(
+            torch.empty(4, 8),
+            torch.empty(4, dtype=torch.int64),
+            torch.empty(4, dtype=torch.int64),
+            torch.empty(1, dtype=torch.int64),
+        )
+        launch = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.minimal_async_ep.combine_data.default
+        )
+        source_wait = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.minimal_async_ep.wait_combine_source.default
+        )
+        ready_wait = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.minimal_async_ep.wait_combine.default
+        )
+
+        self.assertTrue(_is_minimal_async_ep_wait(source_wait))
+        self.assertEqual(
+            _token_exchange_wait_users(launch, node_set=set(gm.graph.nodes)),
+            [ready_wait],
+        )
+
     def test_ep_overlap_keeps_transformer_batch_first_marker_wait_gated(self):
         c10d = torch.ops._c10d_functional
 
@@ -5322,64 +5364,41 @@ class TestChunkPasses(TestCase):
         self.assertIs(rs_nodes[0].args[0], sum_nodes[0])
         self.assertEqual(sum_nodes[0].meta["val"].dtype, torch.float32)
 
-    def test_normalize_chunked_grad_collective_chains_dedups_eager_fsdp(self):
-        for fsdp_mode in ("replicate", "fully_shard"):
-            with self.subTest(fsdp_mode=fsdp_mode):
-                gm, target = self._trace_simple_fsdp_moe_grad_collective(
-                    chunk_strategy="eager",
-                    fsdp_mode=fsdp_mode,
-                )
-                self.assertEqual(len(self._nodes_by_target(gm, target)), 2)
-
-                normalize_chunked_grad_collective_chains_pass(gm)
-
-                collective_nodes = self._nodes_by_target(gm, target)
-                sum_nodes = self._nodes_by_target(gm, torch.ops.aten.add.Tensor)
-                self.assertEqual(len(collective_nodes), 1)
-                self.assertEqual(len(sum_nodes), 1)
-                self.assertTrue(
-                    self._node_depends_on(collective_nodes[0].args[0], sum_nodes[0])
-                )
-                self.assertNotIn("chunk_id", sum_nodes[0].meta)
-                self.assertNotIn("chunk_id", sum_nodes[0].meta.get("custom", {}))
-
-    def test_normalize_chunked_grad_collective_chains_keeps_graph_fsdp_canonical(self):
-        for fsdp_mode in ("replicate", "fully_shard"):
-            with self.subTest(fsdp_mode=fsdp_mode):
-                gm, target = self._trace_simple_fsdp_moe_grad_collective(
-                    chunk_strategy="graph",
-                    fsdp_mode=fsdp_mode,
-                )
-                self.assertEqual(len(self._nodes_by_target(gm, target)), 1)
-
-                normalize_chunked_grad_collective_chains_pass(gm)
-
-                collective_nodes = self._nodes_by_target(gm, target)
-                sum_nodes = self._nodes_by_target(gm, torch.ops.aten.add.Tensor)
-                self.assertEqual(len(collective_nodes), 1)
-                self.assertEqual(len(sum_nodes), 1)
-                self.assertTrue(
-                    self._node_depends_on(collective_nodes[0].args[0], sum_nodes[0])
-                )
-                self.assertNotIn("chunk_id", sum_nodes[0].meta)
-                self.assertNotIn("chunk_id", sum_nodes[0].meta.get("custom", {}))
-
-    def test_normalize_chunked_grad_collective_chains_replays_output_cast(self):
-        for producer in ("eager", "graph"):
-            with self.subTest(producer=producer):
+    def test_normalize_chunked_grad_collective_chains_on_real_fsdp_traces(self):
+        cases = (
+            ("eager", "replicate", False, 2),
+            ("eager", "fully_shard", False, 2),
+            ("graph", "replicate", False, 1),
+            ("graph", "fully_shard", False, 1),
+            ("eager", "fully_shard", True, 2),
+            ("graph", "fully_shard", True, 2),
+        )
+        for producer, fsdp_mode, mixed_precision, before in cases:
+            with self.subTest(
+                producer=producer,
+                fsdp_mode=fsdp_mode,
+                mixed_precision=mixed_precision,
+            ):
                 gm, target = self._trace_simple_fsdp_moe_grad_collective(
                     chunk_strategy=producer,
-                    fsdp_mode="fully_shard",
-                    mixed_precision=True,
+                    fsdp_mode=fsdp_mode,
+                    mixed_precision=mixed_precision,
                 )
-                self.assertEqual(len(self._nodes_by_target(gm, target)), 2)
+                self.assertEqual(len(self._nodes_by_target(gm, target)), before)
 
                 normalize_chunked_grad_collective_chains_pass(gm)
 
-                collective_nodes = self._nodes_by_target(gm, target)
-                self.assertEqual(len(collective_nodes), 1)
-                cast_nodes = self._nodes_by_target(gm, torch.ops.aten._to_copy.default)
-                self.assertTrue(cast_nodes)
+                collectives = self._nodes_by_target(gm, target)
+                sums = self._nodes_by_target(gm, torch.ops.aten.add.Tensor)
+                self.assertEqual(len(collectives), 1)
+                self.assertEqual(len(sums), 1)
+                self.assertTrue(self._node_depends_on(collectives[0].args[0], sums[0]))
+                self.assertNotIn("chunk_id", sums[0].meta)
+                self.assertNotIn("chunk_id", sums[0].meta.get("custom", {}))
+                if mixed_precision:
+                    self.assertTrue(
+                        self._nodes_by_target(gm, torch.ops.aten._to_copy.default)
+                    )
 
     def test_chunk_batch_backward_keeps_same_fqn_grad_plumbing_chunked(self):
         x_real = torch.randn(4, 3)

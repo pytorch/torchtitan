@@ -56,6 +56,8 @@ def run_loss_compare(
     Returns:
         True if the assertion passed, False otherwise.
     """
+    from scripts.loss_compare import extract_losses_from_tensorboard
+
     # Use a temp dump folder instead of loss_compare.py's default ("outputs"),
     # which is created relative to cwd and is not writable in CI containers.
     with tempfile.TemporaryDirectory() as job_dump_folder:
@@ -89,10 +91,12 @@ def run_loss_compare(
         if not compare_grad_norm:
             return True
         return _scalars_are_equal(
-            _extract_scalars_from_tensorboard(
-                job_dump_folder, "tb_baseline", "grad_norm"
+            extract_losses_from_tensorboard(
+                job_dump_folder, "tb_baseline", scalar_tag="grad_norm"
             ),
-            _extract_scalars_from_tensorboard(job_dump_folder, "tb_test", "grad_norm"),
+            extract_losses_from_tensorboard(
+                job_dump_folder, "tb_test", scalar_tag="grad_norm"
+            ),
             metric="grad_norm",
         )
 
@@ -204,31 +208,6 @@ def _scalars_are_equal(
             )
             return False
     return True
-
-
-def _extract_scalars_from_tensorboard(
-    job_dump_folder: str,
-    tb_folder: str,
-    scalar_tag: str,
-) -> dict[int, float]:
-    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-
-    base_path = os.path.join(job_dump_folder, tb_folder)
-    event_dirs = [
-        os.path.join(base_path, name)
-        for name in os.listdir(base_path)
-        if os.path.isdir(os.path.join(base_path, name))
-    ]
-    if len(event_dirs) != 1:
-        raise RuntimeError(
-            f"Expected one TensorBoard directory under {base_path}, "
-            f"found {event_dirs}."
-        )
-    event_accumulator = EventAccumulator(event_dirs[0])
-    event_accumulator.Reload()
-    return {
-        scalar.step: scalar.value for scalar in event_accumulator.Scalars(scalar_tag)
-    }
 
 
 def _extract_losses_from_rank_tensorboard(
@@ -376,6 +355,7 @@ def _run_minimal_async_ep_graph_chunk_loss_compare() -> bool:
     """Compare MinimalAsyncEP graph chunking with eager chunking exactly."""
     common_options = (
         DSV3_EP_OVERLAP_OPTIONS
+        + " --compile.memory_policy full"
         + " --compile.inductor_compilation regional"
         + " --debug.moe_force_load_balance"
     )

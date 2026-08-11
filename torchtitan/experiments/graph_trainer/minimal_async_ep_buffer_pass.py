@@ -6,15 +6,11 @@
 
 """Assign MinimalAsyncEP buffer sets after graph EP chunking."""
 
-from __future__ import annotations
-
 import torch
 import torch.fx as fx
 
-from torchtitan.tools.logging import logger
 
-
-def _buffer_set_arg(node: fx.Node) -> tuple[str, int] | None:
+def _buffer_set_arg(node: fx.Node) -> int | None:
     if node.op != "call_function" or not isinstance(node.target, torch._ops.OpOverload):
         return None
     target = node.target
@@ -22,21 +18,8 @@ def _buffer_set_arg(node: fx.Node) -> tuple[str, int] | None:
         return None
     for index, argument in enumerate(target._schema.arguments):
         if argument.name == "buffer_set":
-            return target._schema.name.rsplit("::", 1)[-1], index
+            return index
     return None
-
-
-def _set_buffer_set(node: fx.Node, index: int, buffer_set: int) -> None:
-    args = list(node.args)
-    kwargs = dict(node.kwargs)
-    if "buffer_set" in kwargs:
-        kwargs["buffer_set"] = buffer_set
-    elif len(args) > index:
-        args[index] = buffer_set
-    else:
-        kwargs["buffer_set"] = buffer_set
-    node.args = tuple(args)
-    node.kwargs = kwargs
 
 
 def assign_minimal_async_ep_buffer_sets_pass(
@@ -52,27 +35,26 @@ def assign_minimal_async_ep_buffer_sets_pass(
 
     assigned = 0
     for node in gm.graph.nodes:
-        op_arg = _buffer_set_arg(node)
-        if op_arg is None:
+        index = _buffer_set_arg(node)
+        if index is None:
             continue
-        name, index = op_arg
-        if node.meta.get("chunked_region_role") != "body":
-            raise ValueError(
-                f"MinimalAsyncEP launch {node.name} ({name}) is not a chunk body "
-                "node under EP overlap; every dispatch/combine launch in a "
-                "chunked region must carry chunk metadata."
-            )
         chunk_id = node.meta.get("chunk_id")
-        if chunk_id not in (0, 1):
+        if node.meta.get("chunked_region_role") != "body" or chunk_id not in (0, 1):
             raise ValueError(
-                f"MinimalAsyncEP launch {node.name} ({name}) has invalid "
-                f"chunk_id={chunk_id!r}; expected 0 or 1."
+                f"MinimalAsyncEP launch {node.name} must be a chunk body with "
+                f"chunk_id 0 or 1, got role={node.meta.get('chunked_region_role')!r} "
+                f"and chunk_id={chunk_id!r}."
             )
-        _set_buffer_set(node, index, chunk_id)
+
+        args, kwargs = list(node.args), dict(node.kwargs)
+        if "buffer_set" in kwargs or len(args) <= index:
+            kwargs["buffer_set"] = chunk_id
+        else:
+            args[index] = chunk_id
+        node.args, node.kwargs = tuple(args), kwargs
         assigned += 1
 
     if assigned:
         gm.graph.lint()
         gm.recompile()
-        logger.info("Assigned MinimalAsyncEP buffer sets to %d launch op(s).", assigned)
     return gm

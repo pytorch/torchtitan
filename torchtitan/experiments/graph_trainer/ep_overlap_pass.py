@@ -85,7 +85,7 @@ from torchtitan.tools.logging import logger
 _GRAPH_BOUNDARY_OPS = {"placeholder", "get_attr"}
 _MINIMAL_ASYNC_EP_WAITS = {
     "dispatch": frozenset({"wait_dispatch", "wait_dispatch_data"}),
-    "combine": frozenset({"wait_combine"}),
+    "combine": frozenset({"wait_combine_source", "wait_combine"}),
 }
 
 
@@ -130,10 +130,21 @@ def _is_minimal_async_ep_wait(node: fx.Node) -> bool:
     return any(name in waits for waits in _MINIMAL_ASYNC_EP_WAITS.values())
 
 
+def _is_combine_source_wait(node: fx.Node) -> bool:
+    return _minimal_async_ep_op_name(node) == "wait_combine_source"
+
+
+def _is_wait_alias_projection(node: fx.Node) -> bool:
+    return node.op == "call_function" and node.target == torch.ops.aten.view.default
+
+
 def _is_matching_minimal_async_ep_wait(wait: fx.Node, launch: fx.Node) -> bool:
     phase = ep_token_exchange_launch_phase(launch)
-    return phase is not None and _minimal_async_ep_op_name(wait) in (
-        _MINIMAL_ASYNC_EP_WAITS.get(phase) or ()
+    return (
+        phase is not None
+        and not _is_combine_source_wait(wait)
+        and _minimal_async_ep_op_name(wait)
+        in (_MINIMAL_ASYNC_EP_WAITS.get(phase) or ())
     )
 
 
@@ -141,6 +152,10 @@ def _token_exchange_launch_for_wait(node: fx.Node) -> fx.Node | None:
     if node.op != "call_function" or not node.all_input_nodes:
         return None
     launch = node.all_input_nodes[0]
+    while _is_wait_alias_projection(launch) and launch.all_input_nodes:
+        launch = launch.all_input_nodes[0]
+    if _is_combine_source_wait(launch) and launch.all_input_nodes:
+        launch = launch.all_input_nodes[0]
     if (
         _is_minimal_async_ep_wait(node)
         and launch.op == "call_function"
@@ -246,6 +261,15 @@ def _token_exchange_wait_users(
     for user in launch.users:
         if user.op == "call_function" and user.target == operator.getitem:
             candidates.update(user.users)
+        elif _is_combine_source_wait(user):
+            aliases = [
+                candidate
+                for candidate in user.users
+                if _is_wait_alias_projection(candidate)
+            ]
+            candidates.update(user.users)
+            for alias in aliases:
+                candidates.update(alias.users)
     return [
         user
         for user in candidates

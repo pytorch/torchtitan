@@ -61,11 +61,14 @@ class EpOverlapConfig:
     the configured capacity instead of dropping tokens.
     """
 
-    minimal_async_ep_num_copy_ctas: int | None = 50
+    minimal_async_ep_num_copy_ctas: int | None = 72
     """Persistent row-copy grid size used by MinimalAsyncEP during overlap.
 
-    ``None`` leaves the copy kernel unbounded. This setting has no effect on
-    other EP backends or when EP overlap is disabled.
+    The default follows ``round_to_8(S * t_copy / (t_copy + t_compute))``, with
+    ``t_copy = 2*R*D*d/B`` and ``t_compute = 3*R*D*H/P``. GB200 measurements
+    use ``S=152``, ``H=2048``, ``B=1.06 TB/s``, and ``P=1.44 PFLOP/s``, which
+    predict 71 CTAs and round to 72. ``None`` leaves the copy kernel unbounded.
+    This setting has no effect on other EP backends or without EP overlap.
     """
 
     disable_early_grad_accumulation: bool = False
