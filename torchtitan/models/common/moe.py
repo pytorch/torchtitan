@@ -20,7 +20,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -144,9 +144,8 @@ class RoutedExperts(Module):
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor->local conversion from the configured input placements and
-        local->DTensor wrapping with the configured output placement. The
-        forward body operates on plain local tensors.
+        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
+        on exit. The forward body operates on plain local tensors.
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
@@ -356,12 +355,10 @@ class MoE(Module):
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
           - LocalTokenDispatcher (no EP): scatter_add only.
           - AllToAll: all-to-all communication, then scatter_add.
-          - DeepEP: async combine_tokens; sync deferred to step 4.
+          - DeepEP: combine_tokens followed by backend synchronization.
           - HybridEP: synchronous combine_tokens.
-    3. Shared experts run on DTensor. Overlaps with DeepEP async combine
-       when the DeepEP dispatcher is used.
-    4. DeepEP combine is synced if needed, then routed and shared expert
-       outputs are summed.
+    3. Shared experts compute their output.
+    4. Routed and shared expert outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -454,18 +451,9 @@ class MoE(Module):
             num_local_tokens_per_expert_E,
         )
 
-        # shared_experts runs in parallel with deepep combine communication.
         shared_out_BLD = (
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
-
-        if isinstance(self.routed_experts.token_dispatcher, DeepEPTokenDispatcher):
-            # Sync the combine operation before using routed_output.
-            # This inserts a CUDA stream wait, ensuring combine is complete before
-            # the subsequent addition or view operations read routed output.
-            from torchtitan.distributed.deepep.deepep import sync_combine
-
-            sync_combine()
 
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD

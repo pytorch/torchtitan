@@ -496,6 +496,12 @@ def test_inference_parallelism_propagates_dense_sequence_parallelism():
     assert compilation_config.pass_config.sp_min_token_num == 1
 
 
+def test_inference_parallelism_disables_dense_sequence_parallelism():
+    parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
+
+    assert not parallelism.to_training().enable_sequence_parallel
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vllm_uneven_decode_tp_padding():
     """Three decode tokens run through EP-internal TP sequence sharding."""
