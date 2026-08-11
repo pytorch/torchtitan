@@ -1271,6 +1271,49 @@ not a single shared Python process. This matters for small differences: the F4
 eager median was `3.482 ms` in the CODA process and `3.613 ms` in the earlier
 FlexGEMM process.
 
+### F1 LM-head and cross entropy
+
+The real per-chunk shape is `(12,288, 7,168) @ (7,168, 129,280)`. The eager
+boundary is the exact graph sequence: BF16 GEMM, FP32 log-softmax, summed NLL,
+FP32 log-softmax backward, BF16 `dlogits`, and the two activation/weight
+gradient GEMMs. The loss is divided by the full 98,304-token local batch.
+
+FlexGEMM has no valid implementation for this row. Its local-reduction API
+cannot combine online max/sum state across the full 129,280-column vocabulary
+or select the target column. CODA instead uses `gemm_lse`, overwrites the BF16
+logits buffer with `dlogits` using `cross_entropy_fwd_bwd_`, and applies the loss
+scale in the two gradient GEMM epilogues. This avoids the 6.35 GB FP32
+log-softmax tensor while retaining the backward data.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager full forward/backward boundary | 46.735 ms | 45.926 ms | 51.256 ms |
+| PyTorch QUACK FlexGEMM | unsupported | unsupported | unsupported |
+| CODA fused-LSE boundary | 42.794 ms | 41.780 ms | 43.763 ms |
+
+CODA is `1.092x` faster than eager. This is a fixed-config result, not an
+autotuned result: `tile_m=256`, `tile_n=256`, `cluster_m=2`, `cluster_n=1`,
+dynamic persistent scheduling, and no ping-pong. CODA's generic LSE autotuner
+currently includes SM100 layouts whose epilogue has more than one N warp and
+fails its `warps_in_N == 1` invariant, so the known-valid configuration was
+selected directly.
+
+Against eager, CODA had `max_abs_error=1.192e-7` in loss and
+`max_abs_error=7.451e-9` in both gradients. Mean absolute errors were
+`3.164e-10` for the activation gradient and `2.963e-11` for the weight
+gradient. CODA computes LSE from the FP32 GEMM accumulator and stores unscaled
+BF16 `dlogits`, then moves the loss scale into the gradient GEMM epilogues; the
+source graph rounds BF16 logits before FP32 log-softmax and rounds scaled
+`dlogits` before the GEMMs. The faster kernel is therefore a performance
+candidate, not a numerically identical replacement.
+
+This kernel was not wired into the GraphTrainer pass pipeline. CODA requires
+Quack 0.6.1 and CUTLASS DSL 4.6.1, while the PyTorch build that provides the
+landed FlexGEMM passes uses its vendored Quack and CUTLASS DSL 4.5.2. Loading
+CODA directly would make the two implementations share an incompatible
+`cutlass` Python package. The benchmark used the isolated environment
+`~/local/coda-kernels/.venv-coda061`.
+
 ### F4 shared-expert SwiGLU
 
 Real shape: `M=98,304`, `K=7,168`, `P=2,048`. CODA interleaves W1/W3 columns
@@ -1323,6 +1366,7 @@ convergence validation.
 
 | GraphTrainer pattern | Existing CODA-kernels analogue | Comparison status |
 | --- | --- | --- |
+| F1 LM-head plus cross entropy | `gemm_lse` + `cross_entropy_fwd_bwd_` + scaled GEMMs | measured above; faster external candidate, FlexGEMM unsupported |
 | `b1_lm_head_input_grad_cast` | none with the required FP32 post-store cast | FlexGEMM/eager only |
 | `b6_bf16_weight_grad_cast` | none with the required FP32 post-store cast | FlexGEMM/eager only |
 | `f6_router_sigmoid_bias` | no public sigmoid-plus-bias GEMM | FlexGEMM/eager only |
