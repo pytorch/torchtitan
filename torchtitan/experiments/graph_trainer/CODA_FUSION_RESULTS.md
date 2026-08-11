@@ -5,6 +5,105 @@ CODA fusion pass. Full tlparse dumps stay under `outputs/` because they are
 generated artifacts; the grounded samples and exact artifact paths are listed
 here.
 
+## B1 LM-head input-gradient cast
+
+Pattern name: `b1_lm_head_input_grad_cast`
+
+The full B1 region contains eight chunked LM-head input-gradient GEMMs, FP32
+chunk writes and accumulation, a final BF16 conversion, and RMSNorm backward.
+The supported FlexGEMM boundary is intentionally smaller: each
+`BF16 mm -> reshape -> alias -> FP32 cast` chain is fused only when it is an
+LM-head backward GEMM and the cast is the source of the corresponding chunk
+`copy_`. The chunk writes, their cross-chunk accumulation, final conversion,
+and RMSNorm backward remain unchanged.
+
+Real before sample:
+
+```python
+mm_548 = torch.ops.aten.mm.default(view_4384, _unsafe_view_2737)
+view_4385 = torch.ops.aten.reshape.default(mm_548, [24, 512, 7168])
+alias_436 = torch.ops.aten.alias.default(view_4385)
+_to_copy_1737 = torch.ops.aten._to_copy.default(
+    alias_436, dtype=torch.float32
+)
+copy_ = torch.ops.aten.copy_.default(slice_798, _to_copy_1737)
+```
+
+Real after sample:
+
+```python
+_coda_b1_lm_head_input_grad_body_0 = (
+    self._coda_b1_lm_head_input_grad_body_0
+)
+flex_gemm = torch.ops.higher_order.flex_gemm(
+    torch.ops.aten.mm.default,
+    _coda_b1_lm_head_input_grad_body_0,
+    (view_4384, _unsafe_view_2737),
+    {},
+    {"backend": "QUACK"},
+)
+getitem_25338 = flex_gemm[0]
+reshape_default = torch.ops.aten.reshape.default(
+    getitem_25338, [24, 512, 7168]
+)
+copy_ = torch.ops.aten.copy_.default(slice_798, reshape_default)
+```
+
+The FlexGEMM body explicitly models accumulator FP32 -> BF16 -> FP32
+conversion, preserving the original BF16 GEMM store rounding while producing
+the FP32 chunk value.
+
+### Graph proof
+
+Configuration: DSV3-671B, fake communication backend, FSDP 256, EP 64, local
+batch 24, sequence length 4096, full activation checkpointing, `c4_test`.
+
+Artifact root:
+
+```text
+outputs/profiling/dsv3_fake/graph/coda-b1-proof-20260810/tlparse/-_-_-_-
+```
+
+Before and after dumps:
+
+```text
+before_fuse_b1_lm_head_input_grad_cast_pass_274.txt
+after_fuse_b1_lm_head_input_grad_cast_pass_275.txt
+```
+
+Pass diff:
+
+| Operation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| root `mm.default` | 2,148 | 2,140 | -8 |
+| root `_to_copy.default` | 2,486 | 2,478 | -8 |
+| root `alias.default` | 2,825 | 2,817 | -8 |
+| root `flex_gemm` | 0 | 8 | +8 |
+| root `get_attr` | 427 | 435 | +8 |
+| root `getitem` | 24,620 | 24,628 | +8 |
+
+All eight grounded chunk chains fused. Root reshape and `copy_` counts are
+unchanged because each removed pre-cast reshape is replaced by a post-FlexGEMM
+reshape. The proof run disabled regional Inductor and the CUDA graph pass so
+tlparse could record the rewrite in isolation; execution subsequently OOMed in
+unfused FlexAttention after all before/after artifacts had been written.
+
+### GB300 microbenchmark
+
+The exact fused boundary was benchmarked at the real chunk shape:
+`(12,288, 129,280) @ (129,280, 7,168)`, BF16 inputs and FP32 output. Five
+warmups and 20 CUDA-event iterations were run on one GB300.
+
+| Implementation | Median | Min | Max |
+| --- | ---: | ---: | ---: |
+| eager `mm` + cast | 13.265 ms | 12.952 ms | 13.502 ms |
+| QUACK FlexGEMM | 15.874 ms | 15.226 ms | 17.246 ms |
+
+Speedup: `0.84x` (FlexGEMM is about 20% slower). This is retained because the
+project accepts FlexGEMM fusions without a speedup. The result was bitwise
+identical to eager (`max_abs_error=0`). The benchmark excludes the unchanged
+chunk `copy_`.
+
 ## B6 BF16 weight-gradient cast
 
 Pattern name: `b6_bf16_weight_grad_cast`

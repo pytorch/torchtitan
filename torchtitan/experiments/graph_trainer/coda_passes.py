@@ -23,7 +23,9 @@ from torchtitan.tools.logging import logger
 _MM = torch.ops.aten.mm.default
 _ADD = torch.ops.aten.add.Tensor
 _ADD_SCALAR = torch.ops.aten.add.Scalar
+_ALIAS = torch.ops.aten.alias.default
 _CONSTANT_PAD_ND = torch.ops.aten.constant_pad_nd.default
+_COPY_ = torch.ops.aten.copy_.default
 _FUSED_RMS_NORM = torch.ops.aten._fused_rms_norm.default
 _MEAN_DIM = torch.ops.aten.mean.dim
 _MUL = torch.ops.aten.mul.Tensor
@@ -135,9 +137,9 @@ def _next_submodule_name(gm: torch.fx.GraphModule, prefix: str) -> str:
     return f"{prefix}_{index}"
 
 
-def _build_b6_bf16_body(
+def _build_bf16_mm_fp32_body(
     mm: torch.fx.Node,
-    cast: torch.fx.Node,
+    *metadata_nodes: torch.fx.Node,
 ) -> torch.fx.GraphModule:
     graph = torch.fx.Graph()
     inputs = []
@@ -152,11 +154,11 @@ def _build_b6_bf16_body(
     # FlexGEMM exposes its accumulator as FP32. Preserve the original BF16
     # GEMM store rounding before returning the FP32 gradient.
     to_fp32 = graph.call_function(_TO_COPY, (body_mm,), {"dtype": torch.float32})
-    to_fp32.meta = dict(cast.meta)
+    to_fp32.meta = _copy_meta_with_dtype(mm, torch.float32, mm, *metadata_nodes)
     to_bf16 = graph.call_function(_TO_COPY, (to_fp32,), {"dtype": torch.bfloat16})
-    to_bf16.meta = dict(mm.meta)
+    to_bf16.meta = _copy_meta_with_value_from(mm, mm, *metadata_nodes)
     value = graph.call_function(_TO_COPY, (to_bf16,), {"dtype": torch.float32})
-    value.meta = dict(cast.meta)
+    value.meta = _copy_meta_with_dtype(mm, torch.float32, mm, *metadata_nodes)
 
     # FlexGEMM lowering returns an ordered output tuple. Keeping the singleton
     # tuple explicit gives regional Inductor a getitem node to consume.
@@ -591,6 +593,136 @@ def _build_f2_q_rmsnorm_second_body(
     return body
 
 
+def _match_b1_lm_head_input_grad_cast(
+    cast: torch.fx.Node,
+) -> tuple[torch.fx.Node, torch.fx.Node, torch.fx.Node] | None:
+    if not _is_cast(cast, torch.float32) or not cast.args:
+        return None
+    alias = cast.args[0]
+    if (
+        not isinstance(alias, torch.fx.Node)
+        or alias.target != _ALIAS
+        or not alias.args
+        or _sole_user(alias) is not cast
+    ):
+        return None
+    reshape = alias.args[0]
+    if (
+        not isinstance(reshape, torch.fx.Node)
+        or reshape.target not in (_RESHAPE, _VIEW)
+        or not reshape.args
+        or not isinstance(reshape.args[0], torch.fx.Node)
+        or _sole_user(reshape) is not alias
+    ):
+        return None
+    mm = reshape.args[0]
+    if (
+        mm.target != _MM
+        or _sole_user(mm) is not reshape
+        or mm.meta.get("autograd_backward") is not True
+        or _module_fqn(mm) != "lm_head"
+    ):
+        return None
+    copy = _sole_user(cast)
+    if (
+        copy is None
+        or copy.target != _COPY_
+        or len(copy.args) < 2
+        or copy.args[1] is not cast
+        or not isinstance(copy.args[0], torch.fx.Node)
+    ):
+        return None
+
+    mm_shape = _node_shape(mm)
+    cast_shape = _node_shape(cast)
+    mm_value = mm.meta.get("val")
+    cast_value = cast.meta.get("val")
+    if (
+        mm_shape is None
+        or len(mm_shape) != 2
+        or cast_shape is None
+        or not cast_shape
+        or mm_shape[-1] != cast_shape[-1]
+        or _node_shape(reshape) != cast_shape
+        or _node_shape(alias) != cast_shape
+        or _node_shape(copy.args[0]) != cast_shape
+        or _node_dtype(mm) != torch.bfloat16
+        or _node_dtype(cast) != torch.float32
+        or not isinstance(mm_value, torch.Tensor)
+        or not isinstance(cast_value, torch.Tensor)
+        or mm_value.numel() != cast_value.numel()
+    ):
+        return None
+    return mm, reshape, alias
+
+
+def fuse_b1_lm_head_input_grad_cast_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Fuse chunked LM-head input-gradient BF16-to-FP32 conversion."""
+    del example_inputs
+    num_fused = 0
+    for cast in list(gm.graph.nodes):
+        match = _match_b1_lm_head_input_grad_cast(cast)
+        if match is None:
+            continue
+        mm, reshape, alias = match
+        mm_shape = _node_shape(mm)
+        cast_shape = _node_shape(cast)
+        mm_value = mm.meta["val"]
+        cast_value = cast.meta["val"]
+        assert mm_shape is not None
+        assert cast_shape is not None
+        assert isinstance(mm_value, torch.Tensor)
+        assert isinstance(cast_value, torch.Tensor)
+
+        body = _build_bf16_mm_fp32_body(mm, reshape, alias, cast)
+        body_name = _next_submodule_name(gm, "_coda_b1_lm_head_input_grad_body")
+        gm.add_module(body_name, body)
+        with gm.graph.inserting_before(mm):
+            body_ref = gm.graph.get_attr(body_name)
+            _tag_for_regional_inductor(body_ref)
+            fused = gm.graph.call_function(
+                flex_gemm_hop,
+                (
+                    _MM,
+                    body_ref,
+                    tuple(mm.args),
+                    dict(mm.kwargs),
+                    {"backend": "QUACK"},
+                ),
+            )
+            output_2d_meta = _copy_meta_with_value(
+                mm_value.float(), mm, reshape, alias, cast
+            )
+            fused.meta = _copy_meta(mm, reshape, alias, cast)
+            fused.meta["val"] = (output_2d_meta["val"],)
+            fused.meta.pop("tensor_meta", None)
+            _tag_for_regional_inductor(fused)
+            output_2d = gm.graph.call_function(operator.getitem, (fused, 0))
+            output_2d.meta = output_2d_meta
+            _tag_for_regional_inductor(output_2d)
+            output = gm.graph.call_function(
+                _RESHAPE,
+                (output_2d, list(cast_shape)),
+            )
+            output.meta = _copy_meta_with_value(cast_value.reshape(cast_shape), cast)
+            _tag_for_regional_inductor(output)
+
+        cast.replace_all_uses_with(output)
+        gm.graph.erase_node(cast)
+        gm.graph.erase_node(alias)
+        gm.graph.erase_node(reshape)
+        gm.graph.erase_node(mm)
+        num_fused += 1
+
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(f"B1 fused {num_fused} chunked LM-head input-gradient casts")
+    return gm
+
+
 def _match_b6_bf16_cast(mm: torch.fx.Node) -> torch.fx.Node | None:
     if mm.target != _MM:
         return None
@@ -615,7 +747,7 @@ def fuse_b6_bf16_weight_grad_cast_pass(
         if cast is None:
             continue
 
-        body = _build_b6_bf16_body(mm, cast)
+        body = _build_bf16_mm_fp32_body(mm, cast)
         body_name = _next_submodule_name(gm, "_coda_b6_body")
         gm.add_module(body_name, body)
         with gm.graph.inserting_before(mm):
@@ -2929,6 +3061,7 @@ def fuse_f2_kv_rmsnorm_pass(
 
 
 CODA_PATTERN_PASSES: dict[str, Callable] = {
+    "b1_lm_head_input_grad_cast": fuse_b1_lm_head_input_grad_cast_pass,
     "b2_dense_swiglu_backward": fuse_b2_dense_swiglu_backward_pass,
     "b4_router_input_grad_add": fuse_b4_router_input_grad_add_pass,
     "b6_bf16_weight_grad_cast": fuse_b6_bf16_weight_grad_cast_pass,

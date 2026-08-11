@@ -12,6 +12,7 @@ from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.experiments.graph_trainer.coda_passes import (
+    fuse_b1_lm_head_input_grad_cast_pass,
     fuse_b2_dense_swiglu_backward_pass,
     fuse_b4_router_input_grad_add_pass,
     fuse_b6_bf16_weight_grad_cast_pass,
@@ -23,6 +24,76 @@ from torchtitan.experiments.graph_trainer.coda_passes import (
     fuse_f6_router_sigmoid_bias_pass,
     get_coda_pattern_passes,
 )
+
+
+class TestB1LMHeadInputGradCastPass(TestCase):
+    def _trace(self, *, module_fqn="lm_head", backward=True):
+        m, k, n = 8, 16, 32
+
+        def fn(grad, weight, destination):
+            input_grad = torch.ops.aten.mm.default(grad, weight)
+            input_grad = torch.ops.aten.reshape.default(input_grad, [2, 4, n])
+            input_grad = torch.ops.aten.alias.default(input_grad)
+            input_grad = torch.ops.aten._to_copy.default(
+                input_grad, dtype=torch.float32
+            )
+            target = torch.ops.aten.slice.Tensor(destination, 1, 0, 4)
+            torch.ops.aten.copy_.default(target, input_grad)
+            return destination
+
+        inputs = (
+            torch.randn(m, k, dtype=torch.bfloat16) * 0.02,
+            torch.randn(k, n, dtype=torch.bfloat16) * 0.02,
+            torch.zeros(2, 8, n, dtype=torch.float32),
+        )
+        gm = make_fx(fn)(*inputs)
+        mm = next(
+            node for node in gm.graph.nodes if node.target == torch.ops.aten.mm.default
+        )
+        mm.meta["custom"] = {"module_fqn": module_fqn}
+        if backward:
+            mm.meta["autograd_backward"] = True
+        return gm, inputs
+
+    def _flex_gemm_nodes(self, gm):
+        return [
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.higher_order.flex_gemm
+        ]
+
+    def test_fuses_lm_head_input_gradient_cast(self):
+        gm, inputs = self._trace()
+        expected = gm(*(value.clone() for value in inputs))
+
+        fuse_b1_lm_head_input_grad_cast_pass(gm)
+
+        actual = gm(*(value.clone() for value in inputs))
+        self.assertEqual(actual, expected, exact_dtype=True)
+        fused = self._flex_gemm_nodes(gm)
+        self.assertEqual(len(fused), 1)
+        fused_output = next(iter(fused[0].users))
+        self.assertEqual(fused_output.meta["val"].shape, (8, 32))
+        self.assertEqual(fused_output.meta["val"].dtype, torch.float32)
+        body = getattr(gm, fused[0].args[1].target)
+        body_targets = [node.target for node in body.graph.nodes]
+        self.assertEqual(body_targets.count(torch.ops.aten._to_copy.default), 3)
+        root_targets = [node.target for node in gm.graph.nodes]
+        self.assertEqual(root_targets.count(torch.ops.aten.copy_.default), 1)
+
+    def test_does_not_fuse_unrelated_module(self):
+        gm, _ = self._trace(module_fqn="layers.3.attention.wq_a")
+
+        fuse_b1_lm_head_input_grad_cast_pass(gm)
+
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
+
+    def test_does_not_fuse_forward_graph(self):
+        gm, _ = self._trace(backward=False)
+
+        fuse_b1_lm_head_input_grad_cast_pass(gm)
+
+        self.assertEqual(self._flex_gemm_nodes(gm), [])
 
 
 class TestB6WeightGradCastPass(TestCase):
@@ -858,6 +929,7 @@ class TestCodaPatternRegistry(TestCase):
     def test_resolves_configured_order(self):
         passes = get_coda_pattern_passes(
             [
+                "b1_lm_head_input_grad_cast",
                 "f6_router_sigmoid_bias",
                 "f4_dense_swiglu",
                 "b2_dense_swiglu_backward",
@@ -872,6 +944,7 @@ class TestCodaPatternRegistry(TestCase):
         self.assertEqual(
             passes,
             [
+                fuse_b1_lm_head_input_grad_cast_pass,
                 fuse_f6_router_sigmoid_bias_pass,
                 fuse_f4_dense_swiglu_pass,
                 fuse_b2_dense_swiglu_backward_pass,
