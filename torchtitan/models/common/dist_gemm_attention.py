@@ -298,8 +298,12 @@ class DistGemmGQAttention(GQAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
-        qkv_linear: AllGatherFusedQKVLinear.Config  # pyrefly: ignore[bad-override]
-        wo: AttentionOutputLinear.Config  # pyrefly: ignore[bad-override]
+        """Same fields as the stock block. ``qkv_linear`` and ``wo`` are the fused
+        variants in practice, but are deliberately not re-annotated as such:
+        narrowing an inherited mutable field is an unsound override, and it breaks
+        type checking at ``make_gqa_config``, which is the only constructor and is
+        what actually guarantees the pairing.
+        """
 
     # No parallelize override: both contracts this block needs -- no
     # attention-boundary all-gather, and a wo that emits its final Shard(1)
