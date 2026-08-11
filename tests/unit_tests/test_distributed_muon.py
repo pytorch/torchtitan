@@ -28,6 +28,20 @@ from torchtitan.components.distributed_muon import (
 from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig
 
 
+class TestDistributedMuonConfig(unittest.TestCase):
+    def test_requires_compute_sharding_for_each_local_fqn(self):
+        parameter = torch.nn.Parameter(torch.empty(2, 2))
+        with self.assertRaisesRegex(
+            ValueError,
+            "missing compute sharding for Muon parameter 'weight'",
+        ):
+            build_distributed_muon(
+                [{"params": [parameter], "param_names": ["weight"]}],
+                compute_sharding_by_fqn={},
+                bucket_configs=[],
+            )
+
+
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistributedMuon(DTensorTestBase):
     @property
@@ -62,26 +76,24 @@ class TestDistributedMuon(DTensorTestBase):
             redistributed: torch.nn.Parameter,
             local_blocks: torch.nn.Parameter,
         ):
-            return build_distributed_muon(
+            redistributed_fqn = "layers.0.redistributed"
+            local_blocks_fqn = "layers.0.local_blocks"
+            optimizer = build_distributed_muon(
                 [
                     {
-                        "params": [redistributed],
-                        "param_names": ["layers.0.redistributed"],
-                        "compute_sharding": MuonComputeShardingConfig(
-                            placement=Owned()
-                        ),
-                    },
-                    {
-                        "params": [local_blocks],
-                        "param_names": ["layers.0.local_blocks"],
-                        "compute_sharding": MuonComputeShardingConfig(
-                            view_before_placement=BatchedMatrixComputeView(
-                                num_matrices=num_matrices,
-                            ),
-                            placement=Shard(0),
-                        ),
-                    },
+                        "params": [redistributed, local_blocks],
+                        "param_names": [redistributed_fqn, local_blocks_fqn],
+                    }
                 ],
+                compute_sharding_by_fqn={
+                    redistributed_fqn: MuonComputeShardingConfig(placement=Owned()),
+                    local_blocks_fqn: MuonComputeShardingConfig(
+                        view_before_placement=BatchedMatrixComputeView(
+                            num_matrices=num_matrices,
+                        ),
+                        placement=Shard(0),
+                    ),
+                },
                 bucket_configs=[
                     BucketConfig(
                         patterns=("layers.0.*",),
@@ -95,6 +107,8 @@ class TestDistributedMuon(DTensorTestBase):
                 nesterov=True,
                 ns_steps=2,
             )
+            self.assertEqual(len(optimizer.param_groups), 1)
+            return optimizer
 
         def set_grads(
             redistributed: torch.nn.Parameter,
