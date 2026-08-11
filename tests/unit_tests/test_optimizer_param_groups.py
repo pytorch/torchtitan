@@ -111,6 +111,17 @@ def _get_default_groups(model, config):
 
 
 class TestParamGroupConfig(unittest.TestCase):
+    def test_for_remaining_parameters(self):
+        optimizer_kwargs = {"lr": 1e-3}
+        config = ParamGroupConfig.for_remaining_parameters(
+            optimizer_name="AdamW",
+            optimizer_kwargs=optimizer_kwargs,
+        )
+
+        self.assertEqual(config.pattern, r".*")
+        self.assertEqual(config.optimizer_name, "AdamW")
+        self.assertEqual(config.optimizer_kwargs, optimizer_kwargs)
+
     def test_default_no_param_groups(self):
         """Empty param_groups produces a single group with all params."""
         model = SimpleModel()

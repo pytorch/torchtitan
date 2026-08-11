@@ -204,15 +204,17 @@ def _distributed_muon_optimizer(
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
+    owned = MuonComputeShardingConfig(placement=Owned())
     per_head = MuonComputeShardingConfig(
         placement=Shard(0),
         view_before_placement=BatchedMatrixComputeView(
             num_matrices=attention.n_heads,
         ),
     )
+    per_expert = MuonComputeShardingConfig(placement=Shard(0))
     query_shardings: dict[str, MuonComputeShardingConfig] = (
         {
-            "wq_a": MuonComputeShardingConfig(placement=Owned()),
+            "wq_a": owned,
             "wq_b": per_head,
         }
         if attention.q_lora_rank
@@ -220,9 +222,9 @@ def _distributed_muon_optimizer(
     )
     attention_shardings = {
         **query_shardings,
-        "wkv_a": MuonComputeShardingConfig(placement=Owned()),
+        "wkv_a": owned,
         "wkv_b": per_head,
-        "wo": MuonComputeShardingConfig(placement=Owned()),
+        "wo": owned,
     }
     num_layers = len(model_config.layers)
     muon_kwargs = {
@@ -241,79 +243,49 @@ def _distributed_muon_optimizer(
         "weight_decay": 0.1,
     }
     expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
-    param_groups = [
-        ParamGroupConfig(
-            pattern=rf"attention\.{projection}\.weight$",
-            optimizer_name="DistributedMuon",
-            optimizer_kwargs={
-                **muon_kwargs,
-                "compute_sharding": compute_sharding,
-            },
-        )
-        for projection, compute_sharding in attention_shardings.items()
-    ]
-    for projection in expert_projections:
-        param_groups.append(
-            ParamGroupConfig(
-                pattern=rf"routed_experts\.inner_experts\.{projection}$",
-                optimizer_name="DistributedMuon",
-                optimizer_kwargs={
-                    **muon_kwargs,
-                    "compute_sharding": MuonComputeShardingConfig(placement=Shard(0)),
-                },
-            )
-        )
-    for pattern in (
-        r"feed_forward\.w[123]\.weight$",
-        # Keep the 2D router gate on Muon: this follows the Kimi team's
-        # matrix-parameter rule, and Moonlight reports a larger SVD-entropy
-        # gain over AdamW for MoE router weights.
-        r"moe\.router\.gate\.weight$",
-        r"moe\.shared_experts\.w[123]\.weight$",
-    ):
-        param_groups.append(
-            ParamGroupConfig(
-                pattern=pattern,
-                optimizer_name="DistributedMuon",
-                optimizer_kwargs={
-                    **muon_kwargs,
-                    "compute_sharding": MuonComputeShardingConfig(placement=Owned()),
-                },
-            )
-        )
-    # Keep embeddings, norms, biases, and vision encoder parameters on AdamW.
-    param_groups.append(
-        ParamGroupConfig(
-            pattern=r".*",
-            optimizer_name="AdamW",
-            optimizer_kwargs=adamw_kwargs,
-        )
-    )
 
-    def layer_fqns(layer_id: int) -> tuple[str, ...]:
+    def compute_shardings_for_layer(
+        layer_id: int,
+    ) -> dict[str, MuonComputeShardingConfig]:
         prefix = f"layers.{layer_id}"
-        fqns = tuple(
-            f"{prefix}.attention.{projection}.weight"
-            for projection in attention_shardings
-        )
+        shardings = {
+            f"{prefix}.attention.{projection}.weight": compute_sharding
+            for projection, compute_sharding in attention_shardings.items()
+        }
         if not layer_id:
-            fqns += tuple(
-                f"{prefix}.feed_forward.{projection}.weight"
-                for projection in ("w1", "w2", "w3")
+            shardings.update(
+                {
+                    f"{prefix}.feed_forward.{projection}.weight": owned
+                    for projection in ("w1", "w2", "w3")
+                }
             )
         else:
-            fqns += tuple(
-                f"{prefix}.moe.routed_experts.inner_experts.{projection}"
-                for projection in expert_projections
+            shardings.update(
+                {
+                    f"{prefix}.moe.routed_experts.inner_experts.{projection}": per_expert
+                    for projection in expert_projections
+                }
             )
-            fqns += (f"{prefix}.moe.router.gate.weight",)
-            fqns += tuple(
-                f"{prefix}.moe.shared_experts.{projection}.weight"
-                for projection in ("w1", "w2", "w3")
+            shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shardings.update(
+                {
+                    f"{prefix}.moe.shared_experts.{projection}.weight": owned
+                    for projection in ("w1", "w2", "w3")
+                }
             )
-        return fqns
+        return shardings
 
-    layer_bucket_fqns = tuple(layer_fqns(layer_id) for layer_id in range(num_layers))
+    layer_compute_shardings = tuple(
+        compute_shardings_for_layer(layer_id) for layer_id in range(num_layers)
+    )
+    compute_sharding_by_fqn = {
+        fqn: compute_sharding
+        for layer_shardings in layer_compute_shardings
+        for fqn, compute_sharding in layer_shardings.items()
+    }
+    layer_bucket_fqns = tuple(
+        tuple(layer_shardings) for layer_shardings in layer_compute_shardings
+    )
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
     # collective launch overhead across pairs of MoE layers.
     bucket_layer_ids = ((0,),) + tuple(
@@ -336,12 +308,40 @@ def _distributed_muon_optimizer(
             strict=True,
         )
     )
+    # Muon is designed for matrix parameters; Moonlight uses AdamW for
+    # non-matrix parameters such as RMSNorm, LM head, and embeddings. Expert
+    # tensors below are batch-first stacks of matrices. See Sec. 2.2:
+    # https://arxiv.org/abs/2502.16982
+    muon_pattern = (
+        r"(?:"
+        rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
+        rf"routed_experts\.inner_experts\.(?:{'|'.join(expert_projections)})|"
+        r"feed_forward\.w[123]\.weight|"
+        # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
+        # SVD-entropy gain over AdamW is larger than for other matrix groups.
+        r"moe\.router\.gate\.weight|"
+        r"moe\.shared_experts\.w[123]\.weight"
+        r")$"
+    )
     return OptimizersContainer.Config(
         implementation="foreach",
-        param_groups=param_groups,
+        param_groups=[
+            ParamGroupConfig(
+                pattern=muon_pattern,
+                optimizer_name="DistributedMuon",
+                optimizer_kwargs=muon_kwargs,
+            ),
+            # The remaining parameters are embeddings, norms, biases, LM head,
+            # and the vision tower.
+            ParamGroupConfig.for_remaining_parameters(
+                optimizer_name="AdamW",
+                optimizer_kwargs=adamw_kwargs,
+            ),
+        ],
         optimizer_init_kwargs={
             "DistributedMuon": {
                 "bucket_configs": bucket_configs,
+                "compute_sharding_by_fqn": compute_sharding_by_fqn,
             }
         },
     )

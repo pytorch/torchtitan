@@ -46,13 +46,12 @@ class ParamGroupConfig:
     fully define the optimizer for matched parameters — no implicit inheritance.
 
     Patterns are checked in order; first match wins. Place specific patterns
-    before broad ones, and use ``r".*"`` as the last entry to catch all
-    remaining parameters. Example::
+    first, then use ``for_remaining_parameters`` for the fallback group. Example::
 
         param_groups=[
-            ParamGroupConfig(pattern=r"\\.bias$", ...),   # specific: biases first
-            ParamGroupConfig(pattern=r"\\.router\\.", ...),  # specific: routers
-            ParamGroupConfig(pattern=r".*", ...),          # catch-all: everything else
+            ParamGroupConfig(pattern=r"\\.bias$", ...),
+            ParamGroupConfig(pattern=r"\\.router\\.", ...),
+            ParamGroupConfig.for_remaining_parameters(...),
         ]
     """
 
@@ -66,6 +65,20 @@ class ParamGroupConfig:
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     """Keyword arguments passed to the optimizer constructor.
     Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
+
+    @classmethod
+    def for_remaining_parameters(
+        cls,
+        *,
+        optimizer_name: str,
+        optimizer_kwargs: dict[str, Any],
+    ) -> "ParamGroupConfig":
+        """Create a group for parameters not matched by preceding groups."""
+        return cls(
+            pattern=r".*",
+            optimizer_name=optimizer_name,
+            optimizer_kwargs=optimizer_kwargs,
+        )
 
 
 T = TypeVar("T", bound=Optimizer)
@@ -132,8 +145,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         optimizer_init_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
         """Programmatic optimizer-wide constructor arguments keyed by name.
 
-        Use this for instance-wide objects such as communication bucket specs;
-        parameter-group hyperparameters belong in ``ParamGroupConfig``.
+        Use this for instance-wide objects such as per-parameter compute
+        metadata and communication bucket specs; parameter-group
+        hyperparameters belong in ``ParamGroupConfig``.
         """
 
         def build(self, **kwargs):
