@@ -23,6 +23,7 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertIsNone(cfg.profiler_skip_first_wait)
         self.assertFalse(cfg.enable_memory_snapshot)
         self.assertEqual(cfg.save_memory_snapshot_folder, "profiling/memory_snapshot")
+        self.assertIsNone(cfg.memory_snapshot_freq)
 
     def test_custom_field_values(self):
         cfg = Profiler.Config(
@@ -32,6 +33,7 @@ class TestProfilerConfig(unittest.TestCase):
             profiler_repeat=2,
             profiler_skip_first=5,
             profiler_skip_first_wait=3,
+            memory_snapshot_freq=7,
         )
         self.assertTrue(cfg.enable_profiling)
         self.assertEqual(cfg.save_traces_folder, "my_traces")
@@ -39,6 +41,7 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertEqual(cfg.profiler_repeat, 2)
         self.assertEqual(cfg.profiler_skip_first, 5)
         self.assertEqual(cfg.profiler_skip_first_wait, 3)
+        self.assertEqual(cfg.memory_snapshot_freq, 7)
 
     def test_build_returns_profiler_instance(self):
         """Profiler.Config.build() auto-wires to Profiler via Configurable."""
@@ -166,6 +169,69 @@ class TestProfilerEnabledPaths(unittest.TestCase):
             )
             with profiler:
                 self.assertIsNotNone(profiler.torch_profiler)
+
+    def test_memory_snapshot_frequency_is_independent(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch(
+                "torchtitan.tools.profiler.MemoryProfiler"
+            ) as memory_profiler_cls:
+                profiler = Profiler(
+                    Profiler.Config(
+                        enable_memory_snapshot=True,
+                        profile_freq=50,
+                        memory_snapshot_freq=3,
+                    )
+                )
+                memory_profiler = profiler.build_memory_profiler(
+                    global_step=7,
+                    base_folder=tmpdir,
+                    leaf_folder="",
+                )
+
+        self.assertIs(memory_profiler, memory_profiler_cls.return_value)
+        self.assertEqual(memory_profiler_cls.call_args.args[1], 3)
+
+    def test_memory_snapshot_frequency_defaults_to_profile_frequency(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch(
+                "torchtitan.tools.profiler.MemoryProfiler"
+            ) as memory_profiler_cls:
+                profiler = Profiler(
+                    Profiler.Config(
+                        enable_memory_snapshot=True,
+                        profile_freq=6,
+                    )
+                )
+                profiler.build_memory_profiler(
+                    global_step=0,
+                    base_folder=tmpdir,
+                    leaf_folder="",
+                )
+
+        self.assertEqual(memory_profiler_cls.call_args.args[1], 6)
+
+    def test_memory_snapshot_frequency_must_be_positive(self):
+        import tempfile
+
+        profiler = Profiler(
+            Profiler.Config(
+                enable_memory_snapshot=True,
+                memory_snapshot_freq=0,
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(
+                ValueError, "Memory snapshot frequency must be greater than zero"
+            ):
+                profiler.build_memory_profiler(
+                    global_step=0,
+                    base_folder=tmpdir,
+                    leaf_folder="",
+                )
 
 
 if __name__ == "__main__":
