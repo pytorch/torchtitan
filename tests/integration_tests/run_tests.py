@@ -14,7 +14,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from torchtitan.tools.logging import logger
 
-from tests.integration_tests import OverrideDefinitions
+from tests.integration_tests import OverrideDefinitions, requires_real_pg
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
@@ -55,6 +55,26 @@ class GPUPool:
         with self._cond:
             self._free.extend(gpus)
             self._cond.notify_all()
+
+
+def add_comm_mode_arg(parser: argparse.ArgumentParser) -> None:
+    """Register the shared ``--comm-mode`` flag on a test-runner parser.
+
+    Shared by the features/models runner and the flux runner so both entry
+    points expose an identical flag and ``args.comm_mode`` is always present.
+    """
+    parser.add_argument(
+        "--comm-mode",
+        default=None,
+        choices=["fake_backend"],
+        dest="comm_mode",
+        help="Run tests under a fake process group (--comm.mode). Each test "
+        "runs a single process on one physical GPU regardless of its simulated "
+        "ngpu, and tests whose variants require a real process group "
+        "(checkpointing, validation, PP>1) are skipped. Collectives are "
+        "no-ops, so this is a construction/sharding-plan smoke check, not a "
+        "collective-correctness or numerical check.",
+    )
 
 
 def _run_cmd(cmd: str, timeout: float | None = None) -> subprocess.CompletedProcess:
@@ -110,6 +130,9 @@ def run_single_test(
     # ``gpu_ids`` is set only in parallel mode; sequential runs leave the
     # child process to use all visible GPUs.
     gpu_ids: list[int] | None = None,
+    # When set, run under ``--comm.mode <comm_mode>`` (e.g. "fake_backend")
+    # on a single physical GPU regardless of the test's simulated ngpu.
+    comm_mode: str | None = None,
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
@@ -134,8 +157,10 @@ def run_single_test(
             cmd += f"MODULE={module} "
         if config is not None:
             cmd += f"CONFIG={config} "
+        comm_mode_prefix = f"COMM_MODE={comm_mode} " if comm_mode else ""
         cmd += (
-            f"{gpu_env_prefix}NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+            f"{gpu_env_prefix}{comm_mode_prefix}"
+            f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
             f"./run_train.sh"
         )
 
@@ -181,7 +206,15 @@ def _filter_tests(
     """Filter tests by --test_name / --exclude / disabled / arch / ngpu.
 
     Returns (runnable, skipped_due_to_ngpu).
+
+    Under ``--comm-mode`` (fake process group), tests run on a single physical
+    GPU regardless of their simulated ngpu, so the ngpu skip does not apply;
+    instead the list is restricted to tests whose variants do not require a
+    real process group (see ``requires_real_pg``). A flavor is excluded if any
+    of its variants needs a real PG, since all its variants run together.
     """
+    comm_mode = args.comm_mode
+
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
@@ -197,6 +230,10 @@ def _filter_tests(
             getattr(args, "gpu_arch_type", "cuda") == "rocm"
             and test_flavor.skip_rocm_test
         ):
+            continue
+        if comm_mode:
+            if not any(requires_real_pg(v) for v in test_flavor.override_args):
+                runnable.append(test_flavor)
             continue
         if args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
@@ -222,29 +259,41 @@ def run_tests(
 
     failed_tests: list[tuple[str, str]] = []
 
+    comm_mode = args.comm_mode
+
+    # Under a fake process group each test runs a single process on one physical
+    # GPU regardless of its simulated ngpu, so its physical footprint is 1.
+    def _phys_ngpu(test_flavor: OverrideDefinitions) -> int:
+        return 1 if comm_mode else test_flavor.ngpu
+
     if parallel and runnable:
         # Schedule tests concurrently, packing them onto a fixed pool of
-        # physical GPUs. A test can run as soon as `test_flavor.ngpu` GPUs are
-        # free; the sum of in-flight test ngpu never exceeds `args.ngpu`.
+        # physical GPUs. A test can run as soon as its physical GPU footprint
+        # is free; the sum of in-flight footprints never exceeds `args.ngpu`.
         pool = GPUPool(args.ngpu)
         # Submit largest-first so the very first wave packs efficiently and
         # avoids head-of-line blocking by an oversized test arriving late.
         # NOTE: this only deterministically orders the *first* batch; once
         # workers start finishing at different times, subsequent acquisition
         # order is driven by completion times, not by ``ngpu``.
-        scheduled = sorted(runnable, key=lambda t: -t.ngpu)
+        scheduled = sorted(runnable, key=lambda t: -_phys_ngpu(t))
         # Worst case: every test wants 1 GPU and runs in parallel.
         max_workers = max(1, min(len(scheduled), args.ngpu))
 
         def _runner(test_flavor: OverrideDefinitions) -> None:
-            gpus = pool.acquire(test_flavor.ngpu)
+            gpus = pool.acquire(_phys_ngpu(test_flavor))
             logger.info(
                 f"[parallel] {test_flavor.test_name}: acquired GPUs {gpus} "
                 f"(ngpu={test_flavor.ngpu})"
             )
             try:
                 run_single_test(
-                    test_flavor, args.output_dir, module, config, gpu_ids=gpus
+                    test_flavor,
+                    args.output_dir,
+                    module,
+                    config,
+                    gpu_ids=gpus,
+                    comm_mode=comm_mode,
                 )
             finally:
                 pool.release(gpus)
@@ -264,7 +313,13 @@ def run_tests(
     else:
         for test_flavor in runnable:
             try:
-                run_single_test(test_flavor, args.output_dir, module, config)
+                run_single_test(
+                    test_flavor,
+                    args.output_dir,
+                    module,
+                    config,
+                    comm_mode=comm_mode,
+                )
             except Exception as e:
                 logger.error(str(e))
                 failed_tests.append((test_flavor.test_name, str(e)))
@@ -330,6 +385,7 @@ def main():
     parser.add_argument(
         "--ngpu", default=8, type=int, help="Maximum number of GPUs to use"
     )
+    add_comm_mode_arg(parser)
     parser.add_argument(
         "--exclude",
         default=None,
