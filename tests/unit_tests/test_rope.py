@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import math
 import unittest
 
 import torch
@@ -187,6 +188,47 @@ class TestMRoPECache(unittest.TestCase):
 
         self.assertEqual(xq_out.shape, xq.shape)
         self.assertEqual(xk_out.shape, xk.shape)
+
+
+class TestYaRNScaling(unittest.TestCase):
+    """YaRN follows the explicit scaling policy, not the cache length.
+
+    The cache is sized to the training sequence length, which can be shorter
+    than ``original_seq_len`` (e.g. fine-tuning a YaRN checkpoint on short
+    sequences), so it must not decide whether YaRN applies.
+    """
+
+    def test_complex_rope_applies_below_original_sequence_length(self):
+        yarn = ComplexRoPE.Config(
+            dim=64,
+            max_seq_len=2048,
+            scaling="yarn",
+            rope_factor=40.0,
+            original_seq_len=4096,
+        ).build()
+        unscaled = ComplexRoPE.Config(dim=64, max_seq_len=2048).build()
+
+        self.assertFalse(torch.equal(yarn.cache[1], unscaled.cache[1]))
+
+    def test_deepseek_mscale_applies_below_original_sequence_length(self):
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3.model import Attention
+
+        model_config = deepseekv3_configs["debugmodel"]("flex", "standard")
+        attention_config = model_config.layers[0].attention
+        assert isinstance(attention_config, Attention.Config)
+        attention_config.rope = dataclasses.replace(
+            attention_config.rope,
+            max_seq_len=attention_config.rope.original_seq_len // 2,
+        )
+        attention = attention_config.build()
+
+        expected_mscale = (
+            0.1 * attention_config.mscale * math.log(attention_config.rope.rope_factor)
+            + 1.0
+        )
+        expected_softmax_scale = attention.qk_head_dim**-0.5 * expected_mscale**2
+        self.assertAlmostEqual(attention.softmax_scale, expected_softmax_scale)
 
 
 class TestPerLayerRoPECache(unittest.TestCase):
