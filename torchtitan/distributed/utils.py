@@ -27,7 +27,7 @@ from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import device_module, device_type
+from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -92,6 +92,17 @@ def _dist_reduce(
             Defaults to None. If provided, this all_reduce will be called for the extra
             process group, and then the result will be all_reduced for the mesh.
     """
+    return float(_dist_reduce_tensor(x, reduceOp, mesh, extra_pg).item())
+
+
+def _dist_reduce_tensor(
+    x: torch.Tensor,
+    reduceOp: str,
+    mesh: DeviceMesh | None,
+    extra_pg: dist.ProcessGroup | None,
+) -> torch.Tensor:
+    """Perform a distributed reduction without moving the result to the CPU."""
+    needs_wait = False
     if isinstance(x, DTensor):
         # loss being a DTensor can be 1) full dtensor or 2) non-full dtensor but
         # TP is enabled. For the former one, a single `full_tensor()` call is enough
@@ -113,10 +124,11 @@ def _dist_reduce(
     # Plain tensor path.
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
-    if mesh is None:
-        return float(x.item())
-    assert x.numel() == 1  # required by `.item()`
-    return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
+        needs_wait = True
+    if mesh is not None:
+        x = funcol.all_reduce(x, reduceOp=reduceOp, group=mesh)
+        needs_wait = True
+    return funcol.wait_tensor(x) if needs_wait else x
 
 
 # TODO: rename this to maybe_dist_max
@@ -136,6 +148,17 @@ def dist_sum(
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
     return _dist_reduce(
+        x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
+    )
+
+
+def dist_sum_tensor(
+    x: torch.Tensor,
+    mesh: DeviceMesh | None = None,
+    extra_pg: dist.ProcessGroup | None = None,
+) -> torch.Tensor:
+    """Sum a tensor across process groups and keep the result on its device."""
+    return _dist_reduce_tensor(
         x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
     )
 
@@ -406,19 +429,23 @@ def get_spmd_context(
     return context
 
 
-def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
+def init_fake_mode(
+    world_size: int,
+    comm_mode: str = "fake_backend",
+    *,
+    rank: int = 0,
+) -> None:
     """Initialize fake backend
 
     Args:
         world_size: The number of GPUs to simulate
         comm_mode: Communication mode ("fake_backend" or "local_tensor")
+        rank: Global rank to simulate
 
-    Returns:
-        The world size
     """
     torch.distributed.init_process_group(
         "fake",
-        rank=0,
+        rank=rank,
         world_size=world_size,
     )
 
@@ -456,7 +483,18 @@ def init_distributed(
             raise ValueError(
                 f"NGPU environment variable must be a valid integer, got: {ngpu_str}"
             ) from e
-        init_fake_mode(world_size, comm_config.mode)
+        rank_str = os.environ.get("RANK", "0")
+        try:
+            rank = int(rank_str)
+        except ValueError as e:
+            raise ValueError(
+                f"RANK environment variable must be a valid integer, got: {rank_str}"
+            ) from e
+        if not 0 <= rank < world_size:
+            raise ValueError(
+                f"RANK must be in [0, {world_size}) for fake mode, got: {rank}"
+            )
+        init_fake_mode(world_size, comm_config.mode, rank=rank)
         return world_size
 
     def _warn_overwrite_env(env, val):
@@ -514,7 +552,7 @@ def init_distributed(
         import torch.distributed.config as dist_config
 
         dist_config.use_torchcomms = True
-        device_id = torch.device(device_type, int(os.environ["LOCAL_RANK"]))
+        device_id = get_local_device()
 
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),
