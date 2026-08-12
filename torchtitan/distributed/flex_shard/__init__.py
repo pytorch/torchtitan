@@ -6,16 +6,9 @@
 
 """Flexible storage-to-compute redistribution APIs."""
 
-from .optim.distributed_muon import flex_optimizer_reshard
-from .optimizer_reshard import BucketConfig, ComputeLayout, FlexOptimizer
-
-# Keep each user-facing reshard API in its own module. A future model API should
-# use model_reshard.py with _model_reshard_schedule.py and
-# _model_reshard_runtime.py.
+from .optimizer_reshard import BucketConfig, ComputeLayout
 
 __all__ = [
     "BucketConfig",
     "ComputeLayout",
-    "FlexOptimizer",
-    "flex_optimizer_reshard",
 ]

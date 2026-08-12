@@ -35,9 +35,68 @@ from torchtitan.components.loss import (
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import set_spmd_backend
+from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
 
 
 class TestLoss(unittest.TestCase):
+    def test_roll_mtp_sequence_respects_packed_document_boundaries(self):
+        tokens = torch.tensor([[10, 11, 12, 20, 21, 22, 23, 24]])
+        positions = torch.tensor([[0, 1, 2, 0, 1, 2, 3, 4]])
+
+        torch.testing.assert_close(
+            roll_mtp_sequence(tokens, shift=1, positions=positions, fill_value=0),
+            torch.tensor([[11, 12, 0, 21, 22, 23, 24, 0]]),
+        )
+        torch.testing.assert_close(
+            roll_mtp_sequence(tokens, shift=2, positions=positions, fill_value=0),
+            torch.tensor([[12, 0, 0, 22, 23, 24, 0, 0]]),
+        )
+
+    def test_mtp_loss_masks_document_boundaries_from_positions(self):
+        """MTP auxiliary labels must not cross packed-document boundaries."""
+        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+        recorded_labels = []
+
+        def record_labels(pred, labels, *, global_vocab_size=None):
+            recorded_labels.append(labels.clone())
+            return pred.new_zeros(())
+
+        loss_fn.fn = record_labels
+
+        # Two packed documents in one row: [A0, A1, A2, B0, B1, B2, B3, B4].
+        # TorchTitan positions reset at each document boundary.
+        positions = torch.tensor([[0, 1, 2, 0, 1, 2, 3, 4]])
+        labels = torch.arange(8).unsqueeze(0)
+        pred = [
+            torch.zeros(1, 8, 16),
+            torch.zeros(1, 8, 16),
+            torch.zeros(1, 8, 16),
+        ]
+
+        loss_fn(pred, labels, positions=positions)
+
+        self.assertEqual(len(recorded_labels), 3)
+        torch.testing.assert_close(recorded_labels[0], labels)
+        torch.testing.assert_close(
+            recorded_labels[1],
+            torch.tensor([[1, 2, IGNORE_INDEX, 4, 5, 6, 7, IGNORE_INDEX]]),
+        )
+        torch.testing.assert_close(
+            recorded_labels[2],
+            torch.tensor(
+                [[2, IGNORE_INDEX, IGNORE_INDEX, 5, 6, 7, IGNORE_INDEX, IGNORE_INDEX]]
+            ),
+        )
+
+    def test_mtp_loss_rejects_plain_tensor(self):
+        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+        pred = torch.zeros(1, 4, 16)
+        labels = torch.zeros(1, 4, dtype=torch.long)
+        positions = torch.arange(4).unsqueeze(0)
+
+        with self.assertRaisesRegex(ValueError, "expects a list"):
+            loss_fn(pred, labels, positions=positions)
+
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.
 
@@ -446,7 +505,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         hidden_states: torch.Tensor,
         labels: torch.Tensor,
         num_chunks: int,
-        global_valid_tokens: float | None = None,
+        global_valid_tokens: torch.Tensor | None = None,
     ):
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
         for h_chunk, label_chunk in zip(
@@ -488,7 +547,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         hidden = torch.randn(B, L, D)
         labels = torch.randint(0, V, (B, L))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_valid_tokens = (labels != IGNORE_INDEX).sum()
 
         def torch_chunk_loss(hidden_states):
             total = hidden_states.new_zeros((), dtype=torch.float32)
@@ -533,7 +592,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         labels = torch.randint(0, V, (B, L))
         labels[0, 1] = IGNORE_INDEX
         labels[1, 3] = IGNORE_INDEX
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_valid_tokens = (labels != IGNORE_INDEX).sum()
 
         # Standard path: lm_head + ce_loss + backward
         hidden_std = hidden_states.detach().requires_grad_(True)
@@ -584,7 +643,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         torch.manual_seed(42)
         B, L, D, V = 2, 16, 32, 64
         labels = torch.randint(0, V, (B, L))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_valid_tokens = (labels != IGNORE_INDEX).sum()
         hidden_states = torch.randn(B, L, D)
 
         losses = []
@@ -667,7 +726,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         _model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
         hidden_states = torch.randn(B, L, D)
         labels = torch.randint(0, V, (B, L))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_valid_tokens = (labels != IGNORE_INDEX).sum()
 
         expected_loss = self._torch_chunk_loss_reference(
             chunked_loss.lm_head,

@@ -9,8 +9,6 @@
 from .distributed_muon import (
     AttentionPerHeadComputeView,
     build_distributed_muon,
-    DistributedMuon,
-    flex_optimizer_reshard,
     MuonComputeShardingConfig,
 )
 
@@ -18,7 +16,5 @@ from .distributed_muon import (
 __all__ = [
     "AttentionPerHeadComputeView",
     "build_distributed_muon",
-    "DistributedMuon",
-    "flex_optimizer_reshard",
     "MuonComputeShardingConfig",
 ]

@@ -216,7 +216,7 @@ class ComplexRoPE(RoPE):
                 wavelen > low_freq_wavelen
             )
             freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
-        elif cfg.scaling == "yarn" and end > cfg.original_seq_len:
+        elif cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
             # YaRN (DeepSeek V3 style)
             freqs = _yarn_inv_freq(
                 dim,
