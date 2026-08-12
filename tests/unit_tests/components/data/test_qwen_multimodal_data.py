@@ -13,6 +13,7 @@ import torch
 
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
@@ -51,6 +52,7 @@ CONTEXT = DatasetBuildContext(
 def _row(
     value: int,
     image: torch.Tensor | None = None,
+    video: torch.Tensor | None = None,
     length: int = 2,
 ) -> dict:
     tokens = torch.arange(value, value + length)
@@ -59,14 +61,14 @@ def _row(
         "labels": tokens.clone(),
         "positions": torch.arange(length),
         "pixel_values": [] if image is None else [image],
-        "pixel_values_videos": [],
+        "pixel_values_videos": [] if video is None else [video],
     }
 
 
 def _dataset(rows, *, repeat=False):
     return MMSamplePackingConfig(
         dataset=SingleDatasetConfig(source=_RowsSourceConfig(rows=tuple(rows))),
-        buffer_size=2,
+        num_packing_bins=2,
     ).build(
         context=CONTEXT,
         dataset_iteration_policy=DatasetIterationPolicy(
@@ -142,9 +144,10 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
     assert dataset.processor.max_patches == 16_384
     assert isinstance(collator, MultiModalCollator.Config)
     assert collator.patch_order == "raster"
-    assert MM_DATASETS[
-        "cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"
-    ] is base_dataset
+    assert (
+        MM_DATASETS["cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"]
+        is base_dataset
+    )
 
 
 @pytest.mark.parametrize(
@@ -198,35 +201,43 @@ def test_qwen35_recipe_geometry_matches_dataset_processor(recipe_name):
     } == registry_state
 
 
-def test_packing_preserves_ordered_images_when_merging_rows():
+def test_packing_preserves_ordered_media_when_merging_rows():
     first_image = torch.zeros(1, 16, 16, 3)
-    second_image = torch.ones(1, 16, 16, 3)
+    second_image = torch.ones(1, 16, 32, 3)
+    first_video = torch.full((2, 16, 16, 3), 2.0)
+    second_video = torch.full((4, 32, 16, 3), 3.0)
     row = next(
         iter(
             _dataset(
                 [
-                    _row(1, first_image),
-                    _row(3, second_image),
+                    _row(1, first_image, first_video),
+                    _row(3, second_image, second_video),
                 ]
             )
         )
     )
 
-    assert torch.equal(row["input_ids"], torch.tensor([1, 2, 3, 4]))
+    assert row["input_ids"].tolist() == [1, 2, 3, 4, 0, 0, 0, 0, 0]
     assert torch.equal(
         row["labels"],
-        torch.tensor([1, 2, 3, 4]),
+        torch.tensor([1, 2, 3, 4] + [IGNORE_INDEX] * (CONTEXT.seq_len - 4)),
     )
+    assert row["positions"].tolist() == [0, 1, 0, 1, 0, 0, 0, 0, 0]
     assert len(row["pixel_values"]) == 2
     assert torch.equal(row["pixel_values"][0], first_image)
     assert torch.equal(row["pixel_values"][1], second_image)
+    assert len(row["pixel_values_videos"]) == 2
+    assert torch.equal(row["pixel_values_videos"][0], first_video)
+    assert torch.equal(row["pixel_values_videos"][1], second_video)
 
 
 def test_buffered_packing_is_checkpointed_exactly():
+    first_image = torch.zeros(1, 16, 16, 3)
+    second_image = torch.ones(1, 16, 16, 3)
     dataset = _dataset(
         [
-            _row(1, length=6),
-            _row(10, length=4),
+            _row(1, image=first_image, length=6),
+            _row(10, image=second_image, length=4),
             _row(20, length=2),
         ]
     )
@@ -239,11 +250,15 @@ def test_buffered_packing_is_checkpointed_exactly():
     restored.set_state(state)
     actual = next(restored)
 
-    assert torch.equal(first["input_ids"], torch.tensor([1, 2, 3, 4, 5, 6]))
-    assert torch.equal(expected["input_ids"], actual["input_ids"])
+    assert first["input_ids"].tolist() == [1, 2, 3, 4, 5, 6, 20, 21, 0]
+    for key in ("input_ids", "labels", "positions"):
+        assert torch.equal(expected[key], actual[key])
+    assert len(expected["pixel_values"]) == len(actual["pixel_values"]) == 1
+    assert torch.equal(expected["pixel_values"][0], actual["pixel_values"][0])
+    assert expected["pixel_values_videos"] == actual["pixel_values_videos"] == []
 
 
-def test_repeated_underfilled_rows_emit_at_buffer_pressure():
+def test_repeated_underfilled_rows_emit_at_bin_pressure():
     dataset = _dataset(
         [
             _row(1, length=6),
@@ -255,11 +270,11 @@ def test_repeated_underfilled_rows_emit_at_buffer_pressure():
 
     assert torch.equal(
         next(iterator)["input_ids"],
-        torch.tensor([1, 2, 3, 4, 5, 6]),
+        torch.tensor([1, 2, 3, 4, 5, 6, 0, 0, 0]),
     )
     assert torch.equal(
         next(iterator)["input_ids"],
-        torch.tensor([10, 11, 12, 13, 14, 15]),
+        torch.tensor([10, 11, 12, 13, 14, 15, 0, 0, 0]),
     )
 
 
@@ -312,4 +327,23 @@ def test_mm_finite_underfilled_tail_flushes():
     )
 
     assert len(rows) == 1
-    assert rows[0]["input_ids"].tolist() == [1, 2, 3, 10, 11]
+    assert rows[0]["input_ids"].tolist() == [1, 2, 3, 10, 11, 0, 0, 0, 0]
+    assert rows[0]["labels"].tolist() == [
+        1,
+        2,
+        3,
+        10,
+        11,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
+        IGNORE_INDEX,
+    ]
+
+
+def test_multimodal_packing_rejects_nonpositive_num_bins():
+    with pytest.raises(ValueError, match="num_packing_bins must be positive"):
+        MMSamplePackingConfig(
+            dataset=SingleDatasetConfig(source=_RowsSourceConfig(rows=())),
+            num_packing_bins=0,
+        )

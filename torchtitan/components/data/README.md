@@ -304,7 +304,7 @@ mm_ds = SingleDatasetConfig(
 
 packed_mm_ds = MMSamplePackingConfig(
     dataset=mm_ds,
-    buffer_size=128,
+    num_packing_bins=8,
 )
 
 config.dataloader = GrainDataLoader.Config(
@@ -318,6 +318,8 @@ config.dataloader = GrainDataLoader.Config(
     streaming_shuffle_buffer_size=128,
 )
 ```
+
+`num_packing_bins` is the number of candidate packed rows kept open, not an input sample buffer.
 
 Custom image augmentation belongs in a `SampleProcessor`.
 

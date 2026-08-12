@@ -12,7 +12,10 @@ import torch
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    MM_DATASETS,
+    MMSamplePackingConfig,
+)
 
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
@@ -43,6 +46,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
                 max_pixels=200000,
             ),
         )
+        dataset = MMSamplePackingConfig(dataset=dataset, num_packing_bins=2)
         dl_config = GrainDataLoader.Config(
             dataset=dataset,
             collator=MultiModalCollator.Config(),
