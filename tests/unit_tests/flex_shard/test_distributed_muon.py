@@ -18,17 +18,17 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout
-from torchtitan.distributed.flex_shard.optim import (
+from torchtitan.distributed.flex_shard import (
     AttentionPerHeadComputeView,
+    BucketConfig,
     build_distributed_muon,
+    ComputeLayout,
     MuonComputeShardingConfig,
 )
-from torchtitan.distributed.flex_shard.optim.distributed_muon import (
+from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
     DistributedMuon,
 )
-from torchtitan.distributed.parallel_dims import MeshAxisName
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -75,7 +75,7 @@ class TestDistributedMuon(DTensorTestBase):
             aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
             aligned_compute_sharding = MuonComputeShardingConfig(
                 compute_layout=ComputeLayout(
-                    axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
+                    axis_placements={"dp_shard": Shard(0)},
                 ),
                 compute_view=AttentionPerHeadComputeView(
                     num_heads=4,
@@ -104,12 +104,12 @@ class TestDistributedMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            owner_mesh_axis_names=(MeshAxisName.DP_SHARD,),
+                            owner_mesh_axis_names=("dp_shard",),
                         )
                     ),
                     oversharded_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
+                            axis_placements={"dp_shard": Shard(0)},
                         ),
                         compute_view=AttentionPerHeadComputeView(
                             num_heads=3,
@@ -417,25 +417,25 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             compute_sharding_by_fqn={
                 dense_fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        owner_mesh_axis_names=(MeshAxisName.DP_SHARD,),
+                        owner_mesh_axis_names=("dp_shard",),
                     )
                 ),
                 "layers.0.routed_experts.sharded": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        axis_placements={MeshAxisName.EFSDP: Shard(0)},
+                        axis_placements={"efsdp": Shard(0)},
                     )
                 ),
                 "layers.0.routed_experts.replicated": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
                         axis_placements={
-                            MeshAxisName.EFSDP: Replicate(),
-                            MeshAxisName.EP: Shard(0),
+                            "efsdp": Replicate(),
+                            "ep": Shard(0),
                         },
                     )
                 ),
                 "layers.0.routed_experts.repeated_shard": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        axis_placements={MeshAxisName.EFSDP: Replicate()},
+                        axis_placements={"efsdp": Replicate()},
                     )
                 ),
             },
@@ -555,8 +555,8 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                     unsupported_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
                             axis_placements={
-                                MeshAxisName.EFSDP: Replicate(),
-                                MeshAxisName.EP: Replicate(),
+                                "efsdp": Replicate(),
+                                "ep": Replicate(),
                             },
                         )
                     )
