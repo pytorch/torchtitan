@@ -22,11 +22,12 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
-from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
+
+from .._optimizer_reshard_runtime import (
     _BucketedRedistributionRuntime,
 )
 
-from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
+from .._optimizer_reshard_schedule import (
     _bind_bucket_configs,
     _BucketPlanningContext,
     _build_bucket_plans,
@@ -43,7 +44,7 @@ from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
     _TensorRegionRoute,
     _validate_bucket_plans_across_ranks,
 )
-from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig
+from ..optimizer_reshard import BucketConfig
 
 
 __all__ = [
@@ -101,24 +102,23 @@ class MuonComputeShardingConfig:
     compute placement.
     """
 
-    placement: Owned | Shard
+    compute_placement: Owned | Shard
 
-    # Applied before compute placement, so placement dimensions refer to the
-    # viewed tensor. A future view_after_placement mode can apply a local view
-    # after redistribution; that ordering is not supported yet.
-    view_before_placement: BatchedMatrixComputeView | None = None
+    # Defines the logical tensor used for placement planning and Muon compute.
+    # compute_placement dimensions refer to the viewed tensor.
+    compute_view: BatchedMatrixComputeView | None = None
 
     def __post_init__(self) -> None:
-        if type(self.placement) not in (Owned, Shard):
+        if type(self.compute_placement) not in (Owned, Shard):
             raise ValueError(
-                "MuonComputeShardingConfig.placement must be Owned or Shard"
+                "MuonComputeShardingConfig.compute_placement must be Owned or Shard"
             )
         if (
-            self.view_before_placement is not None
-            and type(self.view_before_placement) is not BatchedMatrixComputeView
+            self.compute_view is not None
+            and type(self.compute_view) is not BatchedMatrixComputeView
         ):
             raise ValueError(
-                "MuonComputeShardingConfig.view_before_placement must be "
+                "MuonComputeShardingConfig.compute_view must be "
                 "BatchedMatrixComputeView or None"
             )
 
@@ -166,7 +166,7 @@ def build_distributed_muon(
 
     prepared_compute_layouts = {}
     for param, fqn, compute_sharding in parameters_to_prepare:
-        compute_view = compute_sharding.view_before_placement
+        compute_view = compute_sharding.compute_view
         global_storage_shape = torch.Size(param.shape)
         resolved_view = None
         if compute_view is not None and any(
@@ -218,7 +218,7 @@ def build_distributed_muon(
             )
         prepared_compute_layouts[fqn] = _PreparedParameterComputeLayout(
             compute_view_key=compute_view_key,
-            compute_placement=compute_sharding.placement,
+            compute_placement=compute_sharding.compute_placement,
             global_compute_shape=global_compute_shape,
             local_storage_view=local_storage_view,
         )

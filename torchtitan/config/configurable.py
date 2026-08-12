@@ -50,14 +50,7 @@ class Configurable:
                 if hasattr(val, "to_dict"):
                     return val.to_dict()
                 elif dataclasses.is_dataclass(val):
-                    # dataclasses.asdict() recursively flattens nested dataclasses
-                    # before _convert can honor their custom to_dict(). For Muon
-                    # sharding, json.dumps() would then fail with "Object of type
-                    # Shard is not JSON serializable", while Owned becomes {}.
-                    return {
-                        f.name: _convert(getattr(val, f.name))
-                        for f in dataclasses.fields(val)
-                    }
+                    return dataclasses.asdict(val)
                 elif isinstance(val, (list, tuple)):
                     return type(val)(_convert(v) for v in val)
                 elif isinstance(val, dict):
