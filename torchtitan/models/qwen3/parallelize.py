@@ -23,7 +23,6 @@ from torchtitan.distributed.full_dtensor import (
     resolve_sparse_fsdp_mesh,
     validate_config,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.qwen3.model import Qwen3Model
 
 
@@ -57,15 +56,16 @@ def parallelize_qwen3(
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
             model.parallelize(parallel_dims)
 
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
     if ac_config is not None:
         ac_config.build(dump_folder=dump_folder).apply(model)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
+        )
 
     # Skip FSDP wrapper for inference. FSDP's forward hooks
     # are incompatible with torch.inference_mode() used by vLLM.
