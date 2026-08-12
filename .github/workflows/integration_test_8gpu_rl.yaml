@@ -112,7 +112,7 @@ jobs:
           --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
           --import-result "$LOSS_FILE" \
           --assert-equal \
-          --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --trainer.parallelism.spmd_backend spmd_types --generator.parallelism.spmd_backend spmd_types --num_generators 1'
+          --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
 
         # Bitwise trainer/generator parity tests (batch-invariant). Varlen and Flex
         # (both TP=2) run as separate torchrun invocations so each backend gets a
