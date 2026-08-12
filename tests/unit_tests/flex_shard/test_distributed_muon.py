@@ -26,6 +26,7 @@ from torchtitan.distributed.flex_shard.optim import (
 )
 from torchtitan.distributed.flex_shard.optim.distributed_muon import (
     _adjust_muon_learning_rate,
+    DistributedMuon,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
@@ -114,6 +115,9 @@ class TestDistributedMuon(DTensorTestBase):
         redistributed = make_parameter(redistributed_value)
         local_blocks = make_parameter(local_blocks_value)
         optimizer = make_optimizer(redistributed, local_blocks)
+        self.assertIs(type(optimizer), DistributedMuon)
+        with self.assertRaisesRegex(RuntimeError, "parameter groups are frozen"):
+            optimizer.add_param_group({"params": []})
 
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
         reference_local_blocks = tuple(

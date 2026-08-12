@@ -4,23 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Public optimizer-reshard configuration and runtime mixin."""
+"""Public optimizer-reshard configuration."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast, overload, TypeVar
+from typing import Any
 
-import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
-from torch.optim import Optimizer
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
 
-__all__ = ["BucketConfig", "ComputeLayout", "FlexOptimizer"]
+__all__ = ["BucketConfig", "ComputeLayout"]
 
 
 class _FrozenAxisPlacements(Mapping[MeshAxisName, Replicate | Shard]):
@@ -133,45 +131,6 @@ class BucketConfig:
         )
 
 
-class FlexOptimizer:
-    """Mixin added in-place by ``flex_optimizer_reshard``.
-
-    The dynamically composed class places this mixin before the original
-    optimizer class, so FlexShard owns the persistent step lifecycle while the
-    original optimizer supplies its compute-specific callbacks. Checkpoint
-    through ``state_dict``; whole-optimizer pickling is not supported.
-    """
-
-    @overload
-    def step(self, closure: None = None) -> None:
-        ...
-
-    @overload
-    def step(self, closure: Callable[[], float]) -> float:
-        ...
-
-    @torch.no_grad()
-    def step(self, closure: Callable[[], float] | None = None) -> float | None:
-        optimizer = cast(Any, self)
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        optimizer._preflight_step()
-        optimizer._redistribution_runtime.run(
-            optimizer._bucket_plans,
-            local_tensor_spec=optimizer._local_tensor_spec,
-            prepare=optimizer._prepare_local,
-            compute=optimizer._compute_update,
-            finalize=optimizer._apply_update,
-        )
-        return loss
-
-    def add_param_group(self, param_group: dict[str, Any]) -> None:
-        raise RuntimeError("FlexOptimizer parameter groups are frozen")
-
-
 @dataclass(frozen=True, slots=True)
 class _BucketSpec:
     """One ordered optimizer-work bucket selected by canonical FQN.
@@ -191,29 +150,3 @@ class _BucketSpec:
         if self.mesh is not None and self.mesh.ndim != 1:
             raise ValueError("bucket mesh must be one-dimensional")
         object.__setattr__(self, "patterns", tuple(self.patterns))
-
-
-_OptimizerT = TypeVar("_OptimizerT", bound=Optimizer)
-_flex_optimizer_classes: dict[type, type] = {}
-
-
-def _attach_flex_optimizer(optimizer: _OptimizerT) -> _OptimizerT:
-    """Add the FlexOptimizer mixin without replacing the optimizer object."""
-    if isinstance(optimizer, FlexOptimizer):
-        raise ValueError("flex_optimizer_reshard cannot be applied more than once")
-
-    original_class = optimizer.__class__
-    flex_optimizer_class = _flex_optimizer_classes.get(original_class)
-    if flex_optimizer_class is None:
-        flex_optimizer_class = type(
-            f"FlexOptimizer{original_class.__name__}",
-            (FlexOptimizer, original_class),
-            {},
-        )
-        _flex_optimizer_classes[original_class] = flex_optimizer_class
-    optimizer.__class__ = flex_optimizer_class
-    # Optimizer patches step on the class during construction. The dynamic
-    # class is created afterward, so install the standard profiling/hooks
-    # wrapper around FlexOptimizer.step now.
-    optimizer._patch_step_function()
-    return optimizer
