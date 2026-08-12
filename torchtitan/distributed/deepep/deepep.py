@@ -18,11 +18,11 @@ only by an inference forward (no grad) that also set ``cudagraphable=True`` -- w
 BOTH prefill and decode. Combine is handle-driven and mode-agnostic.
 
 - training (``cudagraphable=False``, the default; also forced under autograd): ``do_expand=False`` +
-  ``do_cpu_sync=True`` -- a compact layout ALREADY grouped by local expert
-  (``handle.num_recv_tokens_per_expert_list`` gives the per-expert token counts for the
-  grouped GEMM), so no manual permute is needed. Full autograd via the custom ops below
-  (dispatch backward is a combine, combine backward is a dispatch). The total received
-  count is data-dependent and needs a host sync, so this path is NOT cudagraph-able.
+  ``do_cpu_sync=True`` -- a compact, deduplicated layout. ``_permute_tokens`` gathers it
+  into expert-major order using ``handle.num_recv_tokens_per_expert_list`` for the grouped
+  GEMM. Full autograd is provided by the custom ops below (dispatch backward is a combine,
+  combine backward is a dispatch). The total received count is data-dependent and needs a
+  host sync, so this path is NOT cudagraph-able.
 - inference -- BOTH prefill and decode (``cudagraphable=True``, under no_grad): ``do_expand=True`` +
   ``do_cpu_sync=False`` -- the static "one-token-per-expert-slot" expanding layout,
   routing-independent (correct even as gating changes between captured replays) and with no
@@ -40,7 +40,6 @@ from dataclasses import dataclass
 
 import torch
 from torch.distributed import ProcessGroup
-from torch.utils._python_dispatch import _disable_current_modes
 
 try:
     from deep_ep import ElasticBuffer
@@ -62,9 +61,9 @@ _buffer: ElasticBuffer | None = None
 _handle_cache: dict = {}
 _handle_counter: int = 0
 
-# Pending combine event for deferred synchronization, so shared_experts compute can
-# overlap with the combine communication (the caller MUST call sync_combine() before
-# using the combine result). Process-local + single-threaded, so a module var suffices.
+# Pending combine event for deferred synchronization. The caller MUST call
+# sync_combine() before using the result. Process-local + single-threaded, so a
+# module var suffices.
 _pending_combine_event = None
 
 
@@ -93,7 +92,7 @@ _lib = torch.library.Library("deepep", "DEF")
 # whose static layout is already expert-grouped).
 _lib.define(
     "dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
-    "int num_experts, int num_max_tokens_per_rank, bool cudagraphable) "
+    "int num_experts, int num_tokens_per_rank, bool cudagraphable) "
     "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
 )
 # combine returns: combined_x. ``will_backward`` is the caller's outer grad state
@@ -133,7 +132,7 @@ def _dispatch_op_impl(
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
     num_experts: int,
-    num_max_tokens_per_rank: int,
+    num_tokens_per_rank: int,
     cudagraphable: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Execute DeepEP v2 dispatch.
@@ -163,7 +162,10 @@ def _dispatch_op_impl(
         topk_idx=topk_idx,
         topk_weights=topk_weights,
         num_experts=num_experts,
-        num_max_tokens_per_rank=num_max_tokens_per_rank,
+        # Denote C = num_tokens_per_rank. DeepEP uses C as the per-rank layout stride
+        # (global token ID = rank * C + local token ID) and, in expand mode,
+        # to size recv_x. MoE physically pads x so C is identical across ranks.
+        num_max_tokens_per_rank=num_tokens_per_rank,
         num_sms=num_sms,
         do_expand=cudagraphable,
         do_cpu_sync=not cudagraphable,
@@ -233,8 +235,8 @@ def _dispatch_backward(
     grad_topk_weights = (
         grad_scores.to(ctx.input_dtype) if grad_scores is not None else None
     )
-    # Order matches op inputs:
-    # x, topk_idx, topk_weights, num_experts, num_max_tokens_per_rank, cudagraphable.
+    # Order matches op inputs: x, topk_idx, topk_weights, num_experts,
+    # num_tokens_per_rank, cudagraphable.
     # Backward only runs on the compact (cudagraphable=False) path; the expand layout is
     # inference-only ("must not be backward").
     return grad_x, None, grad_topk_weights, None, None, None
@@ -267,7 +269,7 @@ def _combine_op_impl(
         topk_weights=None,
         async_with_compute_stream=True,
     )
-    # Defer the sync so shared_experts compute can overlap the combine communication.
+    # Record completion so the dispatcher can synchronize before returning.
     _pending_combine_event = after_event
     return combined
 
@@ -373,6 +375,7 @@ def get_buffer(
         hidden=hidden,
         num_topk=num_topk,
         use_fp8_dispatch=use_fp8_dispatch,
+        deterministic=torch.are_deterministic_algorithms_enabled(),
         explicitly_destroy=True,
     )
     return _buffer
@@ -454,9 +457,8 @@ def dispatch_tokens(
     top_scores: torch.Tensor,
     num_local_experts: int,
     num_experts: int,
-    group: ProcessGroup,
     *,
-    num_max_tokens_per_rank: int | None,
+    num_tokens_per_rank: int,
     cudagraphable: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
@@ -473,13 +475,12 @@ def dispatch_tokens(
         top_scores: Routing scores per token [num_tokens, top_k]
         num_local_experts: Number of experts on this rank
         num_experts: Total number of experts across all ranks
-        group: EP process group
-        num_max_tokens_per_rank: Per-rank dispatch capacity. Required (non-None) only in
-            expand mode (cudagraphable=True): it fixes the static slab shape, and it is a
-            CAPACITY -- tokens a rank sends beyond it are DROPPED (masked layout), so set it
-            >= the max per-rank token count to stay dropless. Compact mode
-            (cudagraphable=False) ignores it (may be None) and auto-sizes from the per-rank
-            token count (always dropless).
+        num_tokens_per_rank: Current number of local tokens. With uneven
+            sharding, this must be the maximum local token count across EP
+            ranks. DeepEP uses it as the per-rank layout stride and, in expand
+            mode, to size the current ``recv_x``. This is distinct from the
+            lifetime maximum used to initialize the communication buffer and
+            must not exceed that maximum.
         cudagraphable: If True, use the static, no-host-sync expand layout so the forward is
             cudagraph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -498,21 +499,13 @@ def dispatch_tokens(
     # safely falls back to compact rather than hitting the no-backward kernel error.
     cudagraphable = cudagraphable and not torch.is_grad_enabled()
 
-    # Compact (training) does NOT need a user-set num_max_tokens_per_rank: the per-rank
-    # dispatch count is exactly this forward's token count, so size the buffer from it
-    # (= local_batch * seq_len, already divided by the SP degree since hidden_states is
-    # the SP-local shard). get_buffer only grows the buffer when a larger size is needed,
-    # so a fixed seq_len allocates once. Expand (inference) keeps the configured value:
-    # there it is the per-rank capacity that fixes the static output-slab shape, and tokens
-    # beyond it are dropped, so it must be supplied (set >= the max per-rank count for
-    # dropless inference).
-    if not cudagraphable:
-        num_max_tokens_per_rank = hidden_states.shape[0]
-    elif num_max_tokens_per_rank is None:
-        raise ValueError(
-            "num_max_tokens_per_rank is required in expand mode (cudagraphable=True): "
-            "it fixes the static dispatch-slab shape."
-        )
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before dispatch"
+    assert num_tokens_per_rank <= buffer.num_max_tokens_per_rank, (
+        "DeepEP current token count "
+        f"{num_tokens_per_rank} exceeds the "
+        f"preallocated capacity of {buffer.num_max_tokens_per_rank}."
+    )
 
     selected_experts_indices = selected_experts_indices.contiguous()
     top_scores = top_scores.contiguous()
@@ -520,16 +513,6 @@ def dispatch_tokens(
     selected_experts_indices = selected_experts_indices.masked_fill(top_scores == 0, -1)
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
-
-    # Hide buffer setup (all_gather_object -> aten._to_copy, a MUST_SAVE op in our SAC
-    # policy) from SAC's __torch_dispatch__: it is infrastructure, not model compute.
-    with _disable_current_modes():
-        get_buffer(
-            group,
-            hidden=hidden_states.shape[1],
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-            num_topk=selected_experts_indices.shape[1],
-        )
 
     (
         recv_x,
@@ -541,9 +524,9 @@ def dispatch_tokens(
         hidden_states,
         selected_experts_indices,
         top_scores,
-        num_experts,
-        num_max_tokens_per_rank,
-        cudagraphable,
+        num_experts=num_experts,
+        num_tokens_per_rank=num_tokens_per_rank,
+        cudagraphable=cudagraphable,
     )
 
     num_tokens_per_expert = num_recv_per_expert.to(recv_x.device)
