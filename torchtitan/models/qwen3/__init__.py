@@ -45,6 +45,10 @@ __all__ = [
 ]
 
 
+# Qwen3 uses normal initialization with std=0.02. For residual output
+# projections, align with Megatron's scaled initializer. Megatron applies it
+# to the attention output and MoE expert down projections:
+# https://github.com/NVIDIA/Megatron-LM/blob/d12f6c8c9aff51e166d872fd70151687a8e3f375/megatron/core/transformer/transformer_config.py#L2289-L2303
 _LINEAR_INIT: dict[str, Callable] = {
     "weight": partial(nn.init.normal_, std=0.02),
     "bias": nn.init.zeros_,
@@ -61,22 +65,22 @@ _EXPERTS_INIT: dict[str, Callable] = {
 _EPS = 1e-6
 
 
-def _megatron_output_weight_init(n_layers: int) -> Callable:
+def _residual_output_weight_init(n_layers: int) -> Callable:
     std = 0.02 / (2 * n_layers) ** 0.5
     return partial(nn.init.normal_, std=std)
 
 
-def _megatron_output_init(n_layers: int) -> dict[str, Callable]:
+def _residual_output_init(n_layers: int) -> dict[str, Callable]:
     return {
-        "weight": _megatron_output_weight_init(n_layers),
+        "weight": _residual_output_weight_init(n_layers),
         "bias": nn.init.zeros_,
     }
 
 
-def _megatron_experts_init(n_layers: int) -> dict[str, Callable]:
+def _moe_experts_init(n_layers: int) -> dict[str, Callable]:
     return {
         **_EXPERTS_INIT,
-        "w2_EDF": _megatron_output_weight_init(n_layers),
+        "w2_EDF": _residual_output_weight_init(n_layers),
     }
 
 
@@ -142,12 +146,11 @@ def _build_qwen3_moe_layers(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
-    megatron_init: bool = False,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
-    output_init = _megatron_output_init(n_layers) if megatron_init else _LINEAR_INIT
-    experts_init = _megatron_experts_init(n_layers) if megatron_init else _EXPERTS_INIT
+    output_init = _residual_output_init(n_layers)
+    experts_init = _moe_experts_init(n_layers)
     layers = []
     for _ in range(n_layers):
         layers.append(
@@ -513,8 +516,6 @@ def _debugmodel_moe(
 def _30b_a3b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
-    *,
-    megatron_init: bool = False,
 ) -> Qwen3Model.Config:
     dim = 2048
     head_dim = 128
@@ -549,19 +550,7 @@ def _30b_a3b(
                 theta=1000000.0,
             ),
             moe_comm_backend=moe_comm_backend,
-            megatron_init=megatron_init,
         ),
-    )
-
-
-def _30b_a3b_megatron_init(
-    attn_backend: str,
-    moe_comm_backend: str = "standard",
-) -> Qwen3Model.Config:
-    return _30b_a3b(
-        attn_backend,
-        moe_comm_backend,
-        megatron_init=True,
     )
 
 
@@ -617,7 +606,6 @@ qwen3_configs = {
     "32B": _32b,
     "debugmodel_moe": _debugmodel_moe,
     "30B-A3B": _30b_a3b,
-    "30B-A3B-megatron-init": _30b_a3b_megatron_init,
     "235B-A22B": _235b_a22b,
 }
 
