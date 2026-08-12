@@ -29,6 +29,7 @@ from torchtitan.experiments.transformers_modeling_backend.config_registry import
     transformers_modeling_backend_debugmodel,
     transformers_modeling_backend_debugmodel_moe,
 )
+from torchtitan.tools import utils
 
 
 def main():
@@ -44,11 +45,10 @@ def main():
     args = parser.parse_args()
     balancer = None if args.balancer == "none" else args.balancer
 
-    rank = int(os.environ["LOCAL_RANK"])
     world = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(rank)
+    device = utils.get_local_device()
+    torch.cuda.set_device(device)
     dist.init_process_group("nccl")
-    device = torch.device(f"cuda:{rank}")
     torch.set_default_dtype(torch.float32)
 
     cp = world  # cp = world_size (dp=tp=pp=1)
