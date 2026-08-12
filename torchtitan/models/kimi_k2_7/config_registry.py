@@ -10,11 +10,6 @@ from typing import cast
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.distributed_muon import (
-    BatchedMatrixComputeView,
-    MuonComputeShardingConfig,
-    Owned,
-)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -22,6 +17,11 @@ from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfi
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.flex_shard.optim import (
+    BatchedMatrixComputeView,
+    MuonComputeShardingConfig,
+    Owned,
+)
 from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
@@ -204,14 +204,14 @@ def _distributed_muon_optimizer(
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
-    owned = MuonComputeShardingConfig(placement=Owned())
+    owned = MuonComputeShardingConfig(compute_placement=Owned())
     per_head = MuonComputeShardingConfig(
-        placement=Shard(0),
-        view_before_placement=BatchedMatrixComputeView(
+        compute_placement=Shard(0),
+        compute_view=BatchedMatrixComputeView(
             num_matrices=attention.n_heads,
         ),
     )
-    per_expert = MuonComputeShardingConfig(placement=Shard(0))
+    per_expert = MuonComputeShardingConfig(compute_placement=Shard(0))
     query_shardings: dict[str, MuonComputeShardingConfig] = (
         {
             "wq_a": owned,
@@ -338,7 +338,7 @@ def _distributed_muon_optimizer(
                 optimizer_kwargs=adamw_kwargs,
             ),
         ],
-        optimizer_init_kwargs={
+        optimizer_factory_kwargs_by_name={
             "DistributedMuon": {
                 "bucket_configs": bucket_configs,
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
@@ -351,6 +351,7 @@ def _distributed_muon_optimizer(
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
+        # TODO(#3353): Support TP-produced _StridedShard layouts in DistributedMuon.
         if self.parallelism.tensor_parallel_degree > 1:
             # Fail during config parsing, before TP/FSDP creates _StridedShard
             # storage.

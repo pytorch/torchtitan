@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 import torch
-import torchtitan.components.distributed_muon as distributed_muon_module
+import torchtitan.distributed.flex_shard.optim.distributed_muon as distributed_muon_module
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -20,7 +20,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.distributed_muon import (
+from torchtitan.distributed.flex_shard.optim.distributed_muon import (
     _adjust_muon_learning_rate,
     BatchedMatrixComputeView,
     build_distributed_muon,
@@ -81,15 +81,16 @@ class TestDistributedMuon(DTensorTestBase):
         def make_optimizer(
             redistributed: torch.nn.Parameter,
             stacks: dict[str, torch.nn.Parameter],
+            ns_steps: int = 2,
         ):
             redistributed_fqn = "layers.0.redistributed"
             oversharded_fqn = "layers.0.oversharded"
             aligned_fqns = ("layers.0.local.w1", "layers.0.local.w3")
             aligned_compute_sharding = MuonComputeShardingConfig(
-                view_before_placement=BatchedMatrixComputeView(
+                compute_placement=Shard(0),
+                compute_view=BatchedMatrixComputeView(
                     num_matrices=4,
                 ),
-                placement=Shard(0),
             )
             optimizer = build_distributed_muon(
                 [
@@ -107,12 +108,14 @@ class TestDistributedMuon(DTensorTestBase):
                     }
                 ],
                 compute_sharding_by_fqn={
-                    redistributed_fqn: MuonComputeShardingConfig(placement=Owned()),
+                    redistributed_fqn: MuonComputeShardingConfig(
+                        compute_placement=Owned()
+                    ),
                     oversharded_fqn: MuonComputeShardingConfig(
-                        view_before_placement=BatchedMatrixComputeView(
+                        compute_placement=Shard(0),
+                        compute_view=BatchedMatrixComputeView(
                             num_matrices=3,
                         ),
-                        placement=Shard(0),
                     ),
                     **{fqn: aligned_compute_sharding for fqn in aligned_fqns},
                 },
@@ -127,7 +130,7 @@ class TestDistributedMuon(DTensorTestBase):
                 weight_decay=weight_decay,
                 momentum=0.8,
                 nesterov=True,
-                ns_steps=2,
+                ns_steps=ns_steps,
             )
             self.assertEqual(len(optimizer.param_groups), 1)
             return optimizer
@@ -367,9 +370,20 @@ class TestDistributedMuon(DTensorTestBase):
             name: make_parameter(parameter.full_tensor().detach())
             for name, parameter in stacks.items()
         }
-        resumed_optimizer = make_optimizer(resumed_redistributed, resumed_stacks)
+        resumed_optimizer = make_optimizer(
+            resumed_redistributed,
+            resumed_stacks,
+            ns_steps=3,
+        )
         init_optim_state(resumed_optimizer)
-        load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        with mock.patch.object(
+            resumed_optimizer,
+            "_initialize_plan",
+            wraps=resumed_optimizer._initialize_plan,
+        ) as initialize_plan:
+            load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        initialize_plan.assert_called_once()
+        self.assertEqual(resumed_optimizer.param_groups[0]["ns_steps"], 2)
 
         step_and_assert(
             resumed_optimizer,
