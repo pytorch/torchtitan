@@ -60,7 +60,7 @@ jobs:
         # nightly index. --index-url *replaces* the default PyPI index, so add it
         # back via --extra-index-url or pip cannot resolve those cuda deps.
         python -m pip install --force-reinstall --pre \
-          torch \
+          torch torchvision \
           --index-url https://download.pytorch.org/whl/nightly/cu130 \
           --extra-index-url https://pypi.org/simple
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
