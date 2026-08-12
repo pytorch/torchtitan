@@ -23,9 +23,7 @@ from torch.distributed.tensor._utils import _compute_local_shape_and_global_offs
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
 
-from .._optimizer_reshard_runtime import (
-    _BucketedRedistributionRuntime,
-)
+from .._optimizer_reshard_runtime import _BucketedRedistributionRuntime
 
 from .._optimizer_reshard_schedule import (
     _bind_bucket_configs,
