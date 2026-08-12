@@ -259,31 +259,27 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    # One four-GPU smoke path covers PP=2, FSDP=2, and EP=2.
+                    # Each PP stage consumes its local subset of the global Muon
+                    # compute-sharding map. TP remains unsupported because it can
+                    # produce _StridedShard storage.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 2",
-                ],
-            ],
-            "Kimi K2.7 multimodal spmd_types FSDP",
-            "kimi_k2_5_mm_fsdp_spmd_types",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--training.local_batch_size 2",
-                    "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
+                    # Four microbatches match the four virtual pipeline stages.
+                    "--training.local_batch_size 4",
+                    "--training.steps 1",
                 ],
             ],
-            "Kimi K2.7 multimodal FSDP+TP+EP+PP",
-            "kimi_k2_5_mm_fsdp+tp+ep+pp",
-            ngpu=8,
+            "Kimi K2.7 DistributedMuon PP+FSDP+EP",
+            "kimi_k2_5_muon_pp+fsdp+ep",
+            ngpu=4,
+            timeout=600,
         ),
     ]
 
