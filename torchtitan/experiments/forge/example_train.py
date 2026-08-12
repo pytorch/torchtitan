@@ -54,17 +54,17 @@ class Trainer(ForgeEngine):
         )
 
         # build dataloader
-        dataloader_batch_size = (
-            config.parallelism.pipeline_parallel_microbatch_size
+        num_tokens_per_batch = config.training.num_tokens_per_dp_rank // (
+            config.parallelism.num_pp_microbatches
             if self.parallel_dims.pp_enabled
-            else config.training.local_batch_size
+            else 1
         )
         self.dataloader = config.dataloader.build(
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=dataloader_batch_size,
+            max_seq_len=config.training.max_seq_len,
+            num_tokens_per_batch=num_tokens_per_batch,
         )
 
         model_args = self.model_config
@@ -126,8 +126,8 @@ class Trainer(ForgeEngine):
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.seq_len,
-                local_batch_size=config.training.local_batch_size,
+                seq_len=config.training.max_seq_len,
+                local_batch_size=self.local_batch_size,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -137,10 +137,10 @@ class Trainer(ForgeEngine):
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {config.training.local_batch_size}, "
-            f"global batch size {self.global_batch_size}, "
+            f"{config.training.num_tokens_per_dp_rank} tokens per DP rank, "
+            f"{self.num_tokens_per_step} tokens per optimizer step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"sequence length {config.training.seq_len}, "
+            f"maximum sequence length {config.training.max_seq_len}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})."
         )

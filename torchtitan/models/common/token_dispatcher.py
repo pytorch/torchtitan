@@ -1221,16 +1221,16 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
         num_token_shards = (
             parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
         )
-        if training.seq_len % num_token_shards != 0:
+        if training.max_seq_len % num_token_shards != 0:
             raise ValueError(
-                f"training.seq_len ({training.seq_len}) must be divisible by "
+                f"training.max_seq_len ({training.max_seq_len}) must be divisible by "
                 "context_parallel_degree * tensor_parallel_degree "
                 f"({num_token_shards}) so CP and TP/SP produce equal local "
-                "token counts. Pad training.seq_len to a multiple of "
+                "token counts. Pad training.max_seq_len to a multiple of "
                 f"{num_token_shards}."
             )
         required_num_max_tokens_per_rank = (
-            training.local_batch_size * training.seq_len // num_token_shards
+            training.num_tokens_per_dp_rank // num_token_shards
         )
 
     for token_dispatcher_cfg in dispatcher_cfgs:

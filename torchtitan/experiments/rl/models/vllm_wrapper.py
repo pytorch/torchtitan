@@ -266,10 +266,12 @@ class VLLMModelWrapper(Module):
             config=_InferenceConfig(
                 parallelism=training_parallelism,
                 training=TrainingConfig(
-                    local_batch_size=1,
+                    num_tokens_per_dp_rank=(
+                        vllm_config.scheduler_config.max_num_batched_tokens
+                    ),
                     # Use the scheduler bound as a synthetic sequence length solely
                     # to derive the per-rank EP buffer capacity.
-                    seq_len=vllm_config.scheduler_config.max_num_batched_tokens,
+                    max_seq_len=vllm_config.scheduler_config.max_num_batched_tokens,
                 ),
             )
         )

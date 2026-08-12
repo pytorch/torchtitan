@@ -244,7 +244,11 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
         from torchtitan.trainer import Trainer
 
         return Trainer.Config(
-            training=dataclasses.replace(TrainingConfig(), seq_len=seq_len),
+            training=dataclasses.replace(
+                TrainingConfig(),
+                num_tokens_per_dp_rank=seq_len,
+                max_seq_len=seq_len,
+            ),
             parallelism=ParallelismConfig(),
             debug=DebugConfig(),
         )
@@ -268,9 +272,9 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
         self.assertEqual(cfg.max_seq_len, rope_max)
 
     def test_vllm_max_model_len_as_seq_len(self):
-        """vLLM wrapper translates max_model_len to TrainingConfig.seq_len.
+        """vLLM wrapper translates max_model_len to TrainingConfig.max_seq_len.
 
-        When seq_len equals rope.max_seq_len, the RoPE cache stays at
+        When max_seq_len equals rope.max_seq_len, the RoPE cache stays at
         the model's intrinsic maximum.
         """
         cfg = self._make_config()

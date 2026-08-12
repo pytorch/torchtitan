@@ -90,18 +90,23 @@ class FaultTolerantTrainer(Trainer):
             else None
         )
 
+        local_batch_size = config.training.get_num_sequences(
+            config.training.num_tokens_per_dp_rank,
+            field_name="training.num_tokens_per_dp_rank",
+        )
+        num_pp_microbatches = (
+            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+        )
         # build dataloader
-        dataloader_batch_size = (
-            config.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else config.training.local_batch_size
+        num_tokens_per_batch = config.training.num_tokens_per_dp_rank // (
+            num_pp_microbatches
         )
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=dataloader_batch_size,
+            max_seq_len=config.training.max_seq_len,
+            num_tokens_per_batch=num_tokens_per_batch,
         )
 
         # build model (using meta init)
@@ -140,7 +145,7 @@ class FaultTolerantTrainer(Trainer):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(model, config.training.max_seq_len)
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
@@ -163,32 +168,27 @@ class FaultTolerantTrainer(Trainer):
             compile_config=config.compile,
         )
 
-        # verify batch sizes
-        global_batch_size = config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = config.training.local_batch_size * batch_degree
-        assert global_batch_size > 0
+        # Verify token budgets.
+        num_tokens_per_step = config.training.num_tokens_per_step
+        if num_tokens_per_step < 0:
+            num_tokens_per_step = config.training.num_tokens_per_dp_rank * batch_degree
+        assert num_tokens_per_step > 0
         assert (
-            global_batch_size % (config.training.local_batch_size * batch_degree) == 0
+            num_tokens_per_step
+            % (config.training.num_tokens_per_dp_rank * batch_degree)
+            == 0
         ), (
-            f"global batch size must be multiple of local batch size times "
-            f"data-parallel degree ({global_batch_size} "
-            f"% ({config.training.local_batch_size} * {batch_degree}) != 0)"
+            "num_tokens_per_step must be a multiple of num_tokens_per_dp_rank "
+            f"times data-parallel degree ({num_tokens_per_step} "
+            f"% ({config.training.num_tokens_per_dp_rank} * {batch_degree}) != 0)"
         )
 
         # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = global_batch_size // (
-            config.training.local_batch_size * batch_degree
+        self.gradient_accumulation_steps = num_tokens_per_step // (
+            config.training.num_tokens_per_dp_rank * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
-        self.num_pipeline_parallel_microbatches = (
-            config.training.local_batch_size
-            // config.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else 1
-        )
+        self.num_pipeline_parallel_microbatches = num_pp_microbatches
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -334,8 +334,8 @@ class FaultTolerantTrainer(Trainer):
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.seq_len,
-                local_batch_size=config.training.local_batch_size,
+                seq_len=config.training.max_seq_len,
+                local_batch_size=local_batch_size,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -343,10 +343,10 @@ class FaultTolerantTrainer(Trainer):
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {config.training.local_batch_size}, "
-            f"global batch size {global_batch_size}, "
+            f"{config.training.num_tokens_per_dp_rank} tokens per DP rank, "
+            f"{num_tokens_per_step} tokens per optimizer step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"sequence length {config.training.seq_len}, "
+            f"maximum sequence length {config.training.max_seq_len}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )

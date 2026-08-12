@@ -112,21 +112,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "Batch-invariant mode is not supported in pre-training."
                 )
 
-            pp_microbatch_size = self.parallelism.pipeline_parallel_microbatch_size
-            if pp_microbatch_size <= 0:
+            num_pp_microbatches = self.parallelism.num_pp_microbatches
+            if num_pp_microbatches <= 0:
                 raise ValueError(
-                    "parallelism.pipeline_parallel_microbatch_size must be "
-                    "greater than 0."
+                    "parallelism.num_pp_microbatches must be greater than 0."
                 )
+            local_batch_size = self.training.get_num_sequences(
+                self.training.num_tokens_per_dp_rank,
+                field_name="training.num_tokens_per_dp_rank",
+            )
             if (
                 self.parallelism.pipeline_parallel_degree > 1
-                and self.training.local_batch_size % pp_microbatch_size != 0
+                and local_batch_size % num_pp_microbatches != 0
             ):
                 raise ValueError(
-                    f"training.local_batch_size ({self.training.local_batch_size}) "
-                    "must be evenly divisible by "
-                    "parallelism.pipeline_parallel_microbatch_size "
-                    f"({pp_microbatch_size}) when pipeline parallelism is enabled."
+                    f"The rectangular batch size ({local_batch_size}) derived "
+                    "from training.num_tokens_per_dp_rank must be evenly "
+                    "divisible by parallelism.num_pp_microbatches "
+                    f"({num_pp_microbatches}) while model inputs use the "
+                    "rectangular [batch, seq] layout."
                 )
 
             if (
@@ -262,9 +266,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         seq_len_divisor = (
             parallel_dims.tp if config.parallelism.enable_sequence_parallel else 1
         ) * (2 * parallel_dims.cp if parallel_dims.cp > 1 else 1)
-        if config.training.seq_len % seq_len_divisor != 0:
+        if config.training.max_seq_len % seq_len_divisor != 0:
             raise ValueError(
-                f"Training sequence length ({config.training.seq_len}) must be "
+                f"Training maximum sequence length ({config.training.max_seq_len}) "
+                "must be "
                 f"divisible by {seq_len_divisor} for the configured "
                 "sequence/context parallelism."
             )
@@ -342,7 +347,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(model, config.training.max_seq_len)
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
@@ -365,33 +370,34 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             compile_config=config.compile,
         )
 
-        # verify batch sizes
-        global_batch_size = config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = config.training.local_batch_size * batch_degree
-        assert global_batch_size > 0
+        # Verify token budgets.
+        num_tokens_per_step = config.training.num_tokens_per_step
+        if num_tokens_per_step < 0:
+            # This token budget results in one gradient accumulation iteration.
+            num_tokens_per_step = config.training.num_tokens_per_dp_rank * batch_degree
+        assert num_tokens_per_step > 0
         assert (
-            global_batch_size % (config.training.local_batch_size * batch_degree) == 0
+            num_tokens_per_step
+            % (config.training.num_tokens_per_dp_rank * batch_degree)
+            == 0
         ), (
-            f"global batch size must be multiple of local batch size times "
-            f"data-parallel degree ({global_batch_size} "
-            f"% ({config.training.local_batch_size} * {batch_degree}) != 0)"
+            "num_tokens_per_step must be a multiple of num_tokens_per_dp_rank "
+            f"times data-parallel degree ({num_tokens_per_step} "
+            f"% ({config.training.num_tokens_per_dp_rank} * {batch_degree}) != 0)"
         )
 
         # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = global_batch_size // (
-            config.training.local_batch_size * batch_degree
+        self.gradient_accumulation_steps = num_tokens_per_step // (
+            config.training.num_tokens_per_dp_rank * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
         self.num_pipeline_parallel_microbatches = (
-            config.training.local_batch_size
-            // config.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else 1
+            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-
+        local_batch_size = config.training.get_num_sequences(
+            config.training.num_tokens_per_dp_rank,
+            field_name="training.num_tokens_per_dp_rank",
+        )
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:
@@ -521,17 +527,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
-        dataloader_batch_size = (
-            config.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else config.training.local_batch_size
+        num_tokens_per_batch = config.training.num_tokens_per_dp_rank // (
+            self.num_pipeline_parallel_microbatches
         )
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=dataloader_batch_size,
+            max_seq_len=config.training.max_seq_len,
+            num_tokens_per_batch=num_tokens_per_batch,
             snapshot_every_n_steps=(
                 config.checkpoint.interval
                 * self.gradient_accumulation_steps
@@ -585,8 +589,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.seq_len,
-                local_batch_size=config.training.local_batch_size,
+                seq_len=config.training.max_seq_len,
+                local_batch_size=local_batch_size,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -594,10 +598,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {config.training.local_batch_size}, "
-            f"global batch size {global_batch_size}, "
+            f"{config.training.num_tokens_per_dp_rank} tokens per DP rank, "
+            f"{num_tokens_per_step} tokens per optimizer step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"sequence length {config.training.seq_len}, "
+            f"maximum sequence length {config.training.max_seq_len}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )

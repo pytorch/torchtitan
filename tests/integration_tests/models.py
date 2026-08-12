@@ -85,6 +85,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                 [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.num_pp_microbatches 8",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -183,6 +184,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--module qwen3_5 --config qwen35_debugmodel_moe",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.num_pp_microbatches 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                 ],
@@ -232,6 +234,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.context_parallel_load_balancer ptrr",
                     "--parallelism.context_parallel_ptrr_mask_key basic_mask",
                     "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.num_pp_microbatches 8",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.expert_parallel_degree 4",
                     "activation-checkpoint:selective",
@@ -245,9 +248,10 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module gpt_oss --config gpt_oss_debugmodel",
-                    "--training.global_batch_size 64",
+                    "--training.num_tokens_per_step 131072",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.num_pp_microbatches 8",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.expert_parallel_degree 4",
                     "activation-checkpoint:selective",
@@ -276,9 +280,10 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--training.local_batch_size 2",
+                    "--training.num_tokens_per_dp_rank 1024",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.num_pp_microbatches 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                 ],

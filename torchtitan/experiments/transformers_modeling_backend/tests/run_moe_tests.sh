@@ -144,6 +144,7 @@ if [ "$TOTAL_GPUS" -ge 8 ]; then
         "FSDP + PP=2 + EP=2" \
             --parallelism.data_parallel_shard_degree -1 \
             --parallelism.pipeline_parallel_degree 2 \
+            --parallelism.num_pp_microbatches 2 \
             --parallelism.pipeline_parallel_schedule 1F1B \
             --parallelism.expert_parallel_degree 2 \
         -- \
@@ -178,6 +179,7 @@ if [ "$TOTAL_GPUS" -ge 8 ]; then
         "FSDP + PP=2 + EP=2 + compile" \
             --parallelism.data_parallel_shard_degree -1 \
             --parallelism.pipeline_parallel_degree 2 \
+            --parallelism.num_pp_microbatches 2 \
             --parallelism.pipeline_parallel_schedule 1F1B \
             --parallelism.expert_parallel_degree 2 \
             --compile.enable
@@ -195,6 +197,7 @@ if [ "$TOTAL_GPUS" -ge 8 ]; then
             --parallelism.data_parallel_shard_degree -1 \
             --parallelism.tensor_parallel_degree 2 \
             --parallelism.pipeline_parallel_degree 2 \
+            --parallelism.num_pp_microbatches 2 \
             --parallelism.pipeline_parallel_schedule 1F1B \
             --parallelism.expert_parallel_degree 2
 
@@ -227,11 +230,11 @@ else
         "FSDP + EP=4 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4 --compile.enable" \
         "FSDP + TP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --compile.enable" \
         "FSDP + TP=2 (MoE, no EP) + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --compile.enable" \
-        "FSDP + PP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2" \
+        "FSDP + PP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2" \
         "HSDP + EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2" \
         "FSDP + EP=2 (no SAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2 activation-checkpoint:none" \
         "FSDP + TP=2 + EP=2 (no SAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 activation-checkpoint:none" \
-        "FSDP + PP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable" \
+        "FSDP + PP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable" \
         "FSDP + CP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2" \
         "FSDP + CP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.expert_parallel_degree 2" \
         "FSDP + CP=2 + TP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.tensor_parallel_degree 2" \
@@ -279,11 +282,11 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
         "EP=4+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4 --compile.enable"
         "TP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --compile.enable"
         "TP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --compile.enable"
-        "PP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2"
+        "PP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2"
         "HSDP+EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2"
         "EP=2(noSAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2 activation-checkpoint:none"
         "TP=2+EP=2(noSAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 activation-checkpoint:none"
-        "PP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable"
+        "PP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable"
         "CP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2"
         "CP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.expert_parallel_degree 2"
         "CP=2+TP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.tensor_parallel_degree 2"
@@ -291,7 +294,7 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
 
     # 8-GPU configs (run sequentially on all GPUs)
     CONFIGS_8GPU=(
-        "TP=2+PP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.pipeline_parallel_degree 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2"
+        "TP=2+PP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2"
         "HSDP+TP=2+EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2"
         "CP=2+TP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2"
     )

@@ -41,20 +41,24 @@ class FluxTrainer(Trainer):
         encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
         inference: Inference = field(default_factory=Inference)
+        num_samples_per_dp_rank: int = 8
+        """Number of image samples processed per data-parallel rank."""
+
+        def __post_init__(self):
+            # The autoencoder downsamples the image, then pack_latents tiles
+            # the latent into 2x2 patches.
+            # pyrefly: ignore [missing-attribute]
+            img_size = self.dataloader.img_size
+            latent_side_width = img_size // IMAGE_LATENT_SIZE_RATIO // PATCH_WIDTH
+            latent_side_height = img_size // IMAGE_LATENT_SIZE_RATIO // PATCH_HEIGHT
+            seq_len_img = latent_side_width * latent_side_height
+            self.training.max_seq_len = seq_len_img + self.tokenizer.max_t5_encoding_len
+            self.training.num_tokens_per_dp_rank = (
+                self.num_samples_per_dp_rank * self.training.max_seq_len
+            )
+            Trainer.Config.__post_init__(self)
 
     def __init__(self, config: Config):
-        # Compute image token count: autoencoder downscales the image,
-        # then pack_latents tiles the latent into 2×2 patches.
-        # pyrefly: ignore [missing-attribute]
-        img_size = config.dataloader.img_size
-        ae_downscale = IMAGE_LATENT_SIZE_RATIO
-        latent_side_width = img_size // ae_downscale // PATCH_WIDTH
-        latent_side_height = img_size // ae_downscale // PATCH_HEIGHT
-        seq_len_img = latent_side_width * latent_side_height
-
-        seq_len_txt = config.tokenizer.max_t5_encoding_len
-        config.training.seq_len = seq_len_img + seq_len_txt
-
         super().__init__(config)
 
         # Set random seed, and maybe enable deterministic mode
@@ -154,7 +158,7 @@ class FluxTrainer(Trainer):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             bsz = labels.shape[0]
-            ntokens_batch = bsz * self.config.training.seq_len
+            ntokens_batch = bsz * self.config.training.max_seq_len
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -261,7 +265,9 @@ class FluxTrainer(Trainer):
 
         # Accumulate after CP sharding so the count reflects the actual
         # unique tokens this rank processes (not the full pre-split sequence).
-        self.ntokens_seen += bsz * self.config.training.seq_len // self.parallel_dims.cp
+        self.ntokens_seen += (
+            bsz * self.config.training.max_seq_len // self.parallel_dims.cp
+        )
 
         with self.train_context():
             annotate_flux_forward_inputs(

@@ -26,23 +26,43 @@ import torch
 
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
-    local_batch_size: int = 8
+    num_tokens_per_dp_rank: int = 16384
     """
-    Batch size processed per data-parallel rank in one gradient accumulation step.
-    With pipeline parallelism, this is split into pipeline microbatches.
-    """
-
-    global_batch_size: int = -1
-    """
-    Global batch size across data-parallel ranks and gradient accumulation steps.
-    Defaults to `training.local_batch_size * data-parallel degree`.
+    Number of input-token slots processed per data-parallel rank in one
+    gradient accumulation iteration, before context or tensor parallel sharding.
     """
 
-    # TODO: Separate the packed model-input length from the per-document maximum.
-    # seq_len currently also controls document rejection, maximum position IDs,
-    # and the required RoPE cache length.
-    seq_len: int = 2048
-    """Sequence length"""
+    num_tokens_per_step: int = -1
+    """
+    Number of input-token slots processed across data-parallel ranks and
+    gradient accumulation for one optimizer step. Defaults to
+    `training.num_tokens_per_dp_rank * data-parallel degree`.
+    """
+
+    max_seq_len: int = 2048
+    """Maximum logical sequence length and RoPE position range."""
+
+    def get_num_sequences(self, num_tokens: int, *, field_name: str) -> int:
+        """Convert a token budget to the current rectangular sequence count.
+
+        This compatibility helper is temporary while model inputs still use
+        ``[batch, seq]``. It can be removed once the token-major ``[tokens]``
+        input migration is complete.
+        """
+        if self.max_seq_len <= 0:
+            raise ValueError(
+                "training.max_seq_len must be greater than 0, got "
+                f"{self.max_seq_len}."
+            )
+        if num_tokens <= 0:
+            raise ValueError(f"{field_name} must be greater than 0, got {num_tokens}.")
+        if num_tokens % self.max_seq_len != 0:
+            raise ValueError(
+                f"{field_name} ({num_tokens}) must be evenly divisible by "
+                f"training.max_seq_len ({self.max_seq_len}) while model inputs "
+                "use the rectangular [batch, seq] layout."
+            )
+        return num_tokens // self.max_seq_len
 
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
@@ -204,10 +224,13 @@ class ParallelismConfig:
     PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
     """
 
-    pipeline_parallel_microbatch_size: int = 1
+    num_pp_microbatches: int = 1
     """
-    The size of each pipeline parallel microbatch (default 1).
-    `training.local_batch_size` must be evenly divisible by this value.
+    Number of pipeline microbatches per data-parallel rank and gradient
+    accumulation iteration. This setting is ignored when pipeline parallelism
+    is disabled (`pipeline_parallel_degree = 1`, the default). When pipeline
+    parallelism is enabled, `training.num_tokens_per_dp_rank` is divided evenly
+    across this many microbatches.
     """
 
     context_parallel_degree: int = 1

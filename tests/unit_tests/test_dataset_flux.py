@@ -59,7 +59,7 @@ class TestFluxDataLoader(unittest.TestCase):
                         "flux",
                         "--config",
                         "flux_debugmodel",
-                        "--training.local_batch_size",
+                        "--num-samples-per-dp-rank",
                         str(batch_size),
                         "--dataloader.img_size",
                         str(256),
@@ -79,6 +79,8 @@ class TestFluxDataLoader(unittest.TestCase):
                         "tests/assets/flux_test_encoders/clip-vit-large-patch14",
                     ]
                 )
+                assert config.training.max_seq_len == 512
+                assert config.training.num_tokens_per_dp_rank == 512
 
                 # Build the tokenizer container from config
                 tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)

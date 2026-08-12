@@ -581,16 +581,22 @@ class MMDataLoader(ParallelAwareDataloader):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: MultiModalTokenizer,
-        seq_len: int,
-        local_batch_size: int,
+        max_seq_len: int,
+        num_tokens_per_batch: int,
         **kwargs,
     ):
+        if num_tokens_per_batch % max_seq_len != 0:
+            raise ValueError(
+                "num_tokens_per_batch must be evenly divisible by max_seq_len "
+                "while multimodal inputs use [batch, seq]."
+            )
+        local_batch_size = num_tokens_per_batch // max_seq_len
         dataset = HuggingFaceMultiModalDataset(
             dataset_name=config.dataset,
             dataset_path=config.dataset_path,
             tokenizer=tokenizer,
             batch_size=local_batch_size,
-            seq_len=seq_len,
+            seq_len=max_seq_len,
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,
             spatial_merge_size=config.spatial_merge_size,
@@ -614,7 +620,7 @@ class MMDataLoader(ParallelAwareDataloader):
 
         collate_fn = MultiModalCollator(
             batch_size=local_batch_size,
-            seq_len=seq_len,
+            seq_len=max_seq_len,
             max_images_per_batch=config.max_images_per_batch,
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,

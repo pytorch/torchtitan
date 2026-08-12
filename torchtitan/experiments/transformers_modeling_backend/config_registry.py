@@ -40,8 +40,8 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_dp_rank=2 * 2048,
+            max_seq_len=2048,
             steps=10,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
@@ -71,8 +71,8 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_dp_rank=2 * 2048,
+            max_seq_len=2048,
             steps=10,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
@@ -100,8 +100,8 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_dp_rank=2 * 2048,
+            max_seq_len=2048,
             steps=1000,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
@@ -131,8 +131,8 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_dp_rank=2 * 2048,
+            max_seq_len=2048,
             steps=10,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
@@ -169,8 +169,8 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_dp_rank=2 * 2048,
+            max_seq_len=2048,
             steps=10,
         ),
         dataloader=ChatDataLoader.Config(
@@ -220,8 +220,8 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
             # (~152k), so cross-entropy materializes a
             # local_batch_size * seq_len * vocab logits tensor. batch=8,
             # seq=2048 is ~9GB in fp32 and OOMs the 22GB CI GPUs.
-            local_batch_size=1,
-            seq_len=1024,
+            num_tokens_per_dp_rank=1 * 1024,
+            max_seq_len=1024,
             steps=10,
         ),
         dataloader=ChatDataLoader.Config(

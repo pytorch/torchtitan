@@ -12,7 +12,7 @@ This note clarifies the recommended practices to follow when testing the loss co
 
 ## Guidelines
 
-To validate the correctness of a distributed training technique, one should try to **keep the determinism in the input data to minimize the differences it could cause**. To make sure the global batch size and in general #tokens per iteration stay the same, one can fix the local batch size (`training.local_batch_size`) in the config_registry function, and at the same time fix the data parallel degree.
+To validate the correctness of a distributed training technique, one should try to **keep the determinism in the input data to minimize the differences it could cause**. To keep the number of tokens per optimizer step fixed, set `training.num_tokens_per_dp_rank` in the config registry and keep the data-parallel degree fixed.
 
 If the technique is a parallelism (TP/PP/CP/etc)
 - The control set is a 1D FSDP job on `dp` GPUs (or any other verified setups), with a trusted training config (e.g. those in config_registry.py).
@@ -40,8 +40,9 @@ Results are obtained on 2025/01/21, with the latest `torch`, `torchao`, and `tor
 
 ### Setup
 - Base config: `llama3_8b` (from [config_registry.py](../torchtitan/models/llama3/config_registry.py))
-- `training.local_batch_size = 4`, which is a minimum for Pipeline Parallel with `pipeline_parallel_degree = 2` and `pipeline_parallel_schedule = "Interleaved1F1B"`
-- `training.data_parallel_shard_degree = 8`, resulting in global batch size 32
+- `training.num_tokens_per_dp_rank = 32768` (four 8192-token sequences), which is a minimum for Pipeline Parallel with `pipeline_parallel_degree = 2` and `pipeline_parallel_schedule = "Interleaved1F1B"`
+- `parallelism.num_pp_microbatches = 4`, preserving one 8192-token input row per pipeline microbatch
+- `training.data_parallel_shard_degree = 8`, resulting in 262144 tokens per step
 - `training.steps = 3000`, `lr_scheduler.warmup_steps = 600`
 
 | Parallelism              | Techniques                                        | Remarks                           |

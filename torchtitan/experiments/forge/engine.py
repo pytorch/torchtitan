@@ -103,7 +103,9 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     model_config: BaseModel.Config
     num_flops_per_token: float
     model_param_count: int
-    global_batch_size: int
+    num_tokens_per_step: int
+    local_batch_size: int
+    pp_microbatch_size: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -166,7 +168,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (
             self.model_param_count,
             self.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(model, config.training.max_seq_len)
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
         if config.training.enable_cpu_offload:
@@ -180,33 +182,36 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.compile, parallel_dims=parallel_dims
         )
 
-        # verify batch sizes
-        global_batch_size = config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = config.training.local_batch_size * dp_degree
-        assert global_batch_size > 0
+        # Verify token budgets.
+        num_tokens_per_step = config.training.num_tokens_per_step
+        if num_tokens_per_step < 0:
+            num_tokens_per_step = config.training.num_tokens_per_dp_rank * dp_degree
+        assert num_tokens_per_step > 0
         assert (
-            global_batch_size % (config.training.local_batch_size * dp_degree) == 0
+            num_tokens_per_step % (config.training.num_tokens_per_dp_rank * dp_degree)
+            == 0
         ), (
-            f"global batch size must be multiple of local batch size times "
-            f"data-parallel degree ({global_batch_size} "
-            f"% ({config.training.local_batch_size} * {dp_degree}) != 0)"
+            "num_tokens_per_step must be a multiple of num_tokens_per_dp_rank "
+            f"times data-parallel degree ({num_tokens_per_step} "
+            f"% ({config.training.num_tokens_per_dp_rank} * {dp_degree}) != 0)"
         )
-        self.global_batch_size = global_batch_size
+        self.num_tokens_per_step = num_tokens_per_step
+
+        self.local_batch_size = config.training.get_num_sequences(
+            config.training.num_tokens_per_dp_rank,
+            field_name="training.num_tokens_per_dp_rank",
+        )
+        num_pp_microbatches = (
+            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+        )
+        self.pp_microbatch_size = self.local_batch_size // num_pp_microbatches
 
         # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = global_batch_size // (
-            config.training.local_batch_size * dp_degree
+        self.gradient_accumulation_steps = num_tokens_per_step // (
+            config.training.num_tokens_per_dp_rank * dp_degree
         )
         assert self.gradient_accumulation_steps > 0
-        self.num_pipeline_parallel_microbatches = (
-            config.training.local_batch_size
-            // config.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else 1
-        )
+        self.num_pipeline_parallel_microbatches = num_pp_microbatches
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:

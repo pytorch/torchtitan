@@ -90,7 +90,8 @@ class TestDatasetCheckpointing(unittest.TestCase):
                 tokenizer=HuggingFaceTokenizer.Config().build(
                     tokenizer_path="./tests/assets/tokenizer"
                 ),
-                seq_len=128,
+                max_seq_len=128,
+                num_tokens_per_batch=128,
                 dp_rank=0,
                 dp_world_size=1,
                 infinite=True,
@@ -205,8 +206,8 @@ class TestDatasetCheckpointing(unittest.TestCase):
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
-            seq_len=seq_len,
-            local_batch_size=batch_size,
+            max_seq_len=seq_len,
+            num_tokens_per_batch=batch_size * seq_len,
         )
 
     def _build_interleaved_dataloader(self, batch_size, seq_len, world_size, rank):
@@ -224,8 +225,8 @@ class TestDatasetCheckpointing(unittest.TestCase):
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
-            seq_len=seq_len,
-            local_batch_size=batch_size,
+            max_seq_len=seq_len,
+            num_tokens_per_batch=batch_size * seq_len,
         )
 
 

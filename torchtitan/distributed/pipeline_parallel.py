@@ -124,7 +124,7 @@ def pipeline_llm(
 
     pp_schedule = _build_pipeline_schedule(
         parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
+        n_microbatches=parallelism.num_pp_microbatches,
         stages=stages,
         loss_fn=loss_fn,
     )
@@ -267,7 +267,7 @@ def _get_pipeline_metadata(
 def _build_pipeline_schedule(
     *,
     parallelism: ParallelismConfig,
-    local_batch_size: int,
+    n_microbatches: int,
     stages: list[PipelineStage],
     loss_fn: Callable,
     # Graph PP runs explicit backward graphs instead of autograd
@@ -280,7 +280,7 @@ def _build_pipeline_schedule(
 
     Args:
         parallelism (ParallelismConfig): The parallelism configuration.
-        local_batch_size (int): The local batch size for computing microbatches.
+        n_microbatches (int): Number of pipeline microbatches.
         stages (list[PipelineStage]): The stages to be scheduled.
         loss_fn (Callable): The loss function.
 
@@ -300,15 +300,6 @@ def _build_pipeline_schedule(
         schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
-    microbatch_size = parallelism.pipeline_parallel_microbatch_size
-    batch_size = local_batch_size
-    # validate that the batch size is divisible by the microbatch_size otherwise we'll hang or error during training
-    if batch_size % microbatch_size != 0:
-        raise ValueError(
-            f"Batch size {local_batch_size} must be divisible by microbatch_size {microbatch_size}. "
-            "Update the config arguments for either batch_size or pipeline_parallel_microbatch_size."
-        )
-    n_microbatches = batch_size // microbatch_size
     # We expect that the number of local stages (`len(stages)`) is the same across all ranks
     num_total_stages = parallelism.pipeline_parallel_degree * len(stages)
     if n_microbatches < num_total_stages:

@@ -228,22 +228,18 @@ class Validator(BaseValidator):
         accumulated_losses = []
         device_type = utils.device_type
         num_steps = 0
-        num_microbatches = (
-            self.local_batch_size // self.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else 1
+        num_pp_microbatches = (
+            self.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
+        pp_microbatch_size = self.local_batch_size // num_pp_microbatches
+        num_microbatches = num_pp_microbatches
 
         validation_dataloader = self.dl_config.build(
             dp_world_size=self.dp_world_size,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
-            seq_len=self.seq_len,
-            local_batch_size=(
-                self.parallelism.pipeline_parallel_microbatch_size
-                if parallel_dims.pp_enabled
-                else self.local_batch_size
-            ),
+            max_seq_len=self.seq_len,
+            num_tokens_per_batch=pp_microbatch_size * self.seq_len,
         )
 
         validation_iterator = iter(validation_dataloader)

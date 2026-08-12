@@ -15,12 +15,17 @@ from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
 _TOKENIZER_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "tokenizer")
 
 
-def _build_dataset(seq_len: int) -> HuggingFaceTextDataset:
+def _build_dataset(
+    max_seq_len: int, num_tokens_per_batch: int | None = None
+) -> HuggingFaceTextDataset:
     return HuggingFaceTextDataset(
         dataset_name="c4_test",
         dataset_path=None,
         tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
-        seq_len=seq_len,
+        max_seq_len=max_seq_len,
+        num_tokens_per_batch=(
+            max_seq_len if num_tokens_per_batch is None else num_tokens_per_batch
+        ),
         dp_rank=0,
         dp_world_size=1,
         infinite=True,
@@ -28,14 +33,31 @@ def _build_dataset(seq_len: int) -> HuggingFaceTextDataset:
 
 
 class TestTextDatasetPacking(unittest.TestCase):
-    """Greedy packing must emit exactly seq_len tokens with in-range positions.
+    """Greedy packing must emit the token budget with in-range positions.
 
     Inputs and labels are shifted per document at tokenization time, so a
-    packed sample is seq_len long (not seq_len + 1). Emitting one extra token
-    pushes the largest position to seq_len, which is one past the last entry of
-    a RoPE cache sized at max_seq_len == seq_len and only surfaces as an async
-    device-side assert deep inside the model.
+    packed batch is num_tokens_per_batch long. Positions reset at logical
+    max_seq_len boundaries so they remain within the RoPE cache.
     """
+
+    def test_emits_one_flat_token_batch(self):
+        max_seq_len = 256
+        num_tokens_per_batch = 4 * max_seq_len
+        input_dict, labels = next(
+            iter(_build_dataset(max_seq_len, num_tokens_per_batch))
+        )
+
+        self.assertEqual(input_dict["input"].shape, (num_tokens_per_batch,))
+        self.assertEqual(input_dict["positions"].shape, (num_tokens_per_batch,))
+        self.assertEqual(labels.shape, (num_tokens_per_batch,))
+        self.assertTrue(
+            bool(
+                torch.all(
+                    input_dict["positions"][::max_seq_len]
+                    == torch.zeros(4, dtype=torch.long)
+                )
+            )
+        )
 
     def test_positions_are_contiguous_per_document_runs(self):
         it = iter(_build_dataset(256))

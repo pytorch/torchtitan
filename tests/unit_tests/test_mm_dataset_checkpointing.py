@@ -46,8 +46,8 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=_TOKENIZER,
-            seq_len=seq_len,
-            local_batch_size=batch_size,
+            max_seq_len=seq_len,
+            num_tokens_per_batch=batch_size * seq_len,
         )
 
     def test_cc12m_resumption(self):

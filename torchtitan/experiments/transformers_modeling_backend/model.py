@@ -455,7 +455,7 @@ class HFTransformerModel(BaseModel):
                 if key == "num_experts" and hasattr(self, "n_routed_experts"):
                     self.n_routed_experts = value
 
-            self.max_seq_len = training.seq_len
+            self.max_seq_len = training.max_seq_len
 
             self.deterministic = debug.deterministic
 
