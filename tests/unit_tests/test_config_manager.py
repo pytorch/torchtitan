@@ -270,7 +270,7 @@ class TestConfigManager(unittest.TestCase):
                 for layer in config.model_spec.model.layers:
                     attention = layer.attention.inner_attention
                     assert isinstance(attention, FlexAttention.Config)
-                    assert attention.block_size == (256, 128)
+                    assert attention.block_size == (256, 256)
                     assert attention.kernel_options == {"BACKEND": "FLASH"}
 
         for config_name in (
