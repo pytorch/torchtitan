@@ -17,6 +17,7 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
+    FlexAttention,
     Linear,
     RMSNorm,
     RoPE,
@@ -104,6 +105,11 @@ def make_mla_attention_config(
     ``q_lora_rank > 0``, sets ``wq_a``/``wq_b`` (not ``wq``).
     """
     inner_attention = get_attention_config(attn_backend)
+    if attn_backend == "flex_flash":
+        assert isinstance(inner_attention, FlexAttention.Config)
+        # MLA's 192-wide QK head uses FA4's SM100 2-CTA backward path, which
+        # requires an even number of 128-wide tiles per sparse KV block.
+        inner_attention.block_size = (256, 256)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if q_lora_rank == 0:
