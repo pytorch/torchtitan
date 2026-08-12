@@ -75,7 +75,7 @@ class TestDistributedMuon(DTensorTestBase):
             aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
             aligned_compute_sharding = MuonComputeShardingConfig(
                 compute_layout=ComputeLayout(
-                    axis_placements={"dp_shard": Shard(0)},
+                    placements_by_mesh_axis={"dp_shard": Shard(0)},
                 ),
                 compute_view=AttentionPerHeadComputeView(
                     num_heads=4,
@@ -104,12 +104,12 @@ class TestDistributedMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            owner_mesh_axis_names=("dp_shard",),
+                            matrix_ownership_axes=("dp_shard",),
                         )
                     ),
                     oversharded_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            axis_placements={"dp_shard": Shard(0)},
+                            placements_by_mesh_axis={"dp_shard": Shard(0)},
                         ),
                         compute_view=AttentionPerHeadComputeView(
                             num_heads=3,
@@ -316,6 +316,58 @@ class TestDistributedMuon(DTensorTestBase):
                 for name, grad in first_stack_grads.items()
             },
         )
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_rejects_insufficient_expert_storage_layout(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("efsdp", "ep"),
+        )
+        num_experts = 2
+        self.assertGreater(mesh["efsdp"].size() * mesh["ep"].size(), num_experts)
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(
+            num_experts * 16,
+            device=device,
+            dtype=torch.float32,
+        ).reshape(num_experts, 4, 4)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value, mesh, (Shard(1), Shard(0)))
+        )
+        fqn = "layers.0.routed_experts.inner_experts.w1_EFD"
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "cannot redistribute storage on mesh axis 'efsdp'.*"
+            "preserving Shard\\(0\\) storage on mesh axis 'ep'.*"
+            "orthogonal-shard redistribution is not implemented",
+        ):
+            build_distributed_muon(
+                [{"params": [parameter], "param_names": [fqn]}],
+                compute_sharding_by_fqn={
+                    fqn: MuonComputeShardingConfig(
+                        compute_layout=ComputeLayout(
+                            placements_by_mesh_axis={
+                                "efsdp": Shard(0),
+                                "ep": Shard(0),
+                            },
+                        )
+                    )
+                },
+                bucket_configs=[BucketConfig(patterns=(fqn,))],
+            )
 
 
 if __name__ == "__main__":
