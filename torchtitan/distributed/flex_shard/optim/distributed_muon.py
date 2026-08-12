@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
-from typing import Any, cast, NoReturn
+from typing import Any, cast, NoReturn, overload
 
 import torch
 from torch import Tensor
@@ -42,20 +42,12 @@ from .._optimizer_reshard_schedule import (
     _TensorRegionRoute,
     _validate_bucket_plans_across_ranks,
 )
-from ..optimizer_reshard import (
-    _attach_flex_optimizer,
-    _BucketSpec,
-    BucketConfig,
-    ComputeLayout,
-    FlexOptimizer,
-)
+from ..optimizer_reshard import _BucketSpec, BucketConfig, ComputeLayout
 
 
 __all__ = [
     "AttentionPerHeadComputeView",
     "build_distributed_muon",
-    "DistributedMuon",
-    "flex_optimizer_reshard",
     "MuonComputeShardingConfig",
 ]
 
@@ -139,7 +131,7 @@ def build_distributed_muon(
     bucket_configs: Sequence[BucketConfig],
     **kwargs: Any,
 ) -> DistributedMuon:
-    """Construct DistributedMuon and apply FlexShard optimizer resharding."""
+    """Construct a DistributedMuon optimizer with FlexShard redistribution."""
     prepared_params = []
     for param_group in params:
         group = dict(param_group)
@@ -156,20 +148,22 @@ def build_distributed_muon(
 
         prepared_params.append(group)
 
-    return flex_optimizer_reshard(
-        DistributedMuon(prepared_params, **kwargs),
+    optimizer = DistributedMuon(prepared_params, **kwargs)
+    _configure_distributed_muon(
+        optimizer,
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
     )
+    return optimizer
 
 
-def flex_optimizer_reshard(
+def _configure_distributed_muon(
     optimizer: DistributedMuon,
     *,
     compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
     bucket_configs: Sequence[BucketConfig],
-) -> DistributedMuon:
-    """Apply FlexShard optimizer resharding to DistributedMuon in place.
+) -> None:
+    """Configure one newly constructed DistributedMuon optimizer.
 
     Every group must provide aligned ``params`` and ``param_names``. Every
     local parameter FQN must have one entry in ``compute_sharding_by_fqn``;
@@ -177,21 +171,7 @@ def flex_optimizer_reshard(
     Parameter groups, compute sharding, bucket configuration, and layouts are
     frozen after this call because optimizer state and collectives depend on
     them.
-
-    This currently supports only ``DistributedMuon``. The returned optimizer
-    is the same object with a ``FlexOptimizer``-prefixed dynamic class, so it
-    remains an instance of ``DistributedMuon`` while FlexShard owns its step
-    lifecycle. Apply this before an LR scheduler or another utility wraps the
-    optimizer's ``step`` method.
     """
-    if not isinstance(optimizer, DistributedMuon):
-        raise TypeError("flex_optimizer_reshard currently supports DistributedMuon")
-    if isinstance(optimizer, FlexOptimizer):
-        raise ValueError("flex_optimizer_reshard cannot be applied more than once")
-    if "step" in optimizer.__dict__:
-        raise ValueError(
-            "flex_optimizer_reshard must run before optimizer.step is wrapped"
-        )
     optimizer._validate_groups()
 
     parameters_to_prepare = []
@@ -294,11 +274,10 @@ def flex_optimizer_reshard(
         local_tensor_spec=optimizer._local_tensor_spec,
     )
     optimizer.register_load_state_dict_post_hook(_after_load_state_dict, prepend=True)
-    return _attach_flex_optimizer(optimizer)
 
 
 class DistributedMuon(Optimizer):
-    """Muon optimizer configured by ``flex_optimizer_reshard``.
+    """Muon optimizer constructed by ``build_distributed_muon``.
 
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
     are frozen after resharding is applied. Every configured parameter must
@@ -314,6 +293,7 @@ class DistributedMuon(Optimizer):
     _prepared_compute_layouts: dict[str, _PreparedParameterComputeLayout]
     _specs: tuple[_BucketSpec, ...]
     _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
+    _param_groups_frozen: bool
 
     def __init__(
         self,
@@ -339,8 +319,40 @@ class DistributedMuon(Optimizer):
             "adjust_lr_fn": adjust_lr_fn,
         }
         self._first_step_validated = False
+        self._param_groups_frozen = False
         super().__init__(params, defaults)
         self._validate_groups()
+        self._param_groups_frozen = True
+
+    @overload
+    def step(self, closure: None = None) -> None:
+        ...
+
+    @overload
+    def step(self, closure: Callable[[], float]) -> float:
+        ...
+
+    @torch.no_grad()
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        self._preflight_step()
+        self._redistribution_runtime.run(
+            self._bucket_plans,
+            local_tensor_spec=self._local_tensor_spec,
+            prepare=self._prepare_local,
+            compute=self._compute_update,
+            finalize=self._apply_update,
+        )
+        return loss
+
+    def add_param_group(self, param_group: dict[str, Any]) -> None:
+        if self._param_groups_frozen:
+            raise RuntimeError("DistributedMuon parameter groups are frozen")
+        super().add_param_group(param_group)
 
     def _validate_groups(self) -> None:
         if len(self.param_groups) != 1:
