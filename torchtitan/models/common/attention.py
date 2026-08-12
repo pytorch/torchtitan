@@ -84,13 +84,22 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
-@spmd.local_map(
-    in_types=(spmd.PartitionSpec("dp", None, "tp"), None),
-    out_types=spmd.PartitionSpec("dp", None, "tp", None),
-)
-def local_head_split(t: torch.Tensor, head_dim: int) -> torch.Tensor:
+def local_head_split(
+    t: torch.Tensor,
+    head_dim: int,
+    *,
+    dp_shard_dim: int = 0,
+) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
-    return t.view(t.shape[0], t.shape[1], -1, head_dim)
+    use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
+    tensor_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(2)}
+    with spmd.local():
+        if use_spmd:
+            spmd.assert_type(t, tensor_type)
+        out = t.view(t.shape[0], t.shape[1], -1, head_dim)
+        if use_spmd:
+            spmd.assert_type(out, tensor_type)
+    return out
 
 
 class VarlenAttention(Module):
@@ -654,6 +663,10 @@ def create_varlen_metadata_for_document(
     packed_cu_seqlens = torch.cat(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        # Packed document boundaries are rank-local ragged metadata, so they
+        # vary across DP ranks even when construction initially infers R.
+        spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
 
     max_seqlen: int
     packed_cu_seqlens_host = None

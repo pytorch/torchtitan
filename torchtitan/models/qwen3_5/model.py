@@ -57,12 +57,12 @@ spmd.register_local_autograd_function(CausalConv1dFunction)
 
 @spmd.local_map(
     in_types=(
-        {"dp": spmd.S(0), "tp": spmd.S(2)},
+        {"dp": spmd.S(1), "tp": spmd.S(2)},
         {"dp": spmd.R, "tp": spmd.S(0)},
         {"dp": spmd.V, "tp": spmd.R},
         {"dp": spmd.V, "tp": spmd.R},
     ),
-    out_types={"dp": spmd.S(0), "tp": spmd.S(2)},
+    out_types={"dp": spmd.S(1), "tp": spmd.S(2)},
 )
 def _causal_conv1d_varlen(
     x_BTD: torch.Tensor,
@@ -93,6 +93,16 @@ def _causal_conv1d_varlen(
         cu_seqlens_cpu=cu_seqlens_cpu,
     )
     return out_BTD
+
+
+@spmd.local_map(
+    in_types=({"dp": spmd.S(1), "tp": spmd.S(2)}, None, None),
+    out_types={"dp": spmd.S(0), "tp": spmd.S(2)},
+)
+def unflatten_to_bld(
+    tensor: torch.Tensor, batch_size: int, seq_len: int
+) -> torch.Tensor:
+    return tensor.reshape(batch_size, seq_len, -1)
 
 
 class OffsetRMSNorm(Module):
@@ -401,11 +411,17 @@ class GatedDeltaNet(Module):
                 dtype=cu_seqlens.dtype,
                 device="cpu",
             )
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                # Python host metadata loses the DP-varying provenance of the
+                # device offsets when it is materialized as a new tensor.
+                spmd.mutate_type(cu_seqlens_cpu, "dp", src=spmd.R, dst=spmd.V)
 
         def _maybe_flatten(tensor: torch.Tensor) -> torch.Tensor:
             if cu_seqlens is None:
                 return tensor
             return tensor.reshape(1, B * L, *tensor.shape[2:])
+
+        dp_shard_dim = 1 if cu_seqlens is not None else 0
 
         # Shapes:
         #   xq_BLNK, xk_BLNK: (B, L, n_key_heads, key_head_dim)
@@ -417,23 +433,31 @@ class GatedDeltaNet(Module):
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xq_BLNK = local_head_split(xq_BLNK, self.key_head_dim)
+        xq_BLNK = local_head_split(
+            xq_BLNK, self.key_head_dim, dp_shard_dim=dp_shard_dim
+        )
         xk_BLNK = self._causal_conv(
             _maybe_flatten(self.in_proj_k(x_BLD)),
             self.conv_k,
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xk_BLNK = local_head_split(xk_BLNK, self.key_head_dim)
+        xk_BLNK = local_head_split(
+            xk_BLNK, self.key_head_dim, dp_shard_dim=dp_shard_dim
+        )
         xv_BLNV = self._causal_conv(
             _maybe_flatten(self.in_proj_v(x_BLD)),
             self.conv_v,
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xv_BLNV = local_head_split(xv_BLNV, self.value_head_dim)
+        xv_BLNV = local_head_split(
+            xv_BLNV, self.value_head_dim, dp_shard_dim=dp_shard_dim
+        )
         xz_BLNV = local_head_split(
-            _maybe_flatten(self.in_proj_z(x_BLD)), self.value_head_dim
+            _maybe_flatten(self.in_proj_z(x_BLD)),
+            self.value_head_dim,
+            dp_shard_dim=dp_shard_dim,
         )
         xa_BLN = _maybe_flatten(self.in_proj_a(x_BLD))
         xb_BLN = _maybe_flatten(self.in_proj_b(x_BLD))
@@ -460,7 +484,11 @@ class GatedDeltaNet(Module):
 
         # Merge value heads and restore (B, L); under varlen the kernel ran on a
         # flattened (1, B*L) layout, so this also unpacks the batch.
-        out_BLD = out_BLNV.reshape(B, L, -1)
+        out_BLD = (
+            unflatten_to_bld(out_BLNV, B, L)
+            if cu_seqlens is not None
+            else out_BLNV.flatten(2)
+        )
         return self.out_proj(out_BLD)
 
 
@@ -699,6 +727,10 @@ class Qwen35Model(Decoder):
             set_qwen35_sharding_config(
                 self,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+                varlen=isinstance(
+                    self.first_attention.inner_attention,
+                    VarlenAttention.Config,
+                ),
             )
 
         def get_nparams_and_flops(
