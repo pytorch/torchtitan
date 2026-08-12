@@ -29,7 +29,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
-from torchtitan.models.common.vision_sharding import (
+from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
     set_vision_transformer_block_sharding_config,
     vision_colwise_config,

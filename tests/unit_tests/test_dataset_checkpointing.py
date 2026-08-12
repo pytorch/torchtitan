@@ -128,6 +128,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
         # and default to 0 (epoch-0 path is unshuffled, so no behavior change).
         legacy_state = {
             "inputs_buffer": [],
+            "labels_buffer": [],
             "positions_buffer": [],
             "sample_idx": 0,
         }
