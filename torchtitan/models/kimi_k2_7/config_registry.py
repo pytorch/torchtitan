@@ -207,12 +207,12 @@ def _distributed_muon_optimizer(
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
     owned = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
-            owner_mesh_axis_names=(MeshAxisName.DP_SHARD.value,),
+            matrix_ownership_axes=(MeshAxisName.DP_SHARD.value,),
         )
     )
     per_head = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
-            axis_placements={MeshAxisName.DP_SHARD.value: Shard(0)},
+            placements_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
         ),
         compute_view=AttentionPerHeadComputeView(
             num_heads=attention.n_heads,
@@ -220,8 +220,7 @@ def _distributed_muon_optimizer(
     )
     per_expert = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
-            axis_placements={
-                MeshAxisName.DP.value: Shard(0),
+            placements_by_mesh_axis={
                 MeshAxisName.DP_SHARD.value: Shard(0),
                 MeshAxisName.EFSDP.value: Shard(0),
                 MeshAxisName.EP.value: Shard(0),
