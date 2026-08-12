@@ -17,12 +17,12 @@ from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfi
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout
 from torchtitan.distributed.flex_shard.optim import (
     BatchedMatrixComputeView,
     MuonComputeShardingConfig,
-    Owned,
 )
-from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig
+from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
@@ -204,14 +204,29 @@ def _distributed_muon_optimizer(
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
-    owned = MuonComputeShardingConfig(compute_placement=Owned())
+    owned = MuonComputeShardingConfig(
+        compute_layout=ComputeLayout(
+            owner_mesh_axis_names=(MeshAxisName.DP_SHARD,),
+        )
+    )
     per_head = MuonComputeShardingConfig(
-        compute_placement=Shard(0),
+        compute_layout=ComputeLayout(
+            axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
+        ),
         compute_view=BatchedMatrixComputeView(
             num_matrices=attention.n_heads,
         ),
     )
-    per_expert = MuonComputeShardingConfig(compute_placement=Shard(0))
+    per_expert = MuonComputeShardingConfig(
+        compute_layout=ComputeLayout(
+            axis_placements={
+                MeshAxisName.DP: Shard(0),
+                MeshAxisName.DP_SHARD: Shard(0),
+                MeshAxisName.EFSDP: Shard(0),
+                MeshAxisName.EP: Shard(0),
+            },
+        )
+    )
     query_shardings: dict[str, MuonComputeShardingConfig] = (
         {
             "wq_a": owned,
@@ -300,7 +315,6 @@ def _distributed_muon_optimizer(
         BucketConfig(
             name="layers." + "-".join(map(str, layer_ids)),
             patterns=fqns,
-            mesh_axis="dp_shard",
         )
         for layer_ids, fqns in zip(
             bucket_layer_ids,
