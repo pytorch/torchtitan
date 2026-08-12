@@ -50,7 +50,7 @@ class FaultTolerantTrainer(Trainer):
 
         device_module, device_type = utils.device_module, utils.device_type
         # pyrefly: ignore [read-only]
-        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        self.device = utils.get_local_device()
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
@@ -400,15 +400,14 @@ class FaultTolerantTrainer(Trainer):
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
 
-        # All-reduce to get global token count across DP ranks
-        # Move to GPU for distributed communication
+        # Keep the global token count on device so loss normalization does not
+        # introduce a CPU synchronization in the training path.
+        global_valid_tokens = local_valid_tokens.to(self.device)
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(
-                local_valid_tokens.to(self.device), batch_mesh
+            global_valid_tokens = dist_utils.dist_sum_tensor(
+                global_valid_tokens, batch_mesh
             )
-        else:
-            global_valid_tokens = float(local_valid_tokens.item())
 
         accumulated_losses = []
         for microbatches in microbatch_groups:
