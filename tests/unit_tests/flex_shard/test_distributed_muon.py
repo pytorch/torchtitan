@@ -1,0 +1,220 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import unittest
+
+import torch
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import distribute_tensor, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
+from torchtitan.components.checkpoint_utils import (
+    get_flat_optim_state_dict,
+    init_optim_state,
+    load_flat_optim_state_dict,
+)
+from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout
+from torchtitan.distributed.flex_shard.optim import (
+    BatchedMatrixComputeView,
+    build_distributed_muon,
+    MuonComputeShardingConfig,
+)
+from torchtitan.distributed.flex_shard.optim.distributed_muon import (
+    _adjust_muon_learning_rate,
+)
+from torchtitan.distributed.parallel_dims import MeshAxisName
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestDistributedMuon(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_matches_plain_muon_across_flat_checkpoint(self):
+        lr = 0.03
+        weight_decay = 0.2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+
+        def make_parameter(value: torch.Tensor) -> torch.nn.Parameter:
+            return torch.nn.Parameter(
+                distribute_tensor(value.clone(), mesh, (Shard(0),))
+            )
+
+        def make_optimizer(
+            redistributed: torch.nn.Parameter,
+            local_blocks: torch.nn.Parameter,
+            ns_steps: int = 2,
+        ):
+            redistributed_fqn = "layers.0.redistributed"
+            local_blocks_fqn = "layers.0.local_blocks"
+            return build_distributed_muon(
+                [
+                    {
+                        "params": [redistributed, local_blocks],
+                        "param_names": [redistributed_fqn, local_blocks_fqn],
+                    }
+                ],
+                compute_sharding_by_fqn={
+                    redistributed_fqn: MuonComputeShardingConfig(
+                        compute_layout=ComputeLayout(
+                            owner_mesh_axis_names=(MeshAxisName.DP_SHARD,),
+                        )
+                    ),
+                    local_blocks_fqn: MuonComputeShardingConfig(
+                        compute_layout=ComputeLayout(
+                            axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
+                        ),
+                        compute_view=BatchedMatrixComputeView(
+                            num_matrices=self.world_size,
+                        ),
+                    ),
+                },
+                bucket_configs=[
+                    BucketConfig(
+                        patterns=("layers.0.*",),
+                        name="layers.0",
+                    )
+                ],
+                lr=lr,
+                weight_decay=weight_decay,
+                momentum=0.8,
+                nesterov=True,
+                ns_steps=ns_steps,
+            )
+
+        redistributed_value = (
+            torch.arange(12, device=device).reshape(4, 3).float().div_(10).add_(1)
+        )
+        local_blocks_value = (
+            torch.arange(12, 24, device=device).reshape(4, 3).float().div_(10)
+        )
+        redistributed = make_parameter(redistributed_value)
+        local_blocks = make_parameter(local_blocks_value)
+        optimizer = make_optimizer(redistributed, local_blocks)
+
+        reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
+        reference_local_blocks = tuple(
+            torch.nn.Parameter(block.clone())
+            for block in local_blocks_value.chunk(self.world_size, dim=0)
+        )
+        reference_optimizer = torch.optim.Muon(
+            [reference_redistributed, *reference_local_blocks],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+
+        def step_and_assert(
+            current_optimizer,
+            current_redistributed: torch.nn.Parameter,
+            current_local_blocks: torch.nn.Parameter,
+            redistributed_grad: torch.Tensor,
+            local_blocks_grad: torch.Tensor,
+        ) -> None:
+            local_blocks_before = current_local_blocks.to_local().clone()
+            reference_local_blocks_before = tuple(
+                parameter.detach().clone() for parameter in reference_local_blocks
+            )
+            current_redistributed.grad = distribute_tensor(
+                redistributed_grad.clone(), mesh, (Shard(0),)
+            )
+            current_local_blocks.grad = distribute_tensor(
+                local_blocks_grad.clone(), mesh, (Shard(0),)
+            )
+            reference_redistributed.grad = redistributed_grad.clone()
+            for parameter, grad in zip(
+                reference_local_blocks,
+                local_blocks_grad.chunk(self.world_size, dim=0),
+                strict=True,
+            ):
+                parameter.grad = grad.clone()
+
+            current_optimizer.step()
+            reference_optimizer.step()
+
+            rank = mesh.get_local_rank()
+            expected_redistributed = reference_redistributed.detach().chunk(
+                self.world_size, dim=0
+            )[rank]
+            torch.testing.assert_close(
+                current_redistributed.to_local(),
+                expected_redistributed,
+                rtol=0,
+                atol=0,
+            )
+
+            expected_local_blocks = reference_local_blocks[rank].detach()
+            decay = 1 - lr * weight_decay
+            adjusted_lr = _adjust_muon_learning_rate(
+                lr, None, expected_local_blocks.shape
+            )
+            actual_update = (
+                local_blocks_before * decay - current_local_blocks.to_local()
+            ) / adjusted_lr
+            expected_update = (
+                reference_local_blocks_before[rank] * decay - expected_local_blocks
+            ) / adjusted_lr
+            # Batched BF16 Newton-Schulz can differ slightly across GEMM schedules.
+            torch.testing.assert_close(
+                actual_update,
+                expected_update,
+                rtol=0,
+                atol=2e-2,
+            )
+
+        first_redistributed_grad = (
+            torch.arange(1, 13, device=device).reshape(4, 3).float().div_(17)
+        )
+        first_local_blocks_grad = (
+            torch.arange(13, 25, device=device).reshape(4, 3).float().div_(19)
+        )
+        step_and_assert(
+            optimizer,
+            redistributed,
+            local_blocks,
+            first_redistributed_grad,
+            first_local_blocks_grad,
+        )
+
+        flat_state_dict = get_flat_optim_state_dict(optimizer)
+        resumed_redistributed = make_parameter(redistributed.full_tensor().detach())
+        resumed_local_blocks = make_parameter(local_blocks.full_tensor().detach())
+        resumed_optimizer = make_optimizer(
+            resumed_redistributed,
+            resumed_local_blocks,
+            ns_steps=3,
+        )
+        init_optim_state(resumed_optimizer)
+        load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+
+        second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
+        second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()
+        step_and_assert(
+            resumed_optimizer,
+            resumed_redistributed,
+            resumed_local_blocks,
+            second_redistributed_grad,
+            second_local_blocks_grad,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

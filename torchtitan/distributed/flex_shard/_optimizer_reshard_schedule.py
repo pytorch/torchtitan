@@ -37,7 +37,7 @@ def _bind_bucket_configs(
     get_fqn: Callable[[_ItemT], str],
     get_storage_dtensor: Callable[[_ItemT], DTensor],
     requires_redistribution: Callable[[_ItemT], bool],
-    get_required_storage_mesh_axis: Callable[[_ItemT], int | None],
+    get_redistribution_storage_mesh_axis: Callable[[_ItemT], int | None],
 ) -> tuple[_BucketSpec, ...]:
     """Bind configs after each item's redistribution requirement is resolved.
 
@@ -63,34 +63,28 @@ def _bind_bucket_configs(
             specs.append(config._bind(None))
             continue
 
-        mesh_axis = config.mesh_axis
-        meshes = []
+        transport_groups = []
         for item in redistributed_items:
             storage_mesh = get_storage_dtensor(item).device_mesh
             mesh_axis_names = storage_mesh.mesh_dim_names
-            if mesh_axis_names is None or mesh_axis not in mesh_axis_names:
-                raise ValueError(
-                    f"bucket {config.name!r} mesh axis {mesh_axis!r} is not present "
-                    f"in the storage mesh for parameter {get_fqn(item)!r}"
+            storage_mesh_axis = get_redistribution_storage_mesh_axis(item)
+            if mesh_axis_names is None or storage_mesh_axis is None:
+                raise RuntimeError(
+                    "redistributed parameter has no resolved transport axis: "
+                    f"{get_fqn(item)!r}"
                 )
-            storage_mesh_axis = mesh_axis_names.index(mesh_axis)
-            required_storage_mesh_axis = get_required_storage_mesh_axis(item)
-            if (
-                required_storage_mesh_axis is not None
-                and storage_mesh_axis != required_storage_mesh_axis
-            ):
-                required_mesh_axis = mesh_axis_names[required_storage_mesh_axis]
-                raise ValueError(
-                    f"bucket {config.name!r} mesh axis {mesh_axis!r} does not "
-                    f"match storage shard axis {required_mesh_axis!r} for "
-                    f"parameter {get_fqn(item)!r}"
-                )
-            meshes.append(storage_mesh[config.mesh_axis])
+            mesh_axis_name = mesh_axis_names[storage_mesh_axis]
+            transport_groups.append((mesh_axis_name, storage_mesh[mesh_axis_name]))
 
-        mesh = meshes[0]
-        if any(not torch.equal(candidate.mesh, mesh.mesh) for candidate in meshes[1:]):
-            raise ValueError(
-                f"bucket {config.name!r} resolves to inconsistent communication meshes"
+        mesh_axis_name, mesh = transport_groups[0]
+        if any(
+            candidate_axis_name != mesh_axis_name
+            or not torch.equal(candidate_mesh.mesh, mesh.mesh)
+            for candidate_axis_name, candidate_mesh in transport_groups[1:]
+        ):
+            raise NotImplementedError(
+                f"bucket {config.name!r} requires heterogeneous transport groups; "
+                "split its BucketConfig patterns"
             )
         specs.append(config._bind(mesh))
     return tuple(specs)
@@ -838,7 +832,7 @@ def _dtensor_storage_region_for_participant(
     local_shape = list(tensor.shape)
     global_offsets = [0] * tensor.ndim
     for mesh_axis, placement in enumerate(tensor.placements):
-        if type(placement) is Replicate:
+        if mesh_shape[mesh_axis] == 1 or type(placement) is Replicate:
             continue
         _require_valid_plan(
             type(placement) is Shard,
@@ -910,7 +904,7 @@ def _dtensor_storage_regions(
                     "redistributed optimizer storage requires exact Shard or "
                     "Replicate on the communication mesh axis"
                 )
-        elif type(placement) is not Replicate:
+        elif storage_mesh.size(mesh_axis) != 1 and type(placement) is not Replicate:
             raise ValueError(
                 "redistributed optimizer storage requires Replicate outside "
                 "the communication mesh axis"
