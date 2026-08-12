@@ -288,6 +288,8 @@ class InterGeneratorRouter(Actor, Configurable):
     @endpoint
     async def pull_model_state_dict(self, policy_version: int) -> None:
         """Pull the given policy version's state dict into every generator."""
+        # Wrapper the logic in a private method so we can test it independently
+        # without the need to spawn the Monarch actor mesh.
         await self._pull_model_state_dict(policy_version=policy_version)
 
     @endpoint
