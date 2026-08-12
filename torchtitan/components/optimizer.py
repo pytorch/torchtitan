@@ -26,7 +26,7 @@ from torchtitan.components.checkpoint_utils import (
 )
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.flex_shard.optim import build_distributed_muon
+from torchtitan.distributed.flex_shard import build_distributed_muon
 from torchtitan.tools.logging import logger
 
 __all__ = [
