@@ -80,6 +80,23 @@ MODULE=torchft.llama3 CONFIG=llama3_torchft_debugmodel CUDA_VISIBLE_DEVICES=4,5,
 
 For complete configuration options, run `NGPU=1 ./run_train.sh --help`.
 
+### Checkpoint and Peer-Healing State
+
+When TorchFT is enabled, model, optimizer, learning-rate scheduler, and trainer
+state are registered for in-memory peer healing even if persistent checkpoint
+saving is disabled. The state callback is materialized on the training thread
+because FSDP state dictionaries can contain replica-local collectives.
+
+For persistent checkpoints, only participating replica rank 0 writes the full
+checkpoint. Before the first quorum is available, the configured replica ID 0
+owns that responsibility. TorchFT manager state is included in the full
+checkpoint so a resumed job preserves committed-step metadata.
+
+Dataloader state is not stored in the shared full checkpoint because it is
+replica-specific. With `enable_ft_dataloader_checkpoints=True`, each replica
+saves and loads that state from its own `ft-replicat-<id>` directory. Disabling
+this option also disables exact dataloader recovery and can replay data.
+
 [Optional] Only for semi-synchronous training:
 
 - `--fault_tolerance.sync_steps`: The number of training steps before synchronization.

@@ -28,6 +28,7 @@ from torchtitan.components.checkpoint import (
     DATALOADER,
     LR_SCHEDULER,
     MODEL,
+    ModelWrapper,
     OPTIMIZER,
     TRAIN_STATE,
 )
@@ -39,6 +40,8 @@ from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
+TORCHFT_MANAGER = "torchft_manager"
+
 
 class TorchFTCheckpointManager(CheckpointManager):
     """CheckpointManager with TorchFT fault tolerance support.
@@ -47,7 +50,8 @@ class TorchFTCheckpointManager(CheckpointManager):
 
     1. **Full persistent checkpoint** — saved by the replica with
        ``ft_manager.participating_rank() == 0``. Contains model, optimizer,
-       lr_scheduler, dataloader, and train_state.
+       lr_scheduler, train_state, and TorchFT manager state. Dataloader state
+       is deliberately excluded because it is replica-specific.
 
     2. **Per-replica checkpoint** — contains only the dataloader and is
        saved/loaded by all replicas to/from their own folder, prefixed with
@@ -81,6 +85,8 @@ class TorchFTCheckpointManager(CheckpointManager):
         base_folder: str = "",
         ft_manager: TorchFTManager | None = None,
     ) -> None:
+        input_states = states
+
         # Initialize the base checkpoint manager (without FT)
         super().__init__(
             config,
@@ -96,8 +102,8 @@ class TorchFTCheckpointManager(CheckpointManager):
         self.ft_manager = (
             ft_manager.manager if ft_manager and ft_manager.enabled else None
         )
-        self.enable_ft_dataloader_checkpoints = (
-            self.ft_manager and config.enable_ft_dataloader_checkpoints
+        self.enable_ft_dataloader_checkpoints = bool(
+            self.enable and self.ft_manager and config.enable_ft_dataloader_checkpoints
         )
 
         if self.ft_manager and not self.enable_ft_dataloader_checkpoints:
@@ -107,15 +113,23 @@ class TorchFTCheckpointManager(CheckpointManager):
                 "multiple times, which can result in overfitting."
             )
 
-        if not self.enable:
-            return
-
         if self.ft_manager:
             optimizers.init_cache_state_dict()
 
+            if self.enable:
+                self.states[TORCHFT_MANAGER] = self.ft_manager
+                healing_states = self.states
+            else:
+                healing_states = {
+                    **input_states,
+                    MODEL: ModelWrapper(model_parts),
+                    OPTIMIZER: optimizers,
+                    LR_SCHEDULER: lr_schedulers,
+                }
+
             def state_dict():
                 ret = {}
-                for k, v in self.states.items():
+                for k, v in healing_states.items():
                     if k in {MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE}:
                         ret[k] = v.state_dict()
                 return ret
@@ -123,12 +137,19 @@ class TorchFTCheckpointManager(CheckpointManager):
             def load_state_dict(state_dict):
                 assert state_dict is not None
                 for k, v in state_dict.items():
-                    self.states[k].load_state_dict(v)
+                    healing_states[k].load_state_dict(v)
 
-            # pyrefly: ignore [missing-attribute]
-            self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
+            self.ft_manager.register_state_dict_fn(
+                "torchtitan",
+                load_state_dict,
+                state_dict,
+                state_dict_on_training_thread=True,
+            )
             assert ft_manager is not None
             self.ft_replica_id = ft_manager.replica_id
+
+        if not self.enable:
+            return
 
         # FT may need staging even without async_with_pinned_mem
         if self.enable_ft_dataloader_checkpoints:
@@ -140,25 +161,21 @@ class TorchFTCheckpointManager(CheckpointManager):
                 self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
     @torch.no_grad()
-    def _save(self, curr_step: int, last_step: bool = False) -> None:
+    def _save(self, curr_step: int, last_step: bool = False) -> bool:
         # FT dataloader checkpoint is saved every step (not gated by interval)
         # to minimize data replay on replica failure.
         if self.enable_ft_dataloader_checkpoints:
             self._ft_save(curr_step)
 
-        if not self.enable_ft_dataloader_checkpoints or (
-            self.ft_manager
-            # pyrefly: ignore [missing-attribute]
-            and self.ft_manager.participating_rank() == 0
-        ):
-            super()._save(curr_step, last_step)
-        elif self.enable_ft_dataloader_checkpoints:
-            assert self.ft_manager is not None
-            logger.info(
-                "Replica %d doesn't save checkpoint.",
-                # pyrefly: ignore [missing-attribute]
-                self.ft_manager.participating_rank(),
-            )
+        if self._owns_full_checkpoint():
+            return super()._save(curr_step, last_step)
+
+        assert self.ft_manager is not None
+        logger.info(
+            "Replica %s doesn't save the full checkpoint.",
+            self.ft_manager.participating_rank(),
+        )
+        return False
 
     @torch.no_grad()
     def _load(self, step: int = -1) -> bool:
@@ -168,9 +185,28 @@ class TorchFTCheckpointManager(CheckpointManager):
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
         states = super()._states_to_load(model_only)
-        if self.enable_ft_dataloader_checkpoints:
+        if self.ft_manager:
             states.pop(DATALOADER, None)
         return states
+
+    def _flattened_model_states_sd(
+        self, state_dict: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        states = state_dict if state_dict is not None else self.states
+        if self.ft_manager:
+            states = dict(states)
+            states.pop(DATALOADER, None)
+        return super()._flattened_model_states_sd(states)
+
+    def _owns_full_checkpoint(self) -> bool:
+        if self.ft_manager is None:
+            return True
+
+        participating_rank = self.ft_manager.participating_rank()
+        if participating_rank is not None:
+            return participating_rank == 0
+
+        return self.ft_replica_id == 0
 
     def _wait_for_saving(self) -> None:
         # _ft_save() always uses AsyncMode.ASYNC (regardless of self.async_mode),
