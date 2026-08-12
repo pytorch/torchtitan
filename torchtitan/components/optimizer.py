@@ -23,9 +23,9 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.distributed_muon import build_distributed_muon
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.flex_shard.optim import build_distributed_muon
 from torchtitan.tools.logging import logger
 
 __all__ = [
@@ -137,12 +137,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
-        optimizer_init_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-        """Programmatic optimizer-wide constructor arguments keyed by name.
+        optimizer_factory_kwargs_by_name: dict[str, dict[str, Any]] = field(
+            default_factory=dict
+        )
+        """Arguments passed once per optimizer factory invocation, keyed by name.
 
         Use this for instance-wide objects such as per-parameter compute
-        metadata and communication bucket specs; parameter-group
-        hyperparameters belong in ``ParamGroupConfig``.
+        metadata and communication bucket specs. These arguments are not copied
+        into PyTorch parameter groups; group hyperparameters belong in
+        ``ParamGroupConfig.optimizer_kwargs``.
         """
 
     optimizers: list[T]
@@ -239,7 +242,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             for opt_name, opt_param_groups in groups_by_opt_name.items():
                 optimizer = self._resolve_optimizer_factory(opt_name)(
                     opt_param_groups,
-                    **config.optimizer_init_kwargs.get(opt_name, {}),
+                    **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
                 )
                 self.optimizers.append(cast(T, optimizer))
                 self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
