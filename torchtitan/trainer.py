@@ -251,7 +251,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         device_module, device_type = utils.device_module, utils.device_type
         # pyrefly: ignore [read-only]
-        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        self.device = utils.get_local_device()
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
@@ -733,7 +733,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         *,
         input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
         labels: torch.Tensor | list[torch.Tensor],
-        global_valid_tokens: float,
+        global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -754,7 +754,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         assert len(model_parts) == 1
         with self.train_context():
             pred = model_parts[0](inputs, **extra_kwargs)
-            loss, _ = self.loss_fn(pred, labels, global_valid_tokens)
+            loss_kwargs = {}
+            if "positions" in extra_kwargs:
+                loss_kwargs["positions"] = extra_kwargs["positions"]
+            loss, _ = self.loss_fn(
+                pred,
+                labels,
+                global_valid_tokens,
+                **loss_kwargs,
+            )
             del pred
             with spmd.no_typecheck():
                 # this propagates types through BWD, causing unnecessary conflicts
@@ -769,7 +777,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         *,
         input_dict_mbs: list[dict[str, torch.Tensor]],
         label_mbs: list[torch.Tensor],
-        global_valid_tokens: float,
+        global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         arg_mbs: list[tuple[torch.Tensor, ...]] = []
         kwarg_mbs: list[dict[str, Any]] = []
@@ -825,15 +833,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             microbatch_groups.append(microbatches)
         sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
 
-        # All-reduce to get global token count across DP ranks
-        # Move to GPU for distributed communication
+        # Keep the global token count on device so loss normalization does not
+        # introduce a CPU synchronization in the training path.
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(
+            global_valid_tokens = dist_utils.dist_sum_tensor(
                 local_valid_tokens.to(self.device), batch_mesh
             )
         else:
-            global_valid_tokens = float(local_valid_tokens.item())
+            global_valid_tokens = local_valid_tokens.to(self.device)
 
         # Process each gradient accumulation step, then free its inputs.
         accumulated_losses = []
