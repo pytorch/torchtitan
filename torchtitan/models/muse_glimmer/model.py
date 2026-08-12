@@ -15,6 +15,7 @@ from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
+    create_varlen_metadata_for_document,
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
@@ -112,8 +113,12 @@ class Attention(GQAttention):
             xq, xk = self.rope(xq, xk, positions)
 
         # Select this layer's mask by its window ("global" key = full attention).
-        assert isinstance(attention_masks, dict)
-        attention_masks = attention_masks[_window_mask_key(self.window_size)]
+        # Only flex passes a window-keyed dict of BlockMasks to index into. Varlen
+        # passes a single VarlenMetadata shared by every layer (each layer's window is
+        # a kernel arg, baked in at build time), so it goes straight through to the
+        # kernel (mirrors gpt_oss).
+        if isinstance(attention_masks, dict):
+            attention_masks = attention_masks[_window_mask_key(self.window_size)]
 
         output = self.inner_attention(
             xq,
@@ -507,10 +512,15 @@ class MuseGlimmerModel(Decoder):
         attn_config = self.config.first_attention
         assert attn_config is not None
         inner_attn = attn_config.inner_attention
+        # Varlen carries each layer's sliding window in its own kernel arg (baked at
+        # build time), so all layers share one document-varlen metadata; only the
+        # flex path needs the per-window BlockMask dict built below.
+        if isinstance(inner_attn, VarlenAttention.Config):
+            return create_varlen_metadata_for_document(positions)
         if not isinstance(inner_attn, FlexAttention.Config):
             raise TypeError(
-                "Muse Glimmer requires FlexAttention for sliding-window masks, got "
-                f"{type(inner_attn).__name__}"
+                "Muse Glimmer requires FlexAttention or VarlenAttention for "
+                f"sliding-window masks, got {type(inner_attn).__name__}"
             )
 
         # Language models always use block-causal (per-document) masking: the
