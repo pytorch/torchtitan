@@ -125,6 +125,7 @@ def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
     enable_ep: bool,
+    varlen: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs.
 
@@ -163,6 +164,7 @@ def set_qwen35_sharding_config(
             layer_cfg,
             attention_input_layout=layer_input_layout,
             enable_ep=enable_ep,
+            varlen=varlen,
         )
 
 
@@ -171,6 +173,7 @@ def _set_qwen35_layer_sharding(
     *,
     attention_input_layout: SpmdLayout,
     enable_ep: bool,
+    varlen: bool,
 ) -> None:
     layer_cfg.attention_norm.sharding_config = _decoder_norm_sharding(
         attention_input_layout
@@ -187,6 +190,7 @@ def _set_qwen35_layer_sharding(
         _set_deltanet_sharding(
             layer_cfg.delta_net,
             attention_input_layout=attention_input_layout,
+            varlen=varlen,
         )
 
     if layer_cfg.feed_forward is not None:
@@ -298,6 +302,7 @@ def _set_deltanet_sharding(
     deltanet_cfg: "GatedDeltaNet.Config",
     *,
     attention_input_layout: SpmdLayout,
+    varlen: bool,
 ) -> None:
     """Sharding for GatedDeltaNet: head-sharded TP on projections.
 
@@ -329,27 +334,35 @@ def _set_deltanet_sharding(
     # RowwiseParallel on output projection (reduce-scatter to SP)
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
 
+    # Varlen flattens (B, L) to (1, B*L), moving DP sharding to dim 1.
+    deltanet_activation_layout = (
+        SpmdLayout({DP: spmd.S(1), TP: spmd.S(2)})
+        if varlen
+        else dense_activation_placement(tp=spmd.S(2))
+    )
+
     # RMSNormGated: per-head norm, weight Replicate, activations Shard(2)
-    _norm_plc = dense_activation_placement(tp=spmd.S(2))
     deltanet_cfg.norm.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"x": _norm_plc, "gate": _norm_plc},
-        out_src_shardings=_norm_plc,
+        in_src_shardings={
+            "x": deltanet_activation_layout,
+            "gate": deltanet_activation_layout,
+        },
+        out_src_shardings=deltanet_activation_layout,
     )
 
     # GatedDeltaKernel: local_map converts DTensor q/k/v/g/beta to local.
-    _kernel_plc = dense_activation_placement(tp=spmd.S(2))
     deltanet_cfg.kernel.sharding_config = ShardingConfig(
         in_src_shardings={
-            "xq_BLNK": _kernel_plc,
-            "xk_BLNK": _kernel_plc,
-            "xv_BLNV": _kernel_plc,
-            "g_BLN": _kernel_plc,
-            "beta_BLN": _kernel_plc,
+            "xq_BLNK": deltanet_activation_layout,
+            "xk_BLNK": deltanet_activation_layout,
+            "xv_BLNV": deltanet_activation_layout,
+            "g_BLN": deltanet_activation_layout,
+            "beta_BLN": deltanet_activation_layout,
         },
-        out_src_shardings=_kernel_plc,
+        out_src_shardings=deltanet_activation_layout,
         local_map=LocalMapConfig(
-            in_grad_placements=(_kernel_plc,) * 5,
+            in_grad_placements=(deltanet_activation_layout,) * 5,
         ),
     )
 

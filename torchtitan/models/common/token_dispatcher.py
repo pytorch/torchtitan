@@ -1019,8 +1019,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using MinimalAsyncEP for constrained EP communication.
 
-    This first integration supports EP with SP degree 1 only. TP/SP, CP,
-    PP, padding, and async combine overlap are intentionally out of scope.
+    CP and TP token sharding are handled by the common MoE sharding path. PP
+    composes by using a separate EP process group within each pipeline stage.
     """
 
     ep_mesh: DeviceMesh | None
@@ -1207,6 +1207,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
             (
                 DeepEPTokenDispatcher.Config,
                 HybridEPTokenDispatcher.Config,
+                MinimalAsyncEPTokenDispatcher.Config,
             ),
         ):
             continue
@@ -1220,8 +1221,16 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
         num_token_shards = (
             parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
         )
-        required_num_max_tokens_per_rank = training.local_batch_size * (
-            (training.seq_len + num_token_shards - 1) // num_token_shards
+        if training.seq_len % num_token_shards != 0:
+            raise ValueError(
+                f"training.seq_len ({training.seq_len}) must be divisible by "
+                "context_parallel_degree * tensor_parallel_degree "
+                f"({num_token_shards}) so CP and TP/SP produce equal local "
+                "token counts. Pad training.seq_len to a multiple of "
+                f"{num_token_shards}."
+            )
+        required_num_max_tokens_per_rank = (
+            training.local_batch_size * training.seq_len // num_token_shards
         )
 
     for token_dispatcher_cfg in dispatcher_cfgs:

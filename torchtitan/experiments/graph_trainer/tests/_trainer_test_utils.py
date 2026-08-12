@@ -83,7 +83,6 @@ def build_minimal_trainer(
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-                enable_async_tensor_parallel=False,
                 spmd_backend="partial_dtensor",
             ),
         )
