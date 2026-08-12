@@ -38,6 +38,7 @@ def parallelize_muse_glimmer(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -111,6 +112,12 @@ def parallelize_muse_glimmer(
             apply_compile(model.vision_encoder, compile_config)
             # pyrefly: ignore [bad-argument-type]
             apply_compile(model.vision_adapter, compile_config)
+
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
+        return model
 
     if parallelism.spmd_backend == "full_dtensor":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)

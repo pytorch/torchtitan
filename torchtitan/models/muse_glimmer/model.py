@@ -79,6 +79,14 @@ class Attention(GQAttention):
         # None = global attention (no sliding window) for this layer.
         window_size: int | None = None
 
+        @property
+        def sliding_window_size(self) -> int | None:
+            # Alias: the vLLM generator wrapper reads ``sliding_window_size`` to
+            # configure per-layer paged-attention windows; the flex path uses
+            # ``window_size``. Keep both in sync via this alias (mirrors gpt_oss's
+            # field name without renaming the flex-path usages).
+            return self.window_size
+
     def __init__(self, config: Config):
         super().__init__(config)
         self.use_rope: bool = config.use_rope
