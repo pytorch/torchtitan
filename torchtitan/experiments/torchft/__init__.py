@@ -9,10 +9,18 @@ from torchtitan.experiments.torchft.manager import (
     maybe_semi_sync_training,
     TorchFTManager,
 )
+from torchtitan.experiments.torchft.process_group_registry import (
+    create_process_group,
+    registered_process_group_names,
+    register_process_group_factory,
+)
 
 
 __all__ = [
     "TorchFTManager",
+    "create_process_group",
     "has_torchft",
     "maybe_semi_sync_training",
+    "registered_process_group_names",
+    "register_process_group_factory",
 ]
