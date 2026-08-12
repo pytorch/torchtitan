@@ -36,7 +36,7 @@ pip install av torchvision
 | Feature | Notes |
 |---------|-------|
 | FSDP / HSDP | Decoder sharded per-layer. Without PP, the vision encoder is a separate FSDP unit; with PP, it belongs to the first-stage root FSDP unit |
-| Tensor Parallelism (TP) | The model supports TP: token embeddings and vision activations remain replicated for vision scatter, decoder SP resumes at layer 0, and vision attention/linear layers are TP-sharded without vision SP. The default DistributedMuon recipes currently reject TP because it can produce unsupported `_StridedShard` parameter layouts |
+| Tensor Parallelism (TP) | Model support exists, but DistributedMuon recipes currently reject TP-produced `_StridedShard` layouts ([#3353](https://github.com/pytorch/torchtitan/issues/3353)) |
 | Expert Parallelism (EP) | DeepSeek-V3 routed + shared experts |
 | Pipeline Parallel (PP) | Vision encoder folded into the first stage; 1F1B and Interleaved1F1B schedules |
 
@@ -61,8 +61,6 @@ Test scripts:
 
 ## TODO
 
-- Add DistributedMuon support for TP-produced `_StridedShard` parameter
-  layouts; tracked in [#3353](https://github.com/pytorch/torchtitan/issues/3353).
 - Add a video dataset training pipeline.
 - Add INT4 (compressed-tensors) checkpoint loading. The released K2.5, K2.6,
   and K2.7-Code 1T checkpoints are INT4 group-quantized; the inherited
