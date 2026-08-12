@@ -14,6 +14,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``inductor_passes.py`` — regional and full Inductor compilation
 - ``cudagraph.py`` — cudagraph wrapping and kernel annotations
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
+- ``grad_chain_pass.py`` — chunked grad collective-chain normalization
 - ``remove_noop_passes.py`` — graph cleanup bundled as ``canonicalize_graph_pass``
   (detach, identity view/slice, back-to-back transpose, view→reshape normalization)
 - ``performance_passes.py`` — opt-in numerics-changing optimizations
@@ -71,6 +72,9 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
+from torchtitan.experiments.graph_trainer.grad_chain_pass import (
+    normalize_chunked_grad_collective_chains_pass,
+)
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
     full_inductor_compilation_pass,
@@ -79,6 +83,9 @@ from torchtitan.experiments.graph_trainer.inductor_passes import (
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
+)
+from torchtitan.experiments.graph_trainer.minimal_async_ep_buffer_pass import (
+    assign_minimal_async_ep_buffer_sets_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
@@ -210,12 +217,16 @@ def compile_time_passes(
     ep_overlap_chunk_passes: list[Callable] = []
     ep_overlap_module_fqn: str | None = None
     ep_overlap_chunk_strategy: str | None = None
+    disable_early_grad_accumulation = False
     if ep_overlap_enabled:
         (
             overlap_dim,
             ep_overlap_chunk_strategy,
             ep_overlap_module_fqn,
         ) = validate_ep_overlap_config(config.compile.ep_overlap)
+        disable_early_grad_accumulation = (
+            config.compile.ep_overlap.disable_early_grad_accumulation
+        )
         if (
             ep_overlap_chunk_strategy == "graph"
             and _tensor_parallel_degree(config, parallel_dims) > 1
@@ -242,10 +253,8 @@ def compile_time_passes(
                         mode=overlap_dim,
                         module_pattern=ep_overlap_module_fqn,
                         num_static_inputs=traced_result.num_static_inputs,
-                        optimize_grad_live_out=not (
-                            config.compile.ep_overlap.disable_early_grad_accumulation
-                        ),
-                        require_all_to_all=(
+                        optimize_grad_live_out=False,
+                        require_token_exchange=(
                             getattr(config.parallelism, "expert_parallel_degree", 1) > 1
                         ),
                     ),
@@ -270,6 +279,10 @@ def compile_time_passes(
         passes.extend(ep_overlap_chunk_passes)
         passes.append(isolate_ep_process_group_pass)
         passes.append(eliminate_dead_code_pass)
+        if ep_overlap_chunk_strategy == "graph":
+            passes.append(assign_minimal_async_ep_buffer_sets_pass)
+        if not disable_early_grad_accumulation:
+            passes.append(normalize_chunked_grad_collective_chains_pass)
 
     if config.compile.enable_fsdp_ag_rs_overlap:
         passes.append(reassign_collective_pgs_pass)
@@ -291,7 +304,7 @@ def compile_time_passes(
             functools.partial(
                 ep_overlap_schedule_pass,
                 module_pattern=ep_overlap_module_fqn,
-                require_all_to_all=(
+                require_token_exchange=(
                     getattr(config.parallelism, "expert_parallel_degree", 1) > 1
                 ),
                 pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,

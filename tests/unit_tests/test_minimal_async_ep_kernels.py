@@ -4,13 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import operator
+import os
 import unittest
+from collections import deque
+from contextlib import ExitStack
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+import pytest
 import torch
+import torch.distributed as dist
+
+import torchtitan.distributed.minimal_async_ep.api as minimal_async_ep_api
 import triton.language as tl
+from torch.fx.experimental.proxy_tensor import make_fx
 
 from torchtitan.distributed.minimal_async_ep.kernels import (
-    _copy_rows_to_peer_ptrs_kernel,
+    _copy_rows_to_peer_ptrs_persistent_kernel,
     copy_full_counts_to_peers_kernel,
     copy_rows_to_peers_kernel,
     expand_topk_grad_kernel,
@@ -31,8 +42,487 @@ def assert_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
         raise AssertionError(f"tensor mismatch:\nactual={actual}\nexpected={expected}")
 
 
+def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+
+    dispatcher = object.__new__(MinimalAsyncEPTokenDispatcher)
+    dispatcher.top_k = 2
+    dispatcher.receive_capacity = 16
+    dispatcher.ep_mesh = SimpleNamespace(
+        get_group=lambda: SimpleNamespace(size=lambda: 2)
+    )
+
+    def exchange(x, expert_ids, counts, scores):
+        hidden, tokens_per_expert, metadata = dispatcher.dispatch(
+            x, scores.view(4, 2), expert_ids, counts
+        )
+        expert_offsets = torch.cumsum(tokens_per_expert, 0)
+        expert_output = hidden * 2 + expert_offsets[-1] * 0
+        return dispatcher.combine(expert_output, metadata, x)
+
+    gm = make_fx(exchange, tracing_mode="fake")(
+        torch.randn(4, 8),
+        torch.tensor([[0, 1], [1, 2], [2, 3], [3, 0]]),
+        torch.full((4,), 2, dtype=torch.int64),
+        torch.randn(8),
+    )
+    nodes = list(gm.graph.nodes)
+
+    def one(target):
+        matches = [node for node in nodes if node.target is target]
+        assert len(matches) == 1
+        return matches[0]
+
+    dispatch = one(torch.ops.minimal_async_ep.dispatch.default)
+    wait_dispatch = one(torch.ops.minimal_async_ep.wait_dispatch.default)
+    combine = one(torch.ops.minimal_async_ep.combine.default)
+    source_wait = one(torch.ops.minimal_async_ep.wait_combine_source.default)
+    ready_wait = one(torch.ops.minimal_async_ep.wait_combine.default)
+    dispatch_hidden = next(
+        user
+        for user in dispatch.users
+        if user.target is operator.getitem and user.args[1] == 0
+    )
+    dispatch_counts = next(
+        user
+        for user in dispatch.users
+        if user.target is operator.getitem and user.args[1] == 8
+    )
+    dispatch_ranks = next(
+        user
+        for user in dispatch.users
+        if user.target is operator.getitem and user.args[1] == 1
+    )
+    wait_counts = next(
+        user
+        for user in wait_dispatch.users
+        if user.target is operator.getitem and user.args[1] == 1
+    )
+    counts_cumsum = one(torch.ops.aten.cumsum.default)
+
+    def depends_on(node, dependency):
+        return dependency in node.all_input_nodes or any(
+            depends_on(input_node, dependency) for input_node in node.all_input_nodes
+        )
+
+    assert wait_dispatch.args == (
+        dispatch_hidden,
+        dispatch_counts,
+        [dispatch.args[0], dispatch.args[1], dispatch.args[2]],
+    )
+    assert depends_on(counts_cumsum, wait_counts)
+    assert wait_dispatch not in dispatch_ranks.users
+    assert source_wait.args == (
+        combine,
+        [combine.args[0], combine.args[3], combine.args[4], combine.args[5]],
+    )
+    assert ready_wait.args[1] == []
+    assert list(combine.users) == [source_wait]
+    source_projection = next(iter(source_wait.users))
+    assert source_projection.target is torch.ops.aten.view.default
+    assert list(source_projection.users) == [ready_wait]
+
+
+def test_minimal_async_ep_wait_schemas_are_nonmutating_aliases():
+    schemas = (
+        (torch.ops.minimal_async_ep.wait_dispatch.default._schema, ("a", "b")),
+        (torch.ops.minimal_async_ep.wait_dispatch_data.default._schema, ("a",)),
+        (torch.ops.minimal_async_ep.wait_combine_source.default._schema, ("a",)),
+        (torch.ops.minimal_async_ep.wait_combine.default._schema, ("a",)),
+    )
+    for schema, aliases in schemas:
+        tensor_args = schema.arguments[: len(aliases)]
+        assert [arg.name for arg in tensor_args] == [
+            "pending",
+            *(("pending_counts",) if len(aliases) == 2 else ()),
+        ]
+        assert len(schema.returns) == len(aliases)
+        for arg, result, alias in zip(
+            tensor_args, schema.returns, aliases, strict=True
+        ):
+            assert arg.alias_info.before_set == {alias}
+            assert result.alias_info.before_set == {alias}
+            assert not arg.alias_info.is_write
+            assert not result.alias_info.is_write
+
+
+def test_combine_source_wait_releases_retained_tensors():
+    pending = torch.empty(1)
+    retained = torch.empty(1)
+    source_event, ready_event = object(), object()
+    event_key = ("combine", pending.data_ptr())
+    event = minimal_async_ep_api._PendingEvent(source_event, ready_event, (retained,))
+    state = SimpleNamespace(pending_events={event_key: deque((event,))})
+    stream = Mock()
+
+    with (
+        patch.object(minimal_async_ep_api, "_buffer_state", state),
+        patch.object(torch.cuda, "current_stream", return_value=stream),
+    ):
+        minimal_async_ep_api._wait_pending_event("combine", pending, source_only=True)
+        assert event.retained == ()
+        assert event_key in state.pending_events
+        minimal_async_ep_api._wait_pending_event("combine", pending)
+        assert event_key not in state.pending_events
+
+    assert [call.args[0] for call in stream.wait_event.call_args_list] == [
+        source_event,
+        ready_event,
+    ]
+
+
+def test_forced_load_balance_receive_capacity_matches_round_robin_routing():
+    cases = (
+        (4, 2, 4, 2),
+        (5, 3, 8, 4),
+        (17, 6, 64, 8),
+        (32_768, 8, 256, 64),
+    )
+    for num_tokens, top_k, num_experts, ep_size in cases:
+        assignments = torch.arange(num_tokens * top_k) % num_experts
+        num_local_experts = num_experts // ep_size
+        actual = max(
+            int(
+                (
+                    (assignments >= rank * num_local_experts)
+                    & (assignments < (rank + 1) * num_local_experts)
+                ).sum()
+            )
+            * ep_size
+            for rank in range(ep_size)
+        )
+        expected = minimal_async_ep_api._forced_load_balance_receive_capacity(
+            num_tokens,
+            top_k,
+            num_experts,
+            ep_size,
+        )
+        assert expected == actual
+
+
+def test_buffer_rows_use_configured_receive_capacity():
+    forced = minimal_async_ep_api._buffer_rows_per_set(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        num_buffer_sets=2,
+        force_load_balance=True,
+    )
+    worst_case = minimal_async_ep_api._buffer_rows_per_set(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        num_buffer_sets=2,
+        force_load_balance=False,
+    )
+    capacity_limited = minimal_async_ep_api._buffer_rows_per_set(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        num_buffer_sets=2,
+        force_load_balance=False,
+        receive_capacity_factor=2.0,
+    )
+
+    assert forced == (131_072, 131_072)
+    assert worst_case == (4_194_304, 131_072)
+    assert capacity_limited == (262_144, 131_072)
+
+
+def test_minimal_async_ep_runtime_config_propagation():
+    from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+        graph_trainer_deepseek_v3_debugmodel_minimal_async_ep,
+    )
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+
+    config = graph_trainer_deepseek_v3_debugmodel_minimal_async_ep()
+    config.parallelism.expert_parallel_degree = 2
+    config.compile.memory_policy = "full"
+    config.compile.ep_overlap.minimal_async_ep_receive_capacity_factor = 2.0
+    config.model_spec.model.update_from_config(config=config)
+
+    dispatchers = [
+        layer.moe.routed_experts.token_dispatcher
+        for layer in config.model_spec.model.layers
+        if layer.moe is not None
+    ]
+    assert dispatchers
+    expected = (
+        config.training.local_batch_size
+        * config.training.seq_len
+        * dispatchers[0].top_k
+        * 2
+    )
+    assert all(
+        isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+        and dispatcher.receive_capacity == expected
+        for dispatcher in dispatchers
+    )
+    assert all(dispatcher.num_row_copy_ctas is None for dispatcher in dispatchers)
+
+    config.compile.ep_overlap.enabled = True
+    config.model_spec.model.update_from_config(config=config)
+    assert all(dispatcher.num_row_copy_ctas == 72 for dispatcher in dispatchers)
+
+
+def test_receive_capacity_rejects_global_routing_overflow():
+    with pytest.raises(
+        RuntimeError,
+        match="routing exceeded the configured receive capacity",
+    ):
+        minimal_async_ep_api._assert_receive_capacity(
+            torch.tensor([[2, 1], [1, 0]]),
+            capacity=2,
+        )
+
+
+def test_minimal_async_ep_requires_full_graph_recompute():
+    from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+        graph_trainer_deepseek_v3_debugmodel_minimal_async_ep,
+    )
+
+    config = graph_trainer_deepseek_v3_debugmodel_minimal_async_ep()
+    config.parallelism.expert_parallel_degree = 2
+    with pytest.raises(ValueError, match="memory_policy full"):
+        config.model_spec.model.update_from_config(config=config)
+
+    config.compile.memory_policy = "full"
+    config.model_spec.model.update_from_config(config=config)
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMinimalAsyncEPKernels(unittest.TestCase):
+    @unittest.skipUnless(
+        dist.is_initialized() or "RANK" in os.environ,
+        "requires torchrun launcher",
+    )
+    @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+    def test_two_buffer_sets_match_reference_and_preserve_outputs(self):
+        initialized_pg = dist.is_initialized()
+        if not initialized_pg:
+            dist.init_process_group("nccl")
+        if dist.get_world_size() != 2:
+            self.skipTest("test expects exactly two ranks")
+
+        local_rank = int(os.environ.get("LOCAL_RANK", dist.get_rank()))
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+        minimal_async_ep_api._buffer_state = None
+
+        def run_exchange(x, scores, expert_ids):
+            outputs = []
+            buffer_ptrs = []
+            for buffer_set, (chunk_x, chunk_scores, chunk_ids) in enumerate(
+                zip(x.chunk(2), scores.chunk(2), expert_ids.chunk(2), strict=True)
+            ):
+                counts = torch.bincount(chunk_ids.flatten(), minlength=4)
+                (
+                    hidden,
+                    dispatch_ranks,
+                    dispatch_rows,
+                    combine_ranks,
+                    combine_rows,
+                    num_valid,
+                    expert_to_token,
+                    token_to_expert,
+                    tokens_per_expert,
+                ) = minimal_async_ep_api.dispatch_op(
+                    chunk_x, chunk_ids, counts, 8, 2, buffer_set
+                )
+                hidden, tokens_per_expert = minimal_async_ep_api.wait_dispatch_op(
+                    hidden,
+                    tokens_per_expert,
+                    [chunk_x, chunk_ids, counts],
+                )
+                expert_output = hidden * 1.25
+                routed = minimal_async_ep_api.combine_op(
+                    expert_output,
+                    dispatch_ranks,
+                    dispatch_rows,
+                    combine_ranks,
+                    combine_rows,
+                    num_valid,
+                    4,
+                    buffer_set,
+                )
+                routed = minimal_async_ep_api.wait_combine(
+                    routed,
+                    [expert_output, combine_ranks, combine_rows, num_valid],
+                )
+                outputs.append(
+                    minimal_async_ep_api.reduce_topk_op(
+                        routed,
+                        token_to_expert,
+                        expert_to_token,
+                        chunk_scores.flatten(),
+                        2,
+                        2,
+                    )
+                )
+                buffer_ptrs.append(
+                    (hidden.untyped_storage().data_ptr(), routed.data_ptr())
+                )
+            return torch.cat(outputs), buffer_ptrs
+
+        try:
+            minimal_async_ep_api.init_buffer(
+                dist.group.WORLD,
+                hidden_dim=4,
+                tokens_per_rank=4,
+                num_local_experts=2,
+                top_k=2,
+                dtype=torch.float32,
+                device=device,
+                receive_capacity_factor=2.0,
+                num_buffer_sets=2,
+                num_row_copy_ctas=17,
+            )
+            rank = dist.get_rank()
+            x = (
+                torch.arange(16, device=device, dtype=torch.float32).view(4, 4)
+                + rank * 100
+            )
+            scores = torch.linspace(0.1, 0.8, 8, device=device).view(4, 2)
+            token_ids = torch.arange(4, device=device)
+            expert_ids = torch.stack(
+                ((token_ids + rank) % 4, (token_ids + rank + 2) % 4), dim=1
+            )
+
+            actual_x = x.clone().requires_grad_()
+            actual_scores = scores.clone().requires_grad_()
+            launch_streams = []
+
+            def record_launch(name, fn):
+                def wrapped(*args, **kwargs):
+                    launch_streams.append(
+                        (name, torch.cuda.current_stream().cuda_stream)
+                    )
+                    return fn(*args, **kwargs)
+
+                return wrapped
+
+            launch_functions = (
+                "copy_full_counts_to_peers_kernel",
+                "fill_dispatch_metadata_kernel",
+                "fill_combine_metadata_kernel",
+                "invert_flat_indices_kernel",
+                "copy_rows_to_peers_kernel",
+                "_wait_ready",
+            )
+            with ExitStack() as stack:
+                for name in launch_functions:
+                    fn = getattr(minimal_async_ep_api, name)
+                    stack.enter_context(
+                        patch.object(
+                            minimal_async_ep_api,
+                            name,
+                            side_effect=record_launch(name, fn),
+                        )
+                    )
+                actual, buffer_ptrs = run_exchange(actual_x, actual_scores, expert_ids)
+                actual_grads = torch.autograd.grad(
+                    actual.square().sum(), (actual_x, actual_scores)
+                )
+
+            buffer_state = minimal_async_ep_api._buffer_state
+            assert buffer_state is not None
+            prep_stream = buffer_state.prep_stream.cuda_stream
+            copy_stream = buffer_state.copy_stream.cuda_stream
+            self.assertNotEqual(prep_stream, copy_stream)
+            self.assertLess(
+                buffer_state.copy_stream.priority,
+                buffer_state.prep_stream.priority,
+            )
+            self.assertEqual(
+                buffer_state.num_row_copy_ctas,
+                17,
+            )
+            for buffer_set in buffer_state.buffer_sets:
+                dispatch_pool = buffer_set.hidden_pools["dispatch"]
+                combine_pool = buffer_set.hidden_pools["combine"]
+                self.assertEqual(dispatch_pool.buffer.shape, (8, 4))
+                self.assertEqual(combine_pool.buffer.shape, (4, 4))
+                self.assertNotEqual(
+                    dispatch_pool.buffer.data_ptr(), combine_pool.buffer.data_ptr()
+                )
+            prep_functions = {
+                "copy_full_counts_to_peers_kernel",
+                "fill_dispatch_metadata_kernel",
+                "fill_combine_metadata_kernel",
+                "invert_flat_indices_kernel",
+            }
+            for name, stream in launch_streams:
+                if name in prep_functions:
+                    self.assertEqual(stream, prep_stream)
+                elif name == "copy_rows_to_peers_kernel":
+                    self.assertEqual(stream, copy_stream)
+            wait_streams = {
+                stream for name, stream in launch_streams if name == "_wait_ready"
+            }
+            self.assertEqual(wait_streams, {prep_stream, copy_stream})
+            self.assertEqual(
+                {name for name, _ in launch_streams}, set(launch_functions)
+            )
+
+            ref_x = x.clone().requires_grad_()
+            ref_scores = scores.clone().requires_grad_()
+            ref_expert_output = ref_x * 1.25
+            expected = (
+                ref_expert_output * ref_scores[:, :1]
+                + ref_expert_output * ref_scores[:, 1:]
+            )
+            expected_grads = torch.autograd.grad(
+                expected.square().sum(), (ref_x, ref_scores)
+            )
+
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            for actual, expected in zip(actual_grads, expected_grads, strict=True):
+                torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+            self.assertNotEqual(buffer_ptrs[0][0], buffer_ptrs[1][0])
+            self.assertNotEqual(buffer_ptrs[0][1], buffer_ptrs[1][1])
+        finally:
+            minimal_async_ep_api._buffer_state = None
+            if not initialized_pg and dist.is_initialized():
+                dist.destroy_process_group()
+
+    def test_wait_ops_compile_with_inductor(self):
+        def dispatch_fn(x):
+            pending = x * 2
+            counts = x * 3
+            pending, counts = minimal_async_ep_api.wait_dispatch_op(
+                pending, counts, [x]
+            )
+            return pending.sin() + counts.cos()
+
+        def dispatch_data_fn(x):
+            pending = minimal_async_ep_api._wait_dispatch_data_op(x * 2, [x])
+            return pending.sin()
+
+        def combine_fn(x):
+            pending = minimal_async_ep_api.wait_combine(x * 2, [x])
+            return pending.sin()
+
+        cases = (
+            (
+                dispatch_fn,
+                lambda x: (x * 2).sin() + (x * 3).cos(),
+                lambda x: 2 * (x * 2).cos() - 3 * (x * 3).sin(),
+            ),
+            (dispatch_data_fn, lambda x: (x * 2).sin(), lambda x: 2 * (x * 2).cos()),
+            (combine_fn, lambda x: (x * 2).sin(), lambda x: 2 * (x * 2).cos()),
+        )
+        for fn, expected_fn, expected_grad_fn in cases:
+            with self.subTest(fn=fn):
+                x = torch.randn(16, device="cuda", requires_grad=True)
+                with patch.object(minimal_async_ep_api, "_wait_pending_event"):
+                    actual = torch.compile(fn, backend="inductor", fullgraph=True)(x)
+                torch.testing.assert_close(actual, expected_fn(x))
+                actual.sum().backward()
+                torch.testing.assert_close(x.grad, expected_grad_fn(x))
+
     def test_topk_index_kernels_match_reference(self):
         flat_indices = torch.tensor([2, 0, 3, 1], device="cuda", dtype=torch.int64)
         slot_to_row = invert_flat_indices_kernel(flat_indices, num_rows=4)
@@ -353,6 +843,26 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(row_dsts[0][4], src[0])
         assert_equal(row_dsts[1][5], torch.zeros(2, device="cuda"))
 
+        bounded_src = torch.arange(128, device="cuda", dtype=torch.float32).view(64, 2)
+        bounded_dst = torch.zeros_like(bounded_src)
+        bounded_dst_ptrs = torch.tensor(
+            [bounded_dst.data_ptr()], device="cuda", dtype=torch.int64
+        )
+        copy_rows_to_peers_kernel(
+            bounded_src,
+            [bounded_dst],
+            torch.zeros(64, device="cuda", dtype=torch.int64),
+            torch.arange(64, device="cuda", dtype=torch.int64),
+            ep_size=1,
+            num_rows=64,
+            num_cols=2,
+            dst_ptrs=bounded_dst_ptrs,
+            block_m=1,
+            num_ctas=2,
+        )
+        torch.cuda.synchronize()
+        assert_equal(bounded_dst, bounded_src)
+
     def test_copy_rows_uses_int64_for_source_stride_arithmetic(self):
         row = 1_048_576
         stride = 2048
@@ -383,7 +893,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         src_storage[base_offset + high_offset] = 93
         torch.cuda.synchronize()
 
-        _copy_rows_to_peer_ptrs_kernel[(metadata_numel, 1)](
+        _copy_rows_to_peer_ptrs_persistent_kernel[(20,)](
             src,
             dst_ptrs,
             dst_ranks,
@@ -398,8 +908,10 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             DST_DTYPE=tl.uint8,
             HAS_NUM_VALID_ROWS=True,
             HAS_SRC_ROWS=False,
+            SRC_ROW_DIVISOR=1,
             BLOCK_M=1,
             BLOCK_N=1,
+            NUM_COL_TILES=1,
         )
         torch.cuda.synchronize()
 
