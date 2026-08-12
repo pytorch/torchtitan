@@ -46,7 +46,7 @@ logger = init_logger(__name__)
 
 
 def _replace_vllm_layer_configs(model_config):
-    """Replace model compute-core configs with vLLM generation variants."""
+    """Replace inner-computation configs with vLLM generation variants."""
     # These modules inspect the breakable-cudagraph environment at import time.
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
@@ -83,9 +83,9 @@ def _replace_vllm_layer_configs(model_config):
 
         delta_net_cfg = getattr(layer_cfg, "delta_net", None)
         if delta_net_cfg is not None:
-            from torchtitan.experiments.rl.models.gdn import VLLMGatedDeltaNetCore
+            from torchtitan.experiments.rl.models.gdn import VLLMInnerGatedDeltaNet
 
-            vllm_gdn_core_cfg = VLLMGatedDeltaNetCore.Config(
+            vllm_inner_gdn_cfg = VLLMInnerGatedDeltaNet.Config(
                 layer_idx=layer_idx,
                 num_k_heads=(
                     delta_net_cfg.in_proj_q.out_features // delta_net_cfg.key_head_dim
@@ -96,13 +96,13 @@ def _replace_vllm_layer_configs(model_config):
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
-                activation=delta_net_cfg.core.activation,
+                activation=delta_net_cfg.inner_gated_delta_net.activation,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
                 delta_net=dataclasses.replace(
                     delta_net_cfg,
-                    core=vllm_gdn_core_cfg,
+                    inner_gated_delta_net=vllm_inner_gdn_cfg,
                 ),
             )
 

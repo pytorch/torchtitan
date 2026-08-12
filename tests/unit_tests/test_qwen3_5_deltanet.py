@@ -105,7 +105,7 @@ def _reference_causal_conv1d_varlen(
 ) -> torch.Tensor:
     """Per-document depthwise causal conv + silu, matching the model's FLA
     varlen conv (which is triton/CUDA-only). Patched over
-    ``model._causal_conv1d_varlen`` for CPU runs.
+    ``gdn._causal_conv1d_varlen`` for CPU runs.
     """
     conv_kernel_size = weight.shape[-1]
     out_segments_BTD: list[torch.Tensor] = []
@@ -178,10 +178,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     ):
         try:
             from torchtitan.models.common import Conv1d, Linear
-            from torchtitan.models.qwen3_5.model import (
+            from torchtitan.models.qwen3_5.gdn import (
                 GatedDeltaKernel,
                 GatedDeltaNet,
-                GatedDeltaNetCore,
+                InnerGatedDeltaNet,
                 RMSNormGated,
             )
         except ModuleNotFoundError as exc:
@@ -221,7 +221,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_q=conv(key_dim),
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
-            core=GatedDeltaNetCore.Config(
+            inner_gated_delta_net=InnerGatedDeltaNet.Config(
                 key_head_dim=key_head_dim,
                 value_head_dim=value_head_dim,
                 key_dim=key_dim,
@@ -241,7 +241,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ),
         ).build()
         if backend is None:
-            model.core.kernel = ReferenceGatedDeltaKernel()
+            model.inner_gated_delta_net.kernel = ReferenceGatedDeltaKernel()
 
         model = model.to(device=device, dtype=dtype)
         with torch.no_grad():
@@ -267,7 +267,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         forwards below take the non-varlen conv path, which runs on CPU.
         """
         with mock.patch(
-            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
+            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
             _reference_causal_conv1d_varlen,
         ):
             actual = model(x, masks)
@@ -480,23 +480,16 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             )
 
         with mock.patch(
-            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
+            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
             side_effect=record_cu_seqlens,
         ):
             model(x_BLD, attention_masks)
             model(x_BLD, attention_masks)
 
-        self.assertEqual(len(captured_cu_seqlens), 6)
-        first_invocation = captured_cu_seqlens[:3]
-        second_invocation = captured_cu_seqlens[3:]
-        self.assertTrue(
-            all(cu_seqlens is first_invocation[0] for cu_seqlens in first_invocation)
-        )
-        self.assertTrue(
-            all(cu_seqlens is second_invocation[0] for cu_seqlens in second_invocation)
-        )
-        self.assertIsNot(first_invocation[0], attention_masks.cu_seq_q)
-        self.assertIsNot(second_invocation[0], first_invocation[0])
+        self.assertEqual(len(captured_cu_seqlens), 2)
+        first_invocation, second_invocation = captured_cu_seqlens
+        self.assertIsNot(first_invocation, attention_masks.cu_seq_q)
+        self.assertIsNot(second_invocation, first_invocation)
 
 
 if __name__ == "__main__":

@@ -257,7 +257,7 @@ def build_inference_engine(
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
         # GDN preserves its accumulated paged SSM state in fp32 under
-        # batch-invariant mode inside VLLMGatedDeltaNetCore.
+        # batch-invariant mode inside VLLMInnerGatedDeltaNet.
     )
 
     from torchtitan.tools.utils import has_cuda_capability

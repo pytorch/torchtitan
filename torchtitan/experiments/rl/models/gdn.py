@@ -56,10 +56,10 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
-class VLLMGatedDeltaNetCore(Module, MambaBase):
-    """Paged-cache GDN generation core.
+class VLLMInnerGatedDeltaNet(Module, MambaBase):
+    """Paged-cache inner GDN implementation.
 
-    The enclosing ``qwen3_5.model.GatedDeltaNet`` owns all parameters. This
+    The enclosing ``qwen3_5.gdn.GatedDeltaNet`` owns all parameters. This
     module owns only vLLM cache plumbing and the FLA kernels.
 
     The enclosing module and vLLM cache are both head-sharded under tensor
@@ -258,7 +258,7 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
         assert isinstance(gdn_metadata, GDNAttentionMetadata)
         assert (
             gdn_metadata.spec_sequence_masks is None
-        ), "VLLMGatedDeltaNetCore does not support speculative decoding"
+        ), "VLLMInnerGatedDeltaNet does not support speculative decoding"
 
         num_actual_tokens = gdn_metadata.num_actual_tokens
         if num_actual_tokens == 0:
@@ -336,8 +336,8 @@ class VLLMGatedDeltaNetCore(Module, MambaBase):
                     - gdn_metadata.prefill_query_start_loc[0]
                 )
             num_prefill_sequences = int(prefill_cu_seqlens.numel()) - 1
-            # This core runs eager at the graph break, so checking whether any
-            # prefix state must be restored does not enter a captured graph.
+            # This implementation runs eager at the graph break, so checking
+            # whether any prefix state must be restored does not enter a captured graph.
             has_continuations = prefill_has_initial_state is not None and bool(
                 prefill_has_initial_state.any()
             )

@@ -49,8 +49,8 @@ TP = MeshAxisName.TP
 
 if TYPE_CHECKING:
     from torchtitan.models.common import SigmoidGatedFeedForward
+    from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
-        GatedDeltaNet,
         Qwen35Attention,
         Qwen35AttentionMaskDict,
         Qwen35Model,
@@ -343,10 +343,10 @@ def _set_deltanet_sharding(
     # to Replicate.
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=enable_sp)
 
-    # Head-sharded TP placements reused by the norm, core, and module state:
+    # Head-sharded TP placements reused by the norm, inner GDN, and module state:
     # activations Shard(2) on the head dim (keeps DP/CP/TP on distinct dims),
-    # per-head params Shard(0), everything else Replicate. The core computes on
-    # rank-local heads after a single local_map boundary.
+    # per-head params Shard(0), everything else Replicate. The inner GDN computes
+    # on rank-local heads after a single local_map boundary.
     activation_placement = dense_activation_placement(tp=spmd.S(2))
     parameter_placement = dense_param_placement(tp=spmd.S(0))
     replicated_placement = dense_param_placement(tp=spmd.R)
@@ -364,10 +364,10 @@ def _set_deltanet_sharding(
         out_dst_shardings=activation_placement,
     )
 
-    # The core is the single DTensor-to-local boundary for the head-parallel
+    # The inner GDN is the single DTensor-to-local boundary for the head-parallel
     # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
     # and intentionally remains outside local_map's positional placements.
-    deltanet_cfg.core.sharding_config = ShardingConfig(
+    deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
         in_dst_shardings={
             "mixed_qkv_BLC": activation_placement,
             "a_BLN": activation_placement,
