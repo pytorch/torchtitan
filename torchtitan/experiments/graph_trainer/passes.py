@@ -334,7 +334,7 @@ def compile_time_passes(
             )
         )
 
-    if config.parallelism.enable_async_tensor_parallel:
+    if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
     if not include_inductor:
