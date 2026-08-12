@@ -8,7 +8,7 @@ import unittest
 
 import torch
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Shard
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -312,6 +312,253 @@ class TestDistributedMuon(DTensorTestBase):
                 for name, grad in first_stack_grads.items()
             },
         )
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistributedMuonMultiMesh(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_preserves_ep_shard_in_mixed_logical_bucket(self):
+        lr = 0.03
+        weight_decay = 0.2
+        dense_mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        sparse_mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("efsdp", "ep"),
+        )
+        repeated_shard_mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("ep", "efsdp"),
+        )
+        device = torch.device(self.device_type, self.rank)
+
+        dense_value = (
+            torch.arange(24, device=device).reshape(8, 3).float().div_(11).add_(1)
+        )
+        sparse_values = {
+            "layers.0.routed_experts.sharded": (
+                torch.arange(60, device=device)
+                .reshape(4, 5, 3)
+                .float()
+                .div_(13)
+                .add_(2)
+            ),
+            "layers.0.routed_experts.replicated": (
+                torch.arange(60, 120, device=device)
+                .reshape(4, 5, 3)
+                .float()
+                .div_(17)
+                .add_(3)
+            ),
+            "layers.0.routed_experts.repeated_shard": (
+                torch.arange(120, 180, device=device)
+                .reshape(4, 5, 3)
+                .float()
+                .div_(19)
+                .add_(4)
+            ),
+        }
+        sparse_storage_layouts = {
+            "layers.0.routed_experts.sharded": (
+                sparse_mesh,
+                (Shard(1), Shard(0)),
+            ),
+            "layers.0.routed_experts.replicated": (
+                sparse_mesh,
+                (Shard(1), Shard(0)),
+            ),
+            "layers.0.routed_experts.repeated_shard": (
+                repeated_shard_mesh,
+                (Shard(0), Shard(0)),
+            ),
+        }
+        dense = torch.nn.Parameter(
+            distribute_tensor(dense_value.clone(), dense_mesh, (Shard(0),))
+        )
+        sparse = {
+            fqn: torch.nn.Parameter(
+                distribute_tensor(
+                    value.clone(),
+                    *sparse_storage_layouts[fqn],
+                )
+            )
+            for fqn, value in sparse_values.items()
+        }
+        dense_fqn = "layers.0.dense"
+        optimizer = build_distributed_muon(
+            [
+                {
+                    "params": [dense, *sparse.values()],
+                    "param_names": [dense_fqn, *sparse],
+                }
+            ],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+            compute_sharding_by_fqn={
+                dense_fqn: MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        owner_mesh_axis_names=(MeshAxisName.DP_SHARD,),
+                    )
+                ),
+                "layers.0.routed_experts.sharded": MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        axis_placements={MeshAxisName.EFSDP: Shard(0)},
+                    )
+                ),
+                "layers.0.routed_experts.replicated": MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        axis_placements={
+                            MeshAxisName.EFSDP: Replicate(),
+                            MeshAxisName.EP: Shard(0),
+                        },
+                    )
+                ),
+                "layers.0.routed_experts.repeated_shard": MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        axis_placements={MeshAxisName.EFSDP: Replicate()},
+                    )
+                ),
+            },
+            bucket_configs=[BucketConfig(patterns=("layers.0.*",), name="layers.0")],
+        )
+        transport_groups = {
+            frozenset(plan.group.participants)
+            for plan in optimizer._bucket_plans
+            if hasattr(plan, "group")
+        }
+        self.assertEqual(
+            transport_groups,
+            {
+                frozenset(range(self.world_size)),
+                frozenset(sparse_mesh["efsdp"].mesh.flatten().tolist()),
+                frozenset(repeated_shard_mesh["efsdp"].mesh.flatten().tolist()),
+            },
+        )
+
+        dense_grad = torch.arange(1, 25, device=device).reshape(8, 3).float().div_(19)
+        sparse_grads = {
+            fqn: torch.arange(60, device=device)
+            .reshape_as(value)
+            .float()
+            .mul_(0.37 + 0.11 * index)
+            .add_(0.2 + index)
+            .sin_()
+            for index, (fqn, value) in enumerate(sparse_values.items())
+        }
+        dense.grad = distribute_tensor(dense_grad.clone(), dense_mesh, (Shard(0),))
+        for fqn, parameter in sparse.items():
+            storage_mesh, placements = sparse_storage_layouts[fqn]
+            parameter.grad = distribute_tensor(
+                sparse_grads[fqn].clone(),
+                storage_mesh,
+                placements,
+            )
+
+        reference_dense = torch.nn.Parameter(dense_value.clone())
+        reference_sparse = {
+            fqn: tuple(torch.nn.Parameter(matrix.clone()) for matrix in value)
+            for fqn, value in sparse_values.items()
+        }
+        reference_optimizer = torch.optim.Muon(
+            [
+                reference_dense,
+                *(
+                    parameter
+                    for matrices in reference_sparse.values()
+                    for parameter in matrices
+                ),
+            ],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+        reference_dense.grad = dense_grad.clone()
+        for fqn, matrices in reference_sparse.items():
+            for parameter, grad in zip(
+                matrices,
+                sparse_grads[fqn],
+                strict=True,
+            ):
+                parameter.grad = grad.clone()
+
+        optimizer.step()
+        reference_optimizer.step()
+
+        decay = 1 - lr * weight_decay
+        dense_adjusted_lr = _adjust_muon_learning_rate(lr, None, dense_value.shape)
+        torch.testing.assert_close(
+            (dense_value * decay - dense.full_tensor()) / dense_adjusted_lr,
+            (dense_value * decay - reference_dense) / dense_adjusted_lr,
+            rtol=0,
+            atol=2e-2,
+        )
+        for fqn, parameter in sparse.items():
+            expected = torch.stack(
+                [reference.detach() for reference in reference_sparse[fqn]]
+            )
+            adjusted_lr = _adjust_muon_learning_rate(
+                lr,
+                None,
+                reference_sparse[fqn][0].shape,
+            )
+            actual_update = (
+                sparse_values[fqn] * decay - parameter.full_tensor()
+            ) / adjusted_lr
+            expected_update = (sparse_values[fqn] * decay - expected) / adjusted_lr
+            torch.testing.assert_close(
+                actual_update,
+                expected_update,
+                rtol=0,
+                atol=2e-2,
+            )
+            self.assertEqual(parameter.placements, sparse_storage_layouts[fqn][1])
+
+        unsupported_parameter = torch.nn.Parameter(
+            distribute_tensor(
+                sparse_values["layers.0.routed_experts.sharded"].clone(),
+                sparse_mesh,
+                (Shard(1), Shard(0)),
+            )
+        )
+        unsupported_fqn = "layers.0.routed_experts.unsupported"
+        with self.assertRaisesRegex(NotImplementedError, "multiple mesh axes"):
+            build_distributed_muon(
+                [
+                    {
+                        "params": [unsupported_parameter],
+                        "param_names": [unsupported_fqn],
+                    }
+                ],
+                compute_sharding_by_fqn={
+                    unsupported_fqn: MuonComputeShardingConfig(
+                        compute_layout=ComputeLayout(
+                            axis_placements={
+                                MeshAxisName.EFSDP: Replicate(),
+                                MeshAxisName.EP: Replicate(),
+                            },
+                        )
+                    )
+                },
+                bucket_configs=[BucketConfig(patterns=(unsupported_fqn,))],
+            )
 
 
 if __name__ == "__main__":
