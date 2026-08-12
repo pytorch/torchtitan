@@ -90,7 +90,7 @@ jobs:
         echo "pip install torchao took $((end - start)) seconds"
 
         # Run the GPU-only DistributedMuon test that CPU unit CI skips.
-        python -m pytest tests/unit_tests/test_distributed_muon.py \
+        python -m pytest tests/unit_tests/flex_shard/test_distributed_muon.py \
           --durations=20 -vv
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
