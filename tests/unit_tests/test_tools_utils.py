@@ -7,7 +7,46 @@
 import pytest
 import torch
 
-from torchtitan.tools.utils import get_cuda_flash_attention_impl
+from torchtitan.tools.utils import get_cuda_flash_attention_impl, get_local_device
+
+
+class _FakeDeviceModule:
+    def __init__(self, num_devices: int):
+        self.num_devices = num_devices
+
+    def device_count(self) -> int:
+        return self.num_devices
+
+
+def test_get_local_device_uses_local_rank_when_multiple_devices_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    monkeypatch.setattr("torchtitan.tools.utils.device_type", "cuda")
+    monkeypatch.setattr("torchtitan.tools.utils.device_module", _FakeDeviceModule(8))
+
+    assert get_local_device() == torch.device("cuda:3")
+
+
+def test_get_local_device_uses_zero_when_one_device_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    monkeypatch.setattr("torchtitan.tools.utils.device_type", "cuda")
+    monkeypatch.setattr("torchtitan.tools.utils.device_module", _FakeDeviceModule(1))
+
+    assert get_local_device() == torch.device("cuda:0")
+
+
+def test_get_local_device_rejects_out_of_range_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCAL_RANK", "8")
+    monkeypatch.setattr("torchtitan.tools.utils.device_type", "cuda")
+    monkeypatch.setattr("torchtitan.tools.utils.device_module", _FakeDeviceModule(8))
+
+    with pytest.raises(ValueError, match="outside the visible cuda device count"):
+        get_local_device()
 
 
 @pytest.mark.parametrize(
