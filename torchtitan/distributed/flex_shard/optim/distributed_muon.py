@@ -194,6 +194,7 @@ def flex_optimizer_reshard(
         raise ValueError(
             "flex_optimizer_reshard must run before optimizer.step is wrapped"
         )
+    optimizer._validate_groups()
 
     parameters_to_prepare = []
     for param_group in optimizer.param_groups:
