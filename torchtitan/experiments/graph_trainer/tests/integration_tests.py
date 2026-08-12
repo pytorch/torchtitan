@@ -600,14 +600,52 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
     ]
 
 
+def _build_muse_glimmer_tests() -> list[OverrideDefinitions]:
+    """MuseGlimmer integration tests."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.muse_glimmer",
+                    "--config graph_trainer_muse_glimmer_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 8",
+                ],
+            ],
+            "aot_fx_trace muse_glimmer FSDP",
+            "aot_fx_trace_muse_glimmer_fsdp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.muse_glimmer",
+                    "--config graph_trainer_muse_glimmer_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace muse_glimmer FSDP+TP",
+            "aot_fx_trace_muse_glimmer_fsdp_tp",
+            ngpu=8,
+        ),
+    ]
+
+
 def build_graph_trainer_test_list() -> list[OverrideDefinitions]:
-    """All graph_trainer integration tests (Llama3 + DeepSeek-v3 + Qwen3)."""
-    return _build_llama3_tests() + _build_deepseek_v3_tests() + _build_qwen3_tests()
+    """All graph_trainer integration tests."""
+    return (
+        _build_llama3_tests()
+        + _build_deepseek_v3_tests()
+        + _build_qwen3_tests()
+        + _build_muse_glimmer_tests()
+    )
 
 
 def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
-    """Llama3 tests only (for default A10 machines)."""
-    return _build_llama3_tests()
+    """Dense-model tests for default A10 machines."""
+    return _build_llama3_tests() + _build_muse_glimmer_tests()
 
 
 def _build_async_tp_tests() -> list[OverrideDefinitions]:
