@@ -27,6 +27,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.dist_linear import (
     AllGatherLinear,
     AllGatherLinearMulti,
+    dist_gemm_workspace_bytes,
     LinearReduceScatter,
 )
 
@@ -34,6 +35,48 @@ from torchtitan.distributed.dist_linear import (
 # DTensorTestBase falls back to a CPU/gloo mesh when CUDA is unavailable, so
 # without this guard the CPU CI job runs these for real and dies in the
 # dispatcher: the symm_mem ops have no CPU kernel.
+class TestWorkspaceSizing(unittest.TestCase):
+    """The reservation must cover every schedule the ops can pick.
+
+    Pure arithmetic, so it runs in CI with no devices. Under-reserving is the
+    dangerous direction: it puts workspace growth back inside CUDA graph capture,
+    and outside capture it silently breaks the "final size before any layer runs"
+    guarantee, so this pins the bound against each schedule's own requirement.
+    """
+
+    FP32 = 4
+
+    def test_covers_every_all_gather_shard(self):
+        """Both all-gathers reserve their input shard, not the gathered result.
+
+        True only while every call leaves return_A at its default; return_A=False
+        would select the multimem schedule, which reserves the full gathered
+        buffer instead. See dist_gemm_workspace_bytes.
+        """
+        for ranks in (2, 4, 8):
+            for tokens_global, features in ((8192, 2048), (256, 256), (16384, 4096)):
+                got = dist_gemm_workspace_bytes(
+                    tokens_global=tokens_global, features=features, ranks=ranks
+                )
+                shard = (tokens_global // ranks) * features * self.FP32
+                self.assertGreaterEqual(got, shard, f"ranks={ranks}")
+
+    def test_covers_the_double_buffered_reduce_scatter(self):
+        """The reduce-scatter asks for twice its output chunk."""
+        for ranks in (2, 4, 8):
+            got = dist_gemm_workspace_bytes(
+                tokens_global=8192, features=2048, ranks=ranks
+            )
+            rs = 2 * (8192 // ranks) * 2048 * self.FP32
+            self.assertGreaterEqual(got, rs, f"ranks={ranks}")
+
+    def test_single_rank_needs_nothing(self):
+        """At TP=1 the modules run the stock projections and never allocate."""
+        self.assertEqual(
+            dist_gemm_workspace_bytes(tokens_global=8192, features=2048, ranks=1), 0
+        )
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "symmetric memory requires CUDA")
 class TestDistLinearPrimitives(DTensorTestBase):
     """Forward and backward parity against an unsharded reference."""

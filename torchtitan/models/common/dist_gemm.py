@@ -37,6 +37,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.distributed.dist_linear import (
     AllGatherLinear,
     AllGatherLinearMulti,
+    dist_gemm_workspace_bytes,
     LinearReduceScatter,
     reserve_symm_mem_workspace,
 )
@@ -146,9 +147,11 @@ def reserve_dist_gemm_workspace(
 
     reserve_symm_mem_workspace(
         tp_group,
-        tokens_per_rank=(training.local_batch_size * training.seq_len) // tp_size,
-        features=features,
-        dtype=torch.float32,
+        min_bytes=dist_gemm_workspace_bytes(
+            tokens_global=training.local_batch_size * training.seq_len,
+            features=features,
+            ranks=tp_size,
+        ),
     )
 
 
