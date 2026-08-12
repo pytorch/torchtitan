@@ -57,8 +57,11 @@ torchtitan mid-layer name note: torchtitan exposes the pre-FFN norm as
 ``pre_feedforward_layernorm`` and ``post_feedforward_layernorm`` respectively.
 """
 
+import functools
 import re
 from typing import Any
+
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
@@ -68,6 +71,36 @@ from .model import MuseGlimmerModel
 # HF prefixes in the released MuseGlimmerForConditionalGeneration.
 _HF_TEXT_PREFIX = "model.language_model."
 _HF_VISION_PREFIX = "model.vision_tower."
+
+
+def _dtensor_safe(fn):
+    """Run a row-reshaping permute that is invalid on a tensor sharded along the
+    permuted (row) dim.
+
+    In the live save/load path ``to_hf`` / ``from_hf`` receive DTensors that
+    FSDP shards along dim 0 (the q/k output rows). The head-splitting
+    ``view(n_heads, ...)`` cannot unflatten an unevenly-sharded dim and raises
+    ``Cannot unflatten unevenly sharded tensor``. Redistribute to Replicate,
+    permute the full local tensor, then restore the original placements. Plain
+    (non-DTensor) tensors take the fast path unchanged.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, w, *args, **kwargs):
+        if isinstance(w, DTensor):
+            placements = w.placements
+            mesh = w.device_mesh
+            replicated = w.redistribute(
+                device_mesh=mesh, placements=[Replicate()] * mesh.ndim
+            )
+            local = fn(self, replicated.to_local(), *args, **kwargs)
+            out = DTensor.from_local(
+                local, mesh, [Replicate()] * mesh.ndim, run_check=False
+            )
+            return out.redistribute(device_mesh=mesh, placements=placements)
+        return fn(self, w, *args, **kwargs)
+
+    return wrapper
 
 
 class MuseGlimmerStateDictAdapter(StateDictAdapter):
@@ -138,6 +171,10 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
         }
 
     # ---- HF split-half <-> ComplexRoPE interleaved permute (as in Llama3) ----
+    # These reshape the row (dim-0) axis, which is invalid on a tensor sharded
+    # along that axis, so they are wrapped to redistribute DTensors to Replicate
+    # first (see _dtensor_safe).
+    @_dtensor_safe
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
         """native (interleaved) -> HF (split-half) row order for q/k."""
         if dim1 is None:
@@ -151,6 +188,7 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
             .clone()
         )
 
+    @_dtensor_safe
     def _reverse_permute(self, w, n_heads_arg, dim1=None, dim2=None):
         """HF (split-half) -> native (interleaved) row order for q/k."""
         if dim1 is None:
@@ -161,8 +199,10 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
             w.view(n_heads_arg, 2, dim1 // n_heads_arg // 2, dim2)
             .transpose(1, 2)
             .reshape(dim1, dim2)
+            .clone()
         )
 
+    @_dtensor_safe
     def _permute_1d(self, w, n_heads_arg):
         """Permute a 1D bias/vector (split-half -> interleaved, and inverse via
         the same transpose structure). For q/k biases in the vision tower."""
@@ -174,6 +214,7 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
             .clone()
         )
 
+    @_dtensor_safe
     def _reverse_permute_1d(self, w, n_heads_arg):
         dim = w.shape[0]
         return (
