@@ -23,13 +23,13 @@ from torch.distributed.tensor._utils import _compute_local_shape_and_global_offs
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
 
-from .._optimizer_reshard_runtime import (
+from ._optimizer_reshard_runtime import (
     _BucketedRedistributionRuntime,
     _BufferSlot,
     _LocalBucketExecutor,
 )
 
-from .._optimizer_reshard_schedule import (
+from ._optimizer_reshard_schedule import (
     _bind_bucket_configs,
     _BucketPlanningContext,
     _build_bucket_plans,
@@ -47,7 +47,7 @@ from .._optimizer_reshard_schedule import (
     _TensorRegionRoute,
     _validate_bucket_plans_across_ranks,
 )
-from ..optimizer_reshard import _BucketSpec, BucketConfig, ComputeLayout
+from .optimizer_reshard import _BucketSpec, BucketConfig, ComputeLayout
 
 
 __all__ = [
@@ -1412,19 +1412,18 @@ def _resolve_storage_to_compute_transition(
         for storage_mesh_axis, axis_name in enumerate(mesh_axis_names)
     }
     applicable_axis_placements = {
-        storage_axis_by_name[axis_name.value]: placement
+        storage_axis_by_name[axis_name]: placement
         for axis_name, placement in compute_layout.axis_placements.items()
-        if axis_name.value in storage_axis_by_name
+        if axis_name in storage_axis_by_name
     }
     applicable_owner_axes = tuple(
-        storage_axis_by_name[axis_name.value]
+        storage_axis_by_name[axis_name]
         for axis_name in compute_layout.owner_mesh_axis_names
-        if axis_name.value in storage_axis_by_name
+        if axis_name in storage_axis_by_name
     )
     if not applicable_axis_placements and not applicable_owner_axes:
         declared_axes = sorted(
-            [axis_name.value for axis_name in compute_layout.axis_placements]
-            + [axis_name.value for axis_name in compute_layout.owner_mesh_axis_names]
+            [*compute_layout.axis_placements] + [*compute_layout.owner_mesh_axis_names]
         )
         raise ValueError(
             f"Muon compute layout for parameter {fqn!r} declares no axis in "

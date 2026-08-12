@@ -15,30 +15,27 @@ from typing import Any
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
-
-
 __all__ = ["BucketConfig", "ComputeLayout"]
 
 
-class _FrozenAxisPlacements(Mapping[MeshAxisName, Replicate | Shard]):
+class _FrozenAxisPlacements(Mapping[str, Replicate | Shard]):
     """Small immutable mapping that remains safe to copy with configs."""
 
     __slots__ = ("_items",)
 
     def __init__(
         self,
-        placements: Mapping[MeshAxisName, Replicate | Shard],
+        placements: Mapping[str, Replicate | Shard],
     ) -> None:
         self._items = tuple(placements.items())
 
-    def __getitem__(self, axis_name: MeshAxisName) -> Replicate | Shard:
+    def __getitem__(self, axis_name: str) -> Replicate | Shard:
         for candidate_axis_name, placement in self._items:
             if candidate_axis_name == axis_name:
                 return placement
         raise KeyError(axis_name)
 
-    def __iter__(self) -> Iterator[MeshAxisName]:
+    def __iter__(self) -> Iterator[str]:
         return (axis_name for axis_name, _ in self._items)
 
     def __len__(self) -> int:
@@ -65,10 +62,8 @@ class ComputeLayout:
     must apply when the layout is resolved.
     """
 
-    axis_placements: Mapping[MeshAxisName, Replicate | Shard] = field(
-        default_factory=dict
-    )
-    owner_mesh_axis_names: tuple[MeshAxisName, ...] = ()
+    axis_placements: Mapping[str, Replicate | Shard] = field(default_factory=dict)
+    owner_mesh_axis_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         axis_placements = dict(self.axis_placements)
@@ -76,30 +71,24 @@ class ComputeLayout:
         if not axis_placements and not owner_mesh_axis_names:
             raise ValueError("ComputeLayout must declare a placement or owner axis")
         for axis_name, placement in axis_placements.items():
-            if type(axis_name) is not MeshAxisName:
-                raise ValueError("ComputeLayout placement axes must use MeshAxisName")
+            if not isinstance(axis_name, str):
+                raise ValueError("ComputeLayout placement axis names must be strings")
             if type(placement) not in (Replicate, Shard):
                 raise ValueError("ComputeLayout placements must be Replicate or Shard")
-        if any(
-            type(axis_name) is not MeshAxisName for axis_name in owner_mesh_axis_names
-        ):
-            raise ValueError("ComputeLayout owner axes must use MeshAxisName")
+        if any(not isinstance(axis_name, str) for axis_name in owner_mesh_axis_names):
+            raise ValueError("ComputeLayout owner axis names must be strings")
         if len(set(owner_mesh_axis_names)) != len(owner_mesh_axis_names):
             raise ValueError("ComputeLayout owner axes must be unique")
         overlapping_axes = set(axis_placements).intersection(owner_mesh_axis_names)
         if overlapping_axes:
-            names = sorted(axis_name.value for axis_name in overlapping_axes)
+            names = sorted(overlapping_axes)
             raise ValueError(
                 "ComputeLayout axes cannot have both placement and ownership: "
                 f"{names}"
             )
 
-        normalized_axis_placements = dict(
-            sorted(axis_placements.items(), key=lambda item: item[0].value)
-        )
-        normalized_owner_axes = tuple(
-            sorted(owner_mesh_axis_names, key=lambda axis_name: axis_name.value)
-        )
+        normalized_axis_placements = dict(sorted(axis_placements.items()))
+        normalized_owner_axes = tuple(sorted(owner_mesh_axis_names))
         object.__setattr__(
             self,
             "axis_placements",
