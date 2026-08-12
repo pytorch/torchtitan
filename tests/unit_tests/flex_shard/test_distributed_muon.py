@@ -20,7 +20,7 @@ from torchtitan.components.checkpoint_utils import (
 )
 from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout
 from torchtitan.distributed.flex_shard.optim import (
-    BatchedMatrixComputeView,
+    AttentionPerHeadComputeView,
     build_distributed_muon,
     MuonComputeShardingConfig,
 )
@@ -80,8 +80,8 @@ class TestDistributedMuon(DTensorTestBase):
                         compute_layout=ComputeLayout(
                             axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
                         ),
-                        compute_view=BatchedMatrixComputeView(
-                            num_matrices=self.world_size,
+                        compute_view=AttentionPerHeadComputeView(
+                            num_heads=self.world_size,
                         ),
                     ),
                 },

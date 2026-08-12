@@ -45,12 +45,12 @@ class ParamGroupConfig:
     fully define the optimizer for matched parameters — no implicit inheritance.
 
     Patterns are checked in order; first match wins. Place specific patterns
-    first, then use ``for_remaining_parameters`` for the fallback group. Example::
+    before a broad fallback pattern. Example::
 
         param_groups=[
             ParamGroupConfig(pattern=r"\\.bias$", ...),
             ParamGroupConfig(pattern=r"\\.router\\.", ...),
-            ParamGroupConfig.for_remaining_parameters(...),
+            ParamGroupConfig(pattern=r".*", ...),
         ]
     """
 
@@ -64,20 +64,6 @@ class ParamGroupConfig:
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     """Keyword arguments passed to the optimizer constructor.
     Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
-
-    @classmethod
-    def for_remaining_parameters(
-        cls,
-        *,
-        optimizer_name: str,
-        optimizer_kwargs: dict[str, Any],
-    ) -> "ParamGroupConfig":
-        """Create a group for parameters not matched by preceding groups."""
-        return cls(
-            pattern=r".*",
-            optimizer_name=optimizer_name,
-            optimizer_kwargs=optimizer_kwargs,
-        )
 
 
 T = TypeVar("T", bound=Optimizer)

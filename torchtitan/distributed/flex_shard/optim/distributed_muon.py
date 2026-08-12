@@ -52,7 +52,7 @@ from ..optimizer_reshard import (
 
 
 __all__ = [
-    "BatchedMatrixComputeView",
+    "AttentionPerHeadComputeView",
     "build_distributed_muon",
     "DistributedMuon",
     "flex_optimizer_reshard",
@@ -61,42 +61,37 @@ __all__ = [
 
 
 @dataclass(frozen=True, slots=True)
-class BatchedMatrixComputeView:
-    """Interpret flattened 2D storage as a batch of matrices for Muon.
+class AttentionPerHeadComputeView:
+    """Treat a flattened attention projection as one Muon matrix per head.
 
-    Given storage with shape ``[B * R, C]`` and ``num_matrices=B``, the
-    logical compute tensor has shape ``[B, R, C]``. Muon applies its
-    Newton-Schulz iteration independently to each ``[R, C]`` matrix. This
-    defines compute matrix boundaries without changing the stored parameter
-    shape.
-
-    For an attention projection, ``B`` is typically the number of heads. The
-    same view also applies to any parameter that concatenates equal-shaped
-    matrices along tensor dimension 0.
+    Storage has shape ``[H * R, C]``, where ``H`` is ``num_heads``. Muon
+    computes on ``[H, R, C]`` and applies its Newton-Schulz iteration
+    independently to each ``[R, C]`` head matrix without changing the stored
+    parameter shape.
     """
 
-    num_matrices: int
+    num_heads: int
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.num_matrices, bool)
-            or not isinstance(self.num_matrices, int)
-            or self.num_matrices <= 0
+            isinstance(self.num_heads, bool)
+            or not isinstance(self.num_heads, int)
+            or self.num_heads <= 0
         ):
-            raise ValueError("num_matrices must be a positive integer")
+            raise ValueError("num_heads must be a positive integer")
 
     def _resolve(self, storage_shape: torch.Size) -> _ResolvedBatchedMatrixView:
         if (
             len(storage_shape) != 2
             or storage_shape[0] == 0
-            or storage_shape[0] % self.num_matrices
+            or storage_shape[0] % self.num_heads
         ):
             raise ValueError(
                 f"storage shape {tuple(storage_shape)} cannot be viewed as "
-                f"{self.num_matrices} matrices"
+                f"{self.num_heads} attention heads"
             )
         return _ResolvedBatchedMatrixView(
-            matrix_rows=storage_shape[0] // self.num_matrices,
+            matrix_rows=storage_shape[0] // self.num_heads,
             matrix_columns=storage_shape[1],
         )
 
@@ -116,7 +111,7 @@ class MuonComputeShardingConfig:
 
     # Defines the logical tensor used for placement planning and Muon compute.
     # Shard dimensions in compute_layout refer to the viewed tensor.
-    compute_view: BatchedMatrixComputeView | None = None
+    compute_view: AttentionPerHeadComputeView | None = None
 
     def __post_init__(self) -> None:
         if type(self.compute_layout) is not ComputeLayout:
@@ -125,11 +120,11 @@ class MuonComputeShardingConfig:
             )
         if (
             self.compute_view is not None
-            and type(self.compute_view) is not BatchedMatrixComputeView
+            and type(self.compute_view) is not AttentionPerHeadComputeView
         ):
             raise ValueError(
                 "MuonComputeShardingConfig.compute_view must be "
-                "BatchedMatrixComputeView or None"
+                "AttentionPerHeadComputeView or None"
             )
 
     def to_dict(self) -> dict:
@@ -250,14 +245,13 @@ def flex_optimizer_reshard(
             local_storage_view = local_storage_for_compute_view
         else:
             compute_view_key = (
-                "batched_matrix",
-                compute_view.num_matrices,
-                0,
+                "attention_per_head",
+                compute_view.num_heads,
             )
             assert resolved_view is not None
             global_compute_shape = torch.Size(
                 (
-                    compute_view.num_matrices,
+                    compute_view.num_heads,
                     resolved_view.matrix_rows,
                     resolved_view.matrix_columns,
                 )
@@ -348,6 +342,8 @@ class DistributedMuon(Optimizer):
         self._validate_groups()
 
     def _validate_groups(self) -> None:
+        if len(self.param_groups) != 1:
+            raise ValueError("DistributedMuon requires exactly one parameter group")
         for group_index, group in enumerate(self.param_groups):
             ns_steps = group["ns_steps"]
             coefficients = group["ns_coefficients"]
