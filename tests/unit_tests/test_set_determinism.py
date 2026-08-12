@@ -5,11 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-import random
 import unittest
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import torch
 from torchtitan.config import DebugConfig
 from torchtitan.distributed.utils import set_determinism
@@ -319,32 +317,6 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
                 distinct_seed_mesh_dims=[],
             )
             mock_sda.assert_not_called()
-
-    def test_seeds_python_numpy_and_torch(self):
-        fake_mesh = MagicMock()
-        fake_mesh.world_size = 1
-        debug_config = DebugConfig(seed=42)
-
-        set_determinism(
-            parallel_dims=fake_mesh,
-            device=self.device,
-            debug_config=debug_config,
-            distinct_seed_mesh_dims=[],
-        )
-        first = (random.random(), np.random.random(), torch.rand(1))
-
-        set_determinism(
-            parallel_dims=fake_mesh,
-            device=self.device,
-            debug_config=debug_config,
-            distinct_seed_mesh_dims=[],
-        )
-        second = (random.random(), np.random.random(), torch.rand(1))
-
-        self.assertEqual(first[0], second[0])
-        self.assertEqual(first[1], second[1])
-        self.assertTrue(torch.equal(first[2], second[2]))
-
 
 if __name__ == "__main__":
     unittest.main()

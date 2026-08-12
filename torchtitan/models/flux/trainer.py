@@ -42,9 +42,9 @@ class FluxTrainer(Trainer):
     def __init__(self, config: Config):
         super().__init__(config)
 
-        # Set random seed, and maybe enable deterministic mode
-        # (mainly for debugging, expect perf loss).
-        # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
+        # Flux samples diffusion noise and timesteps during each model step, so
+        # data-parallel ranks need distinct model RNG streams. Dataset
+        # transformations such as prompt dropout use Grain's separate RNG.
         distinct_seed_mesh_dims = (
             ["cp", "dp_shard", "dp_replicate"]
             if config.parallelism.spmd_backend in ("full_dtensor", "spmd_types")
