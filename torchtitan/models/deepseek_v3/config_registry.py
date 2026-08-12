@@ -25,7 +25,7 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
-_PRODUCTION_ATTN_BACKEND = "flex_flash"
+_MINIMAL_ASYNC_EP_ATTN_BACKEND = "flex_flash"
 
 
 def enable_fused_swiglu(config: Trainer.Config) -> None:
@@ -140,7 +140,7 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
 
 
 def deepseek_v3_16b() -> Trainer.Config:
-    model_spec = model_registry("16B", attn_backend=_PRODUCTION_ATTN_BACKEND)
+    model_spec = model_registry("16B", attn_backend="flex")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -177,7 +177,7 @@ def deepseek_v3_16b_hybridep() -> Trainer.Config:
     config = deepseek_v3_16b()
     config.model_spec = model_registry(
         "16B",
-        attn_backend=_PRODUCTION_ATTN_BACKEND,
+        attn_backend="flex",
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
     )
@@ -188,7 +188,7 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
     config = deepseek_v3_16b()
     config.model_spec = model_registry(
         "16B",
-        attn_backend=_PRODUCTION_ATTN_BACKEND,
+        attn_backend=_MINIMAL_ASYNC_EP_ATTN_BACKEND,
         moe_comm_backend="minimal_async_ep",
     )
     enable_fused_swiglu(config)
@@ -207,7 +207,7 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
 def deepseek_v3_671b() -> Trainer.Config:
     model_spec = model_registry(
         "671B",
-        attn_backend=_PRODUCTION_ATTN_BACKEND,
+        attn_backend="flex",
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -253,7 +253,7 @@ def deepseek_v3_671b_float8() -> Trainer.Config:
     )
     config.model_spec = model_registry(
         "671B",
-        attn_backend=_PRODUCTION_ATTN_BACKEND,
+        attn_backend="flex",
         converters=[
             Float8LinearConverter.Config(
                 filter_fqns=["lm_head", "router.gate"],
@@ -271,7 +271,7 @@ def deepseek_v3_671b_bf16_minimal_async_ep() -> Trainer.Config:
     config = deepseek_v3_671b()
     config.model_spec = model_registry(
         "671B",
-        attn_backend=_PRODUCTION_ATTN_BACKEND,
+        attn_backend=_MINIMAL_ASYNC_EP_ATTN_BACKEND,
         moe_comm_backend="minimal_async_ep",
     )
     enable_fused_swiglu(config)
