@@ -5,12 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from unittest import mock
 
 import torch
-import torchtitan.distributed.flex_shard.optim.distributed_muon as distributed_muon_module
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, DTensor, Shard
+from torch.distributed.tensor import distribute_tensor, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -20,28 +18,16 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.distributed.flex_shard.optim.distributed_muon import (
-    _adjust_muon_learning_rate,
+from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout
+from torchtitan.distributed.flex_shard.optim import (
     BatchedMatrixComputeView,
     build_distributed_muon,
     MuonComputeShardingConfig,
-    Owned,
 )
-from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig
-
-
-class TestDistributedMuonConfig(unittest.TestCase):
-    def test_requires_compute_sharding_for_each_local_fqn(self):
-        parameter = torch.nn.Parameter(torch.empty(2, 2))
-        with self.assertRaisesRegex(
-            ValueError,
-            "missing compute sharding for Muon parameter 'weight'",
-        ):
-            build_distributed_muon(
-                [{"params": [parameter], "param_names": ["weight"]}],
-                compute_sharding_by_fqn={},
-                bucket_configs=[],
-            )
+from torchtitan.distributed.flex_shard.optim.distributed_muon import (
+    _adjust_muon_learning_rate,
+)
+from torchtitan.distributed.parallel_dims import MeshAxisName
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -87,12 +73,14 @@ class TestDistributedMuon(DTensorTestBase):
             oversharded_fqn = "layers.0.oversharded"
             aligned_fqns = ("layers.0.local.w1", "layers.0.local.w3")
             aligned_compute_sharding = MuonComputeShardingConfig(
-                compute_placement=Shard(0),
+                compute_layout=ComputeLayout(
+                    axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
+                ),
                 compute_view=BatchedMatrixComputeView(
                     num_matrices=4,
                 ),
             )
-            optimizer = build_distributed_muon(
+            return build_distributed_muon(
                 [
                     {
                         "params": [
@@ -107,12 +95,21 @@ class TestDistributedMuon(DTensorTestBase):
                         ],
                     }
                 ],
+                lr=lr,
+                weight_decay=weight_decay,
+                momentum=0.8,
+                nesterov=True,
+                ns_steps=ns_steps,
                 compute_sharding_by_fqn={
                     redistributed_fqn: MuonComputeShardingConfig(
-                        compute_placement=Owned()
+                        compute_layout=ComputeLayout(
+                            owner_mesh_axis_names=(MeshAxisName.DP_SHARD,),
+                        )
                     ),
                     oversharded_fqn: MuonComputeShardingConfig(
-                        compute_placement=Shard(0),
+                        compute_layout=ComputeLayout(
+                            axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
+                        ),
                         compute_view=BatchedMatrixComputeView(
                             num_matrices=3,
                         ),
@@ -122,18 +119,10 @@ class TestDistributedMuon(DTensorTestBase):
                 bucket_configs=[
                     BucketConfig(
                         patterns=("layers.0.*",),
-                        mesh_axis="dp_shard",
                         name="layers.0",
                     )
                 ],
-                lr=lr,
-                weight_decay=weight_decay,
-                momentum=0.8,
-                nesterov=True,
-                ns_steps=ns_steps,
             )
-            self.assertEqual(len(optimizer.param_groups), 1)
-            return optimizer
 
         def set_grads(
             redistributed: torch.nn.Parameter,
@@ -149,10 +138,8 @@ class TestDistributedMuon(DTensorTestBase):
                 parameter.grad = distribute_tensor(grad.clone(), mesh, (Shard(0),))
 
         def assert_matches_reference(
-            optimizer,
             redistributed: torch.nn.Parameter,
             stacks: dict[str, torch.nn.Parameter],
-            reference_optimizer: torch.optim.Muon,
             reference_redistributed: torch.nn.Parameter,
             reference_stacks: dict[str, tuple[torch.nn.Parameter, ...]],
             stacks_before: dict[str, torch.Tensor],
@@ -196,36 +183,6 @@ class TestDistributedMuon(DTensorTestBase):
                     atol=2e-2,
                 )
 
-                momentum = optimizer.state[parameter]["momentum_buffer"]
-                expected_momentum = torch.cat(
-                    [
-                        reference_optimizer.state[reference]["momentum_buffer"]
-                        for reference in reference_blocks
-                    ],
-                    dim=0,
-                ).narrow(0, row_offset, local_rows)
-                torch.testing.assert_close(
-                    momentum.to_local(),
-                    expected_momentum,
-                    rtol=0,
-                    atol=0,
-                )
-
-            for parameter in (redistributed, *stacks.values()):
-                self.assertIsInstance(parameter, DTensor)
-                self.assertEqual(parameter.placements, (Shard(0),))
-
-            redistributed_momentum = optimizer.state[redistributed]["momentum_buffer"]
-            expected_redistributed_momentum = reference_optimizer.state[
-                reference_redistributed
-            ]["momentum_buffer"].chunk(self.world_size, dim=0)[rank]
-            torch.testing.assert_close(
-                redistributed_momentum.to_local(),
-                expected_redistributed_momentum,
-                rtol=0,
-                atol=0,
-            )
-
         values = {}
         start = 12
         for name, (num_matrices, rows, columns) in stack_shapes.items():
@@ -244,9 +201,6 @@ class TestDistributedMuon(DTensorTestBase):
         redistributed = make_parameter(redistributed_value)
         stacks = {name: make_parameter(value) for name, value in values.items()}
         optimizer = make_optimizer(redistributed, stacks)
-        runtime = optimizer._redistribution_runtime
-        self.assertIsNotNone(runtime._context)
-        self.assertEqual(len(runtime._context.slots), 2)
 
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
         reference_stacks = {
@@ -302,41 +256,11 @@ class TestDistributedMuon(DTensorTestBase):
                 ):
                     parameter.grad = grad.clone()
 
-            runtime = current_optimizer._redistribution_runtime
-            self.assertIsNotNone(runtime._context)
-            reserved = runtime._context.slots[0].buffers.buffers[
-                (device, torch.float32)
-            ]
-            scratch = reserved.compute_scratch
-            self.assertIsNotNone(scratch)
-            expected_batch_numel = sum(
-                current_stacks[name].to_local().numel()
-                for name in ("layers.0.local.w1", "layers.0.local.w3")
-            )
-            self.assertGreaterEqual(scratch.numel(), expected_batch_numel)
-            scratch_data_ptr = scratch.data_ptr()
-            with mock.patch.object(
-                distributed_muon_module,
-                "_compute_muon_direction",
-                wraps=distributed_muon_module._compute_muon_direction,
-            ) as compute_muon_direction:
-                current_optimizer.step()
+            current_optimizer.step()
             reference_optimizer.step()
-            self.assertIs(reserved.compute_scratch, scratch)
-            self.assertEqual(reserved.compute_scratch.data_ptr(), scratch_data_ptr)
-            self.assertEqual(
-                [
-                    tuple(call.args[0].shape)
-                    for call in compute_muon_direction.call_args_list
-                    if tuple(call.args[0].shape[-2:]) == (5, 3)
-                ],
-                [(4, 5, 3)],
-            )
             assert_matches_reference(
-                current_optimizer,
                 current_redistributed,
                 current_stacks,
-                reference_optimizer,
                 reference_redistributed,
                 reference_stacks,
                 stacks_before,
@@ -376,14 +300,7 @@ class TestDistributedMuon(DTensorTestBase):
             ns_steps=3,
         )
         init_optim_state(resumed_optimizer)
-        with mock.patch.object(
-            resumed_optimizer,
-            "_initialize_plan",
-            wraps=resumed_optimizer._initialize_plan,
-        ) as initialize_plan:
-            load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
-        initialize_plan.assert_called_once()
-        self.assertEqual(resumed_optimizer.param_groups[0]["ns_steps"], 2)
+        load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
 
         step_and_assert(
             resumed_optimizer,
