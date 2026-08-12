@@ -97,7 +97,7 @@ class AttentionPerHeadComputeView:
 class MuonComputeShardingConfig:
     """Define Muon's logical tensor and temporary named-axis compute layout.
 
-    Ownership axes balance complete 2D matrices across their participants.
+    Matrix ownership axes balance complete 2D matrices across their participants.
     ``Shard(0)`` on a named axis partitions a 3D batch-first tensor
     ``[B, R, C]`` along its matrix batch. Omitted axes preserve their storage
     placement. Aligned storage computes locally. Identity-view redistribution
@@ -1410,19 +1410,23 @@ def _resolve_storage_to_compute_transition(
         axis_name: storage_mesh_axis
         for storage_mesh_axis, axis_name in enumerate(mesh_axis_names)
     }
-    applicable_axis_placements = {
+    applicable_placements_by_storage_mesh_axis = {
         storage_axis_by_name[axis_name]: placement
-        for axis_name, placement in compute_layout.axis_placements.items()
+        for axis_name, placement in compute_layout.placements_by_mesh_axis.items()
         if axis_name in storage_axis_by_name
     }
-    applicable_owner_axes = tuple(
+    applicable_matrix_ownership_storage_mesh_axes = tuple(
         storage_axis_by_name[axis_name]
-        for axis_name in compute_layout.owner_mesh_axis_names
+        for axis_name in compute_layout.matrix_ownership_axes
         if axis_name in storage_axis_by_name
     )
-    if not applicable_axis_placements and not applicable_owner_axes:
+    if (
+        not applicable_placements_by_storage_mesh_axis
+        and not applicable_matrix_ownership_storage_mesh_axes
+    ):
         declared_axes = sorted(
-            [*compute_layout.axis_placements] + [*compute_layout.owner_mesh_axis_names]
+            [*compute_layout.placements_by_mesh_axis]
+            + [*compute_layout.matrix_ownership_axes]
         )
         raise ValueError(
             f"Muon compute layout for parameter {fqn!r} declares no axis in "
@@ -1432,7 +1436,10 @@ def _resolve_storage_to_compute_transition(
     normalized_target_placements = {}
     changed_storage_mesh_axes = []
     declared_shard_dims = []
-    for storage_mesh_axis, placement in applicable_axis_placements.items():
+    for (
+        storage_mesh_axis,
+        placement,
+    ) in applicable_placements_by_storage_mesh_axis.items():
         if type(placement) is Shard:
             declared_shard_dims.append(
                 _normalize_dim(placement.dim, len(global_compute_shape))
@@ -1465,19 +1472,23 @@ def _resolve_storage_to_compute_transition(
         ]
         changed_storage_mesh_axes.extend(view_redistribution_axes)
 
-    active_owner_axes = tuple(
+    active_matrix_ownership_storage_mesh_axes = tuple(
         storage_mesh_axis
-        for storage_mesh_axis in applicable_owner_axes
+        for storage_mesh_axis in applicable_matrix_ownership_storage_mesh_axes
         if param.device_mesh.size(storage_mesh_axis) > 1
     )
     transport_axes = tuple(
-        sorted(set(changed_storage_mesh_axes).union(active_owner_axes))
+        sorted(
+            set(changed_storage_mesh_axes).union(
+                active_matrix_ownership_storage_mesh_axes
+            )
+        )
     )
     if len(transport_axes) > 1:
         axis_names = [mesh_axis_names[axis] for axis in transport_axes]
         raise NotImplementedError(
             f"Muon parameter {fqn!r} requires compute redistribution or "
-            f"ownership on multiple mesh axes {axis_names}; multi-axis "
+            f"matrix ownership on multiple mesh axes {axis_names}; multi-axis "
             "transport is not implemented"
         )
 
@@ -1531,9 +1542,9 @@ def _resolve_storage_to_compute_transition(
     resolved_target_signature = []
     resolved_target_by_storage_mesh_axis = {}
     resolved_shard_dims = []
-    owner_axis_set = set(applicable_owner_axes)
+    matrix_ownership_axis_set = set(applicable_matrix_ownership_storage_mesh_axes)
     for storage_mesh_axis, axis_name in enumerate(mesh_axis_names):
-        if storage_mesh_axis in owner_axis_set:
+        if storage_mesh_axis in matrix_ownership_axis_set:
             target_key: tuple[Any, ...] = ("owned",)
         elif storage_mesh_axis in normalized_target_placements:
             target_key = normalized_target_placements[storage_mesh_axis]
@@ -1555,8 +1566,12 @@ def _resolve_storage_to_compute_transition(
 
     resolved_compute_layout_signature = tuple(resolved_target_signature)
     compute_shard_dims = [*resolved_shard_dims, *declared_shard_dims]
-    if applicable_owner_axes and (len(global_compute_shape) != 2 or param.ndim != 2):
-        raise ValueError(f"Muon ownership for parameter {fqn!r} requires a 2D matrix")
+    if applicable_matrix_ownership_storage_mesh_axes and (
+        len(global_compute_shape) != 2 or param.ndim != 2
+    ):
+        raise ValueError(
+            f"Muon matrix ownership for parameter {fqn!r} requires a 2D matrix"
+        )
     if compute_shard_dims:
         if len(global_compute_shape) != 3 or any(
             shard_dim != 0 for shard_dim in compute_shard_dims
@@ -1566,7 +1581,7 @@ def _resolve_storage_to_compute_transition(
                 "batch-first tensor sharded only on tensor dimension 0"
             )
 
-    if active_owner_axes:
+    if active_matrix_ownership_storage_mesh_axes:
         compute_assignment: _ComputeAssignment = _SingleParticipantCompute()
     elif redistribution_storage_mesh_axis is not None:
         transport_target = resolved_target_by_storage_mesh_axis[
@@ -1579,7 +1594,7 @@ def _resolve_storage_to_compute_transition(
             compute_assignment = _AllParticipantsCompute()
     elif compute_shard_dims:
         compute_assignment = _DimPartitionedCompute(0)
-    elif applicable_owner_axes:
+    elif applicable_matrix_ownership_storage_mesh_axes:
         compute_assignment = _SingleParticipantCompute()
     else:
         compute_assignment = _AllParticipantsCompute()

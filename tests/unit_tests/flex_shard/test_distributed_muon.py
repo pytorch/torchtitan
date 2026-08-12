@@ -75,7 +75,7 @@ class TestDistributedMuon(DTensorTestBase):
             aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
             aligned_compute_sharding = MuonComputeShardingConfig(
                 compute_layout=ComputeLayout(
-                    axis_placements={"dp_shard": Shard(0)},
+                    placements_by_mesh_axis={"dp_shard": Shard(0)},
                 ),
                 compute_view=AttentionPerHeadComputeView(
                     num_heads=4,
@@ -104,12 +104,12 @@ class TestDistributedMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            owner_mesh_axis_names=("dp_shard",),
+                            matrix_ownership_axes=("dp_shard",),
                         )
                     ),
                     oversharded_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            axis_placements={"dp_shard": Shard(0)},
+                            placements_by_mesh_axis={"dp_shard": Shard(0)},
                         ),
                         compute_view=AttentionPerHeadComputeView(
                             num_heads=3,
@@ -417,17 +417,17 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             compute_sharding_by_fqn={
                 dense_fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        owner_mesh_axis_names=("dp_shard",),
+                        matrix_ownership_axes=("dp_shard",),
                     )
                 ),
                 "layers.0.routed_experts.sharded": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        axis_placements={"efsdp": Shard(0)},
+                        placements_by_mesh_axis={"efsdp": Shard(0)},
                     )
                 ),
                 "layers.0.routed_experts.replicated": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        axis_placements={
+                        placements_by_mesh_axis={
                             "efsdp": Replicate(),
                             "ep": Shard(0),
                         },
@@ -435,7 +435,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 ),
                 "layers.0.routed_experts.repeated_shard": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        axis_placements={"efsdp": Replicate()},
+                        placements_by_mesh_axis={"efsdp": Replicate()},
                     )
                 ),
             },
@@ -554,7 +554,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 compute_sharding_by_fqn={
                     unsupported_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            axis_placements={
+                            placements_by_mesh_axis={
                                 "efsdp": Replicate(),
                                 "ep": Replicate(),
                             },
