@@ -9,7 +9,10 @@ import spmd_types as spmd
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.models.common.dist_gemm_attention import DistGemmGQAttention
+from torchtitan.models.common.dist_gemm import (
+    AllGatherFusedFeedForward,
+    RowParallelLinear,
+)
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 DP = MeshAxisName.DP
@@ -169,7 +172,9 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     )
     # The dist-GEMM attention block runs both TP collectives inside its own
     # GEMMs, so it declares different activation contracts from the stock block.
-    dist_gemm = isinstance(attention_cfg, DistGemmGQAttention.Config)
+    # SP and spmd_types are preconditions for dist-GEMM, enforced at config time in
+    # maybe_update_dist_gemm_config; this branch only declares the contracts.
+    dist_gemm = isinstance(attention_cfg.wo, RowParallelLinear.Config)
 
     attn_x_layout = (
         dense_sequence_parallel_placement()
@@ -199,11 +204,15 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     wo_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
         # A stock rowwise linear emits a Partial over its slice of K and lets the
-        # framework reduce-scatter it. AttentionOutputLinear collapses those two
+        # framework reduce-scatter it. RowParallelLinear collapses those two
         # steps -- the reduce-scatter happens inside the fused op -- so it returns
         # the final Shard(1) directly and never produces a Partial. Keep only the
         # parameter shardings: with the output already in its final layout there
         # is nothing left to check or redistribute.
+        #
+        # Transitional. Once redistribute collectives move inside the modules and
+        # boundary src->dst redistribution goes away, every module declares only
+        # its state like this and the branch collapses.
         wo_config = ShardingConfig(state_shardings=wo_config.state_shardings)
     attention_cfg.wo.sharding_config = wo_config
 
@@ -262,13 +271,26 @@ def set_dense_ffn_sharding(
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    feed_forward_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={"x": attn_x_layout},
-        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+    # Same two differences as the dist-GEMM attention block: the fused w1/w3
+    # consume the sequence shard directly, so there is no boundary all-gather to
+    # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
+    # See set_gqa_attention_sharding; both branches collapse once redistribute
+    # collectives move inside the modules.
+    dist_gemm = isinstance(feed_forward_cfg, AllGatherFusedFeedForward.Config)
+    feed_forward_cfg.sharding_config = (
+        None
+        if dist_gemm
+        else ShardingConfig(
+            in_src_shardings={"x": attn_x_layout},
+            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+        )
     )
     feed_forward_cfg.w1.sharding_config = colwise_config()
     feed_forward_cfg.w3.sharding_config = colwise_config()
-    feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
+    w2_config = rowwise_config(output_sp=enable_sp)
+    if dist_gemm:
+        w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)
+    feed_forward_cfg.w2.sharding_config = w2_config
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:

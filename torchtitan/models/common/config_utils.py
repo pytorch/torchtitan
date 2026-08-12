@@ -26,10 +26,10 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.dist_gemm_attention import (
+from torchtitan.models.common.dist_gemm import (
+    AllGatherFusedFeedForward,
     AllGatherFusedQKVLinear,
-    AttentionOutputLinear,
-    DistGemmGQAttention,
+    RowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -209,7 +209,7 @@ def make_gqa_config(
 
     # The backend picks the classes; everything below builds the same shapes into
     # whichever was chosen.
-    fused_qkv_cls, wo_cls, attention_cls = FusedQKVLinear, Linear, GQAttention
+    fused_qkv_cls, wo_cls = FusedQKVLinear, Linear
     if gemm_backend == "dist_gemm":
         if not fuse_qkv:
             raise ValueError(
@@ -218,8 +218,7 @@ def make_gqa_config(
                 "schedule to fall back on."
             )
         fused_qkv_cls = AllGatherFusedQKVLinear
-        wo_cls = AttentionOutputLinear
-        attention_cls = DistGemmGQAttention
+        wo_cls = RowParallelLinear
 
     if fuse_qkv:
         qkv = fused_qkv_cls.Config(
@@ -254,7 +253,7 @@ def make_gqa_config(
             ),
         )
 
-    return attention_cls.Config(
+    return GQAttention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
@@ -277,9 +276,15 @@ def make_ffn_config(
     hidden_dim: int,
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
+    gemm_backend: GemmBackend = "default",
 ) -> FeedForward.Config:
-    """Build a fully-specified FeedForward.Config."""
-    return FeedForward.Config(
+    """Build a fully-specified FeedForward.Config.
+
+    ``gemm_backend="dist_gemm"`` folds the TP collectives into the GEMMs: one
+    all-gather feeds w1 and w3, and w2 reduce-scatters. See make_gqa_config.
+    """
+    ffn_cls = AllGatherFusedFeedForward if gemm_backend == "dist_gemm" else FeedForward
+    return ffn_cls.Config(
         w1=Linear.Config(
             in_features=dim, out_features=hidden_dim, param_init=w1_param_init
         ),

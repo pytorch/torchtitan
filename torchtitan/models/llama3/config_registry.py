@@ -82,9 +82,14 @@ def llama3_debugmodel_dist_gemm() -> Trainer.Config:
 
     Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
     fall back to the stock projections, so this stays runnable on one rank.
+
+    ``spmd_backend`` is pinned to spmd_types: the fused modules take and return
+    plain local tensors, which is that backend's contract. The DTensor backends
+    are being deprecated and are not supported here.
     """
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", gemm_backend="dist_gemm")
+    config.parallelism.spmd_backend = "spmd_types"
     return config
 
 

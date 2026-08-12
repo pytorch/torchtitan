@@ -104,6 +104,7 @@ def _build_llama3_layers(
                     hidden_dim=hidden_dim,
                     w1_param_init=_LINEAR_INIT,
                     w2w3_param_init=_depth_init(layer_id),
+                    gemm_backend=gemm_backend,
                 ),
             )
         )

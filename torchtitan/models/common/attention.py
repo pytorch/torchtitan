@@ -952,7 +952,6 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        B, L, _ = x_BLD.shape
         xq_BLNH, xk_BLNH, xv_BLNH = self.qkv_linear(x_BLD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
@@ -973,5 +972,9 @@ class GQAttention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        out_BLD = out_BLNH.view(B, L, -1)
+        # Fold heads from out_BLNH's own shape rather than from x_BLD's. A QKV
+        # that changes the sequence length -- AllGatherFusedQKVLinear gathers the
+        # SP shard -- makes the input's L wrong here, and under spmd_types (local
+        # shapes, no placements) that silently folds sequence into features.
+        out_BLD = out_BLNH.flatten(2)
         return self.wo(out_BLD)

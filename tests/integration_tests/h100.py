@@ -103,9 +103,9 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "Dist GEMM: fuse the TP collectives into the attention QKV and output "
+            "Dist GEMM: fuse the TP collectives into the attention and FFN "
             "projections (FSDP2 + TP2)",
-            "dist_gemm_attention",
+            "dist_gemm",
             ngpu=4,
             # symmetric memory is CUDA-only.
             skip_rocm_test=True,

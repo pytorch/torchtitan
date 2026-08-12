@@ -17,7 +17,7 @@ the template:
    survive a real ``parallelize``? Still no CUDA: nothing here runs the fused ops.
 3. Numerics for the underlying primitives live in ``test_dist_linear.py`` (2
    GPUs), and an integration entry in ``tests/integration_tests/h100.py`` runs a
-   real training step end to end; see ``dist_gemm_attention`` there.
+   real training step end to end; see ``dist_gemm`` there.
 
 Both classes here run in CI. Note there is no GPU unit-test job, so anything
 CUDA-guarded is developer-run only.
@@ -25,6 +25,9 @@ CUDA-guarded is developer-run only.
 
 import unittest
 from unittest.mock import patch
+
+import torch
+from torch.distributed.device_mesh import init_device_mesh
 
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -34,11 +37,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
-from torchtitan.models.common.dist_gemm_attention import (
+from torchtitan.models.common.dist_gemm import (
     AllGatherFusedQKVLinear,
-    AttentionOutputLinear,
-    DistGemmGQAttention,
-    maybe_update_dist_gemm_config,
+    reserve_dist_gemm_workspace,
+    RowParallelLinear,
 )
 
 DIM = 256
@@ -55,17 +57,15 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         spec = model_registry("debugmodel", gemm_backend="dist_gemm")
         for layer in spec.model.layers:
             attn = layer.attention
-            self.assertIsInstance(attn, DistGemmGQAttention.Config)
             self.assertIsInstance(attn.qkv_linear, AllGatherFusedQKVLinear.Config)
-            self.assertIsInstance(attn.wo, AttentionOutputLinear.Config)
+            self.assertIsInstance(attn.wo, RowParallelLinear.Config)
 
     def test_default_gemm_backend_is_untouched(self):
         """The default must stay stock, or every model silently changes."""
         from torchtitan.models.llama3 import model_registry
 
         for layer in model_registry("debugmodel").model.layers:
-            self.assertNotIsInstance(layer.attention, DistGemmGQAttention.Config)
-            self.assertNotIsInstance(layer.attention.wo, AttentionOutputLinear.Config)
+            self.assertNotIsInstance(layer.attention.wo, RowParallelLinear.Config)
 
     def test_stock_parameter_shapes_survive(self):
         """Fused modules keep the stock layouts, or checkpoints stop loading."""
@@ -103,31 +103,6 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
                 gemm_backend="dist_gemm",
             )
 
-    def test_tokens_per_rank_is_stamped_from_runtime_config(self):
-        """maybe_update_dist_gemm_config carries seq_len x batch onto the modules.
-
-        The symmetric-memory workspace is sized from this at parallelize time, so a
-        None here silently degrades to lazy growth (correct, but not CUDA-graph
-        safe). Worth pinning.
-        """
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
-
-        trainer_cfg = llama3_debugmodel_dist_gemm()
-        trainer_cfg.training.seq_len = 512
-        trainer_cfg.training.local_batch_size = 4
-        model_cfg = trainer_cfg.model_spec.model
-
-        ours = [
-            c
-            for layer in model_cfg.layers
-            for c in (layer.attention.qkv_linear, layer.attention.wo)
-        ]
-        self.assertTrue(ours, "gemm_backend did not reach any attention projection")
-        self.assertTrue(all(c.tokens_per_rank is None for c in ours))
-
-        maybe_update_dist_gemm_config(model_cfg, trainer_cfg)
-        self.assertTrue(all(c.tokens_per_rank == 4 * 512 for c in ours))
-
     def test_sharding_setup_declares_the_fused_contracts(self):
         """set_gqa_attention_sharding declares different contracts for dist-GEMM.
 
@@ -156,14 +131,6 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         self.assertIsNone(fused.wo.sharding_config.out_dst_shardings)
         # the weight sharding still has to be declared, or wo is never sharded
         self.assertIn("weight", fused.wo.sharding_config.state_shardings)
-
-    def test_non_trainer_config_is_a_no_op(self):
-        """Inference-only callers have no fixed token count; must not raise."""
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
-
-        model_cfg = llama3_debugmodel_dist_gemm().model_spec.model
-        maybe_update_dist_gemm_config(model_cfg, object())
-        self.assertIsNone(model_cfg.layers[0].attention.wo.tokens_per_rank)
 
 
 class TestDistGemmAttentionSharding(DTensorTestBase):
@@ -194,6 +161,57 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
             parallel_dims.build_mesh()
         return parallel_dims
 
+    def _built_block(self, trainer_cfg):
+        """One built dist-GEMM attention block, as a stand-in for the model.
+
+        reserve_dist_gemm_workspace only needs ``.modules()``, and a block is one
+        of the modules it looks for, so this avoids building a whole model.
+        """
+        attn_cfg = trainer_cfg.model_spec.model.layers[0].attention
+        set_gqa_attention_sharding(attn_cfg, enable_sp=True)
+        return attn_cfg.build().to(self.device_type)
+
+    @with_comms
+    def test_reserve_rejects_dtensor_backend(self):
+        """dist-GEMM is spmd_types-only; the DTensor backends are deprecated."""
+        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
+
+        cfg = llama3_debugmodel_dist_gemm()
+        block = self._built_block(cfg)
+        cfg.parallelism.spmd_backend = "default"
+        with self.assertRaisesRegex(ValueError, "requires parallelism.spmd_backend"):
+            reserve_dist_gemm_workspace(
+                block, self._parallel_dims(), cfg.training, cfg.parallelism
+            )
+
+    @with_comms
+    def test_reserve_rejects_sequence_parallel_disabled(self):
+        """The fused GEMMs *are* the SP collectives; without SP there is nothing
+        to fuse, and wo would reduce-scatter where it must all-reduce."""
+        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
+
+        cfg = llama3_debugmodel_dist_gemm()
+        block = self._built_block(cfg)
+        cfg.parallelism.enable_sequence_parallel = False
+        with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
+            reserve_dist_gemm_workspace(
+                block, self._parallel_dims(), cfg.training, cfg.parallelism
+            )
+
+    @with_comms
+    def test_reserve_is_a_noop_for_a_stock_model(self):
+        """Every model calls this from parallelize_fn, so it must cost nothing
+        and validate nothing when no layer selected dist_gemm."""
+        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+
+        cfg = llama3_debugmodel()
+        stock = cfg.model_spec.model.layers[0].attention.build().to(self.device_type)
+        # a backend that dist_gemm would reject, to prove nothing is validated
+        cfg.parallelism.spmd_backend = "default"
+        reserve_dist_gemm_workspace(
+            stock, self._parallel_dims(), cfg.training, cfg.parallelism
+        )
+
     @with_comms
     def test_parallelize_preserves_the_fused_contracts(self):
         """Nothing downstream of the declaration undoes it.
@@ -216,6 +234,87 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         self.assertIsNone(attn.wo._sharding_config.out_src_shardings)
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "symmetric memory requires CUDA")
+class TestFusedFeedForwardNumerics(DTensorTestBase):
+    """The fused FFN must match the stock one under TP+SP.
+
+    Proves the fused path actually runs (a silent fallback would still match, so
+    the weights are sharded per rank -- the stock module could not consume them)
+    and that the sequence-major flatten/unflatten round-trips.
+    """
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @with_comms
+    def test_matches_stock_feed_forward(self):
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.distributed.utils import set_spmd_backend
+        from torchtitan.models.common.config_utils import make_ffn_config
+
+        R = self.world_size
+        dev = self.device_type
+        dim, hidden, bsz, seq = 64, 128, 2, 8 * R
+        init = {"weight": torch.nn.init.zeros_}
+
+        torch.manual_seed(0)
+        stock = (
+            make_ffn_config(
+                dim=dim, hidden_dim=hidden, w1_param_init=init, w2w3_param_init=init
+            )
+            .build()
+            .to(dev)
+        )
+        fused = (
+            make_ffn_config(
+                dim=dim,
+                hidden_dim=hidden,
+                w1_param_init=init,
+                w2w3_param_init=init,
+                gemm_backend="dist_gemm",
+            )
+            .build()
+            .to(dev)
+        )
+
+        with torch.no_grad():
+            for m in (stock, fused):
+                for w in (m.w1.weight, m.w2.weight, m.w3.weight):
+                    torch.manual_seed(hash(tuple(w.shape)) % 2**31)
+                    w.copy_(torch.randn_like(w) * 0.1)
+
+        x = torch.randn(bsz, seq, dim, device=dev)
+        ref = stock(x)
+
+        # shard the fused module's weights: w1/w3 colwise, w2 rowwise
+        with torch.no_grad():
+            fused.w1.weight = torch.nn.Parameter(
+                stock.w1.weight.chunk(R, 0)[self.rank].contiguous()
+            )
+            fused.w3.weight = torch.nn.Parameter(
+                stock.w3.weight.chunk(R, 0)[self.rank].contiguous()
+            )
+            fused.w2.weight = torch.nn.Parameter(
+                stock.w2.weight.chunk(R, 1)[self.rank].contiguous()
+            )
+
+        # needs mesh_dim_names, and a "tp" axis for tp_group_from_context
+        mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
+        set_spmd_backend("spmd_types")
+        try:
+            with set_current_spmd_mesh(mesh):
+                x_shard = x.chunk(R, 1)[self.rank].contiguous()
+                out_shard = fused(x_shard)
+        finally:
+            set_spmd_backend("default")
+
+        # fused returns this rank's sequence shard of the full-sequence result
+        torch.testing.assert_close(
+            out_shard, ref.chunk(R, 1)[self.rank], atol=2e-3, rtol=2e-3
+        )
 
 
 if __name__ == "__main__":

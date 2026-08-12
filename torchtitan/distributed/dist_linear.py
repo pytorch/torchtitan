@@ -27,6 +27,7 @@ here.
 
 from __future__ import annotations
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 
@@ -82,31 +83,65 @@ def reserve_symm_mem_workspace(
     symm_mem.get_symm_mem_workspace(group.group_name, min_size=min_size)
 
 
+@spmd.register_autograd_function
 class AllGatherLinear(torch.autograd.Function):
     """All-gather the sequence shard, then apply a column-parallel linear.
 
-    Over ``W`` ranks, with ``M`` rows of sequence-major tokens:
+    Over ``R`` ranks, with ``M`` rows of sequence-major tokens:
 
-        x_shard_m  [M / W, K]   this rank's slice of the sequence
-        w_shard_n  [N / W, K]   weight sharded over its output features
-        y_shard_n  [M, N / W]   full sequence, features still sharded
+        x_shard_m  [M / R, K]   this rank's slice of the sequence
+        w_shard_n  [N / R, K]   weight sharded over its output features
+        y_shard_n  [M, N / R]   full sequence, features still sharded
+        x_shard_k  [M, K / R]   full sequence, features sharded; the slice of the
+                                gathered x that forward saves for wgrad
 
-        forward   y  [M, N / W] = all_gather(x) [M, K] @ w.T [K, N / W]
-        dgrad     dx [M / W, K] = reduce_scatter(dy [M, N / W] @ w [N / W, K])
-                                  the dual of the forward gather
-        wgrad     dw [N / W, K] = (all_gather(x_k.T) [K, M] @ dy [M, N / W]).T
-                                  see below
-        dbias        [N / W]    = dy.sum(0), already complete because dy holds
-                                  the full sequence
+        forward    y_shard_n  = all_gather(x_shard_m) [M, K] @ w_shard_n.T
+        dgrad      dx_shard_m = reduce_scatter(dy_shard_n @ w_shard_n)
+                                the dual of the forward gather
+        wgrad      dw_shard_n = (all_gather(x_shard_k.T) [K, M] @ dy_shard_n).T
+                                see below
+        dbias         [N / R]  = dy_shard_n.sum(0), already complete because
+                                dy_shard_n holds the full sequence
 
-    The weight gradient needs the gathered ``x``, but holding that until
-    backward would cost ``W`` times the activation memory. Forward instead saves
-    the K-sharded slice of it, ``[M, K / W]``, which is the same size as the
-    input this rank already had, and backward rebuilds ``x.T`` by all-gathering
-    that slice along K. Transposing it first is what makes that cheap: K is
-    dim 1 of the slice but dim 0 of ``[K / W, M]``, so the gather stays on
-    dim 0, the only dim the fused all-gather-matmul can consume in place.
+    Saving the gathered ``x`` for wgrad would cost ``R`` times the activation
+    memory, so forward saves ``x_shard_k`` instead -- the same number of elements
+    the input already had -- and backward re-gathers it along K.
+
+    Why backward transposes it first. wgrad needs ``x`` gathered along K, i.e.
+    ``[K, M]`` from a local ``[M, K / R]``. ``fused_all_gather_matmul`` can only
+    gather dim 0 of its input (``gather_dim=0`` is the sole case with a fused
+    schedule; see ``_fused_all_gather_matmul_impl``, which moves any other
+    gather_dim to the front and flattens, i.e. copies). In ``x_shard_k`` the
+    sharded axis K is dim 1, so gathering it directly would take that copy path.
+    Transposing to ``[K / R, M]`` puts K on dim 0, so the same gather runs on the
+    fused path with no pre-copy -- and ``[K, M]`` is the orientation wgrad wants
+    anyway.
     """
+
+    @staticmethod
+    def typecheck_forward(
+        x_shard_m: torch.Tensor,
+        w_shard_n: torch.Tensor,
+        bias_shard_n: torch.Tensor | None,
+        group: dist.ProcessGroup,
+        group_name: str,
+    ) -> torch.Tensor:
+        """SPMD type: x S(0)@TP, w S(0)@TP -> y S(1)@TP.
+
+        The gather consumes the row shard, so the result is full on rows; the
+        weight's output-feature shard survives the GEMM. Non-TP axes pass through
+        from x.
+        """
+        spmd.assert_type(x_shard_m, {group: spmd.S(0)})
+        spmd.assert_type(w_shard_n, {group: spmd.S(0)})
+        if bias_shard_n is not None:
+            spmd.assert_type(bias_shard_n, {group: spmd.S(0)})
+        result = AllGatherLinear.apply(
+            x_shard_m, w_shard_n, bias_shard_n, group, group_name
+        )
+        output_type = {**spmd.get_local_type(x_shard_m), group: spmd.S(1)}
+        spmd.assert_type(result, output_type)
+        return result
 
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]
@@ -177,28 +212,146 @@ class AllGatherLinear(torch.autograd.Function):
         return grad_x_shard_m, grad_w_shard_n, grad_bias, None, None
 
 
+@spmd.register_autograd_function
+class AllGatherLinearMulti(torch.autograd.Function):
+    """One all-gather feeding several column-parallel linears that share an input.
+
+    The SwiGLU case: ``w1`` and ``w3`` both consume the same activation, so
+    gathering once and running two GEMMs off it halves the collectives versus
+    applying :class:`AllGatherLinear` twice.
+
+        x_shard_m   [M / R, K]      this rank's slice of the sequence
+        w_shards_n  [N / R, K] x n  weights, each sharded over its out-features
+        y_shards_n  [M, N / R] x n  full sequence, features still sharded
+
+        forward     one all-gather, n GEMMs (the op takes a list of ``Bs``)
+        dgrad       reduce_scatter(cat(dy, dim=1) @ cat(w, dim=0))
+                    the cats express the sum over outputs as a single product, so
+                    dgrad stays one collective; they cost one dy-sized and one
+                    weight-sized copy, cheaper than a second reduce-scatter
+        wgrad       one all_gather of x_shard_k.T feeding n GEMMs, same list trick
+
+    No bias: torchtitan's dense FFN builds its projections with ``bias=False``,
+    and threading optional per-weight biases through ``*args`` autograd is not
+    worth it. Callers with a bias should use the stock projection.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx,
+        x_shard_m: torch.Tensor,
+        group: dist.ProcessGroup,
+        group_name: str,
+        *w_shards_n: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        ensure_symm_mem_ops()
+        if not x_shard_m.is_contiguous():
+            x_shard_m = x_shard_m.contiguous()
+
+        x_full, outputs = torch.ops.symm_mem.fused_all_gather_matmul(
+            x_shard_m,
+            [w.T for w in w_shards_n],
+            0,
+            group_name,
+        )
+
+        rank = group.rank()
+        world_size = group.size()
+        # See AllGatherLinear: keep only a K-shard of the gathered x for wgrad.
+        x_shard_k = torch.chunk(x_full, world_size, dim=1)[rank].contiguous()
+
+        ctx.save_for_backward(x_shard_k, *w_shards_n)
+        ctx.group_name = group_name
+        return tuple(outputs)
+
+    @staticmethod
+    def backward(ctx, *grad_ys: torch.Tensor):
+        x_shard_k, *w_shards_n = ctx.saved_tensors
+        grad_ys = tuple(g if g.is_contiguous() else g.contiguous() for g in grad_ys)
+
+        grad_x_shard_m = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+            torch.cat(grad_ys, dim=1),
+            torch.cat(w_shards_n, dim=0),
+            "sum",
+            0,
+            ctx.group_name,
+        )
+
+        _, grad_w_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
+            x_shard_k.T.contiguous(),
+            list(grad_ys),
+            0,
+            ctx.group_name,
+            return_A=False,
+        )
+        grad_ws = tuple(g.T.contiguous() for g in grad_w_outputs)
+        return (grad_x_shard_m, None, None, *grad_ws)
+
+    @staticmethod
+    def typecheck_forward(
+        x_shard_m: torch.Tensor,
+        group: dist.ProcessGroup,
+        group_name: str,
+        *w_shards_n: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """SPMD type: x S(0)@TP, each w S(0)@TP -> each y S(1)@TP."""
+        spmd.assert_type(x_shard_m, {group: spmd.S(0)})
+        for w in w_shards_n:
+            spmd.assert_type(w, {group: spmd.S(0)})
+        results = AllGatherLinearMulti.apply(x_shard_m, group, group_name, *w_shards_n)
+        output_type = {**spmd.get_local_type(x_shard_m), group: spmd.S(1)}
+        for result in results:
+            spmd.assert_type(result, output_type)
+        return results
+
+
+@spmd.register_autograd_function
 class LinearReduceScatter(torch.autograd.Function):
     """Apply a row-parallel linear, then reduce-scatter over the sequence.
 
     The mirror image of :class:`AllGatherLinear`:
 
-        x_shard_k  [M, K / W]   full sequence, features sharded
-        w_shard_k  [N, K / W]   weight sharded over its input features
-        y_shard_m  [M / W, N]   sequence sharded again, features complete
+        x_shard_k  [M, K / R]   full sequence, features sharded
+        w_shard_k  [N, K / R]   weight sharded over its input features
+        y_shard_m  [M / R, N]   sequence sharded again, features complete
 
-        forward   y  [M / W, N] = reduce_scatter(x [M, K / W] @ w.T [K / W, N])
-                                  the local matmul is a partial sum over K; the
-                                  reduce-scatter completes it and shards over M
-        dgrad     dx [M, K / W] = all_gather(dy) [M, N] @ w [N, K / W]
-                                  the dual of the forward scatter
-        wgrad     dw [N, K / W] = all_gather(dy).T [N, M] @ x [M, K / W]
-                                  accumulated in fp32
-        dbias        [N]        = dy.sum(0) then all-reduce, since each rank
-                                  only sees its own slice of the sequence
+        forward    y_shard_m  = reduce_scatter(x_shard_k @ w_shard_k.T)
+                                the local matmul is a partial sum over K; the
+                                reduce-scatter completes it and shards over M
+        dgrad      dx_shard_k = all_gather(dy_shard_m) [M, N] @ w_shard_k
+                                the dual of the forward scatter
+        wgrad      dw_shard_k = all_gather(dy_shard_m).T [N, M] @ x_shard_k
+                                accumulated in fp32
+        dbias         [N]      = dy_shard_m.sum(0) then all-reduce, since each
+                                rank only sees its own slice of the sequence
 
     Callers flatten sequence-major, so scattering dim 0 splits the sequence
     instead of cutting across batches.
     """
+
+    @staticmethod
+    def typecheck_forward(
+        x_shard_k: torch.Tensor,
+        w_shard_k: torch.Tensor,
+        bias: torch.Tensor | None,
+        group: dist.ProcessGroup,
+        group_name: str,
+    ) -> torch.Tensor:
+        """SPMD type: x S(1)@TP, w S(1)@TP, bias R@TP -> y S(0)@TP.
+
+        The local matmul is a partial sum over the sharded K; the reduce-scatter
+        completes it and shards rows instead. Non-TP axes pass through from x.
+        """
+        spmd.assert_type(x_shard_k, {group: spmd.S(1)})
+        spmd.assert_type(w_shard_k, {group: spmd.S(1)})
+        if bias is not None:
+            spmd.assert_type(bias, {group: spmd.R})
+        result = LinearReduceScatter.apply(
+            x_shard_k, w_shard_k, bias, group, group_name
+        )
+        output_type = {**spmd.get_local_type(x_shard_k), group: spmd.S(0)}
+        spmd.assert_type(result, output_type)
+        return result
 
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]
