@@ -673,7 +673,7 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
     def test_construction_batch_size_and_num_workers(self):
         config = self._make_config(num_workers=2)
         dl = self._build_dataloader(config, batch_size=4)
-        self.assertEqual(dl.batch_size, 4)
+        self.assertIsNone(dl.batch_size)
         self.assertEqual(dl.num_workers, 2)
 
     def test_yields_input_positions_and_labels(self):
@@ -684,21 +684,21 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
         batch_input, batch_label = next(iter(dl))
         self.assertIn("input", batch_input)
         self.assertIn("positions", batch_input)
-        self.assertEqual(batch_input["input"].shape, (2, seq_len))
-        self.assertEqual(batch_input["positions"].shape, (2, seq_len))
-        self.assertEqual(batch_label.shape, (2, seq_len))
+        self.assertEqual(batch_input["input"].shape, (2 * seq_len,))
+        self.assertEqual(batch_input["positions"].shape, (2 * seq_len,))
+        self.assertEqual(batch_label.shape, (2 * seq_len,))
 
     def test_resumption_mid_epoch(self):
         """Checkpoint taken before any source exhausts resumes correctly."""
         config = self._make_config()
-        dl = self._build_dataloader(config)
+        dl = self._build_dataloader(config, batch_size=4)
         it = iter(dl)
 
         for _ in range(5):
             next(it)
         state = deepcopy(dl.state_dict())
 
-        dl_resumed = self._build_dataloader(self._make_config())
+        dl_resumed = self._build_dataloader(self._make_config(), batch_size=4)
         dl_resumed.load_state_dict(state)
         it_resumed = iter(dl_resumed)
 

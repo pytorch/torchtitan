@@ -172,7 +172,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
 
     def test_interleaved_resumption_mid_epoch(self):
         """Checkpointing mid-epoch (before any source exhausts) resumes correctly."""
-        batch_size = 1
+        batch_size = 4
         seq_len = 512
 
         dl = self._build_interleaved_dataloader(

@@ -54,6 +54,21 @@ DATASETS = {
 }
 
 
+def _collate_token_chunks(
+    samples: list[tuple[dict[str, torch.Tensor], torch.Tensor]],
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    """Concatenate fixed-length token chunks into one flat token batch."""
+    input_dicts, labels = zip(*samples, strict=True)
+    input_keys = input_dicts[0].keys()
+    return (
+        {
+            key: torch.cat([input_dict[key] for input_dict in input_dicts])
+            for key in input_keys
+        },
+        torch.cat(labels),
+    )
+
+
 def _validate_dataset(
     dataset_name: str, dataset_path: str | None = None
 ) -> tuple[str, Callable, Callable]:
@@ -358,9 +373,8 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
                 "num_tokens_per_batch must be evenly divisible by max_seq_len "
                 "while interleaved text inputs use [batch, seq]."
             )
-        local_batch_size = num_tokens_per_batch // max_seq_len
-        # output from each source is already packed
-        # making interleaved weights a token mixture ratio
+        # Each weighted draw contributes max_seq_len token slots, so source
+        # weights remain token-mixture ratios after flattening the draws.
         ds = InterleavedDataset(
             datasets=[
                 HuggingFaceTextDataset(
@@ -386,7 +400,9 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
             "snapshot_every_n_steps": snapshot_every_n_steps,
-            "batch_size": local_batch_size,
+            "batch_size": num_tokens_per_batch // max_seq_len,
+            "collate_fn": _collate_token_chunks,
+            "drop_last": True,
         }
 
         super().__init__(
@@ -788,14 +804,8 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
-        if num_tokens_per_batch % max_seq_len != 0:
-            raise ValueError(
-                "num_tokens_per_batch must be evenly divisible by max_seq_len "
-                "while interleaved chat inputs use [batch, seq]."
-            )
-        local_batch_size = num_tokens_per_batch // max_seq_len
-        # output from each source is already packed
-        # making interleaved weights a token mixture ratio
+        # Every source yields the same number of token slots, so each weighted
+        # draw preserves the configured token-slot mixture ratio.
         ds = InterleavedDataset(
             datasets=[
                 ChatDataset(
@@ -805,7 +815,7 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
                     tokenizer=tokenizer,
                     sample_processor=source.sample_processor,
                     max_seq_len=max_seq_len,
-                    num_tokens_per_batch=max_seq_len,
+                    num_tokens_per_batch=num_tokens_per_batch,
                     dp_rank=dp_rank,
                     dp_world_size=dp_world_size,
                     infinite=source.infinite,
@@ -823,7 +833,7 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
             "snapshot_every_n_steps": snapshot_every_n_steps,
-            "batch_size": local_batch_size,
+            "batch_size": None,
         }
 
         super().__init__(

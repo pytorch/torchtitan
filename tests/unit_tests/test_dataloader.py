@@ -254,7 +254,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
         self.assertIn("infinite", str(ctx.exception))
 
     def test_construction_batch_size_and_num_workers(self):
-        """Verify local_batch_size and num_workers are correctly plumbed through."""
+        """Verify token chunks per batch and workers are configured."""
         config = self._make_config(num_workers=2)
         dataloader = InterleavedHuggingFaceTextDataLoader(
             config,
@@ -281,8 +281,9 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
         batch_input, batch_label = next(iter(dataloader))
         self.assertIn("input", batch_input)
         self.assertIn("positions", batch_input)
-        self.assertEqual(batch_input["input"].shape[0], 2)  # batch size
-        self.assertEqual(batch_input["input"].shape[1], 512)  # seq_len
+        self.assertEqual(batch_input["input"].shape, (2 * 512,))
+        self.assertEqual(batch_input["positions"].shape, (2 * 512,))
+        self.assertEqual(batch_label.shape, (2 * 512,))
 
     def test_single_source_equivalent_to_huggingfacetextdataloader(self):
         """A single-source interleaved dataloader must produce the same batch
@@ -320,7 +321,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             bool(
                 torch.equal(
                     single_batch_input["input"],
-                    interleaved_batch_input["input"].flatten(),
+                    interleaved_batch_input["input"],
                 )
             )
         )
@@ -328,7 +329,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             bool(
                 torch.equal(
                     single_batch_input["positions"],
-                    interleaved_batch_input["positions"].flatten(),
+                    interleaved_batch_input["positions"],
                 )
             )
         )
@@ -336,7 +337,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             bool(
                 torch.equal(
                     single_batch_labels,
-                    interleaved_batch_labels.flatten(),
+                    interleaved_batch_labels,
                 )
             )
         )
