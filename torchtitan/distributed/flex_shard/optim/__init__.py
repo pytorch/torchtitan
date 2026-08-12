@@ -7,7 +7,7 @@
 """Optimizers implemented with FlexShard."""
 
 from .distributed_muon import (
-    BatchedMatrixComputeView,
+    AttentionPerHeadComputeView,
     build_distributed_muon,
     DistributedMuon,
     flex_optimizer_reshard,
@@ -16,7 +16,7 @@ from .distributed_muon import (
 
 
 __all__ = [
-    "BatchedMatrixComputeView",
+    "AttentionPerHeadComputeView",
     "build_distributed_muon",
     "DistributedMuon",
     "flex_optimizer_reshard",

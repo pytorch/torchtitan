@@ -19,7 +19,7 @@ from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout
 from torchtitan.distributed.flex_shard.optim import (
-    BatchedMatrixComputeView,
+    AttentionPerHeadComputeView,
     MuonComputeShardingConfig,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -213,8 +213,8 @@ def _distributed_muon_optimizer(
         compute_layout=ComputeLayout(
             axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
         ),
-        compute_view=BatchedMatrixComputeView(
-            num_matrices=attention.n_heads,
+        compute_view=AttentionPerHeadComputeView(
+            num_heads=attention.n_heads,
         ),
     )
     per_expert = MuonComputeShardingConfig(
@@ -290,16 +290,17 @@ def _distributed_muon_optimizer(
             )
         return shardings
 
-    layer_compute_shardings = tuple(
+    compute_sharding_by_fqn_per_layer = tuple(
         compute_shardings_for_layer(layer_id) for layer_id in range(num_layers)
     )
     compute_sharding_by_fqn = {
         fqn: compute_sharding
-        for layer_shardings in layer_compute_shardings
-        for fqn, compute_sharding in layer_shardings.items()
+        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
+        for fqn, compute_sharding in layer_compute_sharding_by_fqn.items()
     }
     layer_bucket_fqns = tuple(
-        tuple(layer_shardings) for layer_shardings in layer_compute_shardings
+        tuple(layer_compute_sharding_by_fqn)
+        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
     )
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
     # collective launch overhead across pairs of MoE layers.
@@ -347,7 +348,8 @@ def _distributed_muon_optimizer(
             ),
             # The remaining parameters are embeddings, norms, biases, LM head,
             # and the vision tower.
-            ParamGroupConfig.for_remaining_parameters(
+            ParamGroupConfig(
+                pattern=r".*",
                 optimizer_name="AdamW",
                 optimizer_kwargs=adamw_kwargs,
             ),
