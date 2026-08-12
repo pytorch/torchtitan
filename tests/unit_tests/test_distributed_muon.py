@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest import mock
 
 import torch
 from torch.distributed.device_mesh import init_device_mesh
@@ -18,7 +19,7 @@ from torchtitan.components.checkpoint_utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.components.distributed_muon import (
+from torchtitan.distributed.flex_shard.optim.distributed_muon import (
     _adjust_muon_learning_rate,
     BatchedMatrixComputeView,
     build_distributed_muon,
@@ -75,6 +76,7 @@ class TestDistributedMuon(DTensorTestBase):
         def make_optimizer(
             redistributed: torch.nn.Parameter,
             local_blocks: torch.nn.Parameter,
+            ns_steps: int = 2,
         ):
             redistributed_fqn = "layers.0.redistributed"
             local_blocks_fqn = "layers.0.local_blocks"
@@ -86,12 +88,14 @@ class TestDistributedMuon(DTensorTestBase):
                     }
                 ],
                 compute_sharding_by_fqn={
-                    redistributed_fqn: MuonComputeShardingConfig(placement=Owned()),
+                    redistributed_fqn: MuonComputeShardingConfig(
+                        compute_placement=Owned()
+                    ),
                     local_blocks_fqn: MuonComputeShardingConfig(
-                        view_before_placement=BatchedMatrixComputeView(
+                        compute_placement=Shard(0),
+                        compute_view=BatchedMatrixComputeView(
                             num_matrices=num_matrices,
                         ),
-                        placement=Shard(0),
                     ),
                 },
                 bucket_configs=[
@@ -105,7 +109,7 @@ class TestDistributedMuon(DTensorTestBase):
                 weight_decay=weight_decay,
                 momentum=0.8,
                 nesterov=True,
-                ns_steps=2,
+                ns_steps=ns_steps,
             )
             self.assertEqual(len(optimizer.param_groups), 1)
             return optimizer
@@ -283,9 +287,17 @@ class TestDistributedMuon(DTensorTestBase):
         resumed_optimizer = make_optimizer(
             resumed_redistributed,
             resumed_local_blocks,
+            ns_steps=3,
         )
         init_optim_state(resumed_optimizer)
-        load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        with mock.patch.object(
+            resumed_optimizer,
+            "_initialize_plan",
+            wraps=resumed_optimizer._initialize_plan,
+        ) as initialize_plan:
+            load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        initialize_plan.assert_called_once()
+        self.assertEqual(resumed_optimizer.param_groups[0]["ns_steps"], 2)
 
         second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
         second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()
