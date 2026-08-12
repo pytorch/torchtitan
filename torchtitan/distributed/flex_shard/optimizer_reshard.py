@@ -18,16 +18,16 @@ from torch.distributed.tensor import Replicate, Shard
 __all__ = ["BucketConfig", "ComputeLayout"]
 
 
-class _FrozenAxisPlacements(Mapping[str, Replicate | Shard]):
+class _FrozenPlacementsByMeshAxis(Mapping[str, Replicate | Shard]):
     """Small immutable mapping that remains safe to copy with configs."""
 
     __slots__ = ("_items",)
 
     def __init__(
         self,
-        placements: Mapping[str, Replicate | Shard],
+        placements_by_mesh_axis: Mapping[str, Replicate | Shard],
     ) -> None:
-        self._items = tuple(placements.items())
+        self._items = tuple(placements_by_mesh_axis.items())
 
     def __getitem__(self, axis_name: str) -> Replicate | Shard:
         for candidate_axis_name, placement in self._items:
@@ -47,7 +47,7 @@ class _FrozenAxisPlacements(Mapping[str, Replicate | Shard]):
     def __repr__(self) -> str:
         return repr(dict(self._items))
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenAxisPlacements:
+    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenPlacementsByMeshAxis:
         return self
 
 
@@ -56,45 +56,80 @@ class ComputeLayout:
     """Describe a temporary compute layout on named storage-mesh axes.
 
     Placements override the named axes; omitted axes preserve their storage
-    placement. Ownership axes assign each complete logical matrix to one
+    placement. Matrix ownership axes assign each complete logical matrix to one
     participant in their Cartesian group. Extra declarations may target mesh
     variants not used by a particular parameter, but at least one declaration
     must apply when the layout is resolved.
+
+    Examples:
+        Shard a viewed matrix batch across the EFSDP and EP axes::
+
+            ComputeLayout(
+                placements_by_mesh_axis={
+                    "efsdp": Shard(0),
+                    "ep": Shard(0),
+                }
+            )
+
+        Assign each complete matrix to one rank along ``dp_shard``::
+
+            ComputeLayout(matrix_ownership_axes=("dp_shard",))
     """
 
-    axis_placements: Mapping[str, Replicate | Shard] = field(default_factory=dict)
-    owner_mesh_axis_names: tuple[str, ...] = ()
+    placements_by_mesh_axis: Mapping[str, Replicate | Shard] = field(
+        default_factory=dict
+    )
+    matrix_ownership_axes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        axis_placements = dict(self.axis_placements)
-        owner_mesh_axis_names = tuple(self.owner_mesh_axis_names)
-        if not axis_placements and not owner_mesh_axis_names:
-            raise ValueError("ComputeLayout must declare a placement or owner axis")
-        for axis_name, placement in axis_placements.items():
+        placements_by_mesh_axis = dict(self.placements_by_mesh_axis)
+        matrix_ownership_axes = tuple(self.matrix_ownership_axes)
+        if not placements_by_mesh_axis and not matrix_ownership_axes:
+            raise ValueError(
+                "ComputeLayout must declare a placement or matrix ownership axis"
+            )
+        for axis_name, placement in placements_by_mesh_axis.items():
             if not isinstance(axis_name, str):
-                raise ValueError("ComputeLayout placement axis names must be strings")
+                raise ValueError(
+                    "ComputeLayout.placements_by_mesh_axis keys must be strings"
+                )
             if type(placement) not in (Replicate, Shard):
-                raise ValueError("ComputeLayout placements must be Replicate or Shard")
-        if any(not isinstance(axis_name, str) for axis_name in owner_mesh_axis_names):
-            raise ValueError("ComputeLayout owner axis names must be strings")
-        if len(set(owner_mesh_axis_names)) != len(owner_mesh_axis_names):
-            raise ValueError("ComputeLayout owner axes must be unique")
-        overlapping_axes = set(axis_placements).intersection(owner_mesh_axis_names)
+                raise ValueError(
+                    "ComputeLayout.placements_by_mesh_axis values must be "
+                    "Replicate or Shard"
+                )
+        if any(not isinstance(axis_name, str) for axis_name in matrix_ownership_axes):
+            raise ValueError(
+                "ComputeLayout.matrix_ownership_axes entries must be strings"
+            )
+        if len(set(matrix_ownership_axes)) != len(matrix_ownership_axes):
+            raise ValueError(
+                "ComputeLayout.matrix_ownership_axes entries must be unique"
+            )
+        overlapping_axes = set(placements_by_mesh_axis).intersection(
+            matrix_ownership_axes
+        )
         if overlapping_axes:
             names = sorted(overlapping_axes)
             raise ValueError(
-                "ComputeLayout axes cannot have both placement and ownership: "
+                "ComputeLayout axes cannot have both placement and matrix ownership: "
                 f"{names}"
             )
 
-        normalized_axis_placements = dict(sorted(axis_placements.items()))
-        normalized_owner_axes = tuple(sorted(owner_mesh_axis_names))
+        normalized_placements_by_mesh_axis = dict(
+            sorted(placements_by_mesh_axis.items())
+        )
+        normalized_matrix_ownership_axes = tuple(sorted(matrix_ownership_axes))
         object.__setattr__(
             self,
-            "axis_placements",
-            _FrozenAxisPlacements(normalized_axis_placements),
+            "placements_by_mesh_axis",
+            _FrozenPlacementsByMeshAxis(normalized_placements_by_mesh_axis),
         )
-        object.__setattr__(self, "owner_mesh_axis_names", normalized_owner_axes)
+        object.__setattr__(
+            self,
+            "matrix_ownership_axes",
+            normalized_matrix_ownership_axes,
+        )
 
 
 @dataclass(frozen=True, slots=True)
