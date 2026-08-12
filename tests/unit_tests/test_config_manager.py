@@ -217,7 +217,41 @@ class TestConfigManager(unittest.TestCase):
         assert config.model_spec.name == "deepseek_v3"
         assert config.model_spec.flavor == "debugmodel"
 
-    def test_deepseek_production_configs_use_flex_flash(self):
+    def test_deepseek_671b_minimal_async_ep_configs(self):
+        import torch
+
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0):
+            self.skipTest("DeepSeek production configs require Hopper or Blackwell")
+
+        from torchtitan.models.common.token_dispatcher import (
+            MinimalAsyncEPTokenDispatcher,
+        )
+
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "graph_trainer.deepseek_v3",
+                "--config",
+                "graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep",
+            ]
+        )
+        dispatchers = [
+            layer.moe.routed_experts.token_dispatcher
+            for layer in config.model_spec.model.layers
+            if layer.moe is not None
+        ]
+        assert config.model_spec.flavor == "671B"
+        assert dispatchers
+        assert all(
+            isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+            for dispatcher in dispatchers
+        )
+        assert {
+            "torchtitan.overrides.fused_swiglu.fused_swiglu",
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        } <= set(config.override.imports)
+
+    def test_deepseek_minimal_async_ep_configs_use_flex_flash(self):
         import torch
 
         if not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0):
@@ -226,9 +260,8 @@ class TestConfigManager(unittest.TestCase):
         from torchtitan.models.common.attention import FlexAttention
 
         for config_name in (
-            "deepseek_v3_16b",
             "deepseek_v3_16b_minimal_async_ep",
-            "deepseek_v3_671b",
+            "deepseek_v3_671b_bf16_minimal_async_ep",
         ):
             with self.subTest(config=config_name):
                 config = ConfigManager().parse_args(
@@ -239,6 +272,20 @@ class TestConfigManager(unittest.TestCase):
                     assert isinstance(attention, FlexAttention.Config)
                     assert attention.block_size == (256, 128)
                     assert attention.kernel_options == {"BACKEND": "FLASH"}
+
+        for config_name in (
+            "deepseek_v3_16b",
+            "deepseek_v3_16b_hybridep",
+            "deepseek_v3_671b",
+        ):
+            with self.subTest(config=config_name):
+                config = ConfigManager().parse_args(
+                    ["--module", "deepseek_v3", "--config", config_name]
+                )
+                for layer in config.model_spec.model.layers:
+                    attention = layer.attention.inner_attention
+                    assert isinstance(attention, FlexAttention.Config)
+                    assert attention.kernel_options == {}
 
     def test_fqn_module_with_config_registry(self):
         """--module torchtitan.models.llama3.config_registry works."""
