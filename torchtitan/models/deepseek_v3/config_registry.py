@@ -19,6 +19,7 @@ from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -68,6 +69,15 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry("debugmodel", num_mtp_layers=1)
+    config.loss = MTPLoss.Config(
+        global_vocab_size=decoder_vocab_size(config.model_spec),
+    )
+    return config
 
 
 def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
