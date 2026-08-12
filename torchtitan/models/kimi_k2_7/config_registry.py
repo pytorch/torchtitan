@@ -17,9 +17,10 @@ from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfi
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout
-from torchtitan.distributed.flex_shard.optim import (
+from torchtitan.distributed.flex_shard import (
     AttentionPerHeadComputeView,
+    BucketConfig,
+    ComputeLayout,
     MuonComputeShardingConfig,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -206,12 +207,12 @@ def _distributed_muon_optimizer(
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
     owned = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
-            owner_mesh_axis_names=(MeshAxisName.DP_SHARD,),
+            owner_mesh_axis_names=(MeshAxisName.DP_SHARD.value,),
         )
     )
     per_head = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
-            axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
+            axis_placements={MeshAxisName.DP_SHARD.value: Shard(0)},
         ),
         compute_view=AttentionPerHeadComputeView(
             num_heads=attention.n_heads,
@@ -220,10 +221,10 @@ def _distributed_muon_optimizer(
     per_expert = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
             axis_placements={
-                MeshAxisName.DP: Shard(0),
-                MeshAxisName.DP_SHARD: Shard(0),
-                MeshAxisName.EFSDP: Shard(0),
-                MeshAxisName.EP: Shard(0),
+                MeshAxisName.DP.value: Shard(0),
+                MeshAxisName.DP_SHARD.value: Shard(0),
+                MeshAxisName.EFSDP.value: Shard(0),
+                MeshAxisName.EP.value: Shard(0),
             },
         )
     )
