@@ -63,7 +63,18 @@ class Owned:
 
 @dataclass(frozen=True, slots=True)
 class BatchedMatrixComputeView:
-    """View 2D storage as matrices with batch and rows flattened into dim 0."""
+    """Interpret flattened 2D storage as a batch of matrices for Muon.
+
+    Given storage with shape ``[B * R, C]`` and ``num_matrices=B``, the
+    logical compute tensor has shape ``[B, R, C]``. Muon applies its
+    Newton-Schulz iteration independently to each ``[R, C]`` matrix. This
+    defines compute matrix boundaries without changing the stored parameter
+    shape.
+
+    For an attention projection, ``B`` is typically the number of heads. The
+    same view also applies to any parameter that concatenates equal-shaped
+    matrices along tensor dimension 0.
+    """
 
     num_matrices: int
 
