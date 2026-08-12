@@ -275,8 +275,8 @@ def _configure_distributed_muon(
         get_fqn=lambda layout: layout.fqn,
         get_storage_dtensor=lambda layout: layout.param,
         requires_redistribution=lambda layout: (not layout.storage_is_compute_ready),
-        get_redistribution_storage_mesh_axis=lambda layout: (
-            layout.redistribution_storage_mesh_axis
+        get_redistribution_storage_mesh_axes=lambda layout: (
+            layout.redistribution_storage_mesh_axes
         ),
         get_transport_compatibility_key=_transport_compatibility_key,
     )
@@ -455,8 +455,8 @@ class DistributedMuon(
                     resolved_compute_layout_signature=(
                         resolved_transition.resolved_compute_layout_signature
                     ),
-                    redistribution_storage_mesh_axis=(
-                        resolved_transition.redistribution_storage_mesh_axis
+                    redistribution_storage_mesh_axes=(
+                        resolved_transition.redistribution_storage_mesh_axes
                     ),
                 )
             )
@@ -504,6 +504,7 @@ class DistributedMuon(
             compute_layout.compute_view_key,
             _compute_assignment_key(compute_layout.compute_assignment),
             compute_layout.resolved_compute_layout_signature,
+            compute_layout.redistribution_storage_mesh_axes,
             _device_mesh_ranks(compute_layout.param.device_mesh),
             tuple(map(str, compute_layout.param.placements)),
             self._group_signature(compute_layout),
@@ -936,7 +937,7 @@ class _ParameterComputeLayout:
     compute_assignment: _ComputeAssignment
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
-    redistribution_storage_mesh_axis: int | None
+    redistribution_storage_mesh_axes: tuple[int, ...]
 
     @property
     def storage_is_compute_ready(self) -> bool:
@@ -1028,7 +1029,7 @@ class _ResolvedStorageToComputeTransition:
     compute_assignment: _ComputeAssignment
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
-    redistribution_storage_mesh_axis: int | None = None
+    redistribution_storage_mesh_axes: tuple[int, ...] = ()
 
 
 def _resolve_muon_redistribution_plans(
@@ -1179,7 +1180,7 @@ def _build_parameter_redistribution_plan(
     group_local_storage = _dtensor_storage_regions(
         compute_layout.param,
         group.participants,
-        required_storage_mesh_axis=(compute_layout.redistribution_storage_mesh_axis),
+        required_storage_mesh_axes=(compute_layout.redistribution_storage_mesh_axes),
     )
     storage_regions = group_local_storage.regions
     group_local_storage_shape = group_local_storage.logical_shape
@@ -1219,14 +1220,14 @@ def _build_parameter_redistribution_plan(
         return _build_dim0_shard_redistribution_plan(
             storage_regions,
             participants=group.participants,
-            shard_participants=group.mesh_axis_participants,
+            shard_participants=group.mesh_ordered_participants,
             logical_shape=group_local_compute_shape,
         )
 
     return _build_batched_matrix_redistribution_plan(
         storage_regions,
         participants=group.participants,
-        shard_participants=group.mesh_axis_participants,
+        shard_participants=group.mesh_ordered_participants,
         storage_shape=group_local_storage_shape,
         compute_shape=group_local_compute_shape,
     )
@@ -1476,46 +1477,80 @@ def _resolve_storage_to_compute_transition(
     )
     if len(transport_axes) > 1:
         axis_names = [mesh_axis_names[axis] for axis in transport_axes]
-        raise NotImplementedError(
-            f"Muon parameter {fqn!r} requires compute redistribution or "
-            f"ownership on multiple mesh axes {axis_names}; multi-axis "
-            "transport is not implemented"
-        )
+        if active_owner_axes:
+            if changed_storage_mesh_axes:
+                raise NotImplementedError(
+                    f"Muon parameter {fqn!r} cannot combine ownership and "
+                    f"placement redistribution on mesh axes {axis_names}"
+                )
+            for storage_mesh_axis, placement in enumerate(param.placements):
+                if (
+                    storage_mesh_axis not in active_owner_axes
+                    and param.device_mesh.size(storage_mesh_axis) > 1
+                    and _storage_placement_signature(
+                        placement,
+                        ndim=param.ndim,
+                        mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
+                    )
+                    != ("replicate",)
+                ):
+                    raise NotImplementedError(
+                        f"Muon parameter {fqn!r} cannot preserve non-replicated "
+                        f"mesh axis {mesh_axis_names[storage_mesh_axis]!r} "
+                        f"outside joint ownership axes {axis_names}"
+                    )
+        elif has_compute_view:
+            raise NotImplementedError(
+                f"Muon parameter {fqn!r} cannot apply a compute view while "
+                f"redistributing multiple mesh axes {axis_names}"
+            )
+        elif any(
+            normalized_target_placements[axis] != ("replicate",)
+            for axis in transport_axes
+        ):
+            raise NotImplementedError(
+                f"Muon parameter {fqn!r} multi-axis redistribution currently "
+                f"requires Replicate targets on mesh axes {axis_names}"
+            )
 
-    redistribution_storage_mesh_axis = transport_axes[0] if transport_axes else None
-    if redistribution_storage_mesh_axis is not None:
-        redistribution_axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
-        redistribution_storage_placement = param.placements[
-            redistribution_storage_mesh_axis
-        ]
+    transport_axis_set = set(transport_axes)
+    if transport_axes:
+        transport_axis_names = [mesh_axis_names[axis] for axis in transport_axes]
+        single_transport_axis = transport_axes[0] if len(transport_axes) == 1 else None
+        single_transport_placement = (
+            param.placements[single_transport_axis]
+            if single_transport_axis is not None
+            else None
+        )
         for storage_mesh_axis, placement in enumerate(param.placements):
-            if storage_mesh_axis == redistribution_storage_mesh_axis:
+            if storage_mesh_axis in transport_axis_set:
                 if type(placement) not in (Replicate, Shard):
                     raise NotImplementedError(
                         f"Muon parameter {fqn!r} cannot redistribute "
                         f"{type(placement).__name__} storage on mesh axis "
-                        f"{redistribution_axis_name!r}"
+                        f"{mesh_axis_names[storage_mesh_axis]!r}"
                     )
             elif type(placement) not in (Replicate, Shard):
                 raise NotImplementedError(
                     f"Muon parameter {fqn!r} cannot preserve "
                     f"{type(placement).__name__} storage on mesh axis "
                     f"{mesh_axis_names[storage_mesh_axis]!r} while redistributing "
-                    f"along mesh axis {redistribution_axis_name!r}"
+                    f"along mesh axes {transport_axis_names}"
                 )
             elif (
-                redistribution_storage_mesh_axis < storage_mesh_axis
+                single_transport_axis is not None
+                and single_transport_axis < storage_mesh_axis
                 and param.device_mesh.size(storage_mesh_axis) > 1
-                and type(redistribution_storage_placement) is Shard
+                and type(single_transport_placement) is Shard
                 and type(placement) is Shard
-                and redistribution_storage_placement.dim % param.ndim
+                and single_transport_placement.dim % param.ndim
                 == placement.dim % param.ndim
             ):
                 raise NotImplementedError(
                     f"Muon parameter {fqn!r} cannot yet preserve a later mesh "
                     f"axis that repeats storage sharding on tensor dimension "
                     f"{placement.dim % param.ndim} across mesh axes "
-                    f"{redistribution_axis_name!r} and "
+                    f"{mesh_axis_names[single_transport_axis]!r} and "
                     f"{mesh_axis_names[storage_mesh_axis]!r}"
                 )
             elif has_compute_view and _storage_placement_signature(
@@ -1569,14 +1604,16 @@ def _resolve_storage_to_compute_transition(
 
     if active_owner_axes:
         compute_assignment: _ComputeAssignment = _SingleParticipantCompute()
-    elif redistribution_storage_mesh_axis is not None:
-        transport_target = resolved_target_by_storage_mesh_axis[
-            redistribution_storage_mesh_axis
-        ]
-        if transport_target[0] == "shard":
-            compute_assignment = _DimPartitionedCompute(cast(int, transport_target[1]))
+    elif transport_axes:
+        transport_targets = tuple(
+            resolved_target_by_storage_mesh_axis[axis] for axis in transport_axes
+        )
+        if len(transport_targets) == 1 and transport_targets[0][0] == "shard":
+            compute_assignment = _DimPartitionedCompute(
+                cast(int, transport_targets[0][1])
+            )
         else:
-            assert transport_target == ("replicate",)
+            assert all(target == ("replicate",) for target in transport_targets)
             compute_assignment = _AllParticipantsCompute()
     elif compute_shard_dims:
         compute_assignment = _DimPartitionedCompute(0)
@@ -1585,7 +1622,7 @@ def _resolve_storage_to_compute_transition(
     else:
         compute_assignment = _AllParticipantsCompute()
 
-    if redistribution_storage_mesh_axis is None:
+    if not transport_axes:
         if local_storage_view is None:
             _raise_unsupported_layout(fqn)
         return _ResolvedStorageToComputeTransition(
@@ -1594,8 +1631,10 @@ def _resolve_storage_to_compute_transition(
             resolved_compute_layout_signature=resolved_compute_layout_signature,
         )
 
-    redistribution_axis_size = param.device_mesh.size(redistribution_storage_mesh_axis)
-    if redistribution_axis_size == 1:
+    redistribution_group_size = math.prod(
+        param.device_mesh.size(axis) for axis in transport_axes
+    )
+    if redistribution_group_size == 1:
         transition: _StorageToComputeTransition = _NoRedistributionTransition()
     elif isinstance(compute_assignment, _SingleParticipantCompute):
         transition = _OwnedRedistributionTransition()
@@ -1608,10 +1647,10 @@ def _resolve_storage_to_compute_transition(
         compute_assignment=compute_assignment,
         storage_to_compute_transition=transition,
         resolved_compute_layout_signature=resolved_compute_layout_signature,
-        redistribution_storage_mesh_axis=(
-            None
+        redistribution_storage_mesh_axes=(
+            ()
             if isinstance(transition, _NoRedistributionTransition)
-            else redistribution_storage_mesh_axis
+            else transport_axes
         ),
     )
 

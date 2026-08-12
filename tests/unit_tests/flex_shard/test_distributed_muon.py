@@ -329,7 +329,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
         return "cuda"
 
     @with_comms
-    def test_preserves_ep_shard_in_mixed_logical_bucket(self):
+    def test_multi_mesh_redistribution_in_mixed_logical_bucket(self):
         lr = 0.03
         weight_decay = 0.2
         dense_mesh = init_device_mesh(
@@ -352,6 +352,12 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
         dense_value = (
             torch.arange(24, device=device).reshape(8, 3).float().div_(11).add_(1)
         )
+        jointly_owned_fqn = "layers.0.jointly_owned"
+        jointly_owned_value = (
+            torch.arange(240, 288, device=device).reshape(8, 6).float().div_(29).add_(6)
+        )
+        jointly_owned_storage_placements = (Shard(1), Shard(0))
+        fully_replicated_fqn = "layers.0.routed_experts.fully_replicated"
         sparse_values = {
             "layers.0.routed_experts.sharded": (
                 torch.arange(60, device=device)
@@ -374,6 +380,13 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 .div_(19)
                 .add_(4)
             ),
+            fully_replicated_fqn: (
+                torch.arange(180, 240, device=device)
+                .reshape(4, 5, 3)
+                .float()
+                .div_(23)
+                .add_(5)
+            ),
         }
         sparse_storage_layouts = {
             "layers.0.routed_experts.sharded": (
@@ -388,9 +401,20 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 repeated_shard_mesh,
                 (Shard(0), Shard(0)),
             ),
+            fully_replicated_fqn: (
+                sparse_mesh,
+                (Shard(1), Shard(0)),
+            ),
         }
         dense = torch.nn.Parameter(
             distribute_tensor(dense_value.clone(), dense_mesh, (Shard(0),))
+        )
+        jointly_owned = torch.nn.Parameter(
+            distribute_tensor(
+                jointly_owned_value.clone(),
+                sparse_mesh,
+                jointly_owned_storage_placements,
+            )
         )
         sparse = {
             fqn: torch.nn.Parameter(
@@ -405,8 +429,8 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
         optimizer = build_distributed_muon(
             [
                 {
-                    "params": [dense, *sparse.values()],
-                    "param_names": [dense_fqn, *sparse],
+                    "params": [dense, jointly_owned, *sparse.values()],
+                    "param_names": [dense_fqn, jointly_owned_fqn, *sparse],
                 }
             ],
             lr=lr,
@@ -418,6 +442,11 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 dense_fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
                         owner_mesh_axis_names=(MeshAxisName.DP_SHARD,),
+                    )
+                ),
+                jointly_owned_fqn: MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        owner_mesh_axis_names=(MeshAxisName.EFSDP, MeshAxisName.EP),
                     )
                 ),
                 "layers.0.routed_experts.sharded": MuonComputeShardingConfig(
@@ -438,9 +467,31 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                         axis_placements={MeshAxisName.EFSDP: Replicate()},
                     )
                 ),
+                fully_replicated_fqn: MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        axis_placements={
+                            MeshAxisName.EFSDP: Replicate(),
+                            MeshAxisName.EP: Replicate(),
+                        },
+                    )
+                ),
             },
             bucket_configs=[BucketConfig(patterns=("layers.0.*",), name="layers.0")],
         )
+
+        def redistribution_plan_for(fqn: str):
+            return next(
+                redistribution_plan
+                for bucket_plan in optimizer._bucket_plans
+                if hasattr(bucket_plan, "redistribution_plans")
+                for item, redistribution_plan in zip(
+                    bucket_plan.redistributed_items,
+                    bucket_plan.redistribution_plans,
+                    strict=True,
+                )
+                if item.fqn == fqn
+            )
+
         transport_groups = {
             frozenset(plan.group.participants)
             for plan in optimizer._bucket_plans
@@ -454,8 +505,44 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 frozenset(repeated_shard_mesh["efsdp"].mesh.flatten().tolist()),
             },
         )
+        fully_replicated_plan = redistribution_plan_for(fully_replicated_fqn)
+        self.assertEqual(
+            frozenset(fully_replicated_plan.participants),
+            frozenset(range(self.world_size)),
+        )
+        self.assertEqual(
+            tuple(
+                partition.tensor_shape
+                for partition in fully_replicated_plan.compute_partitions
+            ),
+            (tuple(sparse_values[fully_replicated_fqn].shape),) * self.world_size,
+        )
+        jointly_owned_plan = redistribution_plan_for(jointly_owned_fqn)
+        self.assertEqual(
+            frozenset(jointly_owned_plan.participants),
+            frozenset(range(self.world_size)),
+        )
+        jointly_owned_compute_shapes = tuple(
+            partition.tensor_shape
+            for partition in jointly_owned_plan.compute_partitions
+        )
+        self.assertEqual(
+            jointly_owned_compute_shapes.count(tuple(jointly_owned_value.shape)),
+            1,
+        )
+        self.assertEqual(
+            jointly_owned_compute_shapes.count((0,)),
+            self.world_size - 1,
+        )
 
         dense_grad = torch.arange(1, 25, device=device).reshape(8, 3).float().div_(19)
+        jointly_owned_grad = (
+            torch.arange(1, 49, device=device)
+            .reshape_as(jointly_owned_value)
+            .float()
+            .div_(23)
+            .sin_()
+        )
         sparse_grads = {
             fqn: torch.arange(60, device=device)
             .reshape_as(value)
@@ -466,6 +553,11 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             for index, (fqn, value) in enumerate(sparse_values.items())
         }
         dense.grad = distribute_tensor(dense_grad.clone(), dense_mesh, (Shard(0),))
+        jointly_owned.grad = distribute_tensor(
+            jointly_owned_grad.clone(),
+            sparse_mesh,
+            jointly_owned_storage_placements,
+        )
         for fqn, parameter in sparse.items():
             storage_mesh, placements = sparse_storage_layouts[fqn]
             parameter.grad = distribute_tensor(
@@ -475,6 +567,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             )
 
         reference_dense = torch.nn.Parameter(dense_value.clone())
+        reference_jointly_owned = torch.nn.Parameter(jointly_owned_value.clone())
         reference_sparse = {
             fqn: tuple(torch.nn.Parameter(matrix.clone()) for matrix in value)
             for fqn, value in sparse_values.items()
@@ -482,6 +575,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
         reference_optimizer = torch.optim.Muon(
             [
                 reference_dense,
+                reference_jointly_owned,
                 *(
                     parameter
                     for matrices in reference_sparse.values()
@@ -495,6 +589,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             ns_steps=2,
         )
         reference_dense.grad = dense_grad.clone()
+        reference_jointly_owned.grad = jointly_owned_grad.clone()
         for fqn, matrices in reference_sparse.items():
             for parameter, grad in zip(
                 matrices,
@@ -513,6 +608,23 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             (dense_value * decay - reference_dense) / dense_adjusted_lr,
             rtol=0,
             atol=2e-2,
+        )
+        jointly_owned_adjusted_lr = _adjust_muon_learning_rate(
+            lr,
+            None,
+            jointly_owned_value.shape,
+        )
+        torch.testing.assert_close(
+            (jointly_owned_value * decay - jointly_owned.full_tensor())
+            / jointly_owned_adjusted_lr,
+            (jointly_owned_value * decay - reference_jointly_owned)
+            / jointly_owned_adjusted_lr,
+            rtol=0,
+            atol=2e-2,
+        )
+        self.assertEqual(
+            jointly_owned.placements,
+            jointly_owned_storage_placements,
         )
         for fqn, parameter in sparse.items():
             expected = torch.stack(
@@ -535,33 +647,52 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             )
             self.assertEqual(parameter.placements, sparse_storage_layouts[fqn][1])
 
-        unsupported_parameter = torch.nn.Parameter(
+
+@unittest.skipUnless(torch.cuda.device_count() >= 8, "requires eight CUDA devices")
+class TestDistributedMuonJointOwnershipValidation(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 8
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_rejects_nonreplicated_axis_outside_joint_ownership(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2, 2),
+            mesh_dim_names=("efsdp", "ep", "dp_replicate"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(64, device=device).reshape(8, 8).float()
+        parameter = torch.nn.Parameter(
             distribute_tensor(
-                sparse_values["layers.0.routed_experts.sharded"].clone(),
-                sparse_mesh,
-                (Shard(1), Shard(0)),
+                value,
+                mesh,
+                (Shard(1), Shard(0), Shard(0)),
             )
         )
-        unsupported_fqn = "layers.0.routed_experts.unsupported"
-        with self.assertRaisesRegex(NotImplementedError, "multiple mesh axes"):
+        fqn = "layers.0.jointly_owned"
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "cannot preserve non-replicated mesh axis 'dp_replicate'",
+        ):
             build_distributed_muon(
-                [
-                    {
-                        "params": [unsupported_parameter],
-                        "param_names": [unsupported_fqn],
-                    }
-                ],
+                [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
-                    unsupported_fqn: MuonComputeShardingConfig(
+                    fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            axis_placements={
-                                MeshAxisName.EFSDP: Replicate(),
-                                MeshAxisName.EP: Replicate(),
-                            },
+                            owner_mesh_axis_names=(
+                                MeshAxisName.EFSDP,
+                                MeshAxisName.EP,
+                            ),
                         )
                     )
                 },
-                bucket_configs=[BucketConfig(patterns=(unsupported_fqn,))],
+                bucket_configs=[BucketConfig(patterns=(fqn,))],
             )
 
 

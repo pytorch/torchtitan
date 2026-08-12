@@ -140,9 +140,10 @@ class _BucketSpec:
     """One resolved physical optimizer-work bucket.
 
     ``fqns`` are bound from one public ``BucketConfig`` after compute layouts
-    select concrete transport groups. ``mesh`` is the bucket's exact
-    one-dimensional communication mesh, or ``None`` when every parameter is
-    already compute-ready. ``name`` is diagnostic metadata only.
+    select concrete transport groups. ``mesh`` is the bucket's exact 1D
+    communication mesh, which may flatten a Cartesian storage-mesh submesh,
+    or ``None`` when every parameter is already compute-ready. ``name`` is
+    diagnostic metadata only.
     """
 
     fqns: tuple[str, ...]
