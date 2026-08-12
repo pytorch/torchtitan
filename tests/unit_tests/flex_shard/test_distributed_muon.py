@@ -20,7 +20,7 @@ from torchtitan.components.checkpoint_utils import (
 )
 from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout
 from torchtitan.distributed.flex_shard.optim import (
-    BatchedMatrixComputeView,
+    AttentionPerHeadComputeView,
     build_distributed_muon,
     MuonComputeShardingConfig,
 )
@@ -52,11 +52,11 @@ class TestDistributedMuon(DTensorTestBase):
         device = torch.device(self.device_type, self.rank)
         stack_shapes = {
             # Two storage shards each own six rows, so their boundary splits
-            # the middle matrix and exercises overshard redistribution.
-            "layers.0.oversharded": (3, 4, 3),
+            # the middle head matrix and exercises overshard redistribution.
+            "layers.0.attention.oversharded": (3, 4, 3),
             # These aligned siblings remain local and share one batched NS call.
-            "layers.0.local.w1": (4, 5, 3),
-            "layers.0.local.w3": (4, 5, 3),
+            "layers.0.attention.wq": (4, 5, 3),
+            "layers.0.attention.wkv": (4, 5, 3),
         }
 
         def make_parameter(value: torch.Tensor) -> torch.nn.Parameter:
@@ -70,14 +70,14 @@ class TestDistributedMuon(DTensorTestBase):
             ns_steps: int = 2,
         ):
             redistributed_fqn = "layers.0.redistributed"
-            oversharded_fqn = "layers.0.oversharded"
-            aligned_fqns = ("layers.0.local.w1", "layers.0.local.w3")
+            oversharded_fqn = "layers.0.attention.oversharded"
+            aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
             aligned_compute_sharding = MuonComputeShardingConfig(
                 compute_layout=ComputeLayout(
                     axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
                 ),
-                compute_view=BatchedMatrixComputeView(
-                    num_matrices=4,
+                compute_view=AttentionPerHeadComputeView(
+                    num_heads=4,
                 ),
             )
             return build_distributed_muon(
@@ -110,8 +110,8 @@ class TestDistributedMuon(DTensorTestBase):
                         compute_layout=ComputeLayout(
                             axis_placements={MeshAxisName.DP_SHARD: Shard(0)},
                         ),
-                        compute_view=BatchedMatrixComputeView(
-                            num_matrices=3,
+                        compute_view=AttentionPerHeadComputeView(
+                            num_heads=3,
                         ),
                     ),
                     **{fqn: aligned_compute_sharding for fqn in aligned_fqns},
@@ -185,11 +185,11 @@ class TestDistributedMuon(DTensorTestBase):
 
         values = {}
         start = 12
-        for name, (num_matrices, rows, columns) in stack_shapes.items():
-            numel = num_matrices * rows * columns
+        for name, (num_heads, rows, columns) in stack_shapes.items():
+            numel = num_heads * rows * columns
             values[name] = (
                 torch.arange(start, start + numel, device=device)
-                .reshape(num_matrices * rows, columns)
+                .reshape(num_heads * rows, columns)
                 .float()
                 .div_(10)
             )
@@ -277,8 +277,8 @@ class TestDistributedMuon(DTensorTestBase):
             .div_(19 + 2 * index)
             for index, (name, value) in enumerate(values.items())
         }
-        first_stack_grads["layers.0.local.w3"] = (
-            first_stack_grads["layers.0.local.w3"].flip(1).contiguous()
+        first_stack_grads["layers.0.attention.wkv"] = (
+            first_stack_grads["layers.0.attention.wkv"].flip(1).contiguous()
         )
         step_and_assert(
             optimizer,
