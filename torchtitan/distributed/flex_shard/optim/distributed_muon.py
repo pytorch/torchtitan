@@ -308,7 +308,7 @@ class DistributedMuon(
             _ParameterComputeLayout
         ](tensor_device)
         self._redistribution_runtime.reserve_buffers(
-            self._plans,
+            self._bucket_plans,
             local_tensor_spec=self._local_tensor_spec,
             local_bucket_executor=self,
         )
@@ -331,7 +331,7 @@ class DistributedMuon(
 
         self._preflight_step()
         self._redistribution_runtime.run(
-            self._plans,
+            self._bucket_plans,
             local_tensor_spec=self._local_tensor_spec,
             prepare=self._prepare_local,
             compute=self._compute_update,
@@ -341,7 +341,7 @@ class DistributedMuon(
         return loss
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
-        if hasattr(self, "_plans"):
+        if hasattr(self, "_bucket_plans"):
             raise RuntimeError("DistributedMuon parameter groups are frozen")
         super().add_param_group(param_group)
 
@@ -441,7 +441,7 @@ class DistributedMuon(
                 ns_steps_by_group=ns_steps_by_group,
             ),
         )
-        self._plans = result.plans
+        self._bucket_plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
         self._local_execution_plans: dict[
             tuple[str, ...], tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]
@@ -449,7 +449,7 @@ class DistributedMuon(
 
     def _validate_plan_across_ranks(self) -> None:
         _validate_bucket_plans_across_ranks(
-            self._plans,
+            self._bucket_plans,
             item_signature=self._plan_item_signature,
         )
 
@@ -1550,7 +1550,7 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon._initialize_plan(muon._parameter_compute_layouts)
     muon._validate_plan_across_ranks()
     muon._redistribution_runtime.reserve_buffers(
-        muon._plans,
+        muon._bucket_plans,
         local_tensor_spec=muon._local_tensor_spec,
         local_bucket_executor=muon,
     )
