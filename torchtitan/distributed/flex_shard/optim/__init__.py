@@ -10,8 +10,8 @@ from .distributed_muon import (
     BatchedMatrixComputeView,
     build_distributed_muon,
     DistributedMuon,
+    flex_optimizer_reshard,
     MuonComputeShardingConfig,
-    Owned,
 )
 
 
@@ -19,6 +19,6 @@ __all__ = [
     "BatchedMatrixComputeView",
     "build_distributed_muon",
     "DistributedMuon",
+    "flex_optimizer_reshard",
     "MuonComputeShardingConfig",
-    "Owned",
 ]
