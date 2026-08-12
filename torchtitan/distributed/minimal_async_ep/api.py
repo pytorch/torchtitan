@@ -6,9 +6,8 @@
 
 """MinimalAsyncEP primitives for constrained MoE expert parallel dispatch.
 
-This backend is intentionally narrow: it supports the launch shape where the
-EP process group is the data-parallel group and TP/CP/PP/SP are disabled.
-The symmetric-memory allocation is explicit and must happen before dispatch.
+This backend supports EP with optional CP, TP, and PP. The symmetric-memory
+allocation is explicit and must happen before dispatch.
 
 Shape symbols used by the API entrypoints:
     ``T``: local token rows.
@@ -84,7 +83,7 @@ class _MinimalAsyncEPBufferState:
     """Process-local symmetric-memory state initialized as one unit."""
 
     group: dist.ProcessGroup
-    tokens_per_rank: int
+    num_max_tokens_per_rank: int
     hidden_recv_buffers: list[torch.Tensor]
     hidden_recv_handles: list[Any]
     hidden_recv_peer_buffers: list[list[torch.Tensor]]
@@ -102,6 +101,23 @@ class _MinimalAsyncEPBufferState:
 
 
 _buffer_state: _MinimalAsyncEPBufferState | None = None
+# MinimalAsyncEP has one process-global buffer: the first dispatcher
+# initializes it, same-configuration dispatchers reuse it, and differing
+# metadata is invalid because the buffer layout would not match.
+_buffer_key: (
+    tuple[
+        object,
+        int,
+        int,
+        int,
+        int,
+        torch.dtype,
+        torch.device,
+        bool,
+        float | None,
+    ]
+    | None
+) = None
 
 
 def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None:
@@ -109,7 +125,6 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
     from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
     from torchtitan.distributed.activation_checkpoint import FullAC
     from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
-    from torchtitan.trainer import Trainer
 
     assert hasattr(
         config, "parallelism"
@@ -139,14 +154,6 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
             "MinimalAsyncEPTokenDispatcher.Config requires expert parallelism "
             "(expert_parallel_degree > 1)."
         )
-    if parallelism.tensor_parallel_degree != 1:
-        raise ValueError(
-            "MinimalAsyncEP does not support tensor or sequence parallelism."
-        )
-    if parallelism.context_parallel_degree != 1:
-        raise ValueError("MinimalAsyncEP does not support context parallelism.")
-    if parallelism.pipeline_parallel_degree != 1:
-        raise ValueError("MinimalAsyncEP does not support pipeline parallelism.")
     for num_experts in {cfg.num_experts for cfg in dispatcher_cfgs}:
         if num_experts % parallelism.expert_parallel_degree != 0:
             raise ValueError(
@@ -155,10 +162,11 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
                 f"({parallelism.expert_parallel_degree})."
             )
 
-    if not isinstance(config, Trainer.Config):
+    training = getattr(config, "training", None)
+    if training is None:
         raise ValueError(
-            "MinimalAsyncEP requires a Trainer.Config-compatible runtime config "
-            "to set hidden_dim, tokens_per_rank, and dtype."
+            "MinimalAsyncEP requires a training runtime config to set "
+            "hidden_dim, num_max_tokens_per_rank, and dtype."
         )
 
     memory_policy = getattr(config.compile, "memory_policy", None)
@@ -187,17 +195,12 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         )
 
     for token_dispatcher_cfg in dispatcher_cfgs:
-        token_dispatcher_cfg.hidden_dim = model_config.dim
-        token_dispatcher_cfg.tokens_per_rank = (
-            config.training.local_batch_size * config.training.seq_len
-        )
-        token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
-            config.training.mixed_precision_param
-        ]
+        token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
         token_dispatcher_cfg.force_load_balance = config.debug.moe_force_load_balance
         token_dispatcher_cfg.receive_capacity_factor = receive_capacity_factor
+        assert token_dispatcher_cfg.num_max_tokens_per_rank is not None
         token_dispatcher_cfg.receive_capacity = _buffer_rows(
-            token_dispatcher_cfg.tokens_per_rank,
+            token_dispatcher_cfg.num_max_tokens_per_rank,
             token_dispatcher_cfg.top_k,
             token_dispatcher_cfg.num_experts // parallelism.expert_parallel_degree,
             parallelism.expert_parallel_degree,
@@ -279,7 +282,7 @@ def _buffer_rows(
 def init_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
-    tokens_per_rank: int,
+    num_max_tokens_per_rank: int,
     num_local_experts: int,
     top_k: int,
     dtype: torch.dtype,
@@ -287,16 +290,33 @@ def init_buffer(
     force_load_balance: bool = False,
     receive_capacity_factor: float | None = None,
 ) -> None:
-    """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
-    global _buffer_state
+    """Initialize or reuse the process-local MinimalAsyncEP communication buffer."""
+    global _buffer_key, _buffer_state
 
     device = torch.device(device)
     ep_size = group.size()
     num_experts = ep_size * num_local_experts
-    assert _buffer_state is None
+    buffer_key = (
+        group,
+        hidden_dim,
+        num_max_tokens_per_rank,
+        num_local_experts,
+        top_k,
+        dtype,
+        device,
+        force_load_balance,
+        receive_capacity_factor,
+    )
+    if _buffer_key is not None:
+        if _buffer_key != buffer_key:
+            raise ValueError(
+                "MinimalAsyncEP buffer was already initialized with a "
+                "different configuration."
+            )
+        return
 
     dispatch_rows, combine_rows = _buffer_rows(
-        tokens_per_rank,
+        num_max_tokens_per_rank,
         top_k,
         num_local_experts,
         ep_size,
@@ -315,11 +335,12 @@ def init_buffer(
     )
 
     logger.info(
-        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
+        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, "
+        "num_max_tokens_per_rank=%d, "
         "top_k=%d, num_local_experts=%d, ep_size=%d, capacity_mode=%s, "
         "buffer_rows=%d",
         hidden_dim,
-        tokens_per_rank,
+        num_max_tokens_per_rank,
         top_k,
         num_local_experts,
         ep_size,
@@ -378,7 +399,7 @@ def init_buffer(
 
     _buffer_state = _MinimalAsyncEPBufferState(
         group=group,
-        tokens_per_rank=tokens_per_rank,
+        num_max_tokens_per_rank=num_max_tokens_per_rank,
         hidden_recv_buffers=hidden_recv_buffers,
         hidden_recv_handles=hidden_recv_handles,
         hidden_recv_peer_buffers=hidden_recv_peer_buffers,
@@ -392,6 +413,7 @@ def init_buffer(
             receive_capacity_factor is not None and not force_load_balance
         ),
     )
+    _buffer_key = buffer_key
 
 
 def _event_key(exchange: str, tensor: torch.Tensor) -> tuple[str, int]:
@@ -643,7 +665,7 @@ def _compute_direct_metadata(
         scratch.local_count_starts,
         num_routed_tokens=num_routed_rows,
         num_local_experts=num_local_experts,
-        max_tokens_per_segment=_buffer_state.tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.num_max_tokens_per_rank,
         dst_ranks=outputs.dispatch_dst_ranks,
         dst_rows=outputs.dispatch_dst_rows,
     )
@@ -675,7 +697,7 @@ def _compute_direct_metadata(
         ep_size=ep_size,
         num_local_experts=num_local_experts,
         receive_capacity=receive_capacity,
-        max_tokens_per_segment=_buffer_state.tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.num_max_tokens_per_rank,
         dst_ranks=outputs.combine_dst_ranks,
         dst_rows=outputs.combine_dst_rows,
         num_valid_rows=outputs.combine_num_valid_rows,
@@ -1569,5 +1591,4 @@ __all__ = [
     "combine_op",
     "dispatch_op",
     "init_buffer",
-    "maybe_update_minimal_async_ep_config",
 ]
