@@ -67,13 +67,20 @@ class InterGeneratorRouter(Actor, Configurable):
         ``_GeneratorHandle.state``, and so on. These states are not backed by
         shared storage, so if there are multiple router instances, they cannot
         know each others' routing decisions. Instead of using shared storage,
-        we solving the problem by enforcing the singleton pattern:
+        we solve the problem by enforcing the singleton pattern:
           * there should be only 1 router mesh in a training job;
           * this mesh should consists of only 1 actor.
 
         This pattern is simpler to implement, and should be good enough to handle
         the RL job's scale because the router is just a proxy, and the number of
         concurrent requests should be reasonable for a singleton to handle.
+
+    Monarch Actor:
+       The router singleton needs to be access from different processes or even
+       different hosts. If we instantiate the router as an instance of a normal
+       Python class, that instance's cannot be accessed from other processes or
+       hosts. To solve this problem, we model the router as Monarch Actor, and
+       pass the actor reference around.
     """
 
     @dataclass(kw_only=True, slots=True)
