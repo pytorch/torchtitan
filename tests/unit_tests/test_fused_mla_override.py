@@ -9,6 +9,7 @@ import unittest
 from typing import cast
 
 import torch
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -289,6 +290,81 @@ class TestFusedMLANumerics(unittest.TestCase):
             dtype,
             reduction=True,
         )
+
+    def test_make_fx_keeps_forward_and_backward_custom_ops(self):
+        """GraphTrainer fake tracing sees stable fused MLA operator nodes."""
+        q = torch.randn(
+            self.batch,
+            self.seq_len,
+            self.n_heads,
+            self.q_nope_dim + self.rope_dim,
+            device=self.positions.device,
+            requires_grad=True,
+        )
+        kv = torch.randn(
+            self.batch,
+            self.seq_len,
+            self.n_heads,
+            self.q_nope_dim + self.value_dim,
+            device=self.positions.device,
+            requires_grad=True,
+        )
+        k_pos = torch.randn(
+            self.batch,
+            self.seq_len,
+            self.rope_dim,
+            device=self.positions.device,
+            requires_grad=True,
+        )
+        grad_q = torch.randn_like(q)
+        grad_k = torch.randn(
+            *q.shape[:-1],
+            self.q_nope_dim + self.rope_dim,
+            device=q.device,
+        )
+        grad_v = torch.randn(
+            *q.shape[:-1],
+            self.value_dim,
+            device=q.device,
+        )
+
+        def forward_backward(q, kv, k_pos, cache, positions, grad_q, grad_k, grad_v):
+            q_out = fused_mla_q(
+                q.clone(),
+                cache,
+                positions,
+                self.q_nope_dim,
+            )
+            k, v = fused_mla_kv(
+                kv,
+                k_pos,
+                cache,
+                positions,
+                self.q_nope_dim,
+            )
+            return torch.autograd.grad(
+                (q_out, k, v),
+                (q, kv, k_pos),
+                (grad_q, grad_k, grad_v),
+            )
+
+        graph = make_fx(forward_backward, tracing_mode="fake")(
+            q,
+            kv,
+            k_pos,
+            self.rope.cache,
+            self.positions,
+            grad_q,
+            grad_k,
+            grad_v,
+        )
+        targets = [node.target for node in graph.graph.nodes]
+        self.assertEqual(
+            targets.count(torch.ops.torchtitan.fused_mla_q_rope_.default),
+            2,
+        )
+        self.assertIn(torch.ops.torchtitan.fused_mla_k_rope.default, targets)
+        self.assertIn(torch.ops.torchtitan.fused_mla_kv_backward.default, targets)
 
     @parametrize("dtype", [torch.bfloat16, torch.float32])
     def test_attention_module_forward_backward_matches_eager(self, dtype: torch.dtype):

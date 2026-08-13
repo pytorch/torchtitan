@@ -34,6 +34,8 @@ The implementation differs from Megatron Core in several important ways:
   wraps local results back into DTensors.
 * Flattened offsets use 64-bit arithmetic because the traced 671B local tensors
   exceed 2**31 elements.
+* Every Triton launch is exposed as a stable ``torch.library`` custom operator,
+  so GraphTrainer's fake-tensor ``make_fx`` trace keeps the fused boundaries.
 
 The override keeps the stock Attention parameters and state-dict layout.  It
 only replaces the Q/KV layout boundary around ComplexRoPE:
@@ -379,14 +381,19 @@ def _fused_kv_backward_kernel(
     )
 
 
-def _launch_q_rope(
+@torch.library.custom_op(
+    "torchtitan::fused_mla_q_rope_",
+    mutates_args={"q"},
+    device_types="cuda",
+    tags=torch.Tag.inplace,
+)
+def _fused_mla_q_rope_op(
     q: torch.Tensor,
     rope_cache_real: torch.Tensor,
     positions: torch.Tensor,
     q_nope_dim: int,
-    *,
     inverse: bool,
-) -> None:
+) -> torch.Tensor:
     batch, seq_len, n_heads, q_head_dim = q.shape
     rope_dim = q_head_dim - q_nope_dim
     block_pairs = triton.next_power_of_2(rope_dim // 2)
@@ -411,9 +418,15 @@ def _launch_q_rope(
         INVERSE=inverse,
         num_warps=4,
     )
+    return q
 
 
-def _launch_k_rope(
+@torch.library.custom_op(
+    "torchtitan::fused_mla_k_rope",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _fused_mla_k_rope_op(
     kv: torch.Tensor,
     k_pos: torch.Tensor,
     rope_cache_real: torch.Tensor,
@@ -464,7 +477,27 @@ def _launch_k_rope(
     return k
 
 
-def _launch_kv_backward(
+@_fused_mla_k_rope_op.register_fake
+def _fused_mla_k_rope_op_fake(
+    kv: torch.Tensor,
+    k_pos: torch.Tensor,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
+    q_nope_dim: int,
+) -> torch.Tensor:
+    return torch.empty(
+        (*kv.shape[:3], q_nope_dim + k_pos.shape[-1]),
+        dtype=kv.dtype,
+        device=kv.device,
+    )
+
+
+@torch.library.custom_op(
+    "torchtitan::fused_mla_kv_backward",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _fused_mla_kv_backward_op(
     grad_k: torch.Tensor,
     grad_v: torch.Tensor,
     rope_cache_real: torch.Tensor,
@@ -527,6 +560,29 @@ def _launch_kv_backward(
     return grad_kv, grad_k_pos
 
 
+@_fused_mla_kv_backward_op.register_fake
+def _fused_mla_kv_backward_op_fake(
+    grad_k: torch.Tensor,
+    grad_v: torch.Tensor,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
+    q_nope_dim: int,
+    rope_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty(
+            (*grad_k.shape[:3], q_nope_dim + grad_v.shape[-1]),
+            dtype=grad_k.dtype,
+            device=grad_k.device,
+        ),
+        torch.empty(
+            (*grad_k.shape[:2], rope_dim),
+            dtype=grad_k.dtype,
+            device=grad_k.device,
+        ),
+    )
+
+
 class _FusedMLAQ(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -539,19 +595,18 @@ class _FusedMLAQ(torch.autograd.Function):
         ctx.q_nope_dim = q_nope_dim
         ctx.save_for_backward(rope_cache_real, positions)
         ctx.mark_dirty(q)
-        _launch_q_rope(q, rope_cache_real, positions, q_nope_dim, inverse=False)
-        return q
+        return _fused_mla_q_rope_op(q, rope_cache_real, positions, q_nope_dim, False)
 
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_q: torch.Tensor):
         rope_cache_real, positions = ctx.saved_tensors
-        _launch_q_rope(
+        grad_q = _fused_mla_q_rope_op(
             grad_q,
             rope_cache_real,
             positions,
             ctx.q_nope_dim,
-            inverse=True,
+            True,
         )
         return grad_q, None, None, None
 
@@ -569,7 +624,7 @@ class _FusedMLAKV(torch.autograd.Function):
         ctx.q_nope_dim = q_nope_dim
         ctx.rope_dim = k_pos.shape[-1]
         ctx.save_for_backward(rope_cache_real, positions)
-        k = _launch_k_rope(kv, k_pos, rope_cache_real, positions, q_nope_dim)
+        k = _fused_mla_k_rope_op(kv, k_pos, rope_cache_real, positions, q_nope_dim)
         # Preserve the stock zero-copy V view. The custom backward combines its
         # gradient with dK-nope directly into the packed KV gradient.
         v = kv[..., q_nope_dim:]
@@ -579,7 +634,7 @@ class _FusedMLAKV(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_k: torch.Tensor, grad_v: torch.Tensor):
         rope_cache_real, positions = ctx.saved_tensors
-        grad_kv, grad_k_pos = _launch_kv_backward(
+        grad_kv, grad_k_pos = _fused_mla_kv_backward_op(
             grad_k,
             grad_v,
             rope_cache_real,
