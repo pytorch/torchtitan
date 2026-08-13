@@ -33,7 +33,6 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
-    FlexAttention,
     local_head_split,
     VarlenAttention,
     VarlenMetadata,
@@ -334,7 +333,6 @@ class GatedDeltaNet(Module):
         cu_seqlens: torch.Tensor | None = None,
         cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # varlen attention path
         if cu_seqlens is not None:
             if isinstance(x_BLD, DTensor):
 
@@ -364,10 +362,10 @@ class GatedDeltaNet(Module):
 
         @spmd.local_map(
             in_types=(
-                {"dp": spmd.S(0), "tp": spmd.S(1)},
+                {"dp": spmd.S(2), "tp": spmd.S(1)},
                 {"dp": spmd.R, "tp": spmd.S(0)},
             ),
-            out_types={"dp": spmd.S(0), "tp": spmd.S(1)},
+            out_types={"dp": spmd.S(2), "tp": spmd.S(1)},
         )
         def _local_depthwise_conv1d(
             x_local_BDL: torch.Tensor, w_local: torch.Tensor
@@ -423,53 +421,43 @@ class GatedDeltaNet(Module):
                 # device offsets when it is materialized as a new tensor.
                 spmd.mutate_type(cu_seqlens_cpu, "dp", src=spmd.R, dst=spmd.V)
 
-        def _maybe_flatten(tensor: torch.Tensor) -> torch.Tensor:
-            if cu_seqlens is None:
-                return tensor
+        def fold_bl_dim(tensor: torch.Tensor) -> torch.Tensor:
             return tensor.reshape(1, B * L, *tensor.shape[2:])
 
-        dp_shard_dim = 1 if cu_seqlens is not None else 0
-
-        # Shapes:
-        #   xq_BLNK, xk_BLNK: (B, L, n_key_heads, key_head_dim)
-        #   xv_BLNV, xz_BLNV: (B, L, n_value_heads, value_head_dim)
-        #   xa_BLN, xb_BLN: (B, L, n_value_heads)
+        # Folded recurrence shapes:
+        #   xq_BLNK, xk_BLNK: (1, B * L, n_key_heads, key_head_dim)
+        #   xv_BLNV, xz_BLNV: (1, B * L, n_value_heads, value_head_dim)
+        #   xa_BLN, xb_BLN: (1, B * L, n_value_heads)
         xq_BLNK = self._causal_conv(
-            _maybe_flatten(self.in_proj_q(x_BLD)),
+            fold_bl_dim(self.in_proj_q(x_BLD)),
             self.conv_q,
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xq_BLNK = local_head_split(
-            xq_BLNK, self.key_head_dim, dp_shard_dim=dp_shard_dim
-        )
+        xq_BLNK = local_head_split(xq_BLNK, self.key_head_dim, dp_shard_dim=1)
         xk_BLNK = self._causal_conv(
-            _maybe_flatten(self.in_proj_k(x_BLD)),
+            fold_bl_dim(self.in_proj_k(x_BLD)),
             self.conv_k,
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xk_BLNK = local_head_split(
-            xk_BLNK, self.key_head_dim, dp_shard_dim=dp_shard_dim
-        )
+        xk_BLNK = local_head_split(xk_BLNK, self.key_head_dim, dp_shard_dim=1)
         xv_BLNV = self._causal_conv(
-            _maybe_flatten(self.in_proj_v(x_BLD)),
+            fold_bl_dim(self.in_proj_v(x_BLD)),
             self.conv_v,
             cu_seqlens,
             cu_seqlens_cpu,
         )
-        xv_BLNV = local_head_split(
-            xv_BLNV, self.value_head_dim, dp_shard_dim=dp_shard_dim
-        )
+        xv_BLNV = local_head_split(xv_BLNV, self.value_head_dim, dp_shard_dim=1)
         xz_BLNV = local_head_split(
-            _maybe_flatten(self.in_proj_z(x_BLD)),
+            fold_bl_dim(self.in_proj_z(x_BLD)),
             self.value_head_dim,
-            dp_shard_dim=dp_shard_dim,
+            dp_shard_dim=1,
         )
-        xa_BLN = _maybe_flatten(self.in_proj_a(x_BLD))
-        xb_BLN = _maybe_flatten(self.in_proj_b(x_BLD))
+        xa_BLN = fold_bl_dim(self.in_proj_a(x_BLD))
+        xb_BLN = fold_bl_dim(self.in_proj_b(x_BLD))
 
-        # Gating signals have shape (B, L, n_value_heads):
+        # Gating signals have shape (1, B * L, n_value_heads):
         #   g_BLN:    decay rate per head, always negative
         #   beta_BLN: update gate in (0, 1)
         g_BLN = -torch.exp(self.A_log.float()) * F.softplus(
@@ -489,13 +477,8 @@ class GatedDeltaNet(Module):
 
         out_BLNV = self.norm(out_BLNV, xz_BLNV)
 
-        # Merge value heads and restore (B, L); under varlen the kernel ran on a
-        # flattened (1, B*L) layout, so this also unpacks the batch.
-        out_BLD = (
-            unflatten_to_bld(out_BLNV, B, L)
-            if cu_seqlens is not None
-            else out_BLNV.flatten(2)
-        )
+        # Merge value heads and restore (B, L) from the folded (1, B * L) layout.
+        out_BLD = unflatten_to_bld(out_BLNV, B, L)
         return self.out_proj(out_BLD)
 
 
@@ -736,17 +719,9 @@ class Qwen35Model(Decoder):
                             f"n_value_heads ({n_value_heads})."
                         )
 
-            first_attention = self.first_attention
             set_qwen35_sharding_config(
                 self,
                 enable_ep=parallelism.expert_parallel_degree > 1,
-                deltanet_inputs_flattened=(
-                    first_attention is not None
-                    and isinstance(
-                        first_attention.inner_attention,
-                        (FlexAttention.Config, VarlenAttention.Config),
-                    )
-                ),
             )
 
         def get_nparams_and_flops(

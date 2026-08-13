@@ -135,7 +135,6 @@ def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
     enable_ep: bool,
-    deltanet_inputs_flattened: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs.
 
@@ -174,7 +173,6 @@ def set_qwen35_sharding_config(
             layer_cfg,
             attention_input_layout=layer_input_layout,
             enable_ep=enable_ep,
-            deltanet_inputs_flattened=deltanet_inputs_flattened,
         )
 
 
@@ -183,7 +181,6 @@ def _set_qwen35_layer_sharding(
     *,
     attention_input_layout: SpmdLayout,
     enable_ep: bool,
-    deltanet_inputs_flattened: bool,
 ) -> None:
     layer_cfg.attention_norm.sharding_config = _decoder_norm_sharding(
         attention_input_layout
@@ -200,7 +197,6 @@ def _set_qwen35_layer_sharding(
         _set_deltanet_sharding(
             layer_cfg.delta_net,
             attention_input_layout=attention_input_layout,
-            inputs_flattened=deltanet_inputs_flattened,
         )
 
     if layer_cfg.feed_forward is not None:
@@ -312,7 +308,6 @@ def _set_deltanet_sharding(
     deltanet_cfg: "GatedDeltaNet.Config",
     *,
     attention_input_layout: SpmdLayout,
-    inputs_flattened: bool,
 ) -> None:
     """Sharding for GatedDeltaNet: head-sharded TP on projections.
 
@@ -344,15 +339,11 @@ def _set_deltanet_sharding(
     # RowwiseParallel on output projection (reduce-scatter to SP)
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
 
-    # Pretraining supplies document offsets for both Flex and Varlen attention,
-    # so DeltaNet flattens (B, L) to (1, B * L) and moves DP sharding from dim 0
-    # to dim 1. CP is intentionally absent from this layout: Qwen3.5 currently
-    # rejects CP, and its sequence sharding would collide with DP on dim 1.
-    deltanet_activation_layout = (
-        SpmdLayout({DP: spmd.S(1), TP: spmd.S(2)})
-        if inputs_flattened
-        else dense_activation_placement(tp=spmd.S(2))
-    )
+    # Training folds (B, L) to (1, B * L), so tensor DP shards dim 1. Inference
+    # already supplies folded tokens and uses separate vLLM DP workers. CP is
+    # omitted because Qwen3.5 rejects CP, whose sequence sharding would collide
+    # with tensor DP on dim 1.
+    deltanet_activation_layout = SpmdLayout({DP: spmd.S(1), TP: spmd.S(2)})
 
     # RMSNormGated: per-head norm, weight Replicate, activations Shard(2)
     deltanet_cfg.norm.sharding_config = ShardingConfig(
