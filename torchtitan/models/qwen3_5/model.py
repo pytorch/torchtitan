@@ -42,6 +42,7 @@ from .sharding import set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
+Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 
 def _causal_conv1d_varlen(
@@ -577,17 +578,18 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: Qwen35AttentionMaskDict | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if isinstance(attention_masks, dict):
-            attention_masks = attention_masks[self.attn_mask_key]
+        layer_mask = (
+            attention_masks[self.attn_mask_key] if attention_masks is not None else None
+        )
 
         h_BLD = self.attention_norm(x_BLD)
         if self.full_attn:
-            h_BLD = self.attn(h_BLD, attention_masks, positions)
+            h_BLD = self.attn(h_BLD, layer_mask, positions)
         else:
-            h_BLD = self.attn(h_BLD, attention_masks)
+            h_BLD = self.attn(h_BLD, layer_mask)
         x_BLD = x_BLD + h_BLD
 
         h_BLD = self.ffn_norm(x_BLD)
@@ -698,14 +700,6 @@ class Qwen35Model(Decoder):
             )
 
     def __init__(self, config: Config):
-        if config.first_attention is None:
-            # The trainer only builds attention masks for models with a
-            # quadratic attention layer; without masks GatedDeltaNet would
-            # silently run across packed-document boundaries.
-            raise ValueError(
-                "Qwen3.5 configs must include at least one full-attention "
-                "layer (full_attention_interval <= num layers)."
-            )
         super().__init__(config)
 
         self.vision_encoder = config.vision_encoder.build()
@@ -714,18 +708,16 @@ class Qwen35Model(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
-    ) -> AttentionMasksType:
+    ) -> Qwen35AttentionMaskDict:
         """Build the per-consumer mask dict for the hybrid stack.
 
-        A ``BlockMask`` document-isolates the quadratic layers only;
-        GatedDeltaNet is a recurrence, so it takes document *offsets*
-        (``VarlenMetadata``) under the ``"deltanet"`` key to reset conv and
-        recurrent state at packing boundaries. Each transformer block picks
-        its entry by ``attn_mask_key``. Under pipeline parallelism the
-        trainer pre-splits microbatches and builds this dict per microbatch.
+        A ``BlockMask`` isolates documents in the quadratic layers. The value
+        is ``None`` if the config has no quadratic layer. GatedDeltaNet uses
+        document offsets under the ``"deltanet"`` key. Each block selects its
+        value by ``attn_mask_key``. The trainer builds this dictionary for
+        each pipeline microbatch.
         """
         attn_config = self.config.first_attention
-        assert attn_config is not None  # enforced in __init__
 
         # Host offsets are a GatedDeltaNet-only need: the FLA varlen kernels
         # take cu_seqlens as a CPU tensor to size their launches, whereas
@@ -736,17 +728,19 @@ class Qwen35Model(Decoder):
             positions,
             include_host_offsets=True,
         )
-        masks: dict[str, BlockMask | VarlenMetadata] = {
-            "deltanet": deltanet_metadata,
-        }
-        if isinstance(attn_config.inner_attention, VarlenAttention.Config):
+        if attn_config is None:
+            quadratic_attention = None
+        elif isinstance(attn_config.inner_attention, VarlenAttention.Config):
             # Under varlen both consumers read the same document offsets.
-            masks["quadratic_attention"] = deltanet_metadata
+            quadratic_attention = deltanet_metadata
         else:
             quadratic_masks = super().get_attention_masks(positions)
             assert isinstance(quadratic_masks, BlockMask)
-            masks["quadratic_attention"] = quadratic_masks
-        return masks
+            quadratic_attention = quadratic_masks
+        return {
+            "quadratic_attention": quadratic_attention,
+            "deltanet": deltanet_metadata,
+        }
 
     def _get_vision_positions(
         self,
@@ -870,7 +864,7 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: Qwen35AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,

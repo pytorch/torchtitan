@@ -80,11 +80,10 @@ class VarlenMetadata(NamedTuple):
     cu_seq_q_host: tuple[int, ...] | None = None
 
 
-# Mapping (not dict) so covariant value types accept both dict[str, BlockMask]
-# (e.g. gpt_oss) and mixed dicts carrying VarlenMetadata (e.g. qwen3.5's
-# GatedDeltaNet document offsets).
+# Mapping (not dict) lets covariant value types accept both BlockMask-only
+# dictionaries and mixed dictionaries. A None value marks an unused mask.
 AttentionMasksType = (
-    Mapping[str, BlockMask | VarlenMetadata] | BlockMask | VarlenMetadata
+    Mapping[str, BlockMask | VarlenMetadata | None] | BlockMask | VarlenMetadata
 )
 
 

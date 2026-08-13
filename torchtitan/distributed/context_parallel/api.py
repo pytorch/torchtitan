@@ -287,8 +287,7 @@ def cp_shard(
             if not isinstance(mask, BlockMask):
                 raise ValueError(
                     "Context parallelism can only shard BlockMask attention "
-                    f"masks, got {type(mask).__name__} in the mask dict "
-                    "(varlen document metadata is not shardable)."
+                    f"masks, got {type(mask).__name__} in the mask dict."
                 )
             masks.append(mask)
         sharded_masks = _context_parallel_shard(

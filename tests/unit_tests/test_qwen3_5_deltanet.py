@@ -349,6 +349,25 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self.assertIsInstance(varlen_masks["deltanet"], VarlenMetadata)
         self.assertEqual(varlen_masks["deltanet"].cu_seq_q_host, (0, 3, 5, 10))
 
+        deltanet_only_config = model_registry("debugmodel").model
+        deltanet_only_config.layers = [
+            layer
+            for layer in deltanet_only_config.layers
+            if layer.delta_net is not None
+        ]
+        deltanet_only_model = deltanet_only_config.build()
+        deltanet_only_masks = deltanet_only_model.get_attention_masks(positions)
+        self.assertEqual(
+            set(deltanet_only_masks.keys()),
+            {"quadratic_attention", "deltanet"},
+        )
+        self.assertIsNone(deltanet_only_masks["quadratic_attention"])
+        self.assertIsInstance(deltanet_only_masks["deltanet"], VarlenMetadata)
+        self.assertEqual(
+            deltanet_only_masks["deltanet"].cu_seq_q_host,
+            (0, 3, 5, 10),
+        )
+
     def _assert_fla_varlen_matches_per_document(
         self, backend: str, *, atol: float, rtol: float
     ) -> None:
