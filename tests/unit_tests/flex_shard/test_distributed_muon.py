@@ -28,8 +28,95 @@ from torchtitan.distributed.flex_shard import (
 )
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
+    _resolve_mesh_axis_participant_distribution,
+    _ResolvedBatchedMatrixView,
     DistributedMuon,
 )
+
+
+class TestBatchedMatrixParticipantDistribution(unittest.TestCase):
+    @staticmethod
+    def _canonical_regions(
+        *,
+        num_heads: int,
+        matrix_rows: int,
+        matrix_columns: int,
+        num_participants: int,
+    ):
+        view = _ResolvedBatchedMatrixView(
+            matrix_rows=matrix_rows,
+            matrix_columns=matrix_columns,
+        )
+        storage = _resolve_mesh_axis_participant_distribution(
+            torch.Size((num_heads * matrix_rows, matrix_columns)),
+            Shard(0),
+            mesh_axis_size=num_participants,
+            canonicalize_region=lambda region: region,
+        )
+        compute = _resolve_mesh_axis_participant_distribution(
+            torch.Size((num_heads, matrix_rows, matrix_columns)),
+            Shard(0),
+            mesh_axis_size=num_participants,
+            canonicalize_region=view.canonical_storage_region,
+        )
+        return storage.canonical_regions_by_coordinate, (
+            compute.canonical_regions_by_coordinate
+        )
+
+    def test_aligned_storage_matches_compute_ownership(self):
+        storage, compute = self._canonical_regions(
+            num_heads=4,
+            matrix_rows=3,
+            matrix_columns=2,
+            num_participants=2,
+        )
+        self.assertEqual(storage, compute)
+        self.assertEqual(
+            tuple((region.offsets, region.shape) for region in compute),
+            (((0, 0), (6, 2)), ((6, 0), (6, 2))),
+        )
+
+    def test_split_head_changes_compute_ownership(self):
+        storage, compute = self._canonical_regions(
+            num_heads=3,
+            matrix_rows=4,
+            matrix_columns=2,
+            num_participants=2,
+        )
+        self.assertEqual(
+            tuple((region.offsets, region.shape) for region in storage),
+            (((0, 0), (6, 2)), ((6, 0), (6, 2))),
+        )
+        self.assertEqual(
+            tuple((region.offsets, region.shape) for region in compute),
+            (((0, 0), (8, 2)), ((8, 0), (4, 2))),
+        )
+
+    def test_heads_fewer_than_participants_have_empty_compute_regions(self):
+        storage, compute = self._canonical_regions(
+            num_heads=2,
+            matrix_rows=4,
+            matrix_columns=2,
+            num_participants=4,
+        )
+        self.assertEqual(tuple(region.shape[0] for region in storage), (2, 2, 2, 2))
+        self.assertEqual(tuple(region.shape[0] for region in compute), (4, 4, 0, 0))
+
+    def test_uneven_storage_and_compute_partitions(self):
+        storage, compute = self._canonical_regions(
+            num_heads=5,
+            matrix_rows=3,
+            matrix_columns=2,
+            num_participants=4,
+        )
+        self.assertEqual(
+            tuple((region.offsets[0], region.shape[0]) for region in storage),
+            ((0, 4), (4, 4), (8, 4), (12, 3)),
+        )
+        self.assertEqual(
+            tuple((region.offsets[0], region.shape[0]) for region in compute),
+            ((0, 6), (6, 6), (12, 3), (15, 0)),
+        )
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -41,6 +128,49 @@ class TestDistributedMuon(DTensorTestBase):
     @property
     def device_type(self):
         return "cuda"
+
+    @with_comms
+    def test_aligned_storage_uses_local_compute_view(self):
+        num_heads = 4
+        matrix_rows = 3
+        matrix_columns = 2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(
+            num_heads * matrix_rows * matrix_columns,
+            device=device,
+            dtype=torch.float32,
+        ).reshape(num_heads * matrix_rows, matrix_columns)
+        parameter = torch.nn.Parameter(distribute_tensor(value, mesh, (Shard(0),)))
+        fqn = "layers.0.attention.wq.weight"
+
+        optimizer = build_distributed_muon(
+            [{"params": [parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Shard(0)},
+                    ),
+                    compute_view=AttentionPerHeadComputeView(num_heads=num_heads),
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=(fqn,))],
+        )
+
+        compute_layout = optimizer._parameter_compute_layouts[0]
+        self.assertTrue(compute_layout.storage_is_compute_ready)
+        self.assertEqual(
+            compute_layout.local_storage_view.shape,
+            (num_heads // self.world_size, matrix_rows, matrix_columns),
+        )
+        self.assertEqual(
+            compute_layout.local_storage_view.data_ptr(),
+            parameter.to_local().data_ptr(),
+        )
 
     @with_comms
     def test_explicit_replicated_compute(self):
@@ -624,6 +754,83 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                     )
                 },
                 bucket_configs=[BucketConfig(patterns=(unsupported_fqn,))],
+            )
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistributedMuonBatchedMatrixMesh(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_replicated_orthogonal_axis_preserves_ownership(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_shard", "replicate"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(36, device=device, dtype=torch.float32).reshape(12, 3)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value, mesh, (Shard(0), Replicate()))
+        )
+        fqn = "layers.0.attention.wq.weight"
+
+        optimizer = build_distributed_muon(
+            [{"params": [parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Shard(0)},
+                    ),
+                    compute_view=AttentionPerHeadComputeView(num_heads=3),
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=(fqn,))],
+        )
+
+        compute_layout = optimizer._parameter_compute_layouts[0]
+        self.assertFalse(compute_layout.storage_is_compute_ready)
+        self.assertEqual(compute_layout.redistribution_storage_mesh_axis, 0)
+
+    @with_comms
+    def test_two_changing_axes_fail_at_transport_boundary(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_shard", "other_shard"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(36, device=device, dtype=torch.float32).reshape(12, 3)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value, mesh, (Shard(0), Shard(0)))
+        )
+        fqn = "layers.0.attention.wq.weight"
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "requires compute redistribution or owned compute on multiple mesh "
+            "axes.*multi-axis transport is not implemented",
+        ):
+            build_distributed_muon(
+                [{"params": [parameter], "param_names": [fqn]}],
+                compute_sharding_by_fqn={
+                    fqn: MuonComputeShardingConfig(
+                        compute_layout=ComputeLayout(
+                            shardings_by_mesh_axis={
+                                "dp_shard": Shard(0),
+                                "other_shard": Shard(0),
+                            },
+                        ),
+                        compute_view=AttentionPerHeadComputeView(num_heads=3),
+                    )
+                },
+                bucket_configs=[BucketConfig(patterns=(fqn,))],
             )
 
 
