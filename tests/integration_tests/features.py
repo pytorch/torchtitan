@@ -206,7 +206,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
+                    "--compile.enable_async_tensor_parallel",
                 ],
             ],
             "2D async TP compile",

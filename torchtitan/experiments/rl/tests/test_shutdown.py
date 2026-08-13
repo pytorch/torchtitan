@@ -164,6 +164,10 @@ def _make_stub_rl_trainer():
     """Create an Controller with a minimal stub config (no VLLMGenerator validation)."""
     from torchtitan.experiments.rl.observability import metrics as m
 
+    class _StubRollouter:
+        async def close(self):
+            pass
+
     class _StubConfig:
         async_loop = AsyncLoopConfig()
         metrics = m.MetricsProcessor.Config()
@@ -181,7 +185,7 @@ def _make_stub_rl_trainer():
         generator = SimpleNamespace(
             sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
         )
-        rollouter = SimpleNamespace(build=lambda: SimpleNamespace())
+        rollouter = SimpleNamespace(build=lambda: _StubRollouter())
 
         def to_dict(self):
             return {}
@@ -306,10 +310,12 @@ class _RouterCloseEndpoint:
         self._router = router
 
     async def call_one(self):
-        return await self._router.fanout("close", return_exceptions=True)
+        return await self._router._fanout("close", return_exceptions=True)
 
 
-class _StubRouterActor:
+class _StubRouterHandle:
+    """Stands in for the router's actor-mesh handle, whose endpoints take adverbs."""
+
     def __init__(self, router):
         self.close_generators = _RouterCloseEndpoint(router)
 
@@ -340,7 +346,7 @@ class _StubMesh:
 
 
 def _set_generator_router(rl_trainer, generators):
-    rl_trainer.generator_router = _StubRouterActor(
+    rl_trainer.generator_router = _StubRouterHandle(
         InterGeneratorRouter(
             InterGeneratorRouter.Config(),
             generators=generators,
