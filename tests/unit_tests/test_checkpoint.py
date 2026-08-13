@@ -20,12 +20,11 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
-from torchtitan.components.checkpoint import (
+from torchtitan.components.checkpointer import (
     CheckpointManager,
     MODEL,
     ModelWrapper,
-    purge_thread,
-    Terminate,
+    purge_worker,
 )
 
 
@@ -189,8 +188,8 @@ class TestCheckpointManager(unittest.TestCase):
                 states[key].copy_(val)
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_save_load_restores_state(self, mock_load, mock_save, mock_rank):
         mock_save.side_effect = self.fake_save
         mock_load.side_effect = self.fake_load
@@ -221,8 +220,8 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_save_and_purge_keeps_last_k_checkpoints(
         self, mock_load, mock_save, mock_rank
     ):
@@ -264,8 +263,8 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=1)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_nonzero_rank_does_not_purge_or_save(self, mock_load, mock_save, mock_rank):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
@@ -288,7 +287,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertEqual(len(mock_save.call_args_list), 3)
         manager.close()
 
-    @mock.patch("torchtitan.components.checkpoint.logger")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.logger")
     def test_load_returns_false_when_no_checkpoint_folder(self, mock_logger):
         cfg = self.trainer_config.checkpoint
         cfg.folder = "nonexistent"
@@ -326,7 +325,7 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_load_finds_latest_and_calls_dcp_load(self, mock_load, mock_rank):
         ckpt_folder = os.path.join(self.test_folder, "checkpoints")
         os.makedirs(ckpt_folder, exist_ok=True)
@@ -355,7 +354,7 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_initial_load_path_used_when_folder_has_no_valid_checkpoints(
         self, mock_load, mock_rank
     ):
@@ -384,9 +383,9 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertTrue(res)
         manager.close()
 
-    @mock.patch("torchtitan.components.checkpoint.logger")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_initial_load_path_ignored_when_folder_has_valid_checkpoints(
         self, mock_load, mock_rank, mock_logger
     ):
@@ -425,7 +424,7 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_explicit_load_step_raises_when_checkpoint_step_missing(
         self, mock_load, mock_rank
     ):
@@ -452,8 +451,8 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_interval_respects_interval(self, mock_load, mock_save, mock_rank):
         """
         Test that save() only triggers on step 1 and multiples of interval, skipping others,
@@ -488,8 +487,8 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
     def test_last_save_model_only_and_initial_load_model_only(
         self, mock_load, mock_save, mock_rank
     ):
@@ -546,13 +545,13 @@ class TestCheckpointManager(unittest.TestCase):
         manager1.close()
         manager2.close()
 
-    @mock.patch("torchtitan.components.checkpoint.logger")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torch.cuda.Stream")
-    @mock.patch("torchtitan.components.checkpoint.DefaultStager")
-    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.DefaultStager")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dist.new_group")
     @mock.patch(
-        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
+        "torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.async_save", side_effect=fake_async_save
     )
     def test_async_save_with_pinned_mem_assigns_staging_future(
         self,
@@ -606,9 +605,9 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager.close()
 
-    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dist.new_group")
     @mock.patch(
-        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
+        "torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.async_save", side_effect=fake_async_save
     )
     def test_async_save_calls_maybe_wait_for_saving(
         self, mock_async_save, mock_new_group
@@ -646,7 +645,7 @@ class TestCheckpointManager(unittest.TestCase):
         new_future.result.assert_not_called()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
     def test_enable_first_step_checkpoint(self, mock_save, mock_rank):
         """
         Test that enable_first_step_checkpoint triggers checkpoint save at step 1.
@@ -710,7 +709,7 @@ class TestCheckpointManager(unittest.TestCase):
         manager2.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
     def test_non_persist_buffer_not_saved(self, mock_save, mock_rank):
         """Test that freqs_cis is not saved"""
 
@@ -756,7 +755,7 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
     def test_load_only_prevents_saving(self, mock_save, mock_rank):
         """
         Test that load_only=True prevents checkpoint saving.
@@ -812,8 +811,8 @@ class TestCheckpointManager(unittest.TestCase):
         manager2.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.load")
+    @mock.patch("torchtitan.components.checkpointer.dcp_checkpointing_manager.dcp.save")
     def test_verify_prefix(self, mock_save, mock_load, mock_rank):
         def fake_save(state_dict: dict, checkpoint_id: str, storage_writer=None):
             self.assertIn("bias", state_dict)
@@ -889,6 +888,12 @@ class TestCheckpointManager(unittest.TestCase):
 
 
 class TestConfigPostInit(unittest.TestCase):
+    def test_legacy_config_only_adds_dcp_specific_fields(self):
+        self.assertEqual(
+            {"async_mode"},
+            set(CheckpointManager.Config.__annotations__),
+        )
+
     def test_valid_default_config(self):
         """Verify that default values pass initialization."""
         try:
@@ -980,7 +985,7 @@ class TestConfigPostInit(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid async_mode"):
             CheckpointManager.Config(async_mode="invalid_mode")
 
-    @mock.patch("torchtitan.components.checkpoint.logger")
+    @mock.patch("torchtitan.components.checkpointer.base_checkpoint_manager.logger")
     def test_warnings(self, mock_logger):
         """Test that logical redundancies trigger warnings but don't crash."""
 
@@ -1031,28 +1036,25 @@ class TestFindLoadStepRemote(unittest.TestCase):
         self.assertEqual(manager._find_load_step(folder=self.root), -1)
 
 
-class TestPurgeThread(unittest.TestCase):
+class TestPurgeWorker(unittest.TestCase):
     """A single failed deletion must not kill the daemon purge thread; otherwise
     keep_latest_k would silently stop purging for the rest of the run."""
 
     def test_survives_failed_delete(self):
-        q = queue_lib.Queue()
+        q: queue_lib.Queue[str | None] = queue_lib.Queue()
         q.put("fails")
         q.put("succeeds")
-        q.put(Terminate())
+        q.put(None)
+        q.put("ignored")
 
-        calls = []
+        calls: list[str] = []
 
         def rmtree(path):
             calls.append(path)
             if path == "fails":
                 raise RuntimeError("transient backend error")
 
-        with mock.patch(
-            "torchtitan.components.checkpoint.filesystem.rmtree", side_effect=rmtree
-        ):
-            # Returns once Terminate is dequeued; must not raise.
-            purge_thread(q)
+        purge_worker(q, rmtree)
 
         self.assertEqual(calls, ["fails", "succeeds"])
 

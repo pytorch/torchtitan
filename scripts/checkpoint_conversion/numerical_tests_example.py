@@ -8,7 +8,7 @@ import torch
 
 import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
-from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import logger
 

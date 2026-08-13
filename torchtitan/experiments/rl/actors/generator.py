@@ -21,7 +21,7 @@ import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
 from torch.distributed.tensor import DTensor
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.parallel_dims import unfold_dp_axes
 from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance

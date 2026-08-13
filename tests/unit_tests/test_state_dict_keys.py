@@ -30,7 +30,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 
-from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.optimizer_utils import (
     get_flat_optim_state_dict,
     init_optim_state,

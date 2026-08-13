@@ -13,7 +13,7 @@ import re
 import threading
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, cast, Literal
 
 import torch
@@ -29,23 +29,25 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
     AsyncSaveResponse,
 )
-from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.tensor import DTensor
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
-MODEL = "model"
-OPTIMIZER = "optimizer"
-LR_SCHEDULER = "lr_scheduler"
-DATALOADER = "dataloader"
-TRAIN_STATE = "train_state"
+from .base_checkpoint_manager import (
+    BaseCheckpointManager,
+    DATALOADER,
+    LR_SCHEDULER,
+    MODEL,
+    ModelWrapper,
+    OPTIMIZER,
+    purge_worker,
+)
 
 
 class AsyncMode(str, enum.Enum):
@@ -54,126 +56,11 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
-def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Whether ``a`` and ``b`` are backed by the same storage.
-
-    For ``DTensor`` the local shard's storage is compared via ``_local_tensor``
-    rather than ``to_local()``, which is autograd-aware; this is a read-only
-    identity check on the local storage.
-    """
-    if isinstance(a, DTensor):
-        a = a._local_tensor
-    if isinstance(b, DTensor):
-        b = b._local_tensor
-    return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
-
-
-class ModelWrapper(Stateful):
-    """
-    A wrapper for `nn.Module` (or a list of modules) that provides a unified `Stateful`
-    interface for distributed checkpointing.
-
-    This class serves two purposes:
-        1. Flattening/Aggregation: It combines the state dicts of multiple
-           different modules (like individual chunks in Pipeline Parallelism)
-           into a single flat view so checkpointing code can interact
-           with them through a unified interface.
-        2. Stable-storage caching: It caches the flattened state dict and, on
-           every `state_dict()` call, returns tensors backed by the same
-           storage. Async DCP staging may cache pinned host buffers keyed by the
-           source storage, so keeping the storage stable lets it reuse those
-           buffers across saves (the fast checkpoint path). Parameter tensors
-           already satisfy this because the cached view shares the parameter
-           storage; tensors produced by module `state_dict` hooks (e.g. one that
-           splits a fused parameter) may be freshly allocated each call, so they
-           are refreshed in place to keep their storage stable while their values
-           track the current parameters.
-
-    Notes:
-        - Calling `load_state_dict` updates the underlying modules and
-        refreshes the cached state_dict.
-        - The model architecture should not be structurally modified (e.g.,
-        changing keys or replacing tensor references) after wrapping, or the
-        cache will become stale.
-    """
-
-    def __init__(self, model: nn.Module | list[nn.Module]) -> None:
-        self.model = [model] if isinstance(model, nn.Module) else model
-        self.cached_state_dict = self._get_state_dict()
-
-    def _get_state_dict(self) -> dict[str, Any]:
-        # TorchTitan already makes model state_dict keys canonical.
-        return {k: v for model in self.model for k, v in model.state_dict().items()}
-
-    def state_dict(self) -> dict[str, Any]:
-        # Recompute the state dict so hook-produced tensors reflect the current
-        # parameters, then merge into the cache without changing storage objects.
-        for key, value in self._get_state_dict().items():
-            cached = self.cached_state_dict.get(key)
-            if (
-                cached is None
-                or cached.shape != value.shape
-                or cached.dtype != value.dtype
-            ):
-                self.cached_state_dict[key] = value
-            elif not _shares_storage(cached, value):
-                cached.copy_(value)
-        return self.cached_state_dict
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # strict=False because state_dict is the flattened checkpoint dict, which
-        # mixes model FQN keys with non-model keys (optimizer, lr_scheduler, ...).
-        for model in self.model:
-            model.load_state_dict(state_dict, strict=False)
-        # Refresh the cache so state_dict() reflects the freshly loaded values.
-        self.cached_state_dict = self._get_state_dict()
-
-
-class Terminate:
-    pass
-
-
 class SaveDone:
     pass
 
 
-def purge_thread(purge_queue: queue.Queue):
-    """Thread to purge the old checkpoints.
-
-    This is only used when keep_latest_k > 0.
-
-    Args:
-        purge_queue (queue.Queue): The queue to receive the path to purge and
-        Terminate signal.
-    """
-    try:
-        while True:
-            path = purge_queue.get()
-            if isinstance(path, Terminate):
-                return
-            assert isinstance(path, str)
-            logger.info("Checkpointer is deleting %s.", path)
-            begin = time.monotonic()
-            # A single failed deletion (e.g. a transient remote error) must not
-            # kill this daemon thread; otherwise keep_latest_k would silently
-            # stop purging for the rest of the run.
-            try:
-                filesystem.rmtree(path)
-            except Exception as e:
-                logger.warning(
-                    "Checkpointer failed to delete %s: %s. Skipping.", path, e
-                )
-                continue
-            logger.info(
-                "Checkpointer deleted %s in %.2f seconds.",
-                path,
-                time.monotonic() - begin,
-            )
-    finally:
-        logger.info("Destroying the purge thread.")
-
-
-class CheckpointManager(Configurable):
+class CheckpointManager(BaseCheckpointManager):
     """This class manages the checkpointing logic for the TorchTitan trainer.
 
 
@@ -220,238 +107,20 @@ class CheckpointManager(Configurable):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        enable: bool = False
-        """Whether to enable checkpoint"""
-
-        folder: str = "checkpoint"
-        """
-        The folder to store the checkpoints.
-        When enable is set to true, checkpoints will be in
-        {--dump_folder}/{--checkpoint.folder}.
-        """
-
-        interval: int = 500
-        """Checkpointing interval in steps."""
-
-        initial_load_path: str | None = None
-        """
-        This option specifies the path to the initial checkpoint to load, which is
-        particularly useful for resuming training from a previous run with a
-        different output path or when loading a checkpoint from a pre-trained model.
-        If the checkpoint folder for the current run is not empty,
-        located at {--dump_folder}/{--checkpoint.folder}, this option will be ignored.
-        This feature allows users to load an initial checkpoint from a different folder
-        and continue training, saving new checkpoints to the specified folder without
-        affecting the existing ones.
-
-        Note that the path should contain the absolute path to the checkpoint folder,
-        including the step number, if any; for example,
-        "//pre_train/checkpoints/llama3/llama3_8b/step_10000".
-        """
-
-        initial_load_model_only: bool = True
-        """
-        This option specifies if only the model should be loaded during the initial
-        checkpoint load. The option is only used when `initial_load_path` is specified.
-        If False, the checkpoint at `initial_load_path` is treated as a standard
-        training checkpoint, including optimizer, lr scheduler, training states, etc.
-        The default setting for this option is True. Note that you will have to use
-        `--checkpoint.no_initial_load_model_only` to override the default setting.
-        """
-
-        initial_load_in_hf: bool = False
-        """
-        Enable the use of HuggingFace's safetensors format for checkpointing. This will
-        load checkpoints in HF's model definition and safetensors format instead of the
-        default torchtitan model definition and DCP format, after necessary model state
-        dict transformation.
-        If `initial_load_path` is not provided, this option will look for weights
-        in `sd_adapter.hf_assets_path`. `initial_load_model_only` must be True
-        because safetensors doesn't support saving non-tensors.
-        The default value is False.
-        """
-
-        initial_load_in_hf_quantized: bool = False
-        """
-        Enable loading of HuggingFace's safetensors format with quantized state dict
-        keys. The option is only used when `initial_load_path` and
-        `initial_load_path_in_hf` is specified. This will load checkpoints in HF's model
-        definition and dequantize on model weights if necessary. To support this
-        parameter, the model need to define proper HuggingFaceStorageReader to perform
-        dequantize.
-        """
-
-        last_save_model_only: bool = True
-        """
-        When last_save_model_only=True, only the model will be saved at the end of
-        training, the last save. With this, checkpoints can be loaded using
-        `torch.load(..., weights_only=True)` after conversion. When
-        last_save_model_only=False, the full checkpoint will be saved. A full
-        checkpoint includes model, optimizer and train_state, which can be used to
-        resume training. The default value is True.
-        """
-
-        last_save_in_hf: bool = False
-        """
-        Enable the use of Hugging Face's safetensors format for checkpointing. This will
-        save the final checkpoints in safetensors format instead of the default DCP
-        format, after necessary model state dict transformation. There will be a
-        performance cost in using this as we need to consolidate the sharded tensors to
-        full tensors as a separate step. last_save_model_only must be true because
-        safetensors doesn't support saving non-tensors. On load, this argument isn't
-        needed as we will detect whether the loaded checkpoint is in safetensors format
-        or not. The default value is False.
-        """
-
-        export_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
-        """
-        Converts to the specified precision when training completes and
-        last_save_model_only=true.
-        """
-
+    class Config(BaseCheckpointManager.Config):
         async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
-        """
-        Which async checkpoint mode to use. Currently there are 3 different modes.
+        """DCP save mode: synchronous, threaded async, or pinned-memory async."""
 
-        - "disabled": Synchronized checkpointing. The training loop is blocked until all
-        data is successfully saved to the persistence storage device (disk).
-
-        - "async": Uses threading and `torch.distributed.checkpoint.async_save`.
-        The training loop is blocked only during the GPU-to-CPU memory transfer. Once
-        data reaches host RAM, training resumes while a background thread manages the
-        final write to disk. This reduces idle time but remains subject to GIL
-        contention.
-
-        - "async_with_pinned_mem": Uses a separate process and pre-allocated pinned
-        shared memory.
-        The training loop resumes almost immediately by overlapping the GPU-to-CPU DMA
-        transfer with the next iteration's computation. The process then persists the
-        data from pinned shared memory to disk.
-        This eliminates GIL contention and minimizes the blocking window to near-zero
-        (< 1s), at the cost of significantly higher fixed CPU RAM usage (pinned memory).
-        If case of insufficient CPU memory, performance may degrade due to memory
-        paging.
-
-        "disabled" is the default mode.
-        """
-
-        keep_latest_k: int = 10
-        """
-        Keeps only the latest k checkpoints, and purging older ones. If 0, keep all
-        checkpoints. K cannot be 1 as the last one may be in the process of being
-        saved. As a result, the metadata of the last one may not be ready yet. The
-        default value is 10 to avoid filling up the disk.
-        """
-
-        load_step: int = -1
-        """Load the checkpoint at the specified step. If -1, load the latest
-        checkpoint."""
-
-        exclude_from_loading: list[str] = field(default_factory=list)
-        """
-        Exclude specific keys from being loaded from the checkpoint.
-        Provide a comma-separated list of keys to exclude,
-        e.g. 'optimizer,lr_scheduler,dataloader'.
-        Keys shouldn't include 'model' key.
-        """
-
-        enable_first_step_checkpoint: bool = False
-        """
-        Enable the checkpoint save at first step. This will save a checkpoint
-        immediately after the first step to ensure checkpointing functions correctly.
-        This is useful when running on a new cluster or storage to verify checkpointing
-        without waiting for many steps or checkpointing too frequently. The default
-        value is False.
-        """
-
-        create_seed_checkpoint: bool = False
-        """
-        Initializes the full model without applying parallelisms, and then saves it as a
-        seed checkpoint. Note: requires user to call train.py without specifying any
-        parallelisms, e.g. NGPU=1. Could be implemented as a separate script, but this
-        way shares more code.
-        """
-
-        load_only: bool = False
-        """
-        In certain scenarios, you may only need to load checkpoints for verification or
-        debugging purposes, without saving any new checkpoints. For example, you might
-        use seed checkpoints to validate model correctness. Enabling this option allows
-        checkpoints to be loaded without saving any during the training.
-        """
-
-        def __post_init__(self):
-            if not self.folder.strip():
-                raise ValueError("The 'folder' field cannot be empty.")
-            if self.interval < 1:
-                raise ValueError("Checkpoint interval needs to be at least 1 step.")
-            if self.keep_latest_k < 0:
-                raise ValueError("keep_latest_k cannot be negative.")
-            if self.keep_latest_k == 1:
-                raise ValueError(
-                    "We need to maintain at least 2 checkpoint replicas, "
-                    "as the last one may be in the process of being saved."
-                )
-            if MODEL in self.exclude_from_loading:
-                raise ValueError(f"{MODEL} key shouldn't be in exclude_from_loading.")
-
-            if self.initial_load_path:
-                self.initial_load_path = self.initial_load_path.strip()
-                if not (
-                    self.initial_load_path.startswith("/")
-                    or filesystem.is_remote(self.initial_load_path)
-                ):
-                    raise ValueError(
-                        "initial_load_path must be an absolute path or a remote "
-                        f"URI (e.g. gs://...): {self.initial_load_path}"
-                    )
-            if self.initial_load_in_hf and not self.initial_load_model_only:
-                raise ValueError("initial_load_in_hf requires initial_load_model_only.")
-            if self.initial_load_in_hf_quantized and not (
-                self.initial_load_in_hf and self.initial_load_path
-            ):
-                raise ValueError(
-                    "initial_load_in_hf_quantized requires initial_load_in_hf "
-                    "and initial_load_path."
-                )
-            if self.last_save_in_hf and not self.last_save_model_only:
-                raise ValueError("last_save_in_hf requires last_save_model_only=True.")
-
-            # Remote (fsspec) checkpoint IO supports only the native DCP format.
-            # HF safetensors read/write to a remote URI is not implemented, so
-            # reject the combination up front instead of failing deep in DCP.
-            if self.last_save_in_hf and filesystem.is_remote(self.folder):
-                raise ValueError(
-                    "last_save_in_hf is not supported with a remote "
-                    f"checkpoint.folder: {self.folder}"
-                )
-            if (
-                self.initial_load_in_hf
-                and self.initial_load_path
-                and filesystem.is_remote(self.initial_load_path)
-            ):
-                raise ValueError(
-                    "initial_load_in_hf is not supported with a remote "
-                    f"initial_load_path: {self.initial_load_path}"
-                )
-
+        def __post_init__(self) -> None:
+            BaseCheckpointManager.Config.__post_init__(self)
             async_lowered = self.async_mode.lower()
-            if async_lowered in ("disabled", "async", "async_with_pinned_mem"):
-                self.async_mode = async_lowered
-            else:
+            if async_lowered not in (
+                "disabled",
+                "async",
+                "async_with_pinned_mem",
+            ):
                 raise ValueError(f"Invalid async_mode: {async_lowered}")
-
-            if self.load_only and self.enable_first_step_checkpoint:
-                logger.warning(
-                    "checkpoint.load_only is True; enable_first_step_checkpoint "
-                    "will be ignored."
-                )
-            if self.initial_load_model_only and not self.initial_load_path:
-                logger.warning(
-                    "initial_load_model_only=True has no effect without "
-                    "an initial_load_path."
-                )
+            self.async_mode = async_lowered
 
     def __init__(
         self,
@@ -522,9 +191,11 @@ class CheckpointManager(Configurable):
         self.keep_latest_k = config.keep_latest_k
         self.purge_thread: threading.Thread | None = None
         if self.keep_latest_k > 0:
-            self.purge_queue = queue.Queue()
+            self.purge_queue: queue.Queue[str | None] = queue.Queue()
             self.purge_thread = threading.Thread(
-                target=purge_thread, args=(self.purge_queue,), daemon=True
+                target=purge_worker,
+                args=(self.purge_queue, filesystem.rmtree),
+                daemon=True,
             )
             self.purge_thread.start()
 
@@ -543,7 +214,7 @@ class CheckpointManager(Configurable):
                 and self.purge_thread
                 and self.purge_thread.is_alive()
             ):
-                self.purge_queue.put(Terminate())
+                self.purge_queue.put(None)
                 self.purge_thread.join()
 
             if self.stager is not None:

@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageReader
-from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.components.checkpointer import ModelWrapper
 
 
 @torch.inference_mode()
