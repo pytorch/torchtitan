@@ -22,7 +22,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
 
-from .optimizer_reshard import _BucketSpec, BucketConfig
+from .optimizer_reshard import BucketConfig, NoRedistribution
 
 
 __all__: list[str] = []
@@ -31,120 +31,256 @@ __all__: list[str] = []
 _ItemT = TypeVar("_ItemT")
 
 
+def _bucket_diagnostic_label(
+    redistribution_mesh_axis_names: tuple[str, ...] | NoRedistribution,
+    fqns: tuple[str, ...],
+) -> str:
+    return (
+        "BucketConfig(redistribution_mesh_axis_names="
+        f"{redistribution_mesh_axis_names!r}, fqns={fqns!r})"
+    )
+
+
+def _config_redistribution_mesh_axis_names(
+    config: BucketConfig,
+) -> tuple[str, ...]:
+    axis_names = config.redistribution_mesh_axis_names
+    return () if isinstance(axis_names, NoRedistribution) else axis_names
+
+
+@dataclass(frozen=True, slots=True)
+class _RedistributionGroup:
+    process_group: dist.ProcessGroup
+    participants: tuple[int, ...]
+    participant_by_shard_index: tuple[int, ...]
+    local_participant: int
+
+
+@dataclass(frozen=True, slots=True)
+class _BucketSpec:
+    fqns: tuple[str, ...]
+    redistribution_mesh_axis_names: tuple[str, ...] | NoRedistribution
+    redistribution_group: _RedistributionGroup | None
+
+    @property
+    def diagnostic_label(self) -> str:
+        return _bucket_diagnostic_label(
+            self.redistribution_mesh_axis_names,
+            self.fqns,
+        )
+
+
 def _bind_bucket_configs(
     configs: Sequence[BucketConfig],
     items: Sequence[_ItemT],
     *,
     get_fqn: Callable[[_ItemT], str],
     get_storage_dtensor: Callable[[_ItemT], DTensor],
-    requires_redistribution: Callable[[_ItemT], bool],
     get_redistribution_storage_mesh_axes: Callable[[_ItemT], tuple[int, ...]],
-    get_transport_compatibility_key: Callable[[_ItemT], Hashable],
+    get_bucket_compatibility_key: Callable[[_ItemT], Hashable],
 ) -> tuple[_BucketSpec, ...]:
-    """Bind logical configs to homogeneous physical transport buckets.
-
-    Compute-ready work stays on the first physical bucket selected by its
-    logical config so it can overlap that bucket's communication. An entirely
-    local bucket remains mesh-free.
-    """
+    """Bind each explicit physical config to at most one bucket spec."""
+    cartesian_meshes: dict[tuple[str, tuple[int, ...]], DeviceMesh] = {}
+    redistribution_axis_names_by_config = tuple(
+        _config_redistribution_mesh_axis_names(config) for config in configs
+    )
     matched_items_by_config: list[list[_ItemT]] = [[] for _ in configs]
     for item in items:
         fqn = get_fqn(item)
-        matches = [
+        pattern_matches = [
             index
             for index, config in enumerate(configs)
             if any(fnmatch.fnmatchcase(fqn, pattern) for pattern in config.patterns)
         ]
+        if not pattern_matches:
+            raise ValueError(f"optimizer parameter {fqn!r} must match a bucket pattern")
+
+        resolved_redistribution_axis_names: tuple[str, ...] = ()
+        raw_storage_mesh_axes = get_redistribution_storage_mesh_axes(item)
+        if raw_storage_mesh_axes:
+            storage_dtensor = get_storage_dtensor(item)
+            storage_mesh = storage_dtensor.device_mesh
+            mesh_axis_names = storage_mesh.mesh_dim_names
+            if mesh_axis_names is None:
+                raise RuntimeError(
+                    "redistributed parameter has no resolved redistribution axes: "
+                    f"{fqn!r}"
+                )
+            if len(set(raw_storage_mesh_axes)) != len(raw_storage_mesh_axes):
+                raise RuntimeError(
+                    "redistributed parameter has duplicate redistribution axes: "
+                    f"{fqn!r}"
+                )
+            if any(
+                mesh_axis < 0 or mesh_axis >= storage_mesh.ndim
+                for mesh_axis in raw_storage_mesh_axes
+            ):
+                raise RuntimeError(
+                    "redistributed parameter has an invalid redistribution axis: "
+                    f"{fqn!r}"
+                )
+            resolved_redistribution_axis_names = tuple(
+                mesh_axis_names[mesh_axis] for mesh_axis in raw_storage_mesh_axes
+            )
+
+        matches = [
+            index
+            for index in pattern_matches
+            if len(redistribution_axis_names_by_config[index])
+            == len(resolved_redistribution_axis_names)
+            and set(redistribution_axis_names_by_config[index])
+            == set(resolved_redistribution_axis_names)
+        ]
         if len(matches) != 1:
-            raise ValueError(f"optimizer parameter {fqn!r} must match one bucket")
+            declared_alternatives = [
+                (index, configs[index].redistribution_mesh_axis_names)
+                for index in pattern_matches
+            ]
+            if not matches:
+                raise ValueError(
+                    f"optimizer parameter {fqn!r} requires redistribution axes "
+                    f"{resolved_redistribution_axis_names}, but its matching "
+                    "BucketConfigs declare "
+                    f"{declared_alternatives} as (index, redistribution)"
+                )
+            raise ValueError(
+                f"optimizer parameter {fqn!r} matches multiple BucketConfigs "
+                f"{matches} for redistribution axes "
+                f"{resolved_redistribution_axis_names}"
+            )
         matched_items_by_config[matches[0]].append(item)
 
     specs = []
-    for config, raw_matched_items in zip(
+    for config, redistribution_axis_names, raw_matched_items in zip(
         configs,
+        redistribution_axis_names_by_config,
         matched_items_by_config,
         strict=True,
     ):
         matched_items = tuple(sorted(raw_matched_items, key=get_fqn))
-        redistributed_items = tuple(
-            item for item in matched_items if requires_redistribution(item)
-        )
         if not matched_items:
             continue
-        if not redistributed_items:
-            specs.append(
-                config._bind(None, tuple(get_fqn(item) for item in matched_items))
-            )
-            continue
-
-        physical_groups: dict[
-            tuple[
-                tuple[str, ...],
-                tuple[int, ...],
-                torch.dtype,
-                torch.device,
-                Hashable,
-            ],
-            tuple[DeviceMesh, list[_ItemT]],
-        ] = {}
-        for item in redistributed_items:
-            storage_dtensor = get_storage_dtensor(item)
-            storage_mesh = storage_dtensor.device_mesh
-            mesh_axis_names = storage_mesh.mesh_dim_names
-            raw_storage_mesh_axes = get_redistribution_storage_mesh_axes(item)
-            if mesh_axis_names is None or not raw_storage_mesh_axes:
-                raise RuntimeError(
-                    "redistributed parameter has no resolved transport axes: "
-                    f"{get_fqn(item)!r}"
-                )
-            if len(set(raw_storage_mesh_axes)) != len(raw_storage_mesh_axes):
-                raise RuntimeError(
-                    "redistributed parameter has duplicate transport axes: "
-                    f"{get_fqn(item)!r}"
-                )
-            storage_mesh_axes = tuple(sorted(raw_storage_mesh_axes))
-            if any(
-                mesh_axis < 0 or mesh_axis >= storage_mesh.ndim
-                for mesh_axis in storage_mesh_axes
-            ):
-                raise RuntimeError(
-                    "redistributed parameter has an invalid transport axis: "
-                    f"{get_fqn(item)!r}"
-                )
-            transport_axis_names = tuple(
-                mesh_axis_names[mesh_axis] for mesh_axis in storage_mesh_axes
-            )
-            if len(transport_axis_names) == 1:
-                mesh = storage_mesh[transport_axis_names[0]]
-            else:
-                flattened_axis_name = "flex_shard_" + "_".join(transport_axis_names)
-                mesh = storage_mesh[transport_axis_names]._flatten(flattened_axis_name)
-            local_tensor = storage_dtensor.to_local()
-            transport_key = (
-                transport_axis_names,
-                _device_mesh_ranks(mesh),
-                local_tensor.dtype,
-                local_tensor.device,
-                get_transport_compatibility_key(item),
-            )
-            if transport_key not in physical_groups:
-                physical_groups[transport_key] = (mesh, [])
-            physical_groups[transport_key][1].append(item)
-
-        local_items = tuple(
-            item for item in matched_items if not requires_redistribution(item)
+        matched_fqns = tuple(get_fqn(item) for item in matched_items)
+        diagnostic_label = _bucket_diagnostic_label(
+            config.redistribution_mesh_axis_names,
+            matched_fqns,
         )
-        for physical_index, (mesh, physical_items) in enumerate(
-            physical_groups.values()
-        ):
-            if physical_index == 0:
-                physical_items.extend(local_items)
-            specs.append(
-                config._bind(
-                    mesh,
-                    tuple(get_fqn(item) for item in physical_items),
+        reference_mesh: DeviceMesh | None = None
+        reference_participant_by_shard_index: tuple[int, ...] | None = None
+        reference_dtype: torch.dtype | None = None
+        reference_device: torch.device | None = None
+        reference_compatibility_key: Hashable | None = None
+        reference_fqn: str | None = None
+        redistribution_axis_name_set = set(redistribution_axis_names)
+        for item in matched_items:
+            fqn = get_fqn(item)
+            storage_dtensor = get_storage_dtensor(item)
+            local_tensor = storage_dtensor.to_local()
+            compatibility_key = get_bucket_compatibility_key(item)
+            mesh = None
+            participant_by_shard_index = None
+            if redistribution_axis_names:
+                storage_mesh = storage_dtensor.device_mesh
+                storage_axis_names = storage_mesh.mesh_dim_names
+                if storage_axis_names is None or any(
+                    axis_name not in storage_axis_names
+                    for axis_name in redistribution_axis_names
+                ):
+                    raise ValueError(
+                        f"{diagnostic_label} redistribution axes "
+                        f"{redistribution_axis_names} are not present in parameter "
+                        f"{fqn!r} storage mesh axes {storage_axis_names}"
+                    )
+                if len(redistribution_axis_names) == 1:
+                    mesh = storage_mesh[redistribution_axis_names[0]]
+                    participant_by_shard_index = _device_mesh_ranks(mesh)
+                else:
+                    storage_ordered_axis_names = tuple(
+                        storage_axis_name
+                        for storage_axis_name in storage_axis_names
+                        if storage_axis_name in redistribution_axis_name_set
+                    )
+                    storage_ordered_submesh = storage_mesh[storage_ordered_axis_names]
+                    process_group_ranks = tuple(
+                        sorted(storage_ordered_submesh.mesh.reshape(-1).tolist())
+                    )
+                    mesh_key = (storage_mesh.device_type, process_group_ranks)
+                    mesh = cartesian_meshes.get(mesh_key)
+                    if mesh is None:
+                        # Only subgroup members construct this communicator. This
+                        # keeps PP stages independent while config order gives
+                        # overlapping groups a consistent creation order.
+                        process_group = dist.new_group(
+                            ranks=process_group_ranks,
+                            use_local_synchronization=True,
+                            group_desc="flex_shard_cartesian",
+                        )
+                        assert isinstance(process_group, dist.ProcessGroup)
+                        mesh = DeviceMesh.from_group(
+                            process_group,
+                            storage_mesh.device_type,
+                            mesh_dim_names=("flex_shard",),
+                        )
+                        cartesian_meshes[mesh_key] = mesh
+                    declared_axis_permutation = tuple(
+                        storage_ordered_axis_names.index(axis_name)
+                        for axis_name in redistribution_axis_names
+                    )
+                    participant_by_shard_index = tuple(
+                        storage_ordered_submesh.mesh.permute(declared_axis_permutation)
+                        .reshape(-1)
+                        .tolist()
+                    )
+
+            if reference_dtype is None:
+                reference_mesh = mesh
+                reference_participant_by_shard_index = participant_by_shard_index
+                reference_dtype = local_tensor.dtype
+                reference_device = local_tensor.device
+                reference_compatibility_key = compatibility_key
+                reference_fqn = fqn
+                continue
+            assert reference_fqn is not None
+            if participant_by_shard_index != reference_participant_by_shard_index:
+                raise ValueError(
+                    f"{diagnostic_label} cannot form one packed collective: "
+                    f"{reference_fqn!r} resolves to participant-by-shard-index "
+                    f"mapping {reference_participant_by_shard_index}, but {fqn!r} "
+                    f"resolves to {participant_by_shard_index}; use separate "
+                    "BucketConfigs"
                 )
+            if (
+                local_tensor.dtype != reference_dtype
+                or local_tensor.device != reference_device
+            ):
+                raise ValueError(
+                    f"{diagnostic_label} cannot form one packed collective: "
+                    f"{reference_fqn!r} uses {reference_dtype} on "
+                    f"{reference_device}, but {fqn!r} uses {local_tensor.dtype} "
+                    f"on {local_tensor.device}; use separate BucketConfigs"
+                )
+            if compatibility_key != reference_compatibility_key:
+                raise ValueError(
+                    f"{diagnostic_label} cannot form one packed collective: "
+                    f"{reference_fqn!r} and {fqn!r} have incompatible routes; "
+                    "use separate BucketConfigs"
+                )
+
+        if reference_mesh is None:
+            redistribution_group = None
+        else:
+            assert reference_participant_by_shard_index is not None
+            redistribution_group = _redistribution_group(
+                reference_mesh,
+                reference_participant_by_shard_index,
             )
+        specs.append(
+            _BucketSpec(
+                fqns=matched_fqns,
+                redistribution_mesh_axis_names=config.redistribution_mesh_axis_names,
+                redistribution_group=redistribution_group,
+            )
+        )
     return tuple(specs)
 
 
@@ -634,17 +770,18 @@ def _build_dim0_shard_redistribution_plan(
     storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
     *,
     participants: tuple[int, ...],
-    shard_participants: tuple[int, ...],
+    participant_by_shard_index: tuple[int, ...],
     logical_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
     """Route arbitrary rectangular storage partitions to a dim-0 shard."""
     participants = tuple(participants)
-    shard_participants = tuple(shard_participants)
+    participant_by_shard_index = tuple(participant_by_shard_index)
     participant_set = set(participants)
     _require_valid_plan(
-        len(shard_participants) == len(participants)
-        and set(shard_participants) == participant_set,
-        "shard participants must order the redistribution participants",
+        len(participant_by_shard_index) == len(participants)
+        and set(participant_by_shard_index) == participant_set,
+        "participant-by-shard-index mapping must contain every redistribution "
+        "participant",
     )
     storage_endpoints = []
     storage_by_participant = {}
@@ -683,14 +820,15 @@ def _build_dim0_shard_redistribution_plan(
     compute_partitions = []
     compute_endpoints = []
     shard_index_by_participant = {
-        participant: index for index, participant in enumerate(shard_participants)
+        participant: index
+        for index, participant in enumerate(participant_by_shard_index)
     }
     for participant in participants:
-        participant_index = shard_index_by_participant[participant]
+        shard_index = shard_index_by_participant[participant]
         local_dim0, dim0_offset = Shard.local_shard_size_and_offset(
             logical_shape[0],
             len(participants),
-            participant_index,
+            shard_index,
         )
         local_shape = (local_dim0, *logical_shape[1:])
         logical_region = _TensorRegion(
@@ -803,18 +941,9 @@ class _PackedAllToAllSchedule:
 
 
 @dataclass(frozen=True, slots=True)
-class _RedistributionGroup:
-    process_group: dist.ProcessGroup
-    participants: tuple[int, ...]
-    mesh_ordered_participants: tuple[int, ...]
-    local_participant: int
-
-
-@dataclass(frozen=True, slots=True)
 class _BucketPlanningContext(Generic[_ItemT]):
     items: tuple[_ItemT, ...]
     group: _RedistributionGroup
-    name: str
 
 
 @dataclass(slots=True)
@@ -824,7 +953,6 @@ class _LocalBucketPlan(Generic[_ItemT]):
 
 @dataclass(slots=True)
 class _RedistributionBucketPlan(Generic[_ItemT]):
-    unredistributed_items: tuple[_ItemT, ...]
     redistributed_items: tuple[_ItemT, ...]
     redistribution_plans: tuple[_RedistributionPlan, ...]
     group: _RedistributionGroup
@@ -834,13 +962,85 @@ class _RedistributionBucketPlan(Generic[_ItemT]):
     device: torch.device
 
 
-_BucketPlan: TypeAlias = _LocalBucketPlan[_ItemT] | _RedistributionBucketPlan[_ItemT]
+@dataclass(slots=True)
+class _BucketOverlapPlan(Generic[_ItemT]):
+    redistribution_bucket: _RedistributionBucketPlan[_ItemT]
+    local_buckets: tuple[_LocalBucketPlan[_ItemT], ...]
+
+
+_SingleBucketPlan: TypeAlias = (
+    _LocalBucketPlan[_ItemT] | _RedistributionBucketPlan[_ItemT]
+)
+_BucketExecutionPlan: TypeAlias = _SingleBucketPlan[_ItemT] | _BucketOverlapPlan[_ItemT]
 
 
 @dataclass(frozen=True, slots=True)
 class _BucketPlanningResult(Generic[_ItemT]):
-    plans: tuple[_BucketPlan[_ItemT], ...]
-    ordered_items: tuple[_ItemT, ...]
+    plans: tuple[_BucketExecutionPlan[_ItemT], ...]
+    plan_items: tuple[_ItemT, ...]
+
+
+def _compose_bucket_overlap_plans(
+    plans: Sequence[_SingleBucketPlan[_ItemT]],
+) -> tuple[_BucketExecutionPlan[_ItemT], ...]:
+    """Overlap adjacent local buckets with redistribution when one exists."""
+    first_redistribution_index = next(
+        (
+            index
+            for index, plan in enumerate(plans)
+            if isinstance(plan, _RedistributionBucketPlan)
+        ),
+        None,
+    )
+    if first_redistribution_index is None:
+        return tuple(plans)
+
+    leading_local_buckets = []
+    for plan in plans[:first_redistribution_index]:
+        assert isinstance(plan, _LocalBucketPlan)
+        leading_local_buckets.append(plan)
+
+    overlap_plans: list[_BucketExecutionPlan[_ItemT]] = []
+    plan_index = first_redistribution_index
+    while plan_index < len(plans):
+        plan = plans[plan_index]
+        assert isinstance(plan, _RedistributionBucketPlan)
+
+        local_buckets = leading_local_buckets
+        leading_local_buckets = []
+        next_plan_index = plan_index + 1
+        while next_plan_index < len(plans) and isinstance(
+            plans[next_plan_index], _LocalBucketPlan
+        ):
+            local_buckets.append(plans[next_plan_index])
+            next_plan_index += 1
+        if local_buckets:
+            overlap_plans.append(
+                _BucketOverlapPlan(
+                    redistribution_bucket=plan,
+                    local_buckets=tuple(local_buckets),
+                )
+            )
+        else:
+            overlap_plans.append(plan)
+        plan_index = next_plan_index
+    return tuple(overlap_plans)
+
+
+def _flatten_bucket_plan_items(
+    plans: Sequence[_BucketExecutionPlan[_ItemT]],
+) -> tuple[_ItemT, ...]:
+    items = []
+    for plan in plans:
+        if isinstance(plan, _LocalBucketPlan):
+            items.extend(plan.items)
+        elif isinstance(plan, _BucketOverlapPlan):
+            for local_bucket in plan.local_buckets:
+                items.extend(local_bucket.items)
+            items.extend(plan.redistribution_bucket.redistributed_items)
+        else:
+            items.extend(plan.redistributed_items)
+    return tuple(items)
 
 
 def _resolve_routes_to_transfers(
@@ -983,16 +1183,20 @@ def _device_mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
     return tuple(mesh.mesh.flatten().tolist())
 
 
-def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
+def _redistribution_group(
+    mesh: DeviceMesh,
+    participant_by_shard_index: tuple[int, ...],
+) -> _RedistributionGroup:
     process_group = mesh.get_group()
     participants = tuple(dist.get_process_group_ranks(process_group))
-    mesh_ordered_participants = _device_mesh_ranks(mesh)
-    if set(mesh_ordered_participants) != set(participants):
+    if len(participant_by_shard_index) != len(participants) or set(
+        participant_by_shard_index
+    ) != set(participants):
         raise ValueError("bucket mesh and process group participants do not match")
     return _RedistributionGroup(
         process_group=process_group,
         participants=participants,
-        mesh_ordered_participants=mesh_ordered_participants,
+        participant_by_shard_index=participant_by_shard_index,
         local_participant=participants[dist.get_rank(process_group)],
     )
 
@@ -1143,13 +1347,12 @@ def _build_bucket_plans(
 ) -> _BucketPlanningResult[_ItemT]:
     """Build ordered optimizer bucket plans with and without redistribution.
 
-    ``requires_redistribution`` is resolved before communication groups.
-    Entirely local buckets bypass optimizer-specific redistribution planning.
-    For every other bucket, ``resolve_redistribution_plans`` owns compute
-    placement and returns ``None`` for compute-ready items or a
-    transport-neutral plan for items requiring redistribution. Bucket
+    Every bound spec is either entirely local or entirely redistributed.
+    Local buckets bypass optimizer-specific redistribution planning. For every
+    communication bucket, ``resolve_redistribution_plans`` owns compute
+    placement and returns one transport-neutral plan per item. Physical bucket
     membership and redistribution requirements must be rank-stable within
-    every potential communication group.
+    every communication group.
     """
     resolved = _resolve_buckets(items, specs, get_fqn=get_fqn)
     buckets = []
@@ -1163,18 +1366,22 @@ def _build_bucket_plans(
         buckets.append((spec, sorted_bucket, redistribution_requirements))
     contexts_list = []
     for spec, bucket, redistribution_requirements in buckets:
-        if not any(redistribution_requirements):
+        if spec.redistribution_group is None:
+            if any(redistribution_requirements):
+                raise ValueError(
+                    f"{spec.diagnostic_label} requires a communication mesh for "
+                    "redistribution"
+                )
             continue
-        if spec.mesh is None:
+        if not all(redistribution_requirements):
             raise ValueError(
-                f"bucket {spec.name!r} requires a communication mesh for "
-                "redistribution"
+                f"{spec.diagnostic_label} with a communication mesh contains "
+                "compute-ready parameters"
             )
         contexts_list.append(
             _BucketPlanningContext(
                 items=bucket,
-                group=_redistribution_group(spec.mesh),
-                name=spec.name,
+                group=spec.redistribution_group,
             )
         )
     contexts = tuple(contexts_list)
@@ -1186,64 +1393,51 @@ def _build_bucket_plans(
         "expected one entry per bucket",
     )
 
-    plans = []
-    ordered_items = []
+    single_bucket_plans: list[_SingleBucketPlan[_ItemT]] = []
     redistribution_bucket_index = 0
-    for _spec, bucket, redistribution_requirements in buckets:
+    for spec, bucket, redistribution_requirements in buckets:
         if not any(redistribution_requirements):
-            plans.append(_LocalBucketPlan(items=bucket))
-            ordered_items.extend(bucket)
+            single_bucket_plans.append(_LocalBucketPlan(items=bucket))
             continue
 
         context = contexts[redistribution_bucket_index]
+        diagnostic_label = spec.diagnostic_label
         raw_item_plans = item_plans_by_bucket[redistribution_bucket_index]
         redistribution_bucket_index += 1
         item_plans = tuple(raw_item_plans)
         _require_valid_planner_result(
             len(item_plans) == len(context.items),
-            f"bucket {context.name!r} expected one entry per item",
+            f"{diagnostic_label} expected one entry per item",
         )
         group = context.group
 
-        unredistributed_items_list = []
         redistributed_items_list = []
         redistribution_plans = []
-        for item, requires_item_redistribution, item_plan in zip(
+        for item, item_plan in zip(
             context.items,
-            redistribution_requirements,
             item_plans,
             strict=True,
         ):
             if item_plan is None:
-                _require_valid_planner_result(
-                    not requires_item_redistribution,
-                    f"bucket {context.name!r} omitted required redistribution "
-                    f"for parameter {get_fqn(item)!r}",
+                raise RuntimeError(
+                    "invalid redistribution planner result: "
+                    f"{diagnostic_label} omitted required redistribution "
+                    f"for parameter {get_fqn(item)!r}"
                 )
-                unredistributed_items_list.append(item)
-                continue
-            _require_valid_planner_result(
-                requires_item_redistribution,
-                f"bucket {context.name!r} planned redistribution for "
-                f"compute-ready parameter {get_fqn(item)!r}",
-            )
             _require_valid_planner_result(
                 item_plan.participants == group.participants,
-                f"bucket {context.name!r} participants do not match its process group",
+                f"{diagnostic_label} participants do not match its process group",
             )
             local_tensor = get_storage_dtensor(item).to_local()
             storage_partition = item_plan.storage_partition(group.local_participant)
             _require_valid_planner_result(
                 tuple(local_tensor.shape) == storage_partition.tensor_shape,
-                f"bucket {context.name!r} storage partition does not match its mesh",
+                f"{diagnostic_label} storage partition does not match its mesh",
             )
             redistributed_items_list.append(item)
             redistribution_plans.append(item_plan)
 
-        unredistributed_items = tuple(unredistributed_items_list)
         redistributed_items = tuple(redistributed_items_list)
-        ordered_items.extend(unredistributed_items)
-        ordered_items.extend(redistributed_items)
         assert redistributed_items
 
         storage_dtensors = [get_storage_dtensor(item) for item in redistributed_items]
@@ -1253,7 +1447,7 @@ def _build_bucket_plans(
         if any(
             tensor.dtype != dtype or tensor.device != device for tensor in local_tensors
         ):
-            raise ValueError(f"bucket {context.name!r} mixes dtype or device")
+            raise ValueError(f"{diagnostic_label} mixes dtype or device")
 
         redistribution_plans_tuple = tuple(redistribution_plans)
         storage_to_compute_schedule = _build_packed_all_to_all_schedule(
@@ -1272,9 +1466,8 @@ def _build_bucket_plans(
             storage_to_compute_schedule,
             compute_to_storage_schedule,
         )
-        plans.append(
+        single_bucket_plans.append(
             _RedistributionBucketPlan(
-                unredistributed_items=unredistributed_items,
                 redistributed_items=redistributed_items,
                 redistribution_plans=redistribution_plans_tuple,
                 group=group,
@@ -1285,14 +1478,15 @@ def _build_bucket_plans(
             )
         )
 
+    plans = _compose_bucket_overlap_plans(single_bucket_plans)
     return _BucketPlanningResult(
-        plans=tuple(plans),
-        ordered_items=tuple(ordered_items),
+        plans=plans,
+        plan_items=_flatten_bucket_plan_items(plans),
     )
 
 
 def _validate_bucket_plans_across_ranks(
-    plans: Sequence[_BucketPlan[_ItemT]],
+    plans: Sequence[_BucketExecutionPlan[_ItemT]],
     *,
     item_signature: Callable[[_ItemT], tuple[Any, ...]],
 ) -> None:
@@ -1301,27 +1495,37 @@ def _validate_bucket_plans_across_ranks(
     Entirely local plans cannot desynchronize a runtime collective and do not
     require a process group. Every rank must provide redistribution plans in
     the same process-group order so all workers enter these validation
-    collectives in the same sequence.
+    collectives in the same sequence. Overlapped local-bucket membership is
+    intentionally excluded because it may differ across ranks on an
+    orthogonal mesh and has no collective ordering requirement.
     """
     for plan in plans:
         if isinstance(plan, _LocalBucketPlan):
             continue
+        if isinstance(plan, _BucketOverlapPlan):
+            redistribution_bucket = plan.redistribution_bucket
+        else:
+            redistribution_bucket = plan
         description = (
-            str(plan.dtype),
-            plan.device.type,
+            str(redistribution_bucket.dtype),
+            redistribution_bucket.device.type,
             tuple(
                 _redistribution_plan_key(redistribution_plan)
-                for redistribution_plan in plan.redistribution_plans
+                for redistribution_plan in redistribution_bucket.redistribution_plans
             ),
             [
                 item_signature(item)
-                for item in plan.unredistributed_items + plan.redistributed_items
+                for item in redistribution_bucket.redistributed_items
             ],
         )
         digest = hashlib.sha256(repr(description).encode()).digest()
         plan_hash = int.from_bytes(digest[:7], "little")
-        local_hash = torch.tensor(plan_hash, dtype=torch.int64, device=plan.device)
-        process_group = plan.group.process_group
+        local_hash = torch.tensor(
+            plan_hash,
+            dtype=torch.int64,
+            device=redistribution_bucket.device,
+        )
+        process_group = redistribution_bucket.group.process_group
         gathered = [
             torch.empty_like(local_hash)
             for _ in range(dist.get_world_size(process_group))

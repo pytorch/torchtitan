@@ -11,7 +11,7 @@ from .distributed_muon import (
     build_distributed_muon,
     MuonComputeShardingConfig,
 )
-from .optimizer_reshard import BucketConfig, ComputeLayout, Owned
+from .optimizer_reshard import BucketConfig, ComputeLayout, NoRedistribution, Owned
 
 __all__ = [
     "AttentionPerHeadComputeView",
@@ -19,5 +19,6 @@ __all__ = [
     "BucketConfig",
     "ComputeLayout",
     "MuonComputeShardingConfig",
+    "NoRedistribution",
     "Owned",
 ]

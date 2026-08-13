@@ -26,7 +26,8 @@ import torch
 from torch import Tensor
 
 from ._optimizer_reshard_schedule import (
-    _BucketPlan,
+    _BucketExecutionPlan,
+    _BucketOverlapPlan,
     _ItemT,
     _LocalBucketPlan,
     _PackedAllToAllSchedule,
@@ -42,6 +43,16 @@ _NUM_PIPELINE_SLOTS = 2
 
 
 _BufferKey: TypeAlias = tuple[torch.device, torch.dtype]
+
+
+def _redistribution_bucket(
+    plan: _BucketExecutionPlan[_ItemT],
+) -> _RedistributionBucketPlan[_ItemT] | None:
+    if isinstance(plan, _LocalBucketPlan):
+        return None
+    if isinstance(plan, _BucketOverlapPlan):
+        return plan.redistribution_bucket
+    return plan
 
 
 @dataclass(slots=True)
@@ -355,7 +366,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
 
     def reserve_buffers(
         self,
-        plans: Sequence[_BucketPlan[_ItemT]],
+        plans: Sequence[_BucketExecutionPlan[_ItemT]],
         *,
         local_tensor_spec: Callable[
             [_ItemT], tuple[torch.Size, torch.dtype, torch.device]
@@ -366,7 +377,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         context = self._context
         created_context = False
         if context is None and any(
-            isinstance(plan, _RedistributionBucketPlan) for plan in plans
+            _redistribution_bucket(plan) is not None for plan in plans
         ):
             context = _CommunicationContext.create(self._device)
             created_context = True
@@ -381,7 +392,9 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         slot_requirements = tuple({} for _ in context.slots) if context else ()
         redistributed_index = 0
         for plan in plans:
-            if isinstance(plan, _LocalBucketPlan):
+            redistribution_bucket = _redistribution_bucket(plan)
+            if redistribution_bucket is None:
+                assert isinstance(plan, _LocalBucketPlan)
                 _include_local_compute_scratch_requirements(
                     local_requirements,
                     plan.items,
@@ -395,10 +408,11 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 redistributed_index % len(slot_requirements)
             ]
             redistributed_index += 1
-            to_compute = plan.storage_to_compute_schedule
-            to_storage = plan.compute_to_storage_schedule
+            to_compute = redistribution_bucket.storage_to_compute_schedule
+            to_storage = redistribution_bucket.compute_to_storage_schedule
             plan_requirements = requirements.setdefault(
-                (plan.device, plan.dtype), _BufferRequirements()
+                (redistribution_bucket.device, redistribution_bucket.dtype),
+                _BufferRequirements(),
             )
             plan_requirements.include_communication(
                 storage_exchange_numel=max(
@@ -410,8 +424,8 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                     to_storage.input_buffer_numel,
                 ),
             )
-            participant = plan.group.local_participant
-            for redistribution_plan in plan.redistribution_plans:
+            participant = redistribution_bucket.group.local_participant
+            for redistribution_plan in redistribution_bucket.redistribution_plans:
                 storage_partition = redistribution_plan.storage_partition(participant)
                 plan_requirements.include_storage_scratch(
                     math.prod(storage_partition.tensor_shape)
@@ -419,12 +433,14 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 compute_partition = redistribution_plan.compute_partition(participant)
                 if compute_numel := math.prod(compute_partition.tensor_shape):
                     plan_requirements.include_compute_scratch(compute_numel)
-            _include_local_compute_scratch_requirements(
-                requirements,
-                plan.unredistributed_items,
-                local_tensor_spec,
-                local_bucket_executor,
-            )
+            if isinstance(plan, _BucketOverlapPlan):
+                for local_bucket in plan.local_buckets:
+                    _include_local_compute_scratch_requirements(
+                        local_requirements,
+                        local_bucket.items,
+                        local_tensor_spec,
+                        local_bucket_executor,
+                    )
 
         self._local_slot.reserve(
             local_requirements,
@@ -451,7 +467,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
 
     def run(
         self,
-        plans: Sequence[_BucketPlan[_ItemT]],
+        plans: Sequence[_BucketExecutionPlan[_ItemT]],
         *,
         local_tensor_spec: Callable[
             [_ItemT], tuple[torch.Size, torch.dtype, torch.device]
@@ -485,12 +501,13 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             if next_plan_to_prefetch >= len(plans):
                 return None
             next_plan = plans[next_plan_to_prefetch]
-            if isinstance(next_plan, _LocalBucketPlan):
+            next_redistribution_bucket = _redistribution_bucket(next_plan)
+            if next_redistribution_bucket is None:
                 return None
             next_plan_to_prefetch += 1
             assert context is not None and transfer_stream is not None
             return self._enqueue_storage_to_compute(
-                next_plan,
+                next_redistribution_bucket,
                 slot,
                 context,
                 prepare=prepare,
@@ -498,8 +515,19 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
 
         try:
             for plan_index, plan in enumerate(plans):
-                if isinstance(plan, _LocalBucketPlan):
+                redistribution_bucket = _redistribution_bucket(plan)
+                if redistribution_bucket is None:
+                    assert isinstance(plan, _LocalBucketPlan)
                     assert not prefetched
+                    if previous is not None:
+                        assert context is not None and transfer_stream is not None
+                        self._enqueue_compute_to_storage(
+                            previous,
+                            context,
+                            finalize=finalize,
+                        )
+                        self._release(previous, caller)
+                        previous = None
                     with handle.stream(caller):
                         self._run_local_bucket(
                             plan.items,
@@ -521,7 +549,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 if prefetched:
                     assert previous_work is not None
                     work = prefetched.popleft()
-                    assert work.plan is plan
+                    assert work.plan is redistribution_bucket
                     self._enqueue_compute_to_storage(
                         previous_work, context, finalize=finalize
                     )
@@ -532,14 +560,14 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                             previous_work, context, finalize=finalize
                         )
                         work = self._enqueue_storage_to_compute(
-                            plan,
+                            redistribution_bucket,
                             slot,
                             context,
                             prepare=prepare,
                         )
                     else:
                         work = self._enqueue_storage_to_compute(
-                            plan,
+                            redistribution_bucket,
                             slot,
                             context,
                             prepare=prepare,
@@ -553,8 +581,14 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                 self._compute_bucket(
                     work,
                     work.slot,
+                    self._local_slot,
                     caller,
                     context,
+                    local_buckets=(
+                        plan.local_buckets
+                        if isinstance(plan, _BucketOverlapPlan)
+                        else ()
+                    ),
                     local_tensor_spec=local_tensor_spec,
                     prepare=prepare,
                     compute=compute,
@@ -625,9 +659,11 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     def _compute_bucket(
         work: _BucketWork[_ItemT],
         slot: _PipelineSlot,
+        local_slot: _BufferSlot,
         caller_stream: torch.Stream,
         context: _CommunicationContext,
         *,
+        local_buckets: tuple[_LocalBucketPlan[_ItemT], ...],
         local_tensor_spec: Callable[
             [_ItemT], tuple[torch.Size, torch.dtype, torch.device]
         ],
@@ -638,15 +674,16 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     ) -> None:
         handle = context.device_handle
         with handle.stream(caller_stream):
-            _BucketedRedistributionRuntime._run_local_bucket(
-                work.plan.unredistributed_items,
-                slot.buffers,
-                local_tensor_spec=local_tensor_spec,
-                prepare=prepare,
-                compute=compute,
-                finalize=finalize,
-                local_bucket_executor=local_bucket_executor,
-            )
+            for local_bucket in local_buckets:
+                _BucketedRedistributionRuntime._run_local_bucket(
+                    local_bucket.items,
+                    local_slot,
+                    local_tensor_spec=local_tensor_spec,
+                    prepare=prepare,
+                    compute=compute,
+                    finalize=finalize,
+                    local_bucket_executor=local_bucket_executor,
+                )
             caller_stream.wait_event(slot.compute_input_ready)
             _compute_redistributed(
                 work,
