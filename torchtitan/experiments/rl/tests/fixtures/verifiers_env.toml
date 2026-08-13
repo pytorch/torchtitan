@@ -1,0 +1,14 @@
+# CI-only Verifiers EnvServer configuration. The production TerminalBench
+# environment is configured in examples/terminal_bench/verifiers_env.toml.
+[env.taskset]
+id = "torchtitan_verifiers_fixture"
+
+[env.agent]
+runtime = { type = "subprocess" }
+
+[env.agent.harness]
+id = "null"
+
+[serve.pool]
+type = "static"
+num_workers = 1

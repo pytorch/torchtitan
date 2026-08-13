@@ -66,9 +66,10 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
 
 
 def _preimport_torch() -> None:
-    """``bootstrap`` setup callable: pre-import torch on the spawned proc."""
+    """Pre-import shared runtime modules on the spawned process."""
     # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
     import torch  # noqa: F401
+    import torchstore  # noqa: F401
 
 
 def _bootstrap_generator() -> None:

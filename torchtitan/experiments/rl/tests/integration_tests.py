@@ -33,6 +33,18 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module terminal_bench",
+                    "--config rl_grpo_qwen3_0_6b_verifiers_dummy",
+                    "--generator.cudagraph.no-enable",
+                ],
+            ],
+            "RL Controller -> Verifiers -> null harness -> vLLM -> trainer",
+            "rl_verifiers_end_to_end",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--trainer.parallelism.spmd_backend spmd_types",

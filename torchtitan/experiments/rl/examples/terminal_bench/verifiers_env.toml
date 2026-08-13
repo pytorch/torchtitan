@@ -1,0 +1,18 @@
+# Server-side configuration for the Verifiers EnvServer process only.
+# TorchTitan rollouter, model adapter, renderer, and generator settings belong
+# in config_registry.py, not in this file.
+
+[env.taskset]
+id = "harbor"
+dataset = "terminal-bench/terminal-bench-2"
+
+[env.agent]
+# Allow framework routes required for rollout, but deny public sandbox egress.
+runtime = { type = "docker", allow = [], block = ["*"] }
+
+[env.agent.harness]
+id = "bash"
+
+[serve.pool]
+type = "static"
+num_workers = 1

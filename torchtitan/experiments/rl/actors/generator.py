@@ -48,7 +48,7 @@ from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
 )
-from torchtitan.experiments.rl.types import Completion
+from torchtitan.experiments.rl.types import Completion, SamplingConfig
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -320,27 +320,6 @@ class VLLMCudagraphConfig:
                 sp_min_token_num=1 if enable_sequence_parallel else None,
             ),
         )
-
-
-@dataclass(kw_only=True, slots=True)
-class SamplingConfig:
-    """Sampling parameters passed to vLLM's SamplingParams."""
-
-    temperature: float = 0.8
-    """Sampling temperature. 0.0 = greedy, higher = more random."""
-
-    top_p: float = 0.95
-    """Nucleus sampling threshold."""
-
-    max_tokens: int = 100
-    """Maximum number of tokens to generate per completion."""
-
-    seed: int | None = None
-    """Per-request RNG seed. The rollouter offsets this per sample so a group's
-    n=1 requests stay diverse while remaining reproducible (None = nondeterministic)."""
-
-    stop_token_ids: list[int] | None = None
-    """Renderer role-boundary stop tokens; filled by the controller."""
 
 
 class RequestDispatcher:

@@ -131,6 +131,8 @@ from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout.types import GenerateFn
+from torchtitan.experiments.rl.rollout.verifiers.env_server import VerifiersEnvServer
+from torchtitan.experiments.rl.rollout.verifiers.rollouter import VerifiersRollouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
@@ -302,6 +304,9 @@ class Controller(Configurable):
         renderer: RendererConfig
         """Message-to-token renderer config."""
 
+        verifiers_env_server: VerifiersEnvServer.Config | None = None
+        """Controller-owned EnvServer required by a Verifiers-backed rollouter."""
+
         rollout_recorder: RolloutSampleRecorder.Config = field(
             default_factory=RolloutSampleRecorder.Config
         )
@@ -338,6 +343,12 @@ class Controller(Configurable):
         )
 
         def __post_init__(self):
+            uses_verifiers = isinstance(self.rollouter, VerifiersRollouter.Config)
+            if uses_verifiers != (self.verifiers_env_server is not None):
+                raise ValueError(
+                    "a VerifiersRollouter and controller.verifiers_env_server must either "
+                    "both be configured or both be absent"
+                )
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
@@ -437,6 +448,11 @@ class Controller(Configurable):
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
         # Until then, reach into the renderer's tokenizer for the pad id (eos doubles as pad).
         self._rollouter: Rollouter = config.rollouter.build()
+        self._verifiers_env_server = (
+            config.verifiers_env_server.build()
+            if config.verifiers_env_server is not None
+            else None
+        )
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
         )
@@ -444,6 +460,18 @@ class Controller(Configurable):
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
         logger.info("Closing: tearing down actors and process meshes.")
+
+        if isinstance(self._rollouter, VerifiersRollouter):
+            try:
+                await self._rollouter.close()
+            except Exception:
+                logger.exception("rollouter.close failed")
+
+        if self._verifiers_env_server is not None:
+            try:
+                await self._verifiers_env_server.close()
+            except Exception:
+                logger.exception("verifiers_env_server.close failed")
 
         if self.trainer is not None:
             try:
@@ -556,6 +584,12 @@ class Controller(Configurable):
         config = self.config
         if not generator_meshes:
             raise ValueError("setup_async requires at least one generator mesh")
+
+        if self._verifiers_env_server is not None:
+            verifiers_env_server_address = await self._verifiers_env_server.start()
+            await self._rollouter.connect_verifiers_env_server(
+                verifiers_env_server_address
+            )
 
         trainer_parallelism = config.trainer.parallelism
         dp_shard = max(trainer_parallelism.data_parallel_shard_degree, 1)

@@ -11,6 +11,26 @@ import torch
 from torchtitan.experiments.rl.observability import metrics as m
 
 
+@dataclass(kw_only=True, slots=True)
+class SamplingConfig:
+    """Per-request sampling parameters shared by rollout and generation."""
+
+    temperature: float = 0.8
+    """Sampling temperature. 0.0 is greedy; higher values add randomness."""
+
+    top_p: float = 0.95
+    """Nucleus sampling threshold."""
+
+    max_tokens: int = 100
+    """Maximum number of tokens to generate per completion."""
+
+    seed: int | None = None
+    """Per-request RNG seed. None selects nondeterministic sampling."""
+
+    stop_token_ids: list[int] | None = None
+    """Renderer role-boundary stop tokens, filled by the controller."""
+
+
 @dataclass(frozen=True, slots=True)
 class RolloutTurnID:
     """A turn's id: (group, sibling rollout, turn index); renders to the generator request_id.

@@ -1,0 +1,2 @@
+aiohttp>=3.9
+verifiers[harbor]==0.3.0
