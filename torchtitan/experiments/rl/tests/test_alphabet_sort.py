@@ -369,14 +369,24 @@ def test_env_walks_through_follow_up_turns() -> None:
 def test_rollouter_builds_one_env_per_group_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class _RendererConfig:
+        def build(self, *, tokenizer_path: str):
+            return None
+
     _patch_names(monkeypatch)
     config = AlphabetSortRollouter.Config()
     rollouter = AlphabetSortRollouter(config)
     worker = config.worker.build()
     # The worker subclass is selected by its config type.
     assert isinstance(worker, AlphabetSortWorker)
+    asyncio.run(
+        worker.setup_async(
+            renderer_config=_RendererConfig(),
+            hf_assets_path="hf_assets_path",
+        )
+    )
     sample = rollouter.get_training_sample()
-    envs = worker.make_env_group(sample=sample, group_size=3, renderer=None)
+    envs = worker.make_env_group(sample=sample, group_size=3)
     assert len(envs) == 3
 
 
