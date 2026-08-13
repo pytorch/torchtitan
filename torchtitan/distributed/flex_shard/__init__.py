@@ -9,15 +9,24 @@
 from .distributed_muon import (
     AttentionPerHeadComputeView,
     build_distributed_muon,
+    DistributedMuon,
     MuonComputeShardingConfig,
 )
-from .optimizer_reshard import BucketConfig, ComputeLayout, NoRedistribution, Owned
+from .optimizer_reshard import (
+    BucketConfig,
+    ComputeLayout,
+    flex_optimizer_reshard,
+    NoRedistribution,
+    Owned,
+)
 
 __all__ = [
     "AttentionPerHeadComputeView",
     "build_distributed_muon",
     "BucketConfig",
     "ComputeLayout",
+    "DistributedMuon",
+    "flex_optimizer_reshard",
     "MuonComputeShardingConfig",
     "NoRedistribution",
     "Owned",

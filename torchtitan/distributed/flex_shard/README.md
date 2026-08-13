@@ -19,8 +19,14 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   and an optional logical compute view.
 - `AttentionPerHeadComputeView` treats a flattened attention projection as a
   batch of independent per-head matrices for Muon.
+- `DistributedMuon` is the optimizer implementation used by the initial
+  FlexShard integration.
+- `flex_optimizer_reshard` binds a supported optimizer to its per-parameter
+  compute shardings and physical buckets without replacing the optimizer or
+  its `step` method.
 - `build_distributed_muon` validates named DTensor parameters, plans their
-  storage-to-compute transitions, and constructs the optimizer.
+  storage-to-compute transitions, and provides a convenient construction path
+  through `flex_optimizer_reshard`.
 
 ## TorchTitan Kimi integration
 

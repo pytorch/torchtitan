@@ -11,10 +11,10 @@ from __future__ import annotations
 import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from itertools import product
-from typing import Any, cast, NoReturn, overload
+from typing import Any, cast, NoReturn, overload, TypeAlias
 
 import torch
 from torch import Tensor
@@ -31,7 +31,9 @@ from ._optimizer_reshard_runtime import (
 
 from ._optimizer_reshard_schedule import (
     _bind_bucket_configs,
+    _BucketExecutionPlan,
     _BucketPlanningContext,
+    _BucketPlanningResult,
     _BucketSpec,
     _build_bucket_plans,
     _build_dim0_shard_redistribution_plan,
@@ -48,14 +50,24 @@ from ._optimizer_reshard_schedule import (
     _TensorRegionRoute,
     _validate_bucket_plans_across_ranks,
 )
-from .optimizer_reshard import BucketConfig, ComputeLayout, Owned
+from .optimizer_reshard import (
+    BucketConfig,
+    ComputeLayout,
+    flex_optimizer_reshard,
+    Owned,
+)
 
 
 __all__ = [
     "AttentionPerHeadComputeView",
     "build_distributed_muon",
+    "DistributedMuon",
+    "flex_optimizer_reshard",
     "MuonComputeShardingConfig",
 ]
+
+
+_ParameterGroupMembershipSignature: TypeAlias = tuple[tuple[tuple[int, str], ...], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,13 +169,11 @@ def build_distributed_muon(
 
         prepared_params.append(group)
 
-    optimizer = DistributedMuon(prepared_params, **kwargs)
-    _configure_distributed_muon(
-        optimizer,
+    return flex_optimizer_reshard(
+        DistributedMuon(prepared_params, **kwargs),
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
     )
-    return optimizer
 
 
 def _configure_distributed_muon(
@@ -181,6 +191,8 @@ def _configure_distributed_muon(
     frozen after this call because optimizer state and collectives depend on
     them.
     """
+    if optimizer._flex_optimizer_reshard_configured:
+        raise ValueError("flex_optimizer_reshard cannot be applied more than once")
     optimizer._validate_groups()
 
     parameters_to_prepare = []
@@ -193,7 +205,13 @@ def _configure_distributed_muon(
         for param, fqn in zip(group_params, param_names, strict=True):
             if fqn not in compute_sharding_by_fqn:
                 raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
-            parameters_to_prepare.append((param, fqn, compute_sharding_by_fqn[fqn]))
+            compute_sharding = compute_sharding_by_fqn[fqn]
+            if type(compute_sharding) is not MuonComputeShardingConfig:
+                raise ValueError(
+                    "DistributedMuon compute sharding values must be "
+                    "MuonComputeShardingConfig"
+                )
+            parameters_to_prepare.append((param, fqn, compute_sharding))
 
     prepared_compute_layouts = {}
     for param, fqn, compute_sharding in parameters_to_prepare:
@@ -268,10 +286,11 @@ def _configure_distributed_muon(
             global_compute_shape=global_compute_shape,
             local_storage_view=local_storage_view,
         )
-    optimizer._prepared_compute_layouts = prepared_compute_layouts
     tensor_device = optimizer._validate_parameter_storage()
-    compute_layouts = optimizer._build_parameter_compute_layouts()
-    optimizer._specs = _bind_bucket_configs(
+    compute_layouts = optimizer._build_parameter_compute_layouts(
+        prepared_compute_layouts
+    )
+    specs = _bind_bucket_configs(
         tuple(bucket_configs),
         compute_layouts,
         get_fqn=lambda layout: layout.fqn,
@@ -281,24 +300,22 @@ def _configure_distributed_muon(
         ),
         get_bucket_compatibility_key=_bucket_compatibility_key,
     )
-    optimizer._initialize_plan(compute_layouts)
-    optimizer._validate_plan_across_ranks()
-    optimizer._redistribution_runtime = _BucketedRedistributionRuntime[
-        _ParameterComputeLayout
-    ](tensor_device)
-    optimizer._redistribution_runtime.reserve_buffers(
-        optimizer._bucket_plans,
-        local_tensor_spec=optimizer._local_tensor_spec,
-        local_bucket_executor=optimizer,
+    binding = optimizer._compile_optimizer_reshard_binding(
+        specs,
+        compute_layouts,
+        tensor_device,
+    )
+    optimizer.register_load_state_dict_pre_hook(
+        _before_load_state_dict,
+        prepend=True,
     )
     optimizer.register_load_state_dict_post_hook(_after_load_state_dict, prepend=True)
+    optimizer._optimizer_reshard_binding = binding
+    optimizer._flex_optimizer_reshard_configured = True
 
 
-class DistributedMuon(
-    Optimizer,
-    _LocalBucketExecutor["_ParameterComputeLayout"],
-):
-    """Muon optimizer constructed by ``build_distributed_muon``.
+class DistributedMuon(Optimizer):
+    """Muon optimizer configured by ``flex_optimizer_reshard``.
 
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
     are frozen after resharding is applied. Every configured parameter must
@@ -311,9 +328,8 @@ class DistributedMuon(
     the contract.
     """
 
-    _prepared_compute_layouts: dict[str, _PreparedParameterComputeLayout]
-    _specs: tuple[_BucketSpec, ...]
-    _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
+    _optimizer_reshard_binding: _DistributedMuonReshardBinding | None
+    _flex_optimizer_reshard_configured: bool
     _param_groups_frozen: bool
 
     def __init__(
@@ -340,10 +356,24 @@ class DistributedMuon(
             "adjust_lr_fn": adjust_lr_fn,
         }
         self._first_step_validated = False
+        self._optimizer_reshard_binding = None
+        self._flex_optimizer_reshard_configured = False
         self._param_groups_frozen = False
         super().__init__(params, defaults)
         self._validate_groups()
         self._param_groups_frozen = True
+
+    def _configure_flex_optimizer_reshard(
+        self,
+        *,
+        compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+        bucket_configs: Sequence[BucketConfig],
+    ) -> None:
+        _configure_distributed_muon(
+            self,
+            compute_sharding_by_fqn=compute_sharding_by_fqn,
+            bucket_configs=bucket_configs,
+        )
 
     @overload
     def step(self, closure: None = None) -> None:
@@ -355,21 +385,48 @@ class DistributedMuon(
 
     @torch.no_grad()
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        binding = self._require_optimizer_reshard_binding()
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
         self._preflight_step()
-        self._redistribution_runtime.run(
-            self._bucket_plans,
+        binding.runtime.run(
+            binding.plans,
             local_tensor_spec=self._local_tensor_spec,
             prepare=self._prepare_local,
             compute=self._compute_update,
             finalize=self._apply_update,
-            local_bucket_executor=self,
+            local_bucket_executor=binding,
         )
         return loss
+
+    def _require_optimizer_reshard_binding(
+        self,
+    ) -> _DistributedMuonReshardBinding:
+        binding = self._optimizer_reshard_binding
+        if binding is None:
+            if self._flex_optimizer_reshard_configured:
+                raise RuntimeError(
+                    "DistributedMuon FlexShard configuration is unavailable; "
+                    "rebuild the optimizer"
+                )
+            raise RuntimeError(
+                "DistributedMuon must be configured with "
+                "flex_optimizer_reshard before step()"
+            )
+        return binding
+
+    @property
+    def _specs(self) -> tuple[_BucketSpec, ...]:
+        return self._require_optimizer_reshard_binding().bucket_specs
+
+    @property
+    def _bucket_plans(
+        self,
+    ) -> tuple[_BucketExecutionPlan[_ParameterComputeLayout], ...]:
+        return self._require_optimizer_reshard_binding().plans
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
         if self._param_groups_frozen:
@@ -412,6 +469,7 @@ class DistributedMuon(
 
     def _build_parameter_compute_layouts(
         self,
+        prepared_compute_layouts: Mapping[str, _PreparedParameterComputeLayout],
     ) -> tuple[_ParameterComputeLayout, ...]:
         parameters = []
         seen_names = set()
@@ -428,7 +486,7 @@ class DistributedMuon(
 
         compute_layouts = []
         for group_index, fqn, param in parameters:
-            prepared = self._prepared_compute_layouts[fqn]
+            prepared = prepared_compute_layouts[fqn]
             global_compute_shape = torch.Size(prepared.global_compute_shape)
             local_storage_view = prepared.local_storage_view
             resolved_transition = _resolve_storage_to_compute_transition(
@@ -463,14 +521,15 @@ class DistributedMuon(
             )
         return tuple(compute_layouts)
 
-    def _initialize_plan(
+    def _build_optimizer_reshard_plan(
         self,
+        specs: Sequence[_BucketSpec],
         compute_layouts: Sequence[_ParameterComputeLayout],
-    ) -> None:
+    ) -> _BucketPlanningResult[_ParameterComputeLayout]:
         ns_steps_by_group = tuple(group["ns_steps"] for group in self.param_groups)
-        result = _build_bucket_plans(
+        return _build_bucket_plans(
             compute_layouts,
-            self._specs,
+            specs,
             get_fqn=lambda item: item.fqn,
             get_storage_dtensor=lambda item: item.param,
             requires_redistribution=lambda item: (not item.storage_is_compute_ready),
@@ -479,15 +538,44 @@ class DistributedMuon(
                 ns_steps_by_group=ns_steps_by_group,
             ),
         )
-        self._bucket_plans = result.plans
-        self._parameter_compute_layouts = result.plan_items
-        self._local_execution_plans: dict[
-            tuple[str, ...], tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]
-        ] = {}
 
-    def _validate_plan_across_ranks(self) -> None:
+    def _compile_optimizer_reshard_binding(
+        self,
+        specs: tuple[_BucketSpec, ...],
+        compute_layouts: Sequence[_ParameterComputeLayout],
+        tensor_device: torch.device,
+        parameter_group_membership_signature: (
+            _ParameterGroupMembershipSignature | None
+        ) = None,
+    ) -> _DistributedMuonReshardBinding:
+        result = self._build_optimizer_reshard_plan(specs, compute_layouts)
+        self._validate_plan_across_ranks(result.plans)
+        runtime = _BucketedRedistributionRuntime[_ParameterComputeLayout](tensor_device)
+        binding = _DistributedMuonReshardBinding(
+            optimizer=self,
+            bucket_specs=specs,
+            plans=result.plans,
+            plan_items=result.plan_items,
+            runtime=runtime,
+            parameter_group_membership_signature=(
+                self._parameter_group_membership_signature()
+                if parameter_group_membership_signature is None
+                else parameter_group_membership_signature
+            ),
+        )
+        runtime.reserve_buffers(
+            binding.plans,
+            local_tensor_spec=self._local_tensor_spec,
+            local_bucket_executor=binding,
+        )
+        return binding
+
+    def _validate_plan_across_ranks(
+        self,
+        plans: Sequence[_BucketExecutionPlan[_ParameterComputeLayout]],
+    ) -> None:
         _validate_bucket_plans_across_ranks(
-            self._bucket_plans,
+            plans,
             item_signature=self._plan_item_signature,
         )
 
@@ -538,12 +626,24 @@ class DistributedMuon(
         TorchTitan's elastic launcher terminates peer workers after this error
         escapes. Do not add a validation collective to the optimizer hot path.
         """
+        binding = self._require_optimizer_reshard_binding()
+        try:
+            current_membership = self._parameter_group_membership_signature()
+        except ValueError as error:
+            raise RuntimeError(
+                "DistributedMuon parameter groups changed; rebuild the optimizer"
+            ) from error
+        if current_membership != binding.parameter_group_membership_signature:
+            raise RuntimeError(
+                "DistributedMuon parameter groups changed; rebuild the optimizer"
+            )
+
         initialize_state = not self._first_step_validated
         missing_gradients = []
         changed_parameter_storage_fqn = None
         changed_gradient_storage_fqn = None
         gradients = [] if initialize_state else None
-        for compute_layout in self._parameter_compute_layouts:
+        for compute_layout in binding.plan_items:
             if (
                 changed_parameter_storage_fqn is None
                 and compute_layout.storage_is_compute_ready
@@ -614,6 +714,24 @@ class DistributedMuon(
             raise RuntimeError(
                 f"momentum storage layout changed for {compute_layout.fqn!r}"
             )
+
+    def _parameter_group_membership_signature(
+        self,
+    ) -> _ParameterGroupMembershipSignature:
+        signature = []
+        for group in self.param_groups:
+            params = tuple(group["params"])
+            raw_param_names = group.get("param_names")
+            param_names = () if raw_param_names is None else tuple(raw_param_names)
+            if raw_param_names is None or len(params) != len(param_names):
+                raise ValueError("params and param_names must be aligned")
+            signature.append(
+                tuple(
+                    (id(param), fqn)
+                    for param, fqn in zip(params, param_names, strict=True)
+                )
+            )
+        return tuple(signature)
 
     def _momentum(
         self, compute_layout: _ParameterComputeLayout, grad: DTensor
@@ -693,10 +811,11 @@ class DistributedMuon(
 
     def _plan_local_bucket(
         self,
+        binding: _DistributedMuonReshardBinding,
         local_work: tuple[_ParameterComputeLayout, ...],
     ) -> dict[tuple[torch.device, torch.dtype], int]:
         execution_plan = self._build_local_execution_plan(local_work)
-        self._local_execution_plans[_local_bucket_key(local_work)] = execution_plan
+        binding._local_execution_plans[_local_bucket_key(local_work)] = execution_plan
 
         requirements: dict[tuple[torch.device, torch.dtype], int] = {}
         for local_execution in execution_plan:
@@ -712,10 +831,11 @@ class DistributedMuon(
 
     def _execute_local_bucket(
         self,
+        binding: _DistributedMuonReshardBinding,
         local_work: tuple[_ParameterComputeLayout, ...],
         slot: _BufferSlot,
     ) -> None:
-        for local_execution in self._local_execution_plans[
+        for local_execution in binding._local_execution_plans[
             _local_bucket_key(local_work)
         ]:
             if not isinstance(local_execution, _LocalMatrixBatch):
@@ -1693,6 +1813,32 @@ class _LocalMatrixBatch:
     device: torch.device
 
 
+@dataclass(slots=True)
+class _DistributedMuonReshardBinding(_LocalBucketExecutor[_ParameterComputeLayout]):
+    optimizer: DistributedMuon
+    bucket_specs: tuple[_BucketSpec, ...]
+    plans: tuple[_BucketExecutionPlan[_ParameterComputeLayout], ...]
+    plan_items: tuple[_ParameterComputeLayout, ...]
+    runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
+    parameter_group_membership_signature: _ParameterGroupMembershipSignature
+    _local_execution_plans: dict[
+        tuple[str, ...], tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]
+    ] = field(default_factory=dict)
+
+    def _plan_local_bucket(
+        self,
+        local_work: tuple[_ParameterComputeLayout, ...],
+    ) -> dict[tuple[torch.device, torch.dtype], int]:
+        return self.optimizer._plan_local_bucket(self, local_work)
+
+    def _execute_local_bucket(
+        self,
+        local_work: tuple[_ParameterComputeLayout, ...],
+        slot: _BufferSlot,
+    ) -> None:
+        self.optimizer._execute_local_bucket(self, local_work, slot)
+
+
 def _make_local_matrix_execution(
     layouts: Sequence[_ParameterComputeLayout],
 ) -> _ParameterComputeLayout | _LocalMatrixBatch:
@@ -1836,18 +1982,67 @@ def _zeropower_via_newtonschulz(
     return result.transpose(-2, -1) if transposed else result
 
 
+def _before_load_state_dict(
+    optimizer: Optimizer,
+    state_dict: dict[str, Any],
+) -> None:
+    muon = cast(DistributedMuon, optimizer)
+    binding = muon._require_optimizer_reshard_binding()
+    try:
+        current_membership = muon._parameter_group_membership_signature()
+    except ValueError as error:
+        raise ValueError(
+            "current DistributedMuon parameter groups do not match configured "
+            "FlexShard FQNs"
+        ) from error
+    if current_membership != binding.parameter_group_membership_signature:
+        raise ValueError(
+            "current DistributedMuon parameter groups do not match configured "
+            "FlexShard FQNs"
+        )
+
+    loaded_groups = state_dict["param_groups"]
+    if len(loaded_groups) != len(muon.param_groups):
+        return
+    for group_index, (configured_group, loaded_group) in enumerate(
+        zip(
+            binding.parameter_group_membership_signature,
+            loaded_groups,
+            strict=True,
+        )
+    ):
+        loaded_param_names = loaded_group.get("param_names")
+        if loaded_param_names is not None and tuple(loaded_param_names) != tuple(
+            fqn for _param_id, fqn in configured_group
+        ):
+            raise ValueError(
+                "loaded optimizer param_names for group "
+                f"{group_index} do not match configured FlexShard FQNs"
+            )
+
+
 def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon = cast(DistributedMuon, optimizer)
     # Optimizer.load_state_dict restores group values such as ns_steps after
     # construction, and those values affect compute planning and buffer sizes.
-    muon._validate_groups()
-    muon._initialize_plan(muon._parameter_compute_layouts)
-    muon._validate_plan_across_ranks()
-    muon._redistribution_runtime.reserve_buffers(
-        muon._bucket_plans,
-        local_tensor_spec=muon._local_tensor_spec,
-        local_bucket_executor=muon,
-    )
+    binding = muon._require_optimizer_reshard_binding()
+    try:
+        muon._validate_groups()
+        tensor_device = muon._validate_parameter_storage()
+        rebuilt_binding = muon._compile_optimizer_reshard_binding(
+            binding.bucket_specs,
+            binding.plan_items,
+            tensor_device,
+            parameter_group_membership_signature=(
+                binding.parameter_group_membership_signature
+            ),
+        )
+    except Exception:
+        # Loaded group values may no longer agree with the old plans. Do not
+        # leave those plans executable after a failed rebuild.
+        muon._optimizer_reshard_binding = None
+        raise
+    muon._optimizer_reshard_binding = rebuilt_binding
     # init_optim_state may have validated placeholder state before the load.
     muon._first_step_validated = False
 
