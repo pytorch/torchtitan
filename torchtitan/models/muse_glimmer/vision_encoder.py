@@ -4,26 +4,29 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Muse Glimmer vision encoder built on torchtitan's shared component library.
+"""Muse Glimmer vision encoder, built on torchtitan's shared ViT components and
+structured like ``torchtitan/models/qwen3_5/vision_encoder.py``.
 
-Structurally follows ``torchtitan/models/qwen3_5/vision_encoder.py`` (nested
-``Config`` dataclasses, ``ModuleDict`` layer stack, shared
-``Linear``/``LayerNorm``/``FlexAttention``), with Muse Glimmer-specific internals:
+The forward runs the whole batch padded as ``(N, P, D)`` (like qwen3_5/kimi_k2_7):
+``conv1`` linear patch embed, ``grid_sample``-resampled learned position
+embedding, complex 2D RoPE (:meth:`ComplexRoPE.apply_rotary_emb`), a stack of
+transformer blocks, then per-image pixel-shuffle downsampling; the valid tokens
+are concatenated into the returned ``(total_output_tokens, output_dim)``.
 
-- patches are pre-extracted by a ``Linear`` ``conv1`` (a full-patch-kernel Conv
-  expressed as a linear over flattened patches),
-- a learned positional embedding is bilinearly resampled (``grid_sample``) to
-  each image's grid,
-- complex 2D RoPE (the same complex backend as the LLM; see
-  :meth:`ComplexRoPE.apply_rotary_emb`),
-- per-image block-diagonal attention with an additional sparse-window variant
-  (``sparse_attention_factor``), realized as FlexAttention ``BlockMask``s built
-  from segment ids (the document-mask pattern),
-- pixel-shuffle spatial downsampling at the output.
+Attention uses per-image FlexAttention ``(N, P, P)`` masks (the batch dim
+separates images). Most layers use windowed attention -- tokens are permuted per
+row so each window is contiguous (``token_permute``) and a per-row ``win_id``
+confines attention within windows, keeping the mask block-sparse -- while every
+``sparse_attention_factor``-th layer and the last use full per-image
+block-diagonal attention (``get_vision_block_mask_mod``).
 
-The transformer block stack is named ``layers`` so the shared
-``apply_ac``/pipeline tooling (which expects a ``layers`` submodule, like
-``torchtitan/models/qwen3_5``) works unchanged.
+The block stack is named ``layers`` so the shared ``apply_ac``/pipeline tooling
+works unchanged.
+
+Shape suffixes:
+- N = num images in the batch (one forward)
+- P = max patches per image (padded to the batch max)
+- D = vision latent dim (``latent_dim``)
 """
 
 from __future__ import annotations
@@ -37,43 +40,34 @@ import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common import ComplexRoPE, Linear
-from torchtitan.models.common.attention import create_attention_mask
 from torchtitan.models.common.nn_modules import LayerNorm
-from torchtitan.models.common.vision_encoder import VisionTransformerBlock
+from torchtitan.models.common.vision_encoder import (
+    compiled_create_block_mask,
+    get_vision_block_mask_mod,
+    VisionTransformerBlock,
+)
 from torchtitan.protocols.module import Module, ModuleDict
 
 
 def reorder_patch_vector(
     patches: torch.Tensor, *, patch_size: int, patch_temporal: int
 ) -> torch.Tensor:
-    """Reorder a patch vector from the shared collator's ``(c, pt, ph, pw)``
-    layout to Muse Glimmer's ``(pt, c, ph, pw)`` ``conv1_linear`` layout.
+    """Swap the channel/temporal axes of a patch vector: the shared collator
+    (reused by qwen3_5/kimi_k2_7) emits ``(c, pt, ph, pw)`` but Muse Glimmer's
+    ``conv1_linear`` expects ``(pt, c, ph, pw)`` (its pretrained weight layout).
 
-    Why this exists: the shared multimodal collator (``vision_to_patches``,
-    reused by qwen3_5/kimi_k2_7) emits patch vectors channel-first as
-    ``(c, pt, ph, pw)``. Muse Glimmer's ``conv1_linear`` was defined with the
-    temporal axis first, ``(pt, c, ph, pw)`` -- matching the pretrained
-    ``conv1`` weight layout -- so we swap the c/pt axes here
-    to keep ``conv1_linear`` numerics byte-identical to the old packed collator.
-
-    Cost: a single memory-bandwidth-bound copy per forward (the ``reshape`` after
-    a non-contiguous ``permute``), ~tens of MB, dwarfed by the ViT matmuls -- so
-    doing it in the encoder is effectively free. If this ever needs to be truly
-    zero-GPU-cost, push the reorder into the shared collator via an opt-in
-    ``patch_vector_order`` param (runs on CPU dataloader workers); if Muse Glimmer
-    never has to match an existing ``(pt, c, ph, pw)`` checkpoint, drop this
-    entirely and define ``conv1`` natively in ``(c, pt, ph, pw)``.
-
-    ``patches`` is ``[n, patch_dim]`` where ``patch_dim == c * patch_temporal *
-    patch_size**2``. Returns ``[n, patch_dim]`` with the channel/temporal axes
-    swapped so the vector matches the ordering ``conv1_linear`` expects.
+    ``patches`` is ``(..., patch_dim)`` for any leading dims (packed
+    ``(n, patch_dim)`` or padded ``(N, P, patch_dim)``), where ``patch_dim ==
+    c * patch_temporal * patch_size**2``; returns the same shape reordered.
     """
-    n, patch_dim = patches.shape
+    *lead, patch_dim = patches.shape
     ps = patch_size
     pt = patch_temporal
     c = patch_dim // (pt * ps * ps)
-    # (c, pt, ps, ps) -> (pt, c, ps, ps): swap the channel and temporal axes.
-    return patches.view(n, c, pt, ps, ps).permute(0, 2, 1, 3, 4).reshape(n, patch_dim)
+    # (..., c, pt, ps, ps) -> (..., pt, c, ps, ps): swap the channel/temporal axes.
+    return (
+        patches.view(*lead, c, pt, ps, ps).transpose(-4, -3).reshape(*lead, patch_dim)
+    )
 
 
 class _VisionPosEmbed(Module):
@@ -121,12 +115,12 @@ class _VisionPosEmbed(Module):
 
 
 class _VisionTokenPermute(Module):
-    """Advanced-index a token sequence by a permutation: ``x[:, index]``.
+    """Row-wise gather of a padded token batch by a per-row permutation.
 
     A stateless leaf module so the sharding code can wrap forward with a
-    DTensor->local conversion. Advanced indexing (``aten.index.Tensor``) rejects
-    a mix of DTensor and plain tensors; running this region on local tensors
-    (both ``x`` and ``index`` converted by ``local_map``) sidesteps that.
+    DTensor->local conversion. ``torch.gather`` rejects a mix of DTensor and
+    plain tensors; running this region on local tensors (both ``x`` and ``index``
+    converted by ``local_map``) sidesteps that.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -137,7 +131,19 @@ class _VisionTokenPermute(Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-        return x[:, index]
+        """Row-wise gather: ``out[i] = x[i][index[i]]``.
+
+        Used to apply the sparse-window permutation to both the token features
+        ``(N, P, D)`` and the complex RoPE cache ``(N, P, 1, head_dim//2)`` -- a
+        single ``torch.gather`` over dim 1 with ``index`` broadcast over the
+        trailing dims. Invoked via ``__call__`` so the TP wrapper (which
+        ``Module.parallelize`` binds to ``forward``) localizes ``x`` and
+        ``index`` before the gather.
+        """
+        trailing = x.shape[2:]
+        idx = index.view(index.shape[0], index.shape[1], *([1] * len(trailing)))
+        idx = idx.expand(index.shape[0], index.shape[1], *trailing)
+        return torch.gather(x, 1, idx)
 
 
 class _VisionRopeFreq(Module):
@@ -201,18 +207,20 @@ class MuseGlimmerVisionAdapter(Module):
 class MuseGlimmerVisionEncoder(Module):
     """Muse Glimmer vision encoder for a batch of (variable-resolution) images.
 
-    All images are embedded and concatenated into one sequence that runs through
-    the transformer once with block-diagonal masking, so images in the same
-    forward share a pass but cannot attend across each other. The output is
-    pixel-shuffle downsampled per image.
+    All images run through the transformer in one padded ``(N, P, D)`` batch with
+    per-image block-diagonal masking, so images in the same forward share a pass
+    but cannot attend across each other. The output is pixel-shuffle downsampled
+    per image.
 
     ``forward`` takes padded, pre-patchified ``pixel_values``
     (``[N, P, patch_dim]``, one row per image, zero-padded to the batch's max
     patch count ``P``) and ``grid_thw`` (``[N, 3]`` = ``[1, grid_h, grid_w]`` per
-    image; patchify happens in the shared collator). Each row is unpadded via
-    ``grid_thw`` and its patch vector reordered from the collator's
-    ``(c, pt, ph, pw)`` layout to ``conv1``'s ``(pt, c, ph, pw)`` layout. Returns
-    a single ``[total_output_tokens, output_dim]`` tensor.
+    image; patchify happens in the shared collator). The whole batch is embedded
+    padded (the patch vector is reordered from the collator's ``(c, pt, ph, pw)``
+    layout to ``conv1``'s ``(pt, c, ph, pw)`` layout); padding rows are masked in
+    attention and dropped at finalize. Returns a single
+    ``[total_output_tokens, output_dim]`` tensor (valid tokens per image,
+    concatenated).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -301,6 +309,28 @@ class MuseGlimmerVisionEncoder(Module):
             torch.stack([torch.cos(freq), torch.sin(freq)], dim=-1)
         )
 
+    def _compute_2d_rope_cache(
+        self, grids: list[list[int]], max_num_patch: int, device: torch.device
+    ) -> torch.Tensor:
+        """Padded complex 2D-RoPE cache, grouped by unique (h, w).
+
+        Maps ``_make_2d_rope`` over each unique grid into a padded
+        ``(N, max_num_patch, 1, head_dim//2)`` complex cache (head axis = 1 for
+        broadcast); padding rows are the identity ``1+0j``.
+        """
+        n = len(grids)
+        cache = torch.ones(
+            n, max_num_patch, self.head_dim // 2, device=device, dtype=torch.complex64
+        )
+        hw_to_indices: dict[tuple[int, int], list[int]] = {}
+        for i, (_, h, w) in enumerate(grids):
+            hw_to_indices.setdefault((h, w), []).append(i)
+        for (h, w), idxs in hw_to_indices.items():
+            emb = self._make_2d_rope(h, w, device)  # (h*w, head_dim//2) complex
+            for i in idxs:
+                cache[i, : h * w] = emb
+        return cache.unsqueeze(2)
+
     def _get_pos_emb(
         self, grid_h: int, grid_w: int, device: torch.device
     ) -> torch.Tensor:
@@ -321,28 +351,47 @@ class MuseGlimmerVisionEncoder(Module):
             device=device,
         )
 
+    def _compute_pos_embeds(
+        self, grids: list[list[int]], max_num_patch: int, device: torch.device
+    ) -> torch.Tensor:
+        """Padded learned positional embeddings, grouped by unique (h, w).
+
+        Returns ``(N, max_num_patch, latent_dim)`` with padding rows left zero.
+        Delegates to ``self.pos_embed`` (grid_sample leaf) once per unique grid,
+        so TP local_map still localizes ``positional_embedding_vlm``.
+        """
+        n = len(grids)
+        pos = self.positional_embedding_vlm.new_zeros(n, max_num_patch, self.latent_dim)
+        hw_to_indices: dict[tuple[int, int], list[int]] = {}
+        for i, (_, h, w) in enumerate(grids):
+            hw_to_indices.setdefault((h, w), []).append(i)
+        for (h, w), idxs in hw_to_indices.items():
+            emb = self._get_pos_emb(h, w, device).to(pos.dtype)  # (h*w, D)
+            for i in idxs:
+                pos[i, : h * w] = emb
+        return pos
+
     def _pixel_shuffle_downsample(
         self, x: torch.Tensor, grid_h: int, grid_w: int
     ) -> torch.Tensor:
         """Downsample via pixel shuffle: (h r1 w r2) -> (h w r1 r2).
 
-        The downsample is a fixed permutation of the patch grid, so it is
-        expressed as pure view/permute/reshape rather than an ``arange`` gather.
-        These ops have DTensor sharding rules, so this runs natively on a
-        Replicate DTensor under TP (no ``local_map`` needed) and identically on
-        plain tensors single-device.
+        Takes one image's ``(grid_h*grid_w, d)`` tokens and returns
+        ``(n_out, d * f * f)``. The downsample is a fixed permutation of the patch
+        grid, so it is expressed as pure view/permute/reshape rather than an
+        ``arange`` gather. These ops have DTensor sharding rules, so this runs
+        natively on a Replicate DTensor under TP (no ``local_map`` needed) and
+        identically on plain tensors single-device.
         """
         f = self.downsample_factor
         d = x.shape[-1]
         n_out = (grid_h // f) * (grid_w // f)
         return (
-            x.squeeze(0)
-            .view(grid_h // f, f, grid_w // f, f, d)
+            x.view(grid_h // f, f, grid_w // f, f, d)
             .permute(0, 2, 1, 3, 4)
             .reshape(n_out, f * f, d)
             .permute(0, 2, 1)
             .reshape(n_out, d * f * f)
-            .unsqueeze(0)
         )
 
     def _get_sparse_perm_and_slens(
@@ -365,92 +414,97 @@ class MuseGlimmerVisionEncoder(Module):
         sp_perm = idx[idx != -1]
         valid = (idx != -1).view(-1, gh * gw)
         # Keep the per-window token counts on-device: they are consumed by
-        # ``_block_diag_mask`` (repeat_interleave) which runs on the GPU. A
-        # ``.tolist()`` here would force a D2H sync every forward.
+        # ``_compute_sparse_perm_winid`` (repeat_interleave) which runs on the
+        # GPU. A ``.tolist()`` here would force a D2H sync every forward.
         sp_slens = valid.sum(dim=1).to(torch.int32)
         return sp_perm, sp_slens
 
-    def _block_diag_mask(
-        self, slens: torch.Tensor, total_tokens: int, device: torch.device
-    ) -> BlockMask:
-        """FlexAttention block-diagonal mask over contiguous segments.
+    def _compute_sparse_perm_winid(
+        self, grids: list[list[int]], max_num_patch: int, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Padded per-row window permutation, its inverse, and permuted-frame
+        window ids.
 
-        Each token gets a segment id from ``slens``; a query attends to a key iff
-        they share a segment (the document-mask pattern).
+        Returns ``(perm, inv, win_id)`` each ``(N, max_num_patch)``:
+        - ``perm[i, :n]`` reorders image i's tokens so windows are contiguous
+          (identity on the padded tail so ``gather`` stays in-bounds).
+        - ``inv[i]`` is the inverse of ``perm[i]`` (identity on the tail).
+        - ``win_id[i, :n]`` is the window index of each token in the *permuted*
+          frame; the padded tail is ``-1`` so it never matches in the mask.
         """
-        seg = torch.repeat_interleave(
-            torch.arange(slens.shape[0], device=device, dtype=torch.int32),
-            slens.to(torch.int32),
-            # ``total_tokens`` is already known, so pass it explicitly: without
-            # ``output_size`` repeat_interleave reads ``slens.sum()`` back to the
-            # host to size its output, reintroducing the D2H sync.
-            output_size=total_tokens,
+        n_img = len(grids)
+        perm = (
+            torch.arange(max_num_patch, device=device)
+            .unsqueeze(0)
+            .repeat(n_img, 1)
+            .clone()
         )
-
-        def mask_mod(
-            b: torch.Tensor,
-            h: torch.Tensor,
-            q_idx: torch.Tensor,
-            kv_idx: torch.Tensor,
-        ) -> torch.Tensor:
-            return seg[q_idx] == seg[kv_idx]
-
-        return create_attention_mask(
-            mask_mod, 1, None, total_tokens, total_tokens, device=device
+        inv = perm.clone()
+        win_id = torch.full(
+            (n_img, max_num_patch), -1, device=device, dtype=torch.int32
         )
+        for i, (_, h, w) in enumerate(grids):
+            n = h * w
+            sp_perm, sp_slens = self._get_sparse_perm_and_slens(h, w, device)
+            perm[i, :n] = sp_perm
+            row_inv = torch.empty_like(sp_perm)
+            row_inv[sp_perm] = torch.arange(n, device=device)
+            inv[i, :n] = row_inv
+            win_id[i, :n] = torch.repeat_interleave(
+                torch.arange(sp_slens.numel(), device=device, dtype=torch.int32),
+                sp_slens,
+                output_size=n,
+            )
+        return perm, inv, win_id
 
-    def _embed_image(
+    def _build_padded_masks(
         self,
-        patches: torch.Tensor,
-        grid_h: int,
-        grid_w: int,
+        num_patch: torch.Tensor,
+        win_id: torch.Tensor,
+        max_num_patch: int,
         device: torch.device,
-        dtype: torch.dtype,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, int, int, int, torch.Tensor | None, torch.Tensor
-    ]:
-        """Phase 1 for one image: conv1 -> pos emb -> ln_pre -> (sparse) perm.
+    ) -> tuple[BlockMask, BlockMask | None]:
+        """Global (N,P,P) mask, plus the window mask when sparse is active.
 
-        ``patches`` is the pre-patchified ``[n_tokens, patch_dim]`` slice for one
-        image (patchify now happens in the collator). Returns the embedded tokens
-        ``[1, n, latent_dim]``, their 2D-RoPE freqs, ``n_tokens``, ``grid_h``,
-        ``grid_w``, and (under sparse attention) the per-window permutation and
-        segment lengths (``None``/``[]`` otherwise).
+        The sparse ``mask_mod`` keeps a query/key pair iff both are valid (within
+        the image's patch count) AND share a window in the permuted frame.
         """
-        n_tokens = grid_h * grid_w
-
-        x = self.conv1_linear(patches.unsqueeze(0).to(device=device, dtype=dtype))
-        pos_emb = self._get_pos_emb(grid_h, grid_w, device)
-        x = x + pos_emb.unsqueeze(0).to(dtype)
-        x = self.ln_pre(x.view(-1, self.latent_dim)).view(1, -1, self.latent_dim)
-
-        freqs_cis = self._make_2d_rope(grid_h, grid_w, device)
-
-        sp_perm: torch.Tensor | None = None
-        sp_slens: torch.Tensor = torch.empty(0, dtype=torch.int32, device=device)
+        n = num_patch.shape[0]
+        global_mask = compiled_create_block_mask(
+            get_vision_block_mask_mod(num_patch),  # per-image block-diagonal
+            n,
+            None,
+            max_num_patch,
+            max_num_patch,
+            device=device,
+        )
+        sparse_mask: BlockMask | None = None
         if self.sparse_attention_factor > 1:
-            sp_perm, sp_slens = self._get_sparse_perm_and_slens(grid_h, grid_w, device)
-            x = self.token_permute(x, sp_perm)
-            freqs_cis = freqs_cis[sp_perm]
 
-        return x, freqs_cis, n_tokens, grid_h, grid_w, sp_perm, sp_slens
+            def sparse_mask_mod(b, h, q_idx, kv_idx):
+                valid = (q_idx < num_patch[b]) & (kv_idx < num_patch[b])
+                return valid & (win_id[b, q_idx] == win_id[b, kv_idx])
 
-    def _finalize_image(
-        self,
-        x: torch.Tensor,
-        grid_h: int,
-        grid_w: int,
-        sp_perm: torch.Tensor | None,
-        device: torch.device,
-    ) -> torch.Tensor:
-        """Phase 3 for one image: un-permute (if sparse) -> ln_post -> downsample."""
-        if sp_perm is not None:
-            inv_perm = torch.empty_like(sp_perm)
-            inv_perm[sp_perm] = torch.arange(len(sp_perm), device=device)
-            x = self.token_permute(x, inv_perm)
-        x = self.ln_post(x.view(-1, self.latent_dim)).view(1, -1, self.latent_dim)
-        x = self._pixel_shuffle_downsample(x, grid_h, grid_w)
-        return x.squeeze(0)
+            sparse_mask = compiled_create_block_mask(
+                sparse_mask_mod,
+                n,
+                None,
+                max_num_patch,
+                max_num_patch,
+                device=device,
+            )
+        return global_mask, sparse_mask
+
+    def _layer_uses_global_attention(self, layer_idx: int) -> bool:
+        """Whether layer ``layer_idx`` attends globally (vs. sparse windows).
+
+        Global on the last layer and every ``sparse_attention_factor``-th layer,
+        sparse otherwise. When ``sparse_attention_factor == 1`` this is always
+        True, so every layer uses the global mask.
+        """
+        sf = self.sparse_attention_factor
+        is_last = layer_idx == len(self.layers) - 1
+        return is_last or (layer_idx + 1) % sf == 0
 
     # ------------------------------------------------------------------
     # Forward
@@ -462,83 +516,51 @@ class MuseGlimmerVisionEncoder(Module):
         device = self.conv1_linear.weight.device
         dtype = self.conv1_linear.weight.dtype
         sf = self.sparse_attention_factor
+        N, P, _ = pixel_values.shape
 
-        # Patches per image. The temporal grid dim is always 1 (temporal is
-        # folded into the patch vector), so t * h * w == h * w == n_tokens.
-        num_images = grid_thw.shape[0]
-
-        # Phase 1: unpad + reorder patches per image -> embed -> concat.
-        all_x: list[torch.Tensor] = []
-        all_freqs: list[torch.Tensor] = []
-        all_sp_slens: list[torch.Tensor] = []
-        all_global_slens: list[int] = []
-        per_image_meta: list[tuple[int, int, int, torch.Tensor | None]] = []
-
-        # The unpad below slices ``pixel_values[i, :grid_h * grid_w]``, which is
-        # only correct when the temporal grid dim is 1 (T folded into the patch
-        # vector). Fail loudly if a caller ever passes T > 1, otherwise patches
-        # would be silently dropped and the reorder/embed would misalign.
         assert bool((grid_thw[:, 0] == 1).all()), (
             "MuseGlimmerVisionEncoder only supports grid_thw[:, 0] == 1 "
             f"(T patches), got {grid_thw[:, 0].tolist()}"
         )
-
-        grid_hw = grid_thw[:, 1:3].tolist()
-        for i in range(num_images):
-            grid_h, grid_w = int(grid_hw[i][0]), int(grid_hw[i][1])
-            n = grid_h * grid_w
-            # Padded contract: row i holds this image's patches, zero-padded to
-            # P. Unpad to the real n patches, then reorder the patch vector from
-            # the shared collator's (c, pt, ps, ps) layout to conv1's
-            # (pt, c, ps, ps) layout so conv1_linear numerics are preserved.
-            img_patches = reorder_patch_vector(
-                pixel_values[i, :n],
-                patch_size=self.patch_size,
-                patch_temporal=self.patch_temporal,
-            )
-            (
-                x,
-                freqs_cis,
-                n_tokens,
-                grid_h,
-                grid_w,
-                sp_perm,
-                sp_slens,
-            ) = self._embed_image(img_patches, grid_h, grid_w, device, dtype)
-            all_x.append(x.squeeze(0))
-            all_freqs.append(freqs_cis)
-            if sp_slens.numel() > 0:
-                all_sp_slens.append(sp_slens)
-            all_global_slens.append(n_tokens)
-            per_image_meta.append((grid_h, grid_w, n_tokens, sp_perm))
-
-        # Phase 2: concatenate, build masks, run the transformer once.
-        x = torch.cat(all_x, dim=0).unsqueeze(0)
-        freqs_cis = torch.cat(all_freqs, dim=0)
-        # Named to match the shared block's ``rope_cache`` arg, but here it is not
-        # a persistent cache: these 2D-RoPE freqs are recomputed every forward
-        # (per image in _make_2d_rope, then concatenated). Reshape to
-        # [1, total_tokens, 1, head_dim//2] to broadcast over batch(=1) and heads;
-        # this reshape used to live inside MuseGlimmerVisionAttention.
-        rope_cache = freqs_cis.unsqueeze(0).unsqueeze(2)
-        total_tokens = x.shape[1]
-
-        sp_slens_cat = torch.cat(all_sp_slens) if all_sp_slens else None
-        global_mask = self._block_diag_mask(
-            torch.tensor(all_global_slens, device=device, dtype=torch.int32),
-            total_tokens,
-            device,
+        f = self.downsample_factor
+        assert bool((grid_thw[:, 1:] % f == 0).all()), (
+            "MuseGlimmerVisionEncoder requires grid h/w divisible by "
+            f"downsample_factor={f} (pixel-shuffle), got {grid_thw[:, 1:].tolist()}"
         )
-        sp_mask: BlockMask | None = (
-            self._block_diag_mask(sp_slens_cat, total_tokens, device)
-            if sp_slens_cat is not None
-            else None
-        )
+        grids = grid_thw.tolist()  # [[t, h, w], ...]; one host sync for the forward
+        num_patch = (grid_thw[:, 1] * grid_thw[:, 2]).to(torch.long)  # (N,)
 
-        num_layers = len(self.layers)
+        # Phase 1: padded embed. Reorder the whole (N, P, patch_dim) batch from
+        # the collator's (c, pt, ps, ps) layout to conv1's (pt, c, ps, ps), then
+        # conv1 -> pos -> ln_pre on (N, P, D). Padding rows stay masked downstream
+        # (conv1 is bias-free; pos-emb padding is zero).
+        patches = reorder_patch_vector(
+            pixel_values.to(device=device, dtype=dtype),
+            patch_size=self.patch_size,
+            patch_temporal=self.patch_temporal,
+        )
+        x = self.conv1_linear(patches)  # (N, P, D)
+        x = x + self._compute_pos_embeds(grids, P, device).to(dtype)
+        x = self.ln_pre(x)
+
+        rope_cache = self._compute_2d_rope_cache(grids, P, device)  # (N,P,1,hd//2)
+
+        # Sparse permutation: reorder each row so windows are contiguous. The
+        # gather runs through token_permute.__call__ -> forward so the TP
+        # local_map wrapper localizes x/index before torch.gather.
+        inv = None
+        win_id = torch.full((N, P), -1, device=device, dtype=torch.int32)
+        if sf > 1:
+            perm, inv, win_id = self._compute_sparse_perm_winid(grids, P, device)
+            x = self.token_permute(x, perm)
+            rope_cache = self.token_permute(rope_cache, perm)
+
+        # Phase 2: masks + transformer (block stack unchanged, now with N>1).
+        global_mask, sparse_mask = self._build_padded_masks(
+            num_patch, win_id, P, device
+        )
         for i, block in enumerate(self.layers.values()):
-            is_global = (i == num_layers - 1) or ((i + 1) % sf == 0)
-            mask = global_mask if (is_global or sp_slens_cat is None) else sp_mask
+            mask = global_mask if self._layer_uses_global_attention(i) else sparse_mask
             x = block(
                 x,
                 rope_cache=rope_cache,
@@ -546,14 +568,14 @@ class MuseGlimmerVisionEncoder(Module):
                 attention_mask=mask,
             )
 
-        # Phase 3: split per image, finalize each.
-        all_features: list[torch.Tensor] = []
-        offset = 0
-        for grid_h, grid_w, n_tokens, sp_perm in per_image_meta:
-            img_x = x[:, offset : offset + n_tokens]
-            offset += n_tokens
-            all_features.append(
-                self._finalize_image(img_x, grid_h, grid_w, sp_perm, device)
-            )
+        # Phase 3: un-permute, ln_post, per-image pixel-shuffle, flatten valid tokens.
+        if sf > 1:
+            x = self.token_permute(x, inv)
+        x = self.ln_post(x)
 
-        return torch.cat(all_features, dim=0)
+        all_features: list[torch.Tensor] = []
+        for i, (_, grid_h, grid_w) in enumerate(grids):
+            n = grid_h * grid_w
+            feat = self._pixel_shuffle_downsample(x[i, :n], grid_h, grid_w)
+            all_features.append(feat)
+        return torch.cat(all_features, dim=0)  # (total_output_tokens, output_dim)
