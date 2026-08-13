@@ -886,7 +886,6 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager.maybe_wait_for_saving()
 
-
 class TestConfigPostInit(unittest.TestCase):
     def test_legacy_config_only_adds_dcp_specific_fields(self):
         self.assertEqual(
@@ -1000,7 +999,6 @@ class TestConfigPostInit(unittest.TestCase):
         mock_logger.warning.assert_any_call(
             "initial_load_model_only=True has no effect without an initial_load_path."
         )
-
 
 class TestFindLoadStepRemote(unittest.TestCase):
     """_find_load_step must discover checkpoints on a remote (fsspec) folder,
