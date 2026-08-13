@@ -9,30 +9,43 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-__all__ = ["BucketConfig", "ComputeLayout"]
+__all__ = ["BucketConfig", "ComputeLayout", "SingleParticipant"]
 
 
-class _FrozenPlacementsByMeshAxis(Mapping[str, Replicate | Shard]):
+@dataclass(frozen=True, slots=True)
+class SingleParticipant:
+    """Assign the complete subgroup-local logical tensor to one participant.
+
+    This is a temporary compute distribution, not a DTensor storage placement.
+    The consuming optimizer chooses the participant.
+    """
+
+    pass
+
+
+class _FrozenDistributionByMeshAxis(
+    Mapping[str, SingleParticipant | Replicate | Shard]
+):
     """Small immutable mapping that remains safe to copy with configs."""
 
     __slots__ = ("_items",)
 
     def __init__(
         self,
-        placements_by_mesh_axis: Mapping[str, Replicate | Shard],
+        distribution_by_mesh_axis: Mapping[str, SingleParticipant | Replicate | Shard],
     ) -> None:
-        self._items = tuple(placements_by_mesh_axis.items())
+        self._items = tuple(distribution_by_mesh_axis.items())
 
-    def __getitem__(self, axis_name: str) -> Replicate | Shard:
-        for candidate_axis_name, placement in self._items:
+    def __getitem__(self, axis_name: str) -> SingleParticipant | Replicate | Shard:
+        for candidate_axis_name, distribution in self._items:
             if candidate_axis_name == axis_name:
-                return placement
+                return distribution
         raise KeyError(axis_name)
 
     def __iter__(self) -> Iterator[str]:
@@ -47,7 +60,7 @@ class _FrozenPlacementsByMeshAxis(Mapping[str, Replicate | Shard]):
     def __repr__(self) -> str:
         return repr(dict(self._items))
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenPlacementsByMeshAxis:
+    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenDistributionByMeshAxis:
         return self
 
 
@@ -55,80 +68,57 @@ class _FrozenPlacementsByMeshAxis(Mapping[str, Replicate | Shard]):
 class ComputeLayout:
     """Describe a temporary compute layout on named storage-mesh axes.
 
-    Placements override the named axes; omitted axes preserve their storage
-    placement. Matrix ownership axes assign each complete logical matrix to one
-    participant in their Cartesian group. Extra declarations may target mesh
-    variants not used by a particular parameter, but at least one declaration
+    Each named axis uses one of three compute distributions: ``SingleParticipant``
+    assigns the complete subgroup-local logical tensor to one participant,
+    ``Replicate`` assigns it to every participant, and ``Shard`` partitions one
+    tensor dimension.
+    Omitted axes preserve their storage placement. Extra declarations may target
+    mesh variants not used by a particular parameter, but at least one declaration
     must apply when the layout is resolved.
 
     Examples:
         Shard a viewed matrix batch across the EFSDP and EP axes::
 
             ComputeLayout(
-                placements_by_mesh_axis={
+                distribution_by_mesh_axis={
                     "efsdp": Shard(0),
                     "ep": Shard(0),
                 }
             )
 
-        Assign each complete matrix to one rank along ``dp_shard``::
+        Assign the complete subgroup-local logical tensor to one participant
+        along ``dp_shard``::
 
-            ComputeLayout(matrix_ownership_axes=("dp_shard",))
+            ComputeLayout(
+                distribution_by_mesh_axis={
+                    "dp_shard": SingleParticipant(),
+                }
+            )
     """
 
-    placements_by_mesh_axis: Mapping[str, Replicate | Shard] = field(
-        default_factory=dict
-    )
-    matrix_ownership_axes: tuple[str, ...] = ()
+    distribution_by_mesh_axis: Mapping[str, SingleParticipant | Replicate | Shard]
 
     def __post_init__(self) -> None:
-        placements_by_mesh_axis = dict(self.placements_by_mesh_axis)
-        matrix_ownership_axes = tuple(self.matrix_ownership_axes)
-        if not placements_by_mesh_axis and not matrix_ownership_axes:
-            raise ValueError(
-                "ComputeLayout must declare a placement or matrix ownership axis"
-            )
-        for axis_name, placement in placements_by_mesh_axis.items():
+        distribution_by_mesh_axis = dict(self.distribution_by_mesh_axis)
+        if not distribution_by_mesh_axis:
+            raise ValueError("ComputeLayout must declare a compute distribution")
+        for axis_name, distribution in distribution_by_mesh_axis.items():
             if not isinstance(axis_name, str):
                 raise ValueError(
-                    "ComputeLayout.placements_by_mesh_axis keys must be strings"
+                    "ComputeLayout.distribution_by_mesh_axis keys must be strings"
                 )
-            if type(placement) not in (Replicate, Shard):
+            if type(distribution) not in (SingleParticipant, Replicate, Shard):
                 raise ValueError(
-                    "ComputeLayout.placements_by_mesh_axis values must be "
-                    "Replicate or Shard"
+                    "ComputeLayout.distribution_by_mesh_axis values must be "
+                    "SingleParticipant, Replicate, or Shard"
                 )
-        if any(not isinstance(axis_name, str) for axis_name in matrix_ownership_axes):
-            raise ValueError(
-                "ComputeLayout.matrix_ownership_axes entries must be strings"
-            )
-        if len(set(matrix_ownership_axes)) != len(matrix_ownership_axes):
-            raise ValueError(
-                "ComputeLayout.matrix_ownership_axes entries must be unique"
-            )
-        overlapping_axes = set(placements_by_mesh_axis).intersection(
-            matrix_ownership_axes
-        )
-        if overlapping_axes:
-            names = sorted(overlapping_axes)
-            raise ValueError(
-                "ComputeLayout axes cannot have both placement and matrix ownership: "
-                f"{names}"
-            )
-
-        normalized_placements_by_mesh_axis = dict(
-            sorted(placements_by_mesh_axis.items())
-        )
-        normalized_matrix_ownership_axes = tuple(sorted(matrix_ownership_axes))
-        object.__setattr__(
-            self,
-            "placements_by_mesh_axis",
-            _FrozenPlacementsByMeshAxis(normalized_placements_by_mesh_axis),
+        normalized_distribution_by_mesh_axis = dict(
+            sorted(distribution_by_mesh_axis.items())
         )
         object.__setattr__(
             self,
-            "matrix_ownership_axes",
-            normalized_matrix_ownership_axes,
+            "distribution_by_mesh_axis",
+            _FrozenDistributionByMeshAxis(normalized_distribution_by_mesh_axis),
         )
 
 
