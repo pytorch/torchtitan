@@ -24,7 +24,7 @@ from torchtitan.distributed.flex_shard import (
     build_distributed_muon,
     ComputeLayout,
     MuonComputeShardingConfig,
-    SingleParticipant,
+    Owned,
 )
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
@@ -62,7 +62,7 @@ class TestDistributedMuon(DTensorTestBase):
             compute_sharding_by_fqn={
                 fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={
+                        shardings_by_mesh_axis={
                             "dp_shard": Replicate(),
                         },
                     )
@@ -133,7 +133,7 @@ class TestDistributedMuon(DTensorTestBase):
             aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
             aligned_compute_sharding = MuonComputeShardingConfig(
                 compute_layout=ComputeLayout(
-                    distribution_by_mesh_axis={"dp_shard": Shard(0)},
+                    shardings_by_mesh_axis={"dp_shard": Shard(0)},
                 ),
                 compute_view=AttentionPerHeadComputeView(
                     num_heads=4,
@@ -162,14 +162,14 @@ class TestDistributedMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={
-                                "dp_shard": SingleParticipant(),
+                            shardings_by_mesh_axis={
+                                "dp_shard": Owned(),
                             },
                         )
                     ),
                     oversharded_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={"dp_shard": Shard(0)},
+                            shardings_by_mesh_axis={"dp_shard": Shard(0)},
                         ),
                         compute_view=AttentionPerHeadComputeView(
                             num_heads=3,
@@ -477,19 +477,19 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             compute_sharding_by_fqn={
                 dense_fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={
-                            "dp_shard": SingleParticipant(),
+                        shardings_by_mesh_axis={
+                            "dp_shard": Owned(),
                         },
                     )
                 ),
                 "layers.0.routed_experts.sharded": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={"efsdp": Shard(0)},
+                        shardings_by_mesh_axis={"efsdp": Shard(0)},
                     )
                 ),
                 "layers.0.routed_experts.replicated": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={
+                        shardings_by_mesh_axis={
                             "efsdp": Replicate(),
                             "ep": Shard(0),
                         },
@@ -497,7 +497,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 ),
                 "layers.0.routed_experts.repeated_shard": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={"efsdp": Replicate()},
+                        shardings_by_mesh_axis={"efsdp": Replicate()},
                     )
                 ),
             },
@@ -616,7 +616,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 compute_sharding_by_fqn={
                     unsupported_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={
+                            shardings_by_mesh_axis={
                                 "efsdp": Replicate(),
                                 "ep": Replicate(),
                             },
