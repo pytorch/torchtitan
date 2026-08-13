@@ -164,6 +164,12 @@ class TestFusedMLANumerics(unittest.TestCase):
         reference_q = torch.cat([q_nope, q_pos], dim=-1)
 
         self.assertEqual(fused_q.data_ptr(), q_storage.data_ptr())
+        self.assert_dtype_close(
+            fused_q[..., : self.q_nope_dim],
+            reference_q[..., : self.q_nope_dim],
+            dtype,
+            exact=True,
+        )
         self.assert_dtype_close(fused_q, reference_q, dtype)
 
         grad_q = torch.randn_like(fused_q)
@@ -172,6 +178,12 @@ class TestFusedMLANumerics(unittest.TestCase):
             reference_q,
             q_reference_source,
             grad_q.clone(),
+        )
+        self.assert_dtype_close(
+            fused_grad[..., : self.q_nope_dim],
+            reference_grad[..., : self.q_nope_dim],
+            dtype,
+            exact=True,
         )
         self.assert_dtype_close(fused_grad, reference_grad, dtype)
 
@@ -268,6 +280,12 @@ class TestFusedMLANumerics(unittest.TestCase):
             fused_v.untyped_storage().data_ptr(),
             kv.untyped_storage().data_ptr(),
         )
+        self.assert_dtype_close(
+            fused_k[..., : self.q_nope_dim],
+            reference_k[..., : self.q_nope_dim],
+            dtype,
+            exact=True,
+        )
         self.assert_dtype_close(fused_k, reference_k, dtype)
         self.assert_dtype_close(fused_v, reference_v, dtype, exact=True)
 
@@ -283,7 +301,12 @@ class TestFusedMLANumerics(unittest.TestCase):
             (reference_kv, reference_k_pos),
             (grad_k.clone(), grad_v.clone()),
         )
-        self.assert_dtype_close(fused_grad_kv, reference_grad_kv, dtype)
+        self.assert_dtype_close(
+            fused_grad_kv,
+            reference_grad_kv,
+            dtype,
+            exact=True,
+        )
         self.assert_dtype_close(
             fused_grad_k_pos,
             reference_grad_k_pos,
