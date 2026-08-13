@@ -12,6 +12,18 @@ Activate with::
 
     --override.imports torchtitan.overrides.fused_mla.fused_mla
 
+Scope and limitations
+---------------------
+This override is specific to TorchTitan's DeepSeek-V3 ``Attention`` module and
+its packed MLA Q/KV projection layout. It is not a generic RoPE fusion and does
+not apply to non-MLA models such as Qwen3, Qwen3.5, or GPT-OSS.
+
+The kernels implement TorchTitan ``ComplexRoPE`` and require its complex-valued
+cache. They do not support ``CosSinRoPE`` or ``MRoPE``, whose real cos/sin cache
+layouts and rotation conventions require a separate kernel path. A future MLA
+model using either of those RoPE implementations cannot use this override
+without such an adaptation.
+
 Design provenance
 -----------------
 The core fusion strategy is borrowed from NVIDIA Megatron Core's fused MLA
@@ -86,21 +98,26 @@ def _fused_q_rope_kernel(
     POS_STRIDE_L: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     N_HEADS: tl.constexpr,
+    NUM_HEAD_BLOCKS: tl.constexpr,
     Q_NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
+    BLOCK_H: tl.constexpr,
     BLOCK_PAIRS: tl.constexpr,
     INVERSE: tl.constexpr,
 ) -> None:
     # Production DeepSeek shapes exceed 2**31 elements, so every flattened
     # tensor index must be promoted before multiplying by a stride.
-    row = tl.program_id(0).to(tl.int64)
-    head = row % N_HEADS
-    token = row // N_HEADS
+    program = tl.program_id(0).to(tl.int64)
+    head_block = program % NUM_HEAD_BLOCKS
+    token = program // NUM_HEAD_BLOCKS
     seq = token % SEQ_LEN
     batch = token // SEQ_LEN
 
-    pair = tl.arange(0, BLOCK_PAIRS)
+    head = head_block * BLOCK_H + tl.arange(0, BLOCK_H)[:, None]
+    pair = tl.arange(0, BLOCK_PAIRS)[None, :]
+    head_mask = head < N_HEADS
     pair_mask = pair < ROPE_DIM // 2
+    mask = head_mask & pair_mask
     position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
 
     q_base = (
@@ -111,12 +128,12 @@ def _fused_q_rope_kernel(
     )
     q_even = tl.load(
         q + q_base + (2 * pair) * Q_STRIDE_D,
-        mask=pair_mask,
+        mask=mask,
         other=0.0,
     ).to(tl.float32)
     q_odd = tl.load(
         q + q_base + (2 * pair + 1) * Q_STRIDE_D,
-        mask=pair_mask,
+        mask=mask,
         other=0.0,
     ).to(tl.float32)
 
@@ -142,12 +159,12 @@ def _fused_q_rope_kernel(
     tl.store(
         q + q_base + (2 * pair) * Q_STRIDE_D,
         out_even,
-        mask=pair_mask,
+        mask=mask,
     )
     tl.store(
         q + q_base + (2 * pair + 1) * Q_STRIDE_D,
         out_odd,
-        mask=pair_mask,
+        mask=mask,
     )
 
 
@@ -396,8 +413,12 @@ def _fused_mla_q_rope_op(
 ) -> torch.Tensor:
     batch, seq_len, n_heads, q_head_dim = q.shape
     rope_dim = q_head_dim - q_nope_dim
+    # Tuned on GB300 for DeepSeek-V3 671B: B=16, L=4096, H=128. A wide head
+    # tile amortizes position/cache loads without making four warps register-bound.
+    block_h = min(64, triton.next_power_of_2(n_heads))
+    num_head_blocks = triton.cdiv(n_heads, block_h)
     block_pairs = triton.next_power_of_2(rope_dim // 2)
-    _fused_q_rope_kernel[(batch * seq_len * n_heads,)](
+    _fused_q_rope_kernel[(batch * seq_len * num_head_blocks,)](
         q,
         rope_cache_real,
         positions,
@@ -412,8 +433,10 @@ def _fused_mla_q_rope_op(
         POS_STRIDE_L=positions.stride(1),
         SEQ_LEN=seq_len,
         N_HEADS=n_heads,
+        NUM_HEAD_BLOCKS=num_head_blocks,
         Q_NOPE_DIM=q_nope_dim,
         ROPE_DIM=rope_dim,
+        BLOCK_H=block_h,
         BLOCK_PAIRS=block_pairs,
         INVERSE=inverse,
         num_warps=4,
@@ -440,7 +463,9 @@ def _fused_mla_k_rope_op(
         dtype=kv.dtype,
         device=kv.device,
     )
-    block_h = min(8, triton.next_power_of_2(n_heads))
+    # This kernel also materializes Q-nope-sized data per head, so its smaller
+    # tile gives better memory-level parallelism than the Q-only RoPE kernel.
+    block_h = min(16, triton.next_power_of_2(n_heads))
     num_head_blocks = triton.cdiv(n_heads, block_h)
     _fused_k_rope_kernel[(batch * seq_len * num_head_blocks,)](
         kv,
@@ -472,7 +497,7 @@ def _fused_mla_k_rope_op(
         BLOCK_H=block_h,
         BLOCK_D=triton.next_power_of_2(q_nope_dim),
         BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
-        num_warps=8,
+        num_warps=4,
     )
     return k
 
@@ -517,7 +542,8 @@ def _fused_mla_kv_backward_op(
         dtype=grad_k.dtype,
         device=grad_k.device,
     )
-    block_h = min(16, triton.next_power_of_2(n_heads))
+    # Reduce more heads per program to amortize the shared positional gradient.
+    block_h = min(64, triton.next_power_of_2(n_heads))
     _fused_kv_backward_kernel[(batch * seq_len,)](
         grad_k,
         grad_v,
@@ -555,7 +581,7 @@ def _fused_mla_kv_backward_op(
         BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
         ROUND_BF16_SUM=grad_k.dtype == torch.bfloat16,
         ROUND_FP16_SUM=grad_k.dtype == torch.float16,
-        num_warps=8,
+        num_warps=4,
     )
     return grad_kv, grad_k_pe
 
