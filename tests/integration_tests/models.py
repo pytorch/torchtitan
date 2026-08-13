@@ -278,7 +278,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--training.steps 1",
                 ],
             ],
-            "Kimi K2.7 DistributedMuon PP+FSDP+EP",
+            "Kimi K2.7 FlexShard Muon PP+FSDP+EP",
             "kimi_k2_5_muon_pp+fsdp+ep",
             ngpu=4,
             timeout=600,

@@ -3,7 +3,8 @@
 FlexShard provides PyTorch-native building blocks for running optimizer compute
 with layouts that differ from persistent DTensor parameter storage layouts. It
 plans packed storage-to-compute redistribution and overlaps communication with
-optimizer work. DistributedMuon is its initial consumer.
+optimizer work. Its Muon integration configures an exact `torch.optim.Muon`
+instance through supported PyTorch execution and tensor-operation APIs.
 
 ## Public API
 
@@ -19,14 +20,12 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   and an optional logical compute view.
 - `AttentionPerHeadComputeView` treats a flattened attention projection as a
   batch of independent per-head matrices for Muon.
-- `DistributedMuon` is the optimizer implementation used by the initial
-  FlexShard integration.
 - `flex_optimizer_reshard` binds a supported optimizer to its per-parameter
   compute shardings and physical buckets without replacing the optimizer or
   its `step` method.
-- `build_distributed_muon` validates named DTensor parameters, plans their
-  storage-to-compute transitions, and provides a convenient construction path
-  through `flex_optimizer_reshard`.
+- `build_flex_shard_muon` constructs `torch.optim.Muon`, validates named
+  DTensor parameters, plans their storage-to-compute transitions, and provides
+  a convenient construction path through `flex_optimizer_reshard`.
 
 ## TorchTitan Kimi integration
 
@@ -34,8 +33,7 @@ The [Kimi configuration registry](../../models/kimi_k2_7/config_registry.py)
 is the first TorchTitan integration. Its shared optimizer configuration:
 
 - Selects matrix parameters from attention, dense MLPs, routed and shared
-  experts, and routers for DistributedMuon. Other parameters continue to use
-  AdamW.
+  experts, and routers for Muon. Other parameters continue to use AdamW.
 - Defines each selected parameter's compute layout, including per-head Muon
   for compatible attention projections.
 - Groups layers into buckets so compute-ready work can overlap packed

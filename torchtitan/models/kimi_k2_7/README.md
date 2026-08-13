@@ -36,8 +36,8 @@ pip install av torchvision
 | Feature | Notes |
 |---------|-------|
 | FSDP / HSDP | Decoder sharded per-layer. Without PP, the vision encoder is a separate FSDP unit; with PP, it belongs to the first-stage root FSDP unit |
-| Tensor Parallelism (TP) | Model support exists, but DistributedMuon recipes currently reject TP-produced `_StridedShard` layouts ([#3353](https://github.com/pytorch/torchtitan/issues/3353)) |
-| Expert Parallelism (EP) | DeepSeek-V3 routed + shared experts. DistributedMuon preserves EP `Shard(0)` storage while redistributing EFSDP `Shard(1)` to its compute layout ([#4122](https://github.com/pytorch/torchtitan/pull/4122)) |
+| Tensor Parallelism (TP) | Model support exists, but FlexShard Muon recipes currently reject TP-produced `_StridedShard` layouts ([#3353](https://github.com/pytorch/torchtitan/issues/3353)) |
+| Expert Parallelism (EP) | DeepSeek-V3 routed + shared experts. FlexShard Muon preserves EP `Shard(0)` storage while redistributing EFSDP `Shard(1)` to its compute layout ([#4122](https://github.com/pytorch/torchtitan/pull/4122)) |
 | Pipeline Parallel (PP) | Vision encoder folded into the first stage; 1F1B and Interleaved1F1B schedules |
 
 ## Numerical Checks
