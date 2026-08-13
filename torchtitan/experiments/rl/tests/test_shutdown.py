@@ -310,10 +310,12 @@ class _RouterCloseEndpoint:
         self._router = router
 
     async def call_one(self):
-        return await self._router.fanout("close", return_exceptions=True)
+        return await self._router._fanout("close", return_exceptions=True)
 
 
-class _StubRouterActor:
+class _StubRouterHandle:
+    """Stands in for the router's actor-mesh handle, whose endpoints take adverbs."""
+
     def __init__(self, router):
         self.close_generators = _RouterCloseEndpoint(router)
 
@@ -344,7 +346,7 @@ class _StubMesh:
 
 
 def _set_generator_router(rl_trainer, generators):
-    rl_trainer.generator_router = _StubRouterActor(
+    rl_trainer.generator_router = _StubRouterHandle(
         InterGeneratorRouter(
             InterGeneratorRouter.Config(),
             generators=generators,

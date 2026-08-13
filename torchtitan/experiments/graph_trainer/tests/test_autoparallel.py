@@ -138,11 +138,11 @@ def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
     config = SimpleNamespace(
         compile=GraphTrainerCompileConfig(
             enable_autoparallel=True,
+            enable_async_tensor_parallel=False,
             disable_passes=["cudagraph_pass"],
         ),
         model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
         parallelism=SimpleNamespace(
-            enable_async_tensor_parallel=False,
             fsdp_reshard_after_forward="always",
             pipeline_parallel_degree=1,
         ),

@@ -106,9 +106,6 @@ from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
-from torchtitan.experiments.rl.actors.inter_generator_router import (
-    InterGeneratorRouterActor,
-)
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.components.training_sample_builder import (
@@ -412,28 +409,10 @@ class Controller(Configurable):
                     "pull reuse KV cached under the old weights."
                 )
 
-            # FULL cudagraph is only correct with the flex attention backend
-            cudagraph = self.generator.cudagraph
-            if (
-                cudagraph.enable
-                and cudagraph.mode == "FULL"
-                and self.model_spec is not None
-            ):
-                from torchtitan.models.common.attention import FlexAttention
-
-                inner_attn = self.model_spec.model.layers[0].attention.inner_attention
-                if not isinstance(inner_attn, FlexAttention.Config):
-                    raise ValueError(
-                        "cudagraph mode 'FULL' is only supported with the flex "
-                        "attention backend; the varlen backend corrupts FULL capture "
-                        "of mixed prefill+decode batches (#3709). Use FULL_DECODE_ONLY "
-                        "or FULL_AND_PIECEWISE."
-                    )
-
     def __init__(self, config: Config):
         self.config = config
         self.trainer: PolicyTrainer | None = None
-        self.generator_router: InterGeneratorRouterActor | None = None
+        self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
         self.start_step = 0
         self._proc_meshes = []
@@ -519,7 +498,9 @@ class Controller(Configurable):
         generation metrics with `metrics_prefix` and pinning sticky routing on `routing_session_id` (a sample's
         turns reuse one generator's prefix KV)."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
-        # Capture only the Monarch actor reference, avoiding serialization of the entire controller in GenerateFn.
+        # Bind the router handle to a local so the closure captures it instead of
+        # `self`. A GenerateFn may be shipped to another process, where an actor
+        # handle serializes cheaply and the whole controller does not.
         generator_router = self.generator_router
 
         @sl.log_trace_span("generate")
@@ -602,6 +583,10 @@ class Controller(Configurable):
         # provisioner logic. Pull a PerHostProvisioner.spawn_meshes(...) helper and
         # shrink this span to a single call.
         with sl.log_trace_span("mesh_spawn"):
+            # One process, so the router is a singleton and every caller reaches
+            # it with `call_one`. It gets its own mesh rather than sharing the
+            # controller's process so routing does not contend with the training
+            # loop for the controller's GIL.
             router_mesh = this_host().spawn_procs(per_host={"cpus": 1})
             # Store proc meshes for cleanup
             self._proc_meshes = [router_mesh, trainer_mesh, *generator_meshes]
@@ -641,7 +626,7 @@ class Controller(Configurable):
                 generators.append(generator)
             self.generator_router = router_mesh.spawn(
                 "generator_router",
-                InterGeneratorRouterActor,
+                InterGeneratorRouter,
                 config.generator_router,
                 generators=generators,
             )
