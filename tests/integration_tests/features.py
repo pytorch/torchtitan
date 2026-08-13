@@ -516,7 +516,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--parallelism.fsdp_reshard_after_forward always",
                 ],
             ],
