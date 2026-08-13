@@ -79,6 +79,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
             local_batch_size=1,
             seq_len=512,
             steps=10,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(spmd_backend="spmd_types"),
         checkpoint=CheckpointManager.Config(
@@ -112,6 +113,7 @@ def moonlight_16b_a3b() -> Trainer.Config:
             local_batch_size=4,
             seq_len=4096,
             steps=10000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=8,
@@ -152,6 +154,7 @@ def kimi_vl_a3b() -> Trainer.Config:
             local_batch_size=1,
             seq_len=4096,
             steps=10000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=8,
@@ -187,6 +190,7 @@ def kimi_k2_5() -> Trainer.Config:
             local_batch_size=4,
             seq_len=4096,
             steps=10000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",
