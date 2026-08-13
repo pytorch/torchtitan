@@ -7,7 +7,6 @@
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     apply_simple_fsdp,
@@ -43,7 +42,6 @@ def parallelize_muse_glimmer(
 
     if parallel_dims.tp_enabled:
         model.parallelize(parallel_dims)
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     parallelized_model = apply_simple_fsdp(
         model, parallel_dims=parallel_dims, training=training
