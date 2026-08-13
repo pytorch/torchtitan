@@ -457,7 +457,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module torchtitan_configs.tests "
+                    "--module torchtitan_recipes.tests "
                     "--config llama3_debugmodel_fsdp2_cp2",
                 ]
             ],

@@ -58,13 +58,13 @@ class TestConfigManager(unittest.TestCase):
         with pytest.raises(ValueError, match="--module is required"):
             config_manager.parse_args([])
 
-    def test_torchtitan_configs_package_resolves(self):
-        """torchtitan_configs is importable and its configs load."""
+    def test_torchtitan_recipes_package_resolves(self):
+        """torchtitan_recipes is importable and its configs load."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
                 "--module",
-                "torchtitan_configs.tests",
+                "torchtitan_recipes.tests",
                 "--config",
                 "llama3_debugmodel_fsdp2_cp2",
             ]

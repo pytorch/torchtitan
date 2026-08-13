@@ -23,7 +23,7 @@ Discuss with the maintainers first if you intend to add one.
 
 The command-line surface is frozen either way, so annotate a new field with
 ``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
-``docs/configuration.md``.
+``torchtitan/config/configuration.md``.
 """
 
 from dataclasses import dataclass, field
