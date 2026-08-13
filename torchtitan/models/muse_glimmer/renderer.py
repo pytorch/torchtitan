@@ -47,6 +47,19 @@ class MuseGlimmerRendererConfig(BaseRendererConfig):
     an answer, which scores as a failed rollout.
     """
 
+    retain_reasoning_in_history: bool = True
+    """Whether prior assistant turns keep their ``reasoning_content`` when re-rendered.
+
+    The chat template emits a ``to=self`` channel for any assistant message carrying
+    ``reasoning_content``, so history grows with every turn's reasoning. Harmony-style
+    models are often trained with prior analysis *dropped* from context (gpt-oss does
+    this via ``auto_drop_analysis``); set this False to match that convention and to
+    keep multi-turn prompts short.
+
+    Defaults True to preserve the template's own behaviour -- flip it only if you have
+    checked what the model was trained against.
+    """
+
     answer_from_reasoning_fallback: bool = False
     """When the model produces only reasoning channels -- no user-facing content and no
     tool call -- treat the last non-empty reasoning line as the answer.
@@ -57,6 +70,8 @@ class MuseGlimmerRendererConfig(BaseRendererConfig):
     """
 
 # Muse Glimmer special-token ids (from the GGUF metadata)
+START_ID = 200022  # <|start|> begins a harmony message header
+MESSAGE_ID = 200023  # <|message|> ends the header, body follows
 EOT_ID = 200008  # <|eot|> end of turn
 EOM_ID = 200007  # <|eom|> end of message
 EOS_ID = 200001  # <|end_of_text|>
@@ -70,6 +85,16 @@ _CHANNEL = re.compile(
     r"(?=<\|eom\|>|<\|eot\|>|<\|end_of_text\|>|<\|start\|>|\Z)",
     re.DOTALL,
 )
+
+
+def _strip_reasoning_history(messages):
+    """Drop ``reasoning_content`` from assistant messages (see the config field)."""
+    out = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "assistant" and m.get("reasoning_content"):
+            m = {k: v for k, v in m.items() if k != "reasoning_content"}
+        out.append(m)
+    return out
 
 
 def _normalize_tool_calls(messages):
@@ -114,6 +139,12 @@ class MuseGlimmerRenderer:
         # The controller reads renderer._tokenizer (e.g. for pad_id=eos_token_id).
         self._tokenizer = tokenizer
 
+    def _prepare(self, messages):
+        """Apply history policy, then the tool-call shape the template expects."""
+        if not self._config.retain_reasoning_in_history:
+            messages = _strip_reasoning_history(messages)
+        return _normalize_tool_calls(messages)
+
     def _template_kwargs(self) -> dict:
         """Extra kwargs for ``apply_chat_template``, omitting unset knobs."""
         if self._config.reasoning_strength is None:
@@ -130,7 +161,7 @@ class MuseGlimmerRenderer:
     ) -> list[int]:
         # apply_chat_template already emits <|begin_of_text|>, so don't re-add specials.
         text = self._tok.apply_chat_template(
-            _normalize_tool_calls(messages),
+            self._prepare(messages),
             tools=tools,
             add_generation_prompt=add_generation_prompt,
             tokenize=False,
@@ -198,7 +229,7 @@ class MuseGlimmerRenderer:
 
     def _encode_template(self, messages, *, tools, add_generation_prompt) -> list[int]:
         text = self._tok.apply_chat_template(
-            _normalize_tool_calls(messages),
+            self._prepare(messages),
             tools=tools,
             add_generation_prompt=add_generation_prompt,
             tokenize=False,
@@ -242,11 +273,24 @@ class MuseGlimmerRenderer:
                 sampled_mask.pop()
                 is_content.pop()
             sampled = message_roles[i] == "assistant"
+            # Split this message's span into template scaffolding vs body. A harmony
+            # block is ``<|start|> role [to=recipient] <|message|> body <|eom|>/<|eot|>``;
+            # everything up to and including ``<|message|>`` is header the template
+            # injects, which the model never sampled -- marking it sampled would put
+            # gradient on scaffolding. One assistant message can expand into SEVERAL
+            # blocks (a to=self reasoning channel plus one per tool call), so track
+            # header state across the whole span instead of splitting once.
+            in_header = False
             for tok_id in cur[cpl:]:
+                if tok_id == START_ID:
+                    in_header = True
+                is_scaffold = in_header
+                if tok_id == MESSAGE_ID:
+                    in_header = False  # header ends *including* this token
                 token_ids.append(tok_id)
                 message_indices.append(i)
-                sampled_mask.append(sampled)
-                is_content.append(sampled)
+                sampled_mask.append(sampled and not is_scaffold)
+                is_content.append(sampled and not is_scaffold)
             prev = cur
 
         if add_generation_prompt:
