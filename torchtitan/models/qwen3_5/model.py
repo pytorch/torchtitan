@@ -727,7 +727,7 @@ class Qwen35Model(Decoder):
             set_qwen35_sharding_config(
                 self,
                 enable_ep=parallelism.expert_parallel_degree > 1,
-                varlen=isinstance(
+                use_deltanet_varlen_metadata=isinstance(
                     self.first_attention.inner_attention,
                     VarlenAttention.Config,
                 ),
