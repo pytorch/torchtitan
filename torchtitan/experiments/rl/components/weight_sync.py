@@ -17,10 +17,10 @@ from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.observability import structured_logger as sl
 
 if TYPE_CHECKING:
-    from torchtitan.experiments.rl.actors.inter_generator_router import (
-        InterGeneratorRouterActor,
-    )
     from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+    from torchtitan.experiments.rl.routing.inter_generator_router import (
+        InterGeneratorRouter,
+    )
 
 # dummy no-op for step 0, used in WeightSyncManager
 async def _noop() -> None:
@@ -54,7 +54,7 @@ class WeightSyncManager:
         self,
         *,
         trainer: PolicyTrainer,
-        generator_router: InterGeneratorRouterActor,
+        generator_router: InterGeneratorRouter,
         group_buffer: RolloutGroupWorkBuffer,
         num_prompts_per_train_step: int,
     ) -> None:
