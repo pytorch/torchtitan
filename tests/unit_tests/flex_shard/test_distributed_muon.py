@@ -24,7 +24,7 @@ from torchtitan.distributed.flex_shard import (
     build_distributed_muon,
     ComputeLayout,
     MuonComputeShardingConfig,
-    SingleParticipant,
+    Owned,
 )
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
@@ -75,14 +75,14 @@ class TestDistributedMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={
-                                "dp_shard": SingleParticipant(),
+                            shardings_by_mesh_axis={
+                                "dp_shard": Owned(),
                             },
                         )
                     ),
                     local_blocks_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={"dp_shard": Shard(0)},
+                            shardings_by_mesh_axis={"dp_shard": Shard(0)},
                         ),
                         compute_view=AttentionPerHeadComputeView(
                             num_heads=self.world_size,
@@ -264,7 +264,7 @@ class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
                 compute_sharding_by_fqn={
                     fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={
+                            shardings_by_mesh_axis={
                                 "efsdp": Shard(0),
                                 "ep": Shard(0),
                             },
