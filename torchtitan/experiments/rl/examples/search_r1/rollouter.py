@@ -19,7 +19,7 @@ from torchtitan.experiments.rl.rubrics import Rubric
 
 
 class SearchR1Worker(RolloutWorker):
-    """Search-R1's multi-turn search env and exact-match rubric.
+    """Search-R1's multi-turn search env and rubric.
 
     Pure config; all methods inherited.
     """
