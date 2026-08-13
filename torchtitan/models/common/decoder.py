@@ -159,6 +159,13 @@ class Decoder(BaseModel):
 
             update_ep_token_dispatcher_config(self, config)
 
+            # Imported here rather than at module scope to avoid a cycle:
+            # dist_gemm imports attention.py, which this module also pulls in.
+            # A no-op unless a layer selected tp_comm_overlap="dist_gemm".
+            from torchtitan.models.common.dist_gemm import maybe_update_dist_gemm_config
+
+            maybe_update_dist_gemm_config(self, config)
+
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known
             # ahead of time, so keep the RoPE cache at the model's max_seq_len.

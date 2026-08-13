@@ -20,10 +20,10 @@ from torchtitan.models.common import (
     TransformerBlock,
 )
 from torchtitan.models.common.config_utils import (
-    GemmBackend,
     get_attention_config,
     make_ffn_config,
     make_gqa_config,
+    TpCommOverlap,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.utils import validate_converter_order
@@ -76,7 +76,7 @@ def _build_llama3_layers(
     n_kv_heads: int | None = None,
     fuse_qkv: bool = True,
     attn_backend: str,
-    gemm_backend: GemmBackend = "default",
+    tp_comm_overlap: TpCommOverlap = "none",
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
     inner_attention = get_attention_config(attn_backend)
@@ -97,14 +97,14 @@ def _build_llama3_layers(
                     inner_attention=inner_attention,
                     fuse_qkv=fuse_qkv,
                     rope=rope,
-                    gemm_backend=gemm_backend,
+                    tp_comm_overlap=tp_comm_overlap,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
                     w1_param_init=_LINEAR_INIT,
                     w2w3_param_init=_depth_init(layer_id),
-                    gemm_backend=gemm_backend,
+                    tp_comm_overlap=tp_comm_overlap,
                 ),
             )
         )
@@ -112,7 +112,7 @@ def _build_llama3_layers(
 
 
 def _debugmodel(
-    attn_backend: str, gemm_backend: GemmBackend = "default"
+    attn_backend: str, tp_comm_overlap: TpCommOverlap = "none"
 ) -> Llama3Model.Config:
     dim = 256
     n_heads = 16
@@ -140,12 +140,14 @@ def _debugmodel(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            gemm_backend=gemm_backend,
+            tp_comm_overlap=tp_comm_overlap,
         ),
     )
 
 
-def _1b(attn_backend: str, gemm_backend: GemmBackend = "default") -> Llama3Model.Config:
+def _1b(
+    attn_backend: str, tp_comm_overlap: TpCommOverlap = "none"
+) -> Llama3Model.Config:
     dim = 2048
     n_heads = 32
     n_kv_heads = 8
@@ -182,12 +184,14 @@ def _1b(attn_backend: str, gemm_backend: GemmBackend = "default") -> Llama3Model
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            gemm_backend=gemm_backend,
+            tp_comm_overlap=tp_comm_overlap,
         ),
     )
 
 
-def _3b(attn_backend: str, gemm_backend: GemmBackend = "default") -> Llama3Model.Config:
+def _3b(
+    attn_backend: str, tp_comm_overlap: TpCommOverlap = "none"
+) -> Llama3Model.Config:
     dim = 3072
     n_heads = 24
     n_kv_heads = 8
@@ -224,12 +228,14 @@ def _3b(attn_backend: str, gemm_backend: GemmBackend = "default") -> Llama3Model
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            gemm_backend=gemm_backend,
+            tp_comm_overlap=tp_comm_overlap,
         ),
     )
 
 
-def _8b(attn_backend: str, gemm_backend: GemmBackend = "default") -> Llama3Model.Config:
+def _8b(
+    attn_backend: str, tp_comm_overlap: TpCommOverlap = "none"
+) -> Llama3Model.Config:
     dim = 4096
     n_heads = 32
     n_kv_heads = 8
@@ -263,13 +269,13 @@ def _8b(attn_backend: str, gemm_backend: GemmBackend = "default") -> Llama3Model
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            gemm_backend=gemm_backend,
+            tp_comm_overlap=tp_comm_overlap,
         ),
     )
 
 
 def _70b(
-    attn_backend: str, gemm_backend: GemmBackend = "default"
+    attn_backend: str, tp_comm_overlap: TpCommOverlap = "none"
 ) -> Llama3Model.Config:
     dim = 8192
     n_heads = 64
@@ -304,13 +310,13 @@ def _70b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            gemm_backend=gemm_backend,
+            tp_comm_overlap=tp_comm_overlap,
         ),
     )
 
 
 def _405b(
-    attn_backend: str, gemm_backend: GemmBackend = "default"
+    attn_backend: str, tp_comm_overlap: TpCommOverlap = "none"
 ) -> Llama3Model.Config:
     dim = 16384
     n_heads = 128
@@ -345,7 +351,7 @@ def _405b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            gemm_backend=gemm_backend,
+            tp_comm_overlap=tp_comm_overlap,
         ),
     )
 
@@ -363,11 +369,11 @@ llama3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "flex",
-    gemm_backend: GemmBackend = "default",
+    tp_comm_overlap: TpCommOverlap = "none",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = llama3_configs[flavor](
-        attn_backend=attn_backend, gemm_backend=gemm_backend
+        attn_backend=attn_backend, tp_comm_overlap=tp_comm_overlap
     )
     if converters is not None:
         validate_converter_order(converters)

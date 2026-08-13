@@ -59,10 +59,11 @@ def decoder_vocab_size(model_spec: ModelSpec) -> int:
     return model_config.vocab_size
 
 
-# How the TP collectives around the attention projections are run. "default"
-# leaves them to the framework; "dist_gemm" folds each into its adjacent GEMM
-# via symmetric memory (async-TP). See make_gqa_config.
-GemmBackend = Literal["default", "dist_gemm"]
+# Whether the TP collectives around the linear layers overlap the GEMMs they sit
+# next to. "none" leaves them to the framework, as separate collectives at the
+# module boundary; "dist_gemm" folds each into its adjacent GEMM over symmetric
+# memory. Named after Megatron's --tp-comm-overlap, which is the same technique.
+TpCommOverlap = Literal["none", "dist_gemm"]
 
 
 def get_attention_config(
@@ -193,15 +194,15 @@ def make_gqa_config(
     head_dim: int | None = None,
     fuse_qkv: bool = False,
     qk_norm: RMSNorm.Config | None = None,
-    gemm_backend: GemmBackend = "default",
+    tp_comm_overlap: TpCommOverlap = "none",
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config.
 
-    ``gemm_backend`` selects how the TP collectives around the QKV and output
-    projections are run. ``"default"`` leaves them to the framework, as separate
+    ``tp_comm_overlap`` selects how the TP collectives around the QKV and output
+    projections are run. ``"none"`` leaves them to the framework, as separate
     collectives either side of the GEMM. ``"dist_gemm"`` folds each into its
-    adjacent GEMM via symmetric memory (async-TP), which requires
-    ``fuse_qkv=True`` and CUDA.
+    adjacent GEMM over symmetric memory, which requires ``fuse_qkv=True``, CUDA,
+    and the spmd_types backend.
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
@@ -210,10 +211,10 @@ def make_gqa_config(
     # The backend picks the classes; everything below builds the same shapes into
     # whichever was chosen.
     fused_qkv_cls, wo_cls = FusedQKVLinear, Linear
-    if gemm_backend == "dist_gemm":
+    if tp_comm_overlap == "dist_gemm":
         if not fuse_qkv:
             raise ValueError(
-                "gemm_backend='dist_gemm' requires fuse_qkv=True: the all-gather "
+                "tp_comm_overlap='dist_gemm' requires fuse_qkv=True: the all-gather "
                 "feeds a single wqkv GEMM, so there is no separate wq/wk/wv "
                 "schedule to fall back on."
             )
@@ -276,14 +277,17 @@ def make_ffn_config(
     hidden_dim: int,
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
-    gemm_backend: GemmBackend = "default",
+    tp_comm_overlap: TpCommOverlap = "none",
 ) -> FeedForward.Config:
     """Build a fully-specified FeedForward.Config.
 
-    ``gemm_backend="dist_gemm"`` folds the TP collectives into the GEMMs: one
-    all-gather feeds w1 and w3, and w2 reduce-scatters. See make_gqa_config.
+    ``tp_comm_overlap="dist_gemm"`` overlaps the TP collectives with the GEMMs by
+    folding them in: one all-gather feeds w1 and w3, and w2 reduce-scatters. See
+    make_gqa_config.
     """
-    ffn_cls = AllGatherFusedFeedForward if gemm_backend == "dist_gemm" else FeedForward
+    ffn_cls = (
+        AllGatherFusedFeedForward if tp_comm_overlap == "dist_gemm" else FeedForward
+    )
     return ffn_cls.Config(
         w1=Linear.Config(
             in_features=dim, out_features=hidden_dim, param_init=w1_param_init

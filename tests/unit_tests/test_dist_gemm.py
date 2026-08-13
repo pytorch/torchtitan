@@ -9,13 +9,13 @@
 Three layers, cheapest first. If you are adding a new fused module, this file is
 the template:
 
-1. ``TestDistGemmAttentionConfig`` -- no devices. Does ``gemm_backend`` select the
+1. ``TestDistGemmAttentionConfig`` -- no devices. Does ``tp_comm_overlap`` select the
    fused configs, does the sharding setup declare the right contracts for them,
    and does the runtime config reach them? Catches wiring mistakes in
    milliseconds.
 2. ``TestDistGemmAttentionSharding`` -- a 2-rank gloo mesh. Do those contracts
    survive a real ``parallelize``? Still no CUDA: nothing here runs the fused ops.
-3. Numerics for the underlying primitives live in ``test_dist_gemm_ops.py`` (2
+3. Numerics for the underlying primitives live in ``test_distributed_linear.py`` (2
    GPUs), and an integration entry in ``tests/integration_tests/h100.py`` runs a
    real training step end to end; see ``dist_gemm`` there.
 
@@ -39,7 +39,6 @@ from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
     AllGatherFusedQKVLinear,
-    reserve_dist_gemm_workspace,
     RowParallelLinear,
 )
 
@@ -50,17 +49,17 @@ N_HEADS = 8
 class TestDistGemmAttentionConfig(unittest.TestCase):
     """Config-graph rewriting. No devices involved."""
 
-    def test_gemm_backend_selects_the_fused_configs(self):
-        """model_registry(gemm_backend="dist_gemm") swaps all three pieces."""
+    def test_tp_comm_overlap_selects_the_fused_configs(self):
+        """model_registry(tp_comm_overlap="dist_gemm") swaps all three pieces."""
         from torchtitan.models.llama3 import model_registry
 
-        spec = model_registry("debugmodel", gemm_backend="dist_gemm")
+        spec = model_registry("debugmodel", tp_comm_overlap="dist_gemm")
         for layer in spec.model.layers:
             attn = layer.attention
             self.assertIsInstance(attn.qkv_linear, AllGatherFusedQKVLinear.Config)
             self.assertIsInstance(attn.wo, RowParallelLinear.Config)
 
-    def test_default_gemm_backend_is_untouched(self):
+    def test_default_tp_comm_overlap_is_untouched(self):
         """The default must stay stock, or every model silently changes."""
         from torchtitan.models.llama3 import model_registry
 
@@ -73,7 +72,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
         stock = model_registry("debugmodel").model.layers[0].attention
         fused = (
-            model_registry("debugmodel", gemm_backend="dist_gemm")
+            model_registry("debugmodel", tp_comm_overlap="dist_gemm")
             .model.layers[0]
             .attention
         )
@@ -100,7 +99,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
                 inner_attention=FlexAttention.Config(),
                 rope=ComplexRoPE.Config(dim=DIM // N_HEADS, max_seq_len=128),
                 fuse_qkv=False,
-                gemm_backend="dist_gemm",
+                tp_comm_overlap="dist_gemm",
             )
 
     def test_sharding_setup_declares_the_fused_contracts(self):
@@ -116,7 +115,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
         stock = model_registry("debugmodel").model.layers[0].attention
         fused = (
-            model_registry("debugmodel", gemm_backend="dist_gemm")
+            model_registry("debugmodel", tp_comm_overlap="dist_gemm")
             .model.layers[0]
             .attention
         )
@@ -160,57 +159,6 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         ):
             parallel_dims.build_mesh()
         return parallel_dims
-
-    def _built_block(self, trainer_cfg):
-        """One built dist-GEMM attention block, as a stand-in for the model.
-
-        reserve_dist_gemm_workspace only needs ``.modules()``, and a block is one
-        of the modules it looks for, so this avoids building a whole model.
-        """
-        attn_cfg = trainer_cfg.model_spec.model.layers[0].attention
-        set_gqa_attention_sharding(attn_cfg, enable_sp=True)
-        return attn_cfg.build().to(self.device_type)
-
-    @with_comms
-    def test_reserve_rejects_dtensor_backend(self):
-        """dist-GEMM is spmd_types-only; the DTensor backends are deprecated."""
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
-
-        cfg = llama3_debugmodel_dist_gemm()
-        block = self._built_block(cfg)
-        cfg.parallelism.spmd_backend = "default"
-        with self.assertRaisesRegex(ValueError, "requires parallelism.spmd_backend"):
-            reserve_dist_gemm_workspace(
-                block, self._parallel_dims(), cfg.training, cfg.parallelism
-            )
-
-    @with_comms
-    def test_reserve_rejects_sequence_parallel_disabled(self):
-        """The fused GEMMs *are* the SP collectives; without SP there is nothing
-        to fuse, and wo would reduce-scatter where it must all-reduce."""
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
-
-        cfg = llama3_debugmodel_dist_gemm()
-        block = self._built_block(cfg)
-        cfg.parallelism.enable_sequence_parallel = False
-        with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
-            reserve_dist_gemm_workspace(
-                block, self._parallel_dims(), cfg.training, cfg.parallelism
-            )
-
-    @with_comms
-    def test_reserve_is_a_noop_for_a_stock_model(self):
-        """Every model calls this from parallelize_fn, so it must cost nothing
-        and validate nothing when no layer selected dist_gemm."""
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel
-
-        cfg = llama3_debugmodel()
-        stock = cfg.model_spec.model.layers[0].attention.build().to(self.device_type)
-        # a backend that dist_gemm would reject, to prove nothing is validated
-        cfg.parallelism.spmd_backend = "default"
-        reserve_dist_gemm_workspace(
-            stock, self._parallel_dims(), cfg.training, cfg.parallelism
-        )
 
     @with_comms
     def test_parallelize_preserves_the_fused_contracts(self):
@@ -274,7 +222,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
                 hidden_dim=hidden,
                 w1_param_init=init,
                 w2w3_param_init=init,
-                gemm_backend="dist_gemm",
+                tp_comm_overlap="dist_gemm",
             )
             .build()
             .to(dev)
@@ -301,7 +249,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
                 stock.w2.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
-        # needs mesh_dim_names, and a "tp" axis for tp_group_from_context
+        # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
         set_spmd_backend("spmd_types")
         try:

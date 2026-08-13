@@ -10,14 +10,14 @@
 :class:`AllGatherFusedFeedForward` are drop-in replacements for the stock QKV,
 output and SwiGLU projections. They keep the stock parameter layouts and only
 move the TP collective into the GEMM, over the autograd Functions in
-``dist_gemm_ops.py``. ``RowParallelLinear`` serves both attention's ``wo`` and the
+``torchtitan/distributed/linear.py``. ``RowParallelLinear`` serves both attention's ``wo`` and the
 FFN's ``w2``; nothing about the primitives is attention-specific, and MoE
 projections could use the same pair.
 
 What lives here is the wiring -- the reshaping around each collective, and the
-fallbacks -- while ``dist_gemm_ops.py`` holds the collective+GEMM math itself.
+fallbacks -- while ``torchtitan/distributed/linear.py`` holds the collective+GEMM math itself.
 
-Selected by passing ``gemm_backend="dist_gemm"`` to ``make_gqa_config`` or
+Selected by passing ``tp_comm_overlap="dist_gemm"`` to ``make_gqa_config`` or
 ``make_ffn_config`` (see ``config_utils.py``), which also drops the boundary
 all-gather these modules take over. No attention or FFN subclass is needed beyond
 the projections: the stock ``GQAttention`` forward handles a QKV that changes the
@@ -32,28 +32,27 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh
-
-from torchtitan.models.common.attention import FusedQKVLinear
-
-from torchtitan.models.common.dist_gemm_ops import (
+from torchtitan.distributed.linear import (
     AllGatherLinear,
     AllGatherLinearMulti,
     dist_gemm_workspace_bytes,
     LinearReduceScatter,
     reserve_symm_mem_workspace,
 )
+
+from torchtitan.distributed.spmd_types import current_spmd_mesh
+
+from torchtitan.models.common.attention import FusedQKVLinear, GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
 if TYPE_CHECKING:
-    from torchtitan.config import ParallelismConfig, TrainingConfig
+
     from torchtitan.distributed.parallel_dims import ParallelDims
 
 
-def tp_group_from_context() -> dist.ProcessGroup | None:
+def _tp_group_from_context() -> dist.ProcessGroup | None:
     """The TP process group from the current spmd_types mesh context, or None.
 
     Resolved per forward rather than captured at parallelize time. The mesh
@@ -71,102 +70,136 @@ def tp_group_from_context() -> dist.ProcessGroup | None:
     return tp_group if tp_group.size() > 1 else None
 
 
-def local_param(param: torch.Tensor | None) -> torch.Tensor | None:
-    """Unwrap a parameter that a legacy backend may still hand over as a DTensor.
+class _ReservesSymmMemWorkspace:
+    """Mixin: size the symmetric-memory workspace before this layer's first ops.
 
-    TODO: delete once full_dtensor and the legacy backend are removed; under
-    ``spmd_types`` parameters are already local. Mirrors the same unwrap in
-    ``Embedding.forward``.
+    ``tokens_per_rank`` is the per-step token count, which only the runtime config
+    knows, so ``maybe_update_dist_gemm_config`` stamps it onto the module configs
+    at ``update_from_config`` time and ``__init__`` stores it. Same shape as
+    ``DeepEPTokenDispatcher``, which takes ``num_max_tokens_per_rank`` from its
+    config and defers the buffer allocation.
+
+    The reservation itself cannot happen in ``__init__``: sizing the workspace
+    needs the TP process group, and the mesh does not exist until well after
+    ``build()`` -- which is why the referenced example defers its allocation too.
+    It cannot happen in ``forward`` either: allocating and rendezvousing is not
+    traceable, so it would break ``--compile.enable`` and whole-model tracing.
+
+    So it hangs off ``Module.parallelize``, which is the generic hook every trainer
+    calls (``model.parallelize(parallel_dims)``) rather than a model-specific
+    ``parallelize_fn``. That matters: a trainer substituting its own
+    ``parallelize_fn`` -- GraphTrainer does -- would silently skip a hook placed
+    there, leaving the workspace to grow lazily.
+
+    ``tokens_per_rank`` is None for callers that never saw a runtime config
+    (inference, unit tests). The ops then size the workspace lazily as they always
+    have -- correct, just without the pre-capture guarantee.
     """
-    return param.to_local() if isinstance(param, DTensor) else param
+
+    tokens_per_rank: int | None
+
+    def _init_workspace_reservation(self, tokens_per_rank: int | None) -> None:
+        self.tokens_per_rank = tokens_per_rank
+
+    def _workspace_weights(self) -> tuple[torch.Tensor, ...]:
+        """The sharded weights whose dims bound this layer's fused GEMMs."""
+        raise NotImplementedError
+
+    def parallelize(self, parallel_dims: "ParallelDims") -> None:
+        # A mixin, so the static view of super() is object; every concrete user
+        # mixes this in ahead of a Module subclass that does define parallelize.
+        super().parallelize(parallel_dims)  # pyrefly: ignore[missing-attribute]
+        tp_mesh = parallel_dims.get_optional_mesh("tp")
+        if tp_mesh is None or self.tokens_per_rank is None:
+            return
+        tp_group = tp_mesh.get_group("tp")
+        if tp_group.size() < 2:
+            return
+        # After super(), so the weights are sharded and both of their dims are
+        # local; the widest bounds the K and N any of this layer's GEMMs will see.
+        weights = self._workspace_weights()
+        reserve_symm_mem_workspace(
+            tp_group,
+            min_bytes=dist_gemm_workspace_bytes(
+                tokens_global=self.tokens_per_rank,
+                features=max(dim for w in weights for dim in w.shape),
+                ranks=tp_group.size(),
+            ),
+        )
 
 
-def reserve_dist_gemm_workspace(
-    model: torch.nn.Module,
-    parallel_dims: "ParallelDims",
-    training: "TrainingConfig",
-    parallelism: "ParallelismConfig",
-) -> None:
-    """Size the symmetric-memory workspace for every dist-GEMM layer, in one call.
+def maybe_update_dist_gemm_config(model_config: object, config: object) -> None:
+    """Stamp the per-step token count onto any dist-GEMM module configs.
 
-    Call this from a model's ``parallelize_fn`` *before* the weights are sharded:
-    the dims read here are global, and the workspace has to reach its final size
-    before any layer runs. Growing it later re-rendezvouses -- a collective, and
-    rejected outright during CUDA graph capture -- and growth also frees the old
-    buffer while its address may already be baked into a captured graph, which
-    turns an earlier graph into a use-after-free on replay.
-
-    One workspace serves every layer, sized to the widest, so this is a max over
-    layers rather than a sum. A no-op unless some layer selected
-    ``gemm_backend="dist_gemm"``.
-
-    Sized as float32 rather than the layers' actual dtype. Only under-reserving is
-    dangerous, and the collective runs in ``training.mixed_precision_param``, which
-    is independent of the dtype the weights hold here. Both are
-    ``bfloat16 | float32``, so float32 is an upper bound over every combination.
+    Mirrors ``update_ep_token_dispatcher_config``. Also the one place that sees
+    both the model config and the runtime parallelism config, so the two
+    preconditions are checked here: neither is detectable from inside a module,
+    because under spmd_types an activation is a plain local tensor with no
+    placements to inspect.
     """
-    qkv_linears = [m for m in model.modules() if isinstance(m, AllGatherFusedQKVLinear)]
-    out_linears = [m for m in model.modules() if isinstance(m, RowParallelLinear)]
-    if not qkv_linears and not out_linears:
+    cfgs: list[object] = []
+    for layer_cfg in getattr(model_config, "layers", []):
+        attn_cfg = getattr(layer_cfg, "attention", None)
+        if isinstance(attn_cfg, GQAttention.Config) and isinstance(
+            attn_cfg.wo, RowParallelLinear.Config
+        ):
+            cfgs.extend((attn_cfg.qkv_linear, attn_cfg.wo))
+        ffn_cfg = getattr(layer_cfg, "feed_forward", None)
+        if isinstance(ffn_cfg, AllGatherFusedFeedForward.Config):
+            cfgs.append(ffn_cfg)
+    if not cfgs:
         return
 
-    tp_mesh = parallel_dims.get_optional_mesh("tp")
-    if tp_mesh is None:
-        # TP disabled: the fused modules fall back to the stock projections and
-        # never touch symmetric memory.
-        return
-    tp_group = tp_mesh.get_group("tp")
-    tp_size = tp_group.size()
+    from torchtitan.trainer import Trainer
 
-    # Preconditions. Neither is detectable from inside the modules: under
-    # spmd_types an activation is a plain local tensor, so there are no placements
-    # to inspect at runtime.
+    if not isinstance(config, Trainer.Config):
+        # Inference-only callers have no fixed token count per step.
+        return
+
+    parallelism = config.parallelism
     if parallelism.spmd_backend != "spmd_types":
         raise ValueError(
-            "gemm_backend='dist_gemm' requires parallelism.spmd_backend='spmd_types', "
-            f"got {parallelism.spmd_backend!r}. The fused modules take and return "
-            "plain local tensors; the DTensor backends are being deprecated and are "
-            "not supported."
+            "tp_comm_overlap='dist_gemm' requires "
+            "parallelism.spmd_backend='spmd_types', got "
+            f"{parallelism.spmd_backend!r}. The fused modules take and return plain "
+            "local tensors; the DTensor backends are being deprecated and are not "
+            "supported."
         )
     if not parallelism.enable_sequence_parallel:
         raise ValueError(
-            "gemm_backend='dist_gemm' requires parallelism.enable_sequence_parallel; "
-            "the fused GEMMs replace the SP all-gather and reduce-scatter, so there "
-            "is nothing for them to fuse with SP disabled."
+            "tp_comm_overlap='dist_gemm' requires "
+            "parallelism.enable_sequence_parallel; the fused GEMMs replace the SP "
+            "all-gather and reduce-scatter, so there is nothing for them to fuse "
+            "with SP disabled."
         )
 
-    # Widest (K, N) any layer's fused GEMMs will see once sharded. Weights are
-    # still global here, hence the explicit division.
-    features = 0
-    for qkv in qkv_linears:
-        out_f, in_f = qkv.wqkv.weight.shape
-        features = max(features, in_f, out_f // tp_size)
-    for out_linear in out_linears:
-        out_f, in_f = out_linear.weight.shape
-        features = max(features, in_f // tp_size, out_f)
-
-    reserve_symm_mem_workspace(
-        tp_group,
-        min_bytes=dist_gemm_workspace_bytes(
-            tokens_global=training.local_batch_size * training.seq_len,
-            features=features,
-            ranks=tp_size,
-        ),
-    )
+    tokens_per_rank = config.training.local_batch_size * config.training.seq_len
+    for cfg in cfgs:
+        cfg.tokens_per_rank = tokens_per_rank  # pyrefly: ignore[missing-attribute]
 
 
-class AllGatherFusedQKVLinear(FusedQKVLinear):
+class AllGatherFusedQKVLinear(_ReservesSymmMemWorkspace, FusedQKVLinear):
     """Fused QKV projection whose forward all-gathers the TP sequence shard."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(FusedQKVLinear.Config):
-        """Same fields as the stock fused QKV. The subclass exists because it is
-        what binds ``Config.build()`` to this module rather than the stock one."""
+        """Same fields as the stock fused QKV, plus the token count the workspace
+        reservation needs. The subclass also binds ``Config.build()`` to this
+        module rather than the stock one, so it cannot be deleted as empty."""
+
+        tokens_per_rank: int | None = None
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self._init_workspace_reservation(config.tokens_per_rank)
+
+    def _workspace_weights(self) -> tuple[torch.Tensor, ...]:
+        return (self.wqkv.weight,)
 
     def forward(  # pyrefly: ignore[bad-override]
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        tp_group = tp_group_from_context()
+        tp_group = _tp_group_from_context()
         if tp_group is None:
             return super().forward(x)
 
@@ -179,8 +212,8 @@ class AllGatherFusedQKVLinear(FusedQKVLinear):
         x_seq_major = x.transpose(0, 1).reshape(-1, dim).contiguous()
         qkv_flat = AllGatherLinear.apply(
             x_seq_major,
-            local_param(self.wqkv.weight),
-            local_param(self.wqkv.bias),
+            self.wqkv.weight,
+            self.wqkv.bias,
             tp_group,
             tp_group.group_name,
         )
@@ -201,7 +234,7 @@ class AllGatherFusedQKVLinear(FusedQKVLinear):
         )
 
 
-class RowParallelLinear(Linear):
+class RowParallelLinear(_ReservesSymmMemWorkspace, Linear):
     """Attention output projection: matmul fused with the TP reduce-scatter.
 
     Named for the role it fills rather than the collective it performs, so it does
@@ -212,11 +245,21 @@ class RowParallelLinear(Linear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
-        """Same fields as a stock Linear. The subclass exists because it is what
-        binds ``Config.build()`` to this module rather than the stock one."""
+        """Same fields as a stock Linear, plus the token count the workspace
+        reservation needs. The subclass also binds ``Config.build()`` to this
+        module rather than the stock one, so it cannot be deleted as empty."""
+
+        tokens_per_rank: int | None = None
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self._init_workspace_reservation(config.tokens_per_rank)
+
+    def _workspace_weights(self) -> tuple[torch.Tensor, ...]:
+        return (self.weight,)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        tp_group = tp_group_from_context()
+        tp_group = _tp_group_from_context()
         if tp_group is None:
             return super().forward(input)
 
@@ -229,15 +272,15 @@ class RowParallelLinear(Linear):
         x_seq_major = input.transpose(0, 1).reshape(-1, k_local).contiguous()
         y_flat = LinearReduceScatter.apply(
             x_seq_major,
-            local_param(self.weight),
-            local_param(self.bias),
+            self.weight,
+            self.bias,
             tp_group,
             tp_group.group_name,
         )
         return y_flat.view(seqlen // world_size, bsz, -1).transpose(0, 1).contiguous()
 
 
-class AllGatherFusedFeedForward(FeedForward):
+class AllGatherFusedFeedForward(_ReservesSymmMemWorkspace, FeedForward):
     """SwiGLU feed-forward with both TP collectives folded into its GEMMs.
 
     ``w1`` and ``w3`` share an input, so one all-gather feeds both
@@ -252,11 +295,21 @@ class AllGatherFusedFeedForward(FeedForward):
 
     @dataclass(kw_only=True, slots=True)
     class Config(FeedForward.Config):
-        """Same fields as the stock FFN. The subclass exists because it is what
-        binds ``Config.build()`` to this module rather than the stock one."""
+        """Same fields as the stock FFN, plus the token count the workspace
+        reservation needs. The subclass also binds ``Config.build()`` to this
+        module rather than the stock one, so it cannot be deleted as empty."""
+
+        tokens_per_rank: int | None = None
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self._init_workspace_reservation(config.tokens_per_rank)
+
+    def _workspace_weights(self) -> tuple[torch.Tensor, ...]:
+        return (self.w1.weight, self.w2.weight, self.w3.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        tp_group = tp_group_from_context()
+        tp_group = _tp_group_from_context()
         if tp_group is None or self.w1.bias is not None or self.w3.bias is not None:
             return super().forward(x)
 
@@ -266,17 +319,17 @@ class AllGatherFusedFeedForward(FeedForward):
         x_seq_major = x.transpose(0, 1).reshape(-1, dim).contiguous()
         h1, h3 = AllGatherLinearMulti.apply(
             x_seq_major,
+            self.w1.weight,
+            self.w3.weight,
             tp_group,
             tp_group.group_name,
-            local_param(self.w1.weight),
-            local_param(self.w3.weight),
         )
         # Elementwise on feature-sharded activations: no collective.
         h = F.silu(h1) * h3
         y_flat = LinearReduceScatter.apply(
             h,
-            local_param(self.w2.weight),
-            local_param(self.w2.bias),
+            self.w2.weight,
+            self.w2.bias,
             tp_group,
             tp_group.group_name,
         )
@@ -289,5 +342,5 @@ __all__ = [
     "AllGatherFusedFeedForward",
     "AllGatherFusedQKVLinear",
     "RowParallelLinear",
-    "reserve_dist_gemm_workspace",
+    "maybe_update_dist_gemm_config",
 ]

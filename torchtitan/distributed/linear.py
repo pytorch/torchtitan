@@ -154,6 +154,9 @@ class AllGatherLinear(torch.autograd.Function):
         from x.
         """
         spmd.assert_type(x_shard_m, {group: spmd.S(0)})
+        # S(0), not S(1), even though this is the column-parallel direction: torch
+        # stores the weight as [N, K] while the mental model of the GEMM is [K, N],
+        # so sharding the output features N is dim 0 of what is actually stored.
         spmd.assert_type(w_shard_n, {group: spmd.S(0)})
         if bias_shard_n is not None:
             spmd.assert_type(bias_shard_n, {group: spmd.S(0)})
@@ -243,43 +246,49 @@ class AllGatherLinear(torch.autograd.Function):
 
 @spmd.register_autograd_function
 class AllGatherLinearMulti(torch.autograd.Function):
-    """One all-gather feeding several column-parallel linears that share an input.
+    """One all-gather feeding a pair of column-parallel linears on the same input.
 
     The SwiGLU case: ``w1`` and ``w3`` both consume the same activation, so
     gathering once and running two GEMMs off it halves the collectives versus
     applying :class:`AllGatherLinear` twice.
 
         x_shard_m   [M / R, K]      this rank's slice of the sequence
-        w_shards_n  [N / R, K] x n  weights, each sharded over its out-features
-        y_shards_n  [M, N / R] x n  full sequence, features still sharded
+        wa, wb      [N / R, K] x 2  weights, each sharded over its out-features
+        ya, yb      [M, N / R] x 2  full sequence, features still sharded
 
-        forward     one all-gather, n GEMMs (the op takes a list of ``Bs``)
+        forward     one all-gather, two GEMMs (the op takes a list of ``Bs``)
         dgrad       reduce_scatter(cat(dy, dim=1) @ cat(w, dim=0))
                     the cats express the sum over outputs as a single product, so
                     dgrad stays one collective; they cost one dy-sized and one
                     weight-sized copy, cheaper than a second reduce-scatter
-        wgrad       one all_gather of x_shard_k.T feeding n GEMMs, same list trick
+        wgrad       one all_gather of x_shard_k.T feeding both GEMMs, same trick
 
-    No bias: torchtitan's dense FFN builds its projections with ``bias=False``,
-    and threading optional per-weight biases through ``*args`` autograd is not
-    worth it. Callers with a bias should use the stock projection.
+    Fixed at two weights rather than variadic, even though the underlying op takes
+    any number of ``Bs``: Dynamo cannot trace an ``autograd.Function`` whose tensor
+    inputs arrive through ``*args``, which breaks ``--compile.enable`` and anything
+    else that traces the model. Add a third explicitly if a caller ever needs one.
+
+    No bias: torchtitan's dense FFN builds its projections with ``bias=False``, so
+    threading optional per-weight biases through here is not worth it. Callers with
+    a bias should use the stock projection.
     """
 
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]
         ctx,
         x_shard_m: torch.Tensor,
+        wa_shard_n: torch.Tensor,
+        wb_shard_n: torch.Tensor,
         group: dist.ProcessGroup,
         group_name: str,
-        *w_shards_n: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         ensure_symm_mem_ops()
         if not x_shard_m.is_contiguous():
             x_shard_m = x_shard_m.contiguous()
 
         x_full, outputs = torch.ops.symm_mem.fused_all_gather_matmul(
             x_shard_m,
-            [w.T for w in w_shards_n],
+            [wa_shard_n.T, wb_shard_n.T],
             0,
             group_name,
         )
@@ -289,45 +298,67 @@ class AllGatherLinearMulti(torch.autograd.Function):
         # See AllGatherLinear: keep only a K-shard of the gathered x for wgrad.
         x_shard_k = torch.chunk(x_full, world_size, dim=1)[rank].contiguous()
 
-        ctx.save_for_backward(x_shard_k, *w_shards_n)
+        ctx.save_for_backward(x_shard_k, wa_shard_n, wb_shard_n)
         ctx.group_name = group_name
-        return tuple(outputs)
+        return outputs[0], outputs[1]
 
     @staticmethod
-    def backward(ctx, *grad_ys: torch.Tensor):
-        x_shard_k, *w_shards_n = ctx.saved_tensors
-        grad_ys = tuple(g if g.is_contiguous() else g.contiguous() for g in grad_ys)
+    def backward(  # pyrefly: ignore[bad-override]
+        ctx, grad_ya_shard_n: torch.Tensor, grad_yb_shard_n: torch.Tensor
+    ):
+        x_shard_k, wa_shard_n, wb_shard_n = ctx.saved_tensors
+        # Spelled out rather than a genexpr over the pair: Dynamo traces this
+        # backward as well as the forward, and it cannot trace a generator.
+        if not grad_ya_shard_n.is_contiguous():
+            grad_ya_shard_n = grad_ya_shard_n.contiguous()
+        if not grad_yb_shard_n.is_contiguous():
+            grad_yb_shard_n = grad_yb_shard_n.contiguous()
+        grad_ys = [grad_ya_shard_n, grad_yb_shard_n]
 
+        # dx = dya @ wa + dyb @ wb, expressed as one concatenated product so dgrad
+        # stays a single collective. The cats cost one dy-sized and one
+        # weight-sized copy, cheaper than a second reduce-scatter.
         grad_x_shard_m = torch.ops.symm_mem.fused_matmul_reduce_scatter(
             torch.cat(grad_ys, dim=1),
-            torch.cat(w_shards_n, dim=0),
+            torch.cat((wa_shard_n, wb_shard_n), dim=0),
             "sum",
             0,
             ctx.group_name,
         )
 
-        # return_A left at its default; see AllGatherLinear.backward.
+        # One gather of x_shard_k.T feeds both wgrads. return_A left at its
+        # default; see AllGatherLinear.backward.
         _, grad_w_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
             x_shard_k.T.contiguous(),
-            list(grad_ys),
+            grad_ys,
             0,
             ctx.group_name,
         )
-        grad_ws = tuple(g.T.contiguous() for g in grad_w_outputs)
-        return (grad_x_shard_m, None, None, *grad_ws)
+        return (
+            grad_x_shard_m,
+            grad_w_outputs[0].T.contiguous(),
+            grad_w_outputs[1].T.contiguous(),
+            None,
+            None,
+        )
 
     @staticmethod
     def typecheck_forward(
         x_shard_m: torch.Tensor,
+        wa_shard_n: torch.Tensor,
+        wb_shard_n: torch.Tensor,
         group: dist.ProcessGroup,
         group_name: str,
-        *w_shards_n: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        """SPMD type: x S(0)@TP, each w S(0)@TP -> each y S(1)@TP."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """SPMD type: x S(0)@TP, both w S(0)@TP -> both y S(1)@TP."""
         spmd.assert_type(x_shard_m, {group: spmd.S(0)})
-        for w in w_shards_n:
-            spmd.assert_type(w, {group: spmd.S(0)})
-        results = AllGatherLinearMulti.apply(x_shard_m, group, group_name, *w_shards_n)
+        # S(0) for the column-parallel direction; see AllGatherLinear for why the
+        # stored [N, K] layout inverts the dim you would expect.
+        spmd.assert_type(wa_shard_n, {group: spmd.S(0)})
+        spmd.assert_type(wb_shard_n, {group: spmd.S(0)})
+        results = AllGatherLinearMulti.apply(
+            x_shard_m, wa_shard_n, wb_shard_n, group, group_name
+        )
         output_type = {**spmd.get_local_type(x_shard_m), group: spmd.S(1)}
         for result in results:
             spmd.assert_type(result, output_type)
@@ -372,6 +403,10 @@ class LinearReduceScatter(torch.autograd.Function):
         completes it and shards rows instead. Non-TP axes pass through from x.
         """
         spmd.assert_type(x_shard_k, {group: spmd.S(1)})
+        # S(1), the mirror of AllGatherLinear's S(0): torch stores the weight as
+        # [N, K] while the mental model of the GEMM is [K, N], so sharding the
+        # input features K -- the row-parallel direction -- is dim 1 of what is
+        # actually stored.
         spmd.assert_type(w_shard_k, {group: spmd.S(1)})
         if bias is not None:
             spmd.assert_type(bias, {group: spmd.R})
