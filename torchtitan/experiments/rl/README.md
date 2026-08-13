@@ -38,7 +38,7 @@ Most experiments define four pieces:
 - training and validation datasets;
 - a `MessageEnv` for interaction, tools, and termination;
 - a rubric for per-rollout or group reward;
-- a `Rollouter` that composes them.
+- a `Rollouter` config that composes them.
 
 ```python
 class MyRollouter(Rollouter):

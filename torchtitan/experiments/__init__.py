@@ -19,5 +19,6 @@ _supported_experiments = frozenset(
         "alphabet_sort",
         "dapo_math",
         "search_r1",
+        "terminal_bench",
     ]
 )

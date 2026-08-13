@@ -72,6 +72,8 @@ jobs:
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
         uv pip install "git+https://github.com/PrimeIntellect-ai/renderers.git@main"
+        uv pip install \
+          -r torchtitan/experiments/rl/examples/terminal_bench/requirements.txt
 
         # 2. Install batch-invariant ops
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"

@@ -8,16 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol, TYPE_CHECKING
+from typing import Protocol
 
 from renderers import Message
 
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.types import Completion, RolloutTurnID
-
-if TYPE_CHECKING:
-    # Type-only: importing the generator module here would pull in vLLM at import time.
-    from torchtitan.experiments.rl.actors.generator import SamplingConfig
+from torchtitan.experiments.rl.types import Completion, RolloutTurnID, SamplingConfig
 
 
 _TRUNCATED = frozenset(
