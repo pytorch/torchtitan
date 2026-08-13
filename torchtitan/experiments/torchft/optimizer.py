@@ -10,7 +10,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch.nn as nn
 
-from torchtitan.components.checkpoint_utils import init_optim_state
+from torchtitan.components.optimizer_utils import init_optim_state
 from torchtitan.components.optimizer import OptimizersContainer
 
 if TYPE_CHECKING:

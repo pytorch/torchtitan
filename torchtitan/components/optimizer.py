@@ -17,7 +17,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import Checkpoi
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
-from torchtitan.components.checkpoint_utils import (
+from torchtitan.components.optimizer_utils import (
     canonical_fqn,
     get_flat_optim_state_dict,
     init_optim_state,
