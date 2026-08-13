@@ -69,6 +69,7 @@ class _ControllerHost:
 def _rollouter_without_datasets() -> Rollouter:
     rollouter = object.__new__(Rollouter)
     rollouter._config = SimpleNamespace(
+        worker="worker_config",
         worker_pool_size=3,
         num_threads_per_worker=2,
     )
@@ -102,8 +103,9 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         args, kwargs = worker_mesh.spawn_args
         assert args[0] == "rollout_worker"
         assert args[1].__name__ == "RolloutWorkerActor"
+        # The actor gets the worker's own config, not the whole Rollouter config.
         assert kwargs == {
-            "rollouter_config": rollouter._config,
+            "worker_config": "worker_config",
             "num_threads": 2,
         }
         await rollouter.close()
