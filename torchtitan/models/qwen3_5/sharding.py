@@ -125,7 +125,7 @@ def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
     enable_ep: bool,
-    varlen: bool,
+    use_deltanet_varlen_metadata: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs.
 
@@ -164,7 +164,7 @@ def set_qwen35_sharding_config(
             layer_cfg,
             attention_input_layout=layer_input_layout,
             enable_ep=enable_ep,
-            varlen=varlen,
+            use_deltanet_varlen_metadata=use_deltanet_varlen_metadata,
         )
 
 
@@ -173,7 +173,7 @@ def _set_qwen35_layer_sharding(
     *,
     attention_input_layout: SpmdLayout,
     enable_ep: bool,
-    varlen: bool,
+    use_deltanet_varlen_metadata: bool,
 ) -> None:
     layer_cfg.attention_norm.sharding_config = _decoder_norm_sharding(
         attention_input_layout
@@ -190,7 +190,7 @@ def _set_qwen35_layer_sharding(
         _set_deltanet_sharding(
             layer_cfg.delta_net,
             attention_input_layout=attention_input_layout,
-            varlen=varlen,
+            use_varlen_metadata=use_deltanet_varlen_metadata,
         )
 
     if layer_cfg.feed_forward is not None:
@@ -302,7 +302,7 @@ def _set_deltanet_sharding(
     deltanet_cfg: "GatedDeltaNet.Config",
     *,
     attention_input_layout: SpmdLayout,
-    varlen: bool,
+    use_varlen_metadata: bool,
 ) -> None:
     """Sharding for GatedDeltaNet: head-sharded TP on projections.
 
@@ -334,10 +334,11 @@ def _set_deltanet_sharding(
     # RowwiseParallel on output projection (reduce-scatter to SP)
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
 
-    # Varlen flattens (B, L) to (1, B*L), moving DP sharding to dim 1.
+    # DeltaNet flattens (B, L) to (1, B * L) when it receives varlen
+    # metadata, so the DP-sharded batch dimension moves from dim 0 to dim 1.
     deltanet_activation_layout = (
         SpmdLayout({DP: spmd.S(1), TP: spmd.S(2)})
-        if varlen
+        if use_varlen_metadata
         else dense_activation_placement(tp=spmd.S(2))
     )
 
