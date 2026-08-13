@@ -15,7 +15,7 @@ the template:
    milliseconds.
 2. ``TestDistGemmAttentionSharding`` -- a 2-rank gloo mesh. Do those contracts
    survive a real ``parallelize``? Still no CUDA: nothing here runs the fused ops.
-3. Numerics for the underlying primitives live in ``test_dist_linear.py`` (2
+3. Numerics for the underlying primitives live in ``test_dist_gemm_ops.py`` (2
    GPUs), and an integration entry in ``tests/integration_tests/h100.py`` runs a
    real training step end to end; see ``dist_gemm`` there.
 

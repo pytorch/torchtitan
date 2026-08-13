@@ -4,24 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Attention components that use the fused TP+SP linear primitives.
+"""Model components that fold the TP collectives into their GEMMs.
 
-:class:`AllGatherFusedQKVLinear` and :class:`RowParallelLinear` are drop-in
-replacements for the stock QKV and output projections. They keep the stock
-parameter layouts and only move the TP collective into the GEMM, using
-:class:`~torchtitan.distributed.dist_linear.AllGatherLinear` and
-:class:`~torchtitan.distributed.dist_linear.LinearReduceScatter`.
+:class:`AllGatherFusedQKVLinear`, :class:`RowParallelLinear` and
+:class:`AllGatherFusedFeedForward` are drop-in replacements for the stock QKV,
+output and SwiGLU projections. They keep the stock parameter layouts and only
+move the TP collective into the GEMM, over the autograd Functions in
+``dist_gemm_ops.py``. ``RowParallelLinear`` serves both attention's ``wo`` and the
+FFN's ``w2``; nothing about the primitives is attention-specific, and MoE
+projections could use the same pair.
 
-Those primitives live under ``torchtitan/distributed`` rather than here, because
-nothing about them is attention-specific: FFN and MoE projections can use the
-same pair. What stays in this module is the wiring -- the QKV-specific reshaping
-around the collective.
+What lives here is the wiring -- the reshaping around each collective, and the
+fallbacks -- while ``dist_gemm_ops.py`` holds the collective+GEMM math itself.
 
-They are selected by passing ``gemm_backend="dist_gemm"`` to ``make_gqa_config``
-(see ``torchtitan/models/common/config_utils.py``), which also drops the parent
-attention-boundary all-gather that ``AllGatherFusedQKVLinear`` takes over. No
-attention subclass is needed: the stock ``GQAttention`` forward handles a QKV that
-changes the sequence length.
+Selected by passing ``gemm_backend="dist_gemm"`` to ``make_gqa_config`` or
+``make_ffn_config`` (see ``config_utils.py``), which also drops the boundary
+all-gather these modules take over. No attention or FFN subclass is needed beyond
+the projections: the stock ``GQAttention`` forward handles a QKV that changes the
+sequence length.
 """
 
 from __future__ import annotations
@@ -34,17 +34,17 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.dist_linear import (
+from torchtitan.distributed.spmd_types import current_spmd_mesh
+
+from torchtitan.models.common.attention import FusedQKVLinear
+
+from torchtitan.models.common.dist_gemm_ops import (
     AllGatherLinear,
     AllGatherLinearMulti,
     dist_gemm_workspace_bytes,
     LinearReduceScatter,
     reserve_symm_mem_workspace,
 )
-
-from torchtitan.distributed.spmd_types import current_spmd_mesh
-
-from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
