@@ -22,6 +22,7 @@ from torchtitan.distributed.flex_shard import (
     BucketConfig,
     ComputeLayout,
     MuonComputeShardingConfig,
+    SingleParticipant,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
@@ -205,14 +206,16 @@ def _distributed_muon_optimizer(
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
-    owned = MuonComputeShardingConfig(
+    single_participant = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
-            matrix_ownership_axes=(MeshAxisName.DP_SHARD.value,),
+            distribution_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: SingleParticipant(),
+            },
         )
     )
     per_head = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
-            placements_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
+            distribution_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
         ),
         compute_view=AttentionPerHeadComputeView(
             num_heads=attention.n_heads,
@@ -220,7 +223,7 @@ def _distributed_muon_optimizer(
     )
     per_expert = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(
-            placements_by_mesh_axis={
+            distribution_by_mesh_axis={
                 MeshAxisName.DP_SHARD.value: Shard(0),
                 MeshAxisName.EFSDP.value: Shard(0),
                 MeshAxisName.EP.value: Shard(0),
@@ -229,7 +232,7 @@ def _distributed_muon_optimizer(
     )
     query_shardings: dict[str, MuonComputeShardingConfig] = (
         {
-            "wq_a": owned,
+            "wq_a": single_participant,
             "wq_b": per_head,
         }
         if attention.q_lora_rank
@@ -237,9 +240,9 @@ def _distributed_muon_optimizer(
     )
     attention_shardings = {
         **query_shardings,
-        "wkv_a": owned,
+        "wkv_a": single_participant,
         "wkv_b": per_head,
-        "wo": owned,
+        "wo": single_participant,
     }
     num_layers = len(model_config.layers)
     muon_kwargs = {
@@ -270,7 +273,7 @@ def _distributed_muon_optimizer(
         if not layer_id:
             shardings.update(
                 {
-                    f"{prefix}.feed_forward.{projection}.weight": owned
+                    f"{prefix}.feed_forward.{projection}.weight": single_participant
                     for projection in ("w1", "w2", "w3")
                 }
             )
@@ -281,10 +284,10 @@ def _distributed_muon_optimizer(
                     for projection in expert_projections
                 }
             )
-            shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shardings[f"{prefix}.moe.router.gate.weight"] = single_participant
             shardings.update(
                 {
-                    f"{prefix}.moe.shared_experts.{projection}.weight": owned
+                    f"{prefix}.moe.shared_experts.{projection}.weight": single_participant
                     for projection in ("w1", "w2", "w3")
                 }
             )
