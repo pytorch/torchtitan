@@ -154,7 +154,7 @@ def _fused_q_rope_kernel(
 @triton.jit
 def _fused_k_rope_kernel(
     kv,
-    k_pos,
+    k_pe,
     rope_cache,
     positions,
     k,
@@ -162,9 +162,9 @@ def _fused_k_rope_kernel(
     KV_STRIDE_L: tl.constexpr,
     KV_STRIDE_H: tl.constexpr,
     KV_STRIDE_D: tl.constexpr,
-    KPOS_STRIDE_B: tl.constexpr,
-    KPOS_STRIDE_L: tl.constexpr,
-    KPOS_STRIDE_D: tl.constexpr,
+    KPE_STRIDE_B: tl.constexpr,
+    KPE_STRIDE_L: tl.constexpr,
+    KPE_STRIDE_D: tl.constexpr,
     CACHE_STRIDE_M: tl.constexpr,
     CACHE_STRIDE_P: tl.constexpr,
     CACHE_STRIDE_R: tl.constexpr,
@@ -202,19 +202,19 @@ def _fused_k_rope_kernel(
     )
     tl.store(k + k_base + dim * K_STRIDE_D, k_nope, mask=nope_mask)
 
-    # k_pos is shared by every attention head. Rotate it once per head tile,
+    # k_pe is shared by every attention head. Rotate it once per head tile,
     # then broadcast the result while storing the tile instead of repeating the
     # FP32 complex multiply in a separate program for every head.
     pair = tl.arange(0, BLOCK_PAIRS)
     pair_mask = pair < ROPE_DIM // 2
-    kpos_base = batch * KPOS_STRIDE_B + seq * KPOS_STRIDE_L
-    kpos_even = tl.load(
-        k_pos + kpos_base + (2 * pair) * KPOS_STRIDE_D,
+    kpe_base = batch * KPE_STRIDE_B + seq * KPE_STRIDE_L
+    kpe_even = tl.load(
+        k_pe + kpe_base + (2 * pair) * KPE_STRIDE_D,
         mask=pair_mask,
         other=0.0,
     ).to(tl.float32)
-    kpos_odd = tl.load(
-        k_pos + kpos_base + (2 * pair + 1) * KPOS_STRIDE_D,
+    kpe_odd = tl.load(
+        k_pe + kpe_base + (2 * pair + 1) * KPE_STRIDE_D,
         mask=pair_mask,
         other=0.0,
     ).to(tl.float32)
@@ -231,8 +231,8 @@ def _fused_k_rope_kernel(
         mask=pair_mask,
         other=0.0,
     ).to(tl.float32)
-    out_even = kpos_even * cos - kpos_odd * sin
-    out_odd = kpos_even * sin + kpos_odd * cos
+    out_even = kpe_even * cos - kpe_odd * sin
+    out_odd = kpe_even * sin + kpe_odd * cos
 
     rope_base = k_base + Q_NOPE_DIM * K_STRIDE_D
     rope_mask = head_mask & pair_mask[None, :]
@@ -255,7 +255,7 @@ def _fused_kv_backward_kernel(
     rope_cache,
     positions,
     grad_kv,
-    grad_k_pos,
+    grad_k_pe,
     GK_STRIDE_B: tl.constexpr,
     GK_STRIDE_L: tl.constexpr,
     GK_STRIDE_H: tl.constexpr,
@@ -273,9 +273,9 @@ def _fused_kv_backward_kernel(
     GKV_STRIDE_L: tl.constexpr,
     GKV_STRIDE_H: tl.constexpr,
     GKV_STRIDE_D: tl.constexpr,
-    GKPOS_STRIDE_B: tl.constexpr,
-    GKPOS_STRIDE_L: tl.constexpr,
-    GKPOS_STRIDE_D: tl.constexpr,
+    GKPE_STRIDE_B: tl.constexpr,
+    GKPE_STRIDE_L: tl.constexpr,
+    GKPE_STRIDE_D: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     N_HEADS: tl.constexpr,
     Q_NOPE_DIM: tl.constexpr,
@@ -368,14 +368,14 @@ def _fused_kv_backward_kernel(
     out_even = grad_pos_even * cos + grad_pos_odd * sin
     out_odd = grad_pos_odd * cos - grad_pos_even * sin
 
-    gkpos_base = batch * GKPOS_STRIDE_B + seq * GKPOS_STRIDE_L
+    gkpe_base = batch * GKPE_STRIDE_B + seq * GKPE_STRIDE_L
     tl.store(
-        grad_k_pos + gkpos_base + (2 * pair_1d) * GKPOS_STRIDE_D,
+        grad_k_pe + gkpe_base + (2 * pair_1d) * GKPE_STRIDE_D,
         out_even,
         mask=pair_mask_1d,
     )
     tl.store(
-        grad_k_pos + gkpos_base + (2 * pair_1d + 1) * GKPOS_STRIDE_D,
+        grad_k_pe + gkpe_base + (2 * pair_1d + 1) * GKPE_STRIDE_D,
         out_odd,
         mask=pair_mask_1d,
     )
@@ -428,13 +428,13 @@ def _fused_mla_q_rope_op(
 )
 def _fused_mla_k_rope_op(
     kv: torch.Tensor,
-    k_pos: torch.Tensor,
+    k_pe: torch.Tensor,
     rope_cache_real: torch.Tensor,
     positions: torch.Tensor,
     q_nope_dim: int,
 ) -> torch.Tensor:
     batch, seq_len, n_heads, _ = kv.shape
-    rope_dim = k_pos.shape[-1]
+    rope_dim = k_pe.shape[-1]
     k = torch.empty(
         (batch, seq_len, n_heads, q_nope_dim + rope_dim),
         dtype=kv.dtype,
@@ -444,7 +444,7 @@ def _fused_mla_k_rope_op(
     num_head_blocks = triton.cdiv(n_heads, block_h)
     _fused_k_rope_kernel[(batch * seq_len * num_head_blocks,)](
         kv,
-        k_pos,
+        k_pe,
         rope_cache_real,
         positions,
         k,
@@ -452,9 +452,9 @@ def _fused_mla_k_rope_op(
         KV_STRIDE_L=kv.stride(1),
         KV_STRIDE_H=kv.stride(2),
         KV_STRIDE_D=kv.stride(3),
-        KPOS_STRIDE_B=k_pos.stride(0),
-        KPOS_STRIDE_L=k_pos.stride(1),
-        KPOS_STRIDE_D=k_pos.stride(2),
+        KPE_STRIDE_B=k_pe.stride(0),
+        KPE_STRIDE_L=k_pe.stride(1),
+        KPE_STRIDE_D=k_pe.stride(2),
         CACHE_STRIDE_M=rope_cache_real.stride(0),
         CACHE_STRIDE_P=rope_cache_real.stride(1),
         CACHE_STRIDE_R=rope_cache_real.stride(2),
@@ -480,13 +480,13 @@ def _fused_mla_k_rope_op(
 @_fused_mla_k_rope_op.register_fake
 def _fused_mla_k_rope_op_fake(
     kv: torch.Tensor,
-    k_pos: torch.Tensor,
+    k_pe: torch.Tensor,
     rope_cache_real: torch.Tensor,
     positions: torch.Tensor,
     q_nope_dim: int,
 ) -> torch.Tensor:
     return torch.empty(
-        (*kv.shape[:3], q_nope_dim + k_pos.shape[-1]),
+        (*kv.shape[:3], q_nope_dim + k_pe.shape[-1]),
         dtype=kv.dtype,
         device=kv.device,
     )
@@ -512,7 +512,7 @@ def _fused_mla_kv_backward_op(
         dtype=grad_k.dtype,
         device=grad_k.device,
     )
-    grad_k_pos = torch.empty(
+    grad_k_pe = torch.empty(
         (batch, seq_len, rope_dim),
         dtype=grad_k.dtype,
         device=grad_k.device,
@@ -524,7 +524,7 @@ def _fused_mla_kv_backward_op(
         rope_cache_real,
         positions,
         grad_kv,
-        grad_k_pos,
+        grad_k_pe,
         GK_STRIDE_B=grad_k.stride(0),
         GK_STRIDE_L=grad_k.stride(1),
         GK_STRIDE_H=grad_k.stride(2),
@@ -542,9 +542,9 @@ def _fused_mla_kv_backward_op(
         GKV_STRIDE_L=grad_kv.stride(1),
         GKV_STRIDE_H=grad_kv.stride(2),
         GKV_STRIDE_D=grad_kv.stride(3),
-        GKPOS_STRIDE_B=grad_k_pos.stride(0),
-        GKPOS_STRIDE_L=grad_k_pos.stride(1),
-        GKPOS_STRIDE_D=grad_k_pos.stride(2),
+        GKPE_STRIDE_B=grad_k_pe.stride(0),
+        GKPE_STRIDE_L=grad_k_pe.stride(1),
+        GKPE_STRIDE_D=grad_k_pe.stride(2),
         SEQ_LEN=seq_len,
         N_HEADS=n_heads,
         Q_NOPE_DIM=q_nope_dim,
@@ -557,7 +557,7 @@ def _fused_mla_kv_backward_op(
         ROUND_FP16_SUM=grad_k.dtype == torch.float16,
         num_warps=8,
     )
-    return grad_kv, grad_k_pos
+    return grad_kv, grad_k_pe
 
 
 @_fused_mla_kv_backward_op.register_fake
@@ -616,15 +616,15 @@ class _FusedMLAKV(torch.autograd.Function):
     def forward(
         ctx,
         kv: torch.Tensor,
-        k_pos: torch.Tensor,
+        k_pe: torch.Tensor,
         rope_cache_real: torch.Tensor,
         positions: torch.Tensor,
         q_nope_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         ctx.q_nope_dim = q_nope_dim
-        ctx.rope_dim = k_pos.shape[-1]
+        ctx.rope_dim = k_pe.shape[-1]
         ctx.save_for_backward(rope_cache_real, positions)
-        k = _fused_mla_k_rope_op(kv, k_pos, rope_cache_real, positions, q_nope_dim)
+        k = _fused_mla_k_rope_op(kv, k_pe, rope_cache_real, positions, q_nope_dim)
         # Preserve the stock zero-copy V view. The custom backward combines its
         # gradient with dK-nope directly into the packed KV gradient.
         v = kv[..., q_nope_dim:]
@@ -634,7 +634,7 @@ class _FusedMLAKV(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_k: torch.Tensor, grad_v: torch.Tensor):
         rope_cache_real, positions = ctx.saved_tensors
-        grad_kv, grad_k_pos = _fused_mla_kv_backward_op(
+        grad_kv, grad_k_pe = _fused_mla_kv_backward_op(
             grad_k,
             grad_v,
             rope_cache_real,
@@ -642,7 +642,7 @@ class _FusedMLAKV(torch.autograd.Function):
             ctx.q_nope_dim,
             ctx.rope_dim,
         )
-        return grad_kv, grad_k_pos, None, None, None
+        return grad_kv, grad_k_pe, None, None, None
 
 
 def _to_local(tensor: torch.Tensor) -> torch.Tensor:
@@ -706,20 +706,20 @@ def fused_mla_q(
 
 def fused_mla_kv(
     kv: torch.Tensor,
-    k_pos: torch.Tensor,
+    k_pe: torch.Tensor,
     rope_cache: torch.Tensor,
     positions: torch.Tensor | None,
     q_nope_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Materialize K and expose V with a fused custom backward."""
     kv_local = _to_local(kv)
-    kpos_local = _to_local(k_pos)
+    kpe_local = _to_local(k_pe)
     cache_local = _to_local(rope_cache)
     positions_local = _resolve_positions(positions, kv_local)
     cache_real = torch.view_as_real(cache_local).contiguous()
     k_local, v_local = _FusedMLAKV.apply(
         kv_local,
-        kpos_local,
+        kpe_local,
         cache_real,
         positions_local,
         q_nope_dim,
@@ -765,19 +765,19 @@ class FusedMLAAttention(Attention):
                     {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
                 )
 
-        kv_down = self.wkv_a(x)
-        kv_latent, k_pos = torch.split(
-            kv_down,
-            [self.kv_lora_rank, self.qk_rope_head_dim],
-            dim=-1,
-        )
-
         if positions is not None:
             _maybe_check_max_pos(
                 positions,
                 max_valid_pos=self.rope.cache.shape[0] - 1,
             )
         q = fused_mla_q(q, self.rope.cache, positions, self.qk_nope_head_dim)
+
+        kv_down = self.wkv_a(x)
+        kv_latent, k_pe = torch.split(
+            kv_down,
+            [self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1,
+        )
 
         kv = self.wkv_b(self.kv_norm(kv_latent))
         with spmd.local():
@@ -789,7 +789,7 @@ class FusedMLAAttention(Attention):
             )
             k, v = fused_mla_kv(
                 kv,
-                k_pos,
+                k_pe,
                 self.rope.cache,
                 positions,
                 self.qk_nope_head_dim,
