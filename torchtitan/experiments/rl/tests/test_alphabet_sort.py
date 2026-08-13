@@ -16,13 +16,13 @@ from torchtitan.experiments.rl.examples.alphabet_sort import (
     AlphabetSortDataset,
     AlphabetSortRollouter,
     AlphabetSortSample,
+    AlphabetSortWorker,
     data as alphabet_data,
     RewardAlphabetSort,
 )
 from torchtitan.experiments.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.experiments.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
-from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.types import RolloutTurnID
 
 
@@ -376,7 +376,9 @@ def test_rollouter_builds_one_env_per_group_member(
     _patch_names(monkeypatch)
     config = AlphabetSortRollouter.Config()
     rollouter = AlphabetSortRollouter(config)
-    worker = config.worker_cls(config=config)
+    worker = config.worker.build()
+    # The worker subclass is selected by its config type.
+    assert isinstance(worker, AlphabetSortWorker)
     asyncio.run(
         worker.setup_async(
             renderer_config=_RendererConfig(),
@@ -392,7 +394,7 @@ def test_rollouter_config_wires_alphabet_sort() -> None:
     config = AlphabetSortRollouter.Config()
     assert isinstance(config.train_dataset, AlphabetSortDataset.Config)
     assert isinstance(config.validation_dataset, AlphabetSortDataset.Config)
-    assert config.worker_cls is RolloutWorker
-    assert isinstance(config.message_env, AlphabetSortEnv.Config)
-    assert len(config.rubric.reward_fns) == 1
-    assert isinstance(config.rubric.reward_fns[0], RewardAlphabetSort.Config)
+    assert isinstance(config.worker, AlphabetSortWorker.Config)
+    assert isinstance(config.worker.message_env, AlphabetSortEnv.Config)
+    assert len(config.worker.rubric.reward_fns) == 1
+    assert isinstance(config.worker.rubric.reward_fns[0], RewardAlphabetSort.Config)

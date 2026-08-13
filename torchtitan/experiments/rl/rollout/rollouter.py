@@ -47,10 +47,6 @@ class Rollouter(Configurable):
     turns a problem into rollouts: its worker builds the envs, drives them against the inference engine
     (via a `generate_fn` the controller provides), and scores the results with `score_group`.
 
-    Configure `worker_cls` to override specific methods, such as `score_group` for cross-sibling
-    scoring, or `make_env_group` for custom logic, such as using a pool of envs instead of creating
-    a new one.
-
     The flow for one prompt group: the controller passes a `generate_fn` callable; each rollout
     drives its own calls, so the generator runs a whole group's calls together in one continuous
     batch.
@@ -68,11 +64,24 @@ class Rollouter(Configurable):
         rollouter = Rollouter.Config(
             train_dataset=MyDataset.Config(seed=42),
             validation_dataset=MyDataset.Config(seed=99),
-            rubric=Rubric.Config(
-                reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
+            worker=RolloutWorker.Config(
+                rubric=Rubric.Config(
+                    reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
+                ),
+                message_env=MyEnv.Config(),
             ),
-            message_env=MyEnv.Config(),
         ).build()
+
+    Customization:
+        Rollouter supports customization at several levels:
+          - Sample source: override `Config`'s dataset fields, and/or the
+            `get_training_sample` / `get_validation_sample` methods.
+          - Group execution, coarse: override `run_group_rollouts` for your own
+            orchestration. `RolloutWorker` then becomes optional -- but override
+            `setup_async` too, or the worker pool is still spawned unused.
+          - Group execution, fine: keep the stock orchestration and point `worker`
+            at a `RolloutWorker.Config` subclass, overriding only what you need
+            (`make_env_group`, `score_group`, `run_group`).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -83,29 +92,16 @@ class Rollouter(Configurable):
         validation_dataset: Configurable.Config
         """Dataset iterator for validation."""
 
-        rubric: Rubric.Config
-        """Reward functions + weights used by `RolloutWorker.score_group`."""
-
-        message_env: MessageEnv.Config
-        """The env to build per sample; `RolloutWorker.make_env_group` calls `build(env_input=sample)`."""
-
-        token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
-        """`TokenEnv` wraps the `MessageEnv` in `RolloutWorker.make_env_group`."""
-
-        advantage: Configurable.Config = field(
-            default_factory=AdvantageEstimator.Config
-        )
-        """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
-        set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
-
-        worker_cls: type[RolloutWorker] = field(default_factory=lambda: RolloutWorker)
-        """Worker implementation constructed in each rollout worker actor."""
+        worker: RolloutWorker.Config
+        """How a rollout group is built, driven, scored and advantaged. Selects the
+        `RolloutWorker` subclass by config type; one worker is built per pool process."""
 
         worker_pool_size: int = 4
         """CPU rollout worker processes to spawn on the controller host."""
 
         num_threads_per_worker: int = 4
-        """Renderer worker threads in each rollout worker process."""
+        """Size of each worker process's default thread pool executor, i.e. the pool
+        behind every `asyncio.to_thread` call in that process."""
 
         def __post_init__(self) -> None:
             if self.worker_pool_size < 1:
@@ -155,7 +151,7 @@ class Rollouter(Configurable):
         self._worker_actors = self._worker_mesh.spawn(
             "rollout_worker",
             RolloutWorkerActor,
-            rollouter_config=self._config,
+            worker_config=self._config.worker,
             num_threads=self._config.num_threads_per_worker,
         )
         await self._worker_actors.setup_async.call(
@@ -191,9 +187,6 @@ class Rollouter(Configurable):
         each sibling drives its own `generate_fn` calls, so the generator runs a whole
         group's calls together in one continuous batch. Then `score_group` fills each reward.
 
-        Configure `worker_cls` to customize group execution, or override this method
-        to use a different execution strategy.
-
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
             sample: Dataset sample shared by the group.
@@ -216,10 +209,27 @@ class Rollouter(Configurable):
         )
 
 
-class RolloutWorker:
+class RolloutWorker(Configurable):
     """Builds, executes, scores, and advantages one rollout group."""
 
-    def __init__(self, config: Rollouter.Config) -> None:
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        rubric: Rubric.Config
+        """Reward functions + weights used by `score_group`."""
+
+        message_env: MessageEnv.Config
+        """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
+
+        token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
+        """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
+
+        advantage: Configurable.Config = field(
+            default_factory=AdvantageEstimator.Config
+        )
+        """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
+        set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
+
+    def __init__(self, config: Config) -> None:
         self.rubric: Rubric = config.rubric.build()
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env

@@ -110,15 +110,16 @@ def test_worker_executes_group_without_actor_mesh() -> None:
     async def run() -> None:
         generate_fn = _GenerateFn()
         token_env_config = _TokenEnvConfig()
-        rollouter_config = SimpleNamespace(
-            worker_cls=_CustomWorker,
+        # A RolloutWorker takes its own config, so the worker is usable without a
+        # Rollouter or an actor mesh.
+        worker_config = SimpleNamespace(
             custom_setting="custom",
             rubric=_Config(_Rubric()),
             message_env=_MessageEnvConfig(),
             token_env=token_env_config,
             advantage=_Config(_AdvantageEstimator()),
         )
-        worker = rollouter_config.worker_cls(config=rollouter_config)
+        worker = _CustomWorker(worker_config)
         await worker.setup_async(
             renderer_config=_Config("renderer"),
             hf_assets_path="hf_assets_path",

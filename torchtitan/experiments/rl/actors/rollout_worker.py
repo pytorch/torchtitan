@@ -12,7 +12,7 @@ from typing import Any
 
 from monarch.actor import Actor, endpoint
 
-from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rollout.types import RolloutGroup
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.observability import structured_logger as sl
@@ -24,15 +24,13 @@ class RolloutWorkerActor(Actor):
     def __init__(
         self,
         *,
-        rollouter_config: Rollouter.Config,
+        worker_config: RolloutWorker.Config,
         num_threads: int,
     ) -> None:
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
-        self._worker: RolloutWorker = rollouter_config.worker_cls(
-            config=rollouter_config
-        )
+        self._worker: RolloutWorker = worker_config.build()
 
     @endpoint
     async def setup_async(

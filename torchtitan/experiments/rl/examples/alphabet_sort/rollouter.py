@@ -12,9 +12,24 @@ from torchtitan.experiments.rl.examples.alphabet_sort.data import AlphabetSortDa
 from torchtitan.experiments.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.experiments.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
 
-from torchtitan.experiments.rl.rollout.rollouter import Rollouter
+from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
 
 from torchtitan.experiments.rl.rubrics import Rubric
+
+
+class AlphabetSortWorker(RolloutWorker):
+    """AlphabetSort's env and reward. Pure config; all methods inherited."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RolloutWorker.Config):
+        rubric: Rubric.Config = field(
+            default_factory=lambda: Rubric.Config(
+                reward_fns=[RewardAlphabetSort.Config(weight=1.0)]
+            )
+        )
+        message_env: AlphabetSortEnv.Config = field(
+            default_factory=AlphabetSortEnv.Config
+        )
 
 
 class AlphabetSortRollouter(Rollouter):
@@ -41,7 +56,7 @@ class AlphabetSortRollouter(Rollouter):
                         MarcChardin
                         </combined_alphabetical_sorted>          # reward 1.0
 
-    Pure config — `make_env_group`, `get_*_sample`, and `score_group` are inherited from `Rollouter`.
+    Pure config — the datasets live here, the env and reward in `AlphabetSortWorker`.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -52,11 +67,6 @@ class AlphabetSortRollouter(Rollouter):
         validation_dataset: AlphabetSortDataset.Config = field(
             default_factory=lambda: AlphabetSortDataset.Config(seed=99)
         )
-        rubric: Rubric.Config = field(
-            default_factory=lambda: Rubric.Config(
-                reward_fns=[RewardAlphabetSort.Config(weight=1.0)]
-            )
-        )
-        message_env: AlphabetSortEnv.Config = field(
-            default_factory=AlphabetSortEnv.Config
+        worker: AlphabetSortWorker.Config = field(
+            default_factory=AlphabetSortWorker.Config
         )
