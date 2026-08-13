@@ -21,7 +21,7 @@ from torchtitan.experiments.rl.rubrics import Rubric
 
 
 class DapoMathWorker(RolloutWorker):
-    """DAPO-Math's env, Math-Verify reward, and Dr.GRPO advantages.
+    """DAPO-Math's env and Math-Verify reward.
 
     Pure config; all methods inherited.
     """
