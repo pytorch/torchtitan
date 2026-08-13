@@ -12,7 +12,7 @@
 #   H = head dimension (per-head dim),
 #   T = packed tokens (B*L, used by VarlenAttention)
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
@@ -81,7 +81,11 @@ class VarlenMetadata(NamedTuple):
     cu_seq_q_host: tuple[int, ...] | None = None
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+# Mapping (not dict) lets covariant value types accept both BlockMask-only
+# dictionaries and mixed dictionaries. A None value marks an unused mask.
+AttentionMasksType = (
+    Mapping[str, BlockMask | VarlenMetadata | None] | BlockMask | VarlenMetadata
+)
 
 
 def local_head_split(

@@ -22,6 +22,7 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -51,21 +52,23 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.model import (
         GatedDeltaNet,
         Qwen35Attention,
+        Qwen35AttentionMaskDict,
         Qwen35Model,
         Qwen35TransformerBlock,
     )
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
-def annotate_multimodal_input_spmd_types(
+def annotate_qwen35_input_spmd_types(
     *,
+    attention_masks: "Qwen35AttentionMaskDict | None",
     mrope_positions: torch.Tensor | None,
     pixel_values: torch.Tensor | None,
     pixel_values_videos: torch.Tensor | None,
     grid_thw: torch.Tensor | None,
     grid_thw_videos: torch.Tensor | None,
 ) -> None:
-    """Annotate Qwen3.5 multimodal inputs with their local SPMD types."""
+    """Annotate Qwen3.5 structured inputs with their local SPMD types."""
     token_type = {
         MeshAxisName.DP: spmd.S(0),
         MeshAxisName.TP: spmd.R,
@@ -77,6 +80,13 @@ def annotate_multimodal_input_spmd_types(
 
     if mrope_positions is not None:
         spmd.assert_type(mrope_positions, token_type)
+    if attention_masks is not None:
+        deltanet_metadata = attention_masks["deltanet"]
+        assert isinstance(deltanet_metadata, VarlenMetadata)
+        spmd.assert_type(
+            deltanet_metadata.cu_seq_q,
+            {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
+        )
     for tensor in (
         pixel_values,
         pixel_values_videos,
@@ -125,7 +135,7 @@ def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
     enable_ep: bool,
-    use_deltanet_varlen_metadata: bool,
+    deltanet_inputs_flattened: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs.
 
@@ -164,7 +174,7 @@ def set_qwen35_sharding_config(
             layer_cfg,
             attention_input_layout=layer_input_layout,
             enable_ep=enable_ep,
-            use_deltanet_varlen_metadata=use_deltanet_varlen_metadata,
+            deltanet_inputs_flattened=deltanet_inputs_flattened,
         )
 
 
@@ -173,7 +183,7 @@ def _set_qwen35_layer_sharding(
     *,
     attention_input_layout: SpmdLayout,
     enable_ep: bool,
-    use_deltanet_varlen_metadata: bool,
+    deltanet_inputs_flattened: bool,
 ) -> None:
     layer_cfg.attention_norm.sharding_config = _decoder_norm_sharding(
         attention_input_layout
@@ -190,7 +200,7 @@ def _set_qwen35_layer_sharding(
         _set_deltanet_sharding(
             layer_cfg.delta_net,
             attention_input_layout=attention_input_layout,
-            use_varlen_metadata=use_deltanet_varlen_metadata,
+            inputs_flattened=deltanet_inputs_flattened,
         )
 
     if layer_cfg.feed_forward is not None:
@@ -302,7 +312,7 @@ def _set_deltanet_sharding(
     deltanet_cfg: "GatedDeltaNet.Config",
     *,
     attention_input_layout: SpmdLayout,
-    use_varlen_metadata: bool,
+    inputs_flattened: bool,
 ) -> None:
     """Sharding for GatedDeltaNet: head-sharded TP on projections.
 
@@ -334,11 +344,13 @@ def _set_deltanet_sharding(
     # RowwiseParallel on output projection (reduce-scatter to SP)
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
 
-    # DeltaNet flattens (B, L) to (1, B * L) when it receives varlen
-    # metadata, so the DP-sharded batch dimension moves from dim 0 to dim 1.
+    # Pretraining supplies document offsets for both Flex and Varlen attention,
+    # so DeltaNet flattens (B, L) to (1, B * L) and moves DP sharding from dim 0
+    # to dim 1. CP is intentionally absent from this layout: Qwen3.5 currently
+    # rejects CP, and its sequence sharding would collide with DP on dim 1.
     deltanet_activation_layout = (
         SpmdLayout({DP: spmd.S(1), TP: spmd.S(2)})
-        if use_varlen_metadata
+        if inputs_flattened
         else dense_activation_placement(tp=spmd.S(2))
     )
 
