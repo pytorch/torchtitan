@@ -14,6 +14,7 @@ from monarch.actor import Actor, endpoint
 
 from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rollout.types import RolloutGroup
+from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.observability import structured_logger as sl
 
 
@@ -32,6 +33,18 @@ class RolloutWorkerActor(Actor):
         self._worker: RolloutWorker = worker_config.build()
 
     @endpoint
+    async def setup_async(
+        self,
+        *,
+        renderer_config: RendererConfig,
+        hf_assets_path: str,
+    ) -> None:
+        await self._worker.setup_async(
+            renderer_config=renderer_config,
+            hf_assets_path=hf_assets_path,
+        )
+
+    @endpoint
     async def run_group(
         self,
         *,
@@ -40,7 +53,6 @@ class RolloutWorkerActor(Actor):
         group_id: int,
         group_size: int,
         sampling: Any,
-        renderer: Any,
     ) -> RolloutGroup:
         return await self._worker.run_group(
             generate_fn=generate_fn,
@@ -48,7 +60,6 @@ class RolloutWorkerActor(Actor):
             group_id=group_id,
             group_size=group_size,
             sampling=sampling,
-            renderer=renderer,
         )
 
     @endpoint
