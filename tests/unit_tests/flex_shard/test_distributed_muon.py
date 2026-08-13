@@ -24,7 +24,7 @@ from torchtitan.distributed.flex_shard import (
     build_distributed_muon,
     ComputeLayout,
     MuonComputeShardingConfig,
-    SingleParticipant,
+    Owned,
 )
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
@@ -62,7 +62,7 @@ class TestDistributedMuon(DTensorTestBase):
             compute_sharding_by_fqn={
                 fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={
+                        shardings_by_mesh_axis={
                             "dp_shard": Replicate(),
                         },
                     )
@@ -133,7 +133,7 @@ class TestDistributedMuon(DTensorTestBase):
             aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
             aligned_compute_sharding = MuonComputeShardingConfig(
                 compute_layout=ComputeLayout(
-                    distribution_by_mesh_axis={"dp_shard": Shard(0)},
+                    shardings_by_mesh_axis={"dp_shard": Shard(0)},
                 ),
                 compute_view=AttentionPerHeadComputeView(
                     num_heads=4,
@@ -162,14 +162,14 @@ class TestDistributedMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={
-                                "dp_shard": SingleParticipant(),
+                            shardings_by_mesh_axis={
+                                "dp_shard": Owned(),
                             },
                         )
                     ),
                     oversharded_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={"dp_shard": Shard(0)},
+                            shardings_by_mesh_axis={"dp_shard": Shard(0)},
                         ),
                         compute_view=AttentionPerHeadComputeView(
                             num_heads=3,
@@ -389,7 +389,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
         return "cuda"
 
     @with_comms
-    def test_rejects_mixed_single_participant_and_placement_redistribution(self):
+    def test_rejects_mixed_owned_and_placement_redistribution(self):
         mesh = init_device_mesh(
             self.device_type,
             (2, 2),
@@ -404,15 +404,15 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
 
         with self.assertRaisesRegex(
             NotImplementedError,
-            "cannot combine SingleParticipant and placement redistribution",
+            "cannot combine Owned and placement redistribution",
         ):
             build_distributed_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
                     fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={
-                                "efsdp": SingleParticipant(),
+                            shardings_by_mesh_axis={
+                                "efsdp": Owned(),
                                 "ep": Replicate(),
                             },
                         )
@@ -534,27 +534,27 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
             compute_sharding_by_fqn={
                 dense_fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={
-                            "dp_shard": SingleParticipant(),
+                        shardings_by_mesh_axis={
+                            "dp_shard": Owned(),
                         },
                     )
                 ),
                 jointly_assigned_fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={
-                            "efsdp": SingleParticipant(),
-                            "ep": SingleParticipant(),
+                        shardings_by_mesh_axis={
+                            "efsdp": Owned(),
+                            "ep": Owned(),
                         },
                     )
                 ),
                 "layers.0.routed_experts.sharded": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={"efsdp": Shard(0)},
+                        shardings_by_mesh_axis={"efsdp": Shard(0)},
                     )
                 ),
                 "layers.0.routed_experts.replicated": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={
+                        shardings_by_mesh_axis={
                             "efsdp": Replicate(),
                             "ep": Shard(0),
                         },
@@ -562,12 +562,12 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
                 ),
                 "layers.0.routed_experts.repeated_shard": MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={"efsdp": Replicate()},
+                        shardings_by_mesh_axis={"efsdp": Replicate()},
                     )
                 ),
                 fully_replicated_fqn: MuonComputeShardingConfig(
                     compute_layout=ComputeLayout(
-                        distribution_by_mesh_axis={
+                        shardings_by_mesh_axis={
                             "efsdp": Replicate(),
                             "ep": Replicate(),
                         },
@@ -747,7 +747,7 @@ class TestDistributedMuonMultiMesh(DTensorTestBase):
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 8, "requires eight CUDA devices")
-class TestDistributedMuonJointSingleParticipantValidation(DTensorTestBase):
+class TestDistributedMuonJointOwnedValidation(DTensorTestBase):
     @property
     def world_size(self):
         return 8
@@ -757,7 +757,7 @@ class TestDistributedMuonJointSingleParticipantValidation(DTensorTestBase):
         return "cuda"
 
     @with_comms
-    def test_rejects_nonreplicated_axis_outside_joint_single_participant(self):
+    def test_rejects_nonreplicated_axis_outside_joint_owned(self):
         mesh = init_device_mesh(
             self.device_type,
             (2, 2, 2),
@@ -783,9 +783,9 @@ class TestDistributedMuonJointSingleParticipantValidation(DTensorTestBase):
                 compute_sharding_by_fqn={
                     fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            distribution_by_mesh_axis={
-                                "efsdp": SingleParticipant(),
-                                "ep": SingleParticipant(),
+                            shardings_by_mesh_axis={
+                                "efsdp": Owned(),
+                                "ep": Owned(),
                             },
                         )
                     )

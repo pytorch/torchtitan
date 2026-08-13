@@ -15,38 +15,37 @@ from typing import Any
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-__all__ = ["BucketConfig", "ComputeLayout", "SingleParticipant"]
+__all__ = ["BucketConfig", "ComputeLayout", "Owned"]
 
 
 @dataclass(frozen=True, slots=True)
-class SingleParticipant:
-    """Assign the complete subgroup-local logical tensor to one participant.
+class Owned:
+    """Assign the complete subgroup-local logical tensor to one owner rank.
 
-    This is a temporary compute distribution, not a DTensor storage placement.
-    The consuming optimizer chooses the participant. When multiple mesh axes use
-    this distribution, it chooses one participant from their Cartesian group.
+    The owner is selected dynamically from the communication submesh and exists
+    only during the compute phase; this is not persistent DTensor storage
+    ownership. Multiple mesh axes using ``Owned`` select one owner rank from
+    their Cartesian product.
     """
 
     pass
 
 
-class _FrozenDistributionByMeshAxis(
-    Mapping[str, SingleParticipant | Replicate | Shard]
-):
+class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard]):
     """Small immutable mapping that remains safe to copy with configs."""
 
     __slots__ = ("_items",)
 
     def __init__(
         self,
-        distribution_by_mesh_axis: Mapping[str, SingleParticipant | Replicate | Shard],
+        shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard],
     ) -> None:
-        self._items = tuple(distribution_by_mesh_axis.items())
+        self._items = tuple(shardings_by_mesh_axis.items())
 
-    def __getitem__(self, axis_name: str) -> SingleParticipant | Replicate | Shard:
-        for candidate_axis_name, distribution in self._items:
+    def __getitem__(self, axis_name: str) -> Owned | Replicate | Shard:
+        for candidate_axis_name, sharding in self._items:
             if candidate_axis_name == axis_name:
-                return distribution
+                return sharding
         raise KeyError(axis_name)
 
     def __iter__(self) -> Iterator[str]:
@@ -61,19 +60,20 @@ class _FrozenDistributionByMeshAxis(
     def __repr__(self) -> str:
         return repr(dict(self._items))
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenDistributionByMeshAxis:
+    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenShardingsByMeshAxis:
         return self
 
 
 @dataclass(frozen=True, slots=True)
 class ComputeLayout:
-    """Describe a temporary compute layout on named storage-mesh axes.
+    """Describe temporary compute shardings on named storage-mesh axes.
 
-    Each named axis uses one of three compute distributions: ``SingleParticipant``
-    assigns the complete subgroup-local logical tensor to one participant,
-    ``Replicate`` assigns it to every participant, and ``Shard`` partitions one
+    Each named axis uses one of three compute shardings: ``Owned`` assigns the
+    complete subgroup-local logical tensor to one dynamically selected owner rank,
+    ``Replicate`` assigns it to every rank, and ``Shard`` partitions one
     tensor dimension.
-    Multiple ``SingleParticipant`` distributions form one joint Cartesian group.
+    Multiple ``Owned`` shardings select one owner rank from their joint Cartesian
+    group.
     Omitted axes preserve their storage placement. Extra declarations may target
     mesh variants not used by a particular parameter, but at least one declaration
     must apply when the layout is resolved.
@@ -82,45 +82,43 @@ class ComputeLayout:
         Shard a viewed matrix batch across the EFSDP and EP axes::
 
             ComputeLayout(
-                distribution_by_mesh_axis={
+                shardings_by_mesh_axis={
                     "efsdp": Shard(0),
                     "ep": Shard(0),
                 }
             )
 
-        Assign the complete subgroup-local logical tensor to one participant
+        Assign the complete subgroup-local logical tensor to one owner rank
         along ``dp_shard``::
 
             ComputeLayout(
-                distribution_by_mesh_axis={
-                    "dp_shard": SingleParticipant(),
+                shardings_by_mesh_axis={
+                    "dp_shard": Owned(),
                 }
             )
     """
 
-    distribution_by_mesh_axis: Mapping[str, SingleParticipant | Replicate | Shard]
+    shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard]
 
     def __post_init__(self) -> None:
-        distribution_by_mesh_axis = dict(self.distribution_by_mesh_axis)
-        if not distribution_by_mesh_axis:
-            raise ValueError("ComputeLayout must declare a compute distribution")
-        for axis_name, distribution in distribution_by_mesh_axis.items():
+        shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
+        if not shardings_by_mesh_axis:
+            raise ValueError("ComputeLayout must declare a compute sharding")
+        for axis_name, sharding in shardings_by_mesh_axis.items():
             if not isinstance(axis_name, str):
                 raise ValueError(
-                    "ComputeLayout.distribution_by_mesh_axis keys must be strings"
+                    "ComputeLayout.shardings_by_mesh_axis keys must be strings"
                 )
-            if type(distribution) not in (SingleParticipant, Replicate, Shard):
+            if type(sharding) not in (Owned, Replicate, Shard):
                 raise ValueError(
-                    "ComputeLayout.distribution_by_mesh_axis values must be "
-                    "SingleParticipant, Replicate, or Shard"
+                    "ComputeLayout.shardings_by_mesh_axis values must be "
+                    "Owned, Replicate, or Shard"
                 )
-        normalized_distribution_by_mesh_axis = dict(
-            sorted(distribution_by_mesh_axis.items())
-        )
+        normalized_shardings_by_mesh_axis = dict(sorted(shardings_by_mesh_axis.items()))
         object.__setattr__(
             self,
-            "distribution_by_mesh_axis",
-            _FrozenDistributionByMeshAxis(normalized_distribution_by_mesh_axis),
+            "shardings_by_mesh_axis",
+            _FrozenShardingsByMeshAxis(normalized_shardings_by_mesh_axis),
         )
 
 
