@@ -24,6 +24,7 @@ from fla.ops.gated_delta_rule.fused_recurrent import FusedRecurrentFunction
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
@@ -32,6 +33,7 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
+    FlexAttention,
     local_head_split,
     VarlenAttention,
     VarlenMetadata,
@@ -45,10 +47,11 @@ from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 from .rope import MRoPE
-from .sharding import annotate_multimodal_input_spmd_types, set_qwen35_sharding_config
+from .sharding import annotate_qwen35_input_spmd_types, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
+Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 spmd.register_local_autograd_function(ChunkGatedDeltaRuleFunction)
 spmd.register_local_autograd_function(FusedRecurrentFunction)
@@ -241,12 +244,12 @@ class GatedDeltaNet(Module):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
-    No RoPE, different head structure from standard attention. When varlen
-    metadata (``VarlenMetadata``) is provided -- i.e. under the ``varlen``
-    attention backend -- conv and recurrent state are reset at document
-    boundaries. Under other backends (e.g. ``flex``, which passes a
-    ``BlockMask``) no reset occurs and the packed sequence is processed as a
-    single continuous stream.
+    No RoPE, different head structure from standard attention. Conv and
+    recurrent state are reset at document boundaries whenever document
+    offsets (``VarlenMetadata``) are provided -- the transformer block picks
+    them out of the model's attention-mask dict under the ``"deltanet"`` key
+    (both attention backends). With no offsets (``None``) the packed sequence
+    is processed as a single continuous stream.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -390,13 +393,17 @@ class GatedDeltaNet(Module):
     def forward(
         self,
         x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: VarlenMetadata | None = None,
     ) -> torch.Tensor:
         B, L, _ = x_BLD.shape
         cu_seqlens = None
         cu_seqlens_cpu = None
-        if isinstance(attention_masks, VarlenMetadata):
-            cu_seqlens = attention_masks.cu_seq_q
+        if attention_masks is not None:
+            # FLA caches varlen index helpers by tensor identity. A fresh
+            # tensor ensures forward and activation-checkpoint recompute both
+            # execute the helpers instead of taking different cache paths.
+            with spmd.local():
+                cu_seqlens = attention_masks.cu_seq_q.clone()
             cu_seqlens_host = attention_masks.cu_seq_q_host
             if cu_seqlens_host is None:
                 raise ValueError(
@@ -610,6 +617,7 @@ class Qwen35TransformerBlock(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.full_attn = config.attention is not None
+        self.attn_mask_key = "quadratic_attention" if self.full_attn else "deltanet"
 
         if self.full_attn:
             self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
@@ -631,14 +639,18 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: Qwen35AttentionMaskDict | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        layer_mask = (
+            attention_masks[self.attn_mask_key] if attention_masks is not None else None
+        )
+
         h_BLD = self.attention_norm(x_BLD)
         if self.full_attn:
-            h_BLD = self.attn(h_BLD, attention_masks, positions)
+            h_BLD = self.attn(h_BLD, layer_mask, positions)
         else:
-            h_BLD = self.attn(h_BLD, attention_masks)
+            h_BLD = self.attn(h_BLD, layer_mask)
         x_BLD = x_BLD + h_BLD
 
         h_BLD = self.ffn_norm(x_BLD)
@@ -724,12 +736,16 @@ class Qwen35Model(Decoder):
                             f"n_value_heads ({n_value_heads})."
                         )
 
+            first_attention = self.first_attention
             set_qwen35_sharding_config(
                 self,
                 enable_ep=parallelism.expert_parallel_degree > 1,
-                use_deltanet_varlen_metadata=isinstance(
-                    self.first_attention.inner_attention,
-                    VarlenAttention.Config,
+                deltanet_inputs_flattened=(
+                    first_attention is not None
+                    and isinstance(
+                        first_attention.inner_attention,
+                        (FlexAttention.Config, VarlenAttention.Config),
+                    )
                 ),
             )
 
@@ -767,21 +783,39 @@ class Qwen35Model(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
-    ) -> AttentionMasksType | None:
+    ) -> Qwen35AttentionMaskDict:
+        """Build the per-consumer mask dict for the hybrid stack.
+
+        A ``BlockMask`` isolates documents in the quadratic layers. The value
+        is ``None`` if the config has no quadratic layer. GatedDeltaNet uses
+        document offsets under the ``"deltanet"`` key. Each block selects its
+        value by ``attn_mask_key``. The trainer builds this dictionary for
+        each pipeline microbatch.
+        """
         attn_config = self.config.first_attention
-        if attn_config is not None and isinstance(
-            attn_config.inner_attention, VarlenAttention.Config
-        ):
-            # Host offsets are a GatedDeltaNet-only need: the FLA varlen
-            # kernels take cu_seqlens as a CPU tensor to size their launches,
-            # whereas quadratic attention (torch.nn.attention.varlen) consumes
-            # the device tensor directly. They are stored as Python ints so
-            # SelectiveAC checkpoint metadata stays tensor-free.
-            return create_varlen_metadata_for_document(
-                positions,
-                include_host_offsets=True,
-            )
-        return super().get_attention_masks(positions)
+
+        # Host offsets are a GatedDeltaNet-only need: the FLA varlen kernels
+        # take cu_seqlens as a CPU tensor to size their launches, whereas
+        # quadratic attention (torch.nn.attention.varlen) consumes the device
+        # tensor directly. They are stored as Python ints so SelectiveAC
+        # checkpoint metadata stays tensor-free.
+        deltanet_metadata = create_varlen_metadata_for_document(
+            positions,
+            include_host_offsets=True,
+        )
+        if attn_config is None:
+            quadratic_attention = None
+        elif isinstance(attn_config.inner_attention, VarlenAttention.Config):
+            # Under varlen both consumers read the same document offsets.
+            quadratic_attention = deltanet_metadata
+        else:
+            quadratic_masks = super().get_attention_masks(positions)
+            assert isinstance(quadratic_masks, BlockMask)
+            quadratic_attention = quadratic_masks
+        return {
+            "quadratic_attention": quadratic_attention,
+            "deltanet": deltanet_metadata,
+        }
 
     def _get_vision_positions(
         self,
@@ -905,14 +939,15 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: Qwen35AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
         with self.multimodal_context():
             if get_spmd_backend() == "spmd_types":
-                annotate_multimodal_input_spmd_types(
+                annotate_qwen35_input_spmd_types(
+                    attention_masks=attention_masks,
                     mrope_positions=mrope_positions,
                     pixel_values=pixel_values,
                     pixel_values_videos=pixel_values_videos,
