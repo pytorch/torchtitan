@@ -112,14 +112,21 @@ jobs:
           IS_8GPU_TAG="${IS_8GPU_TAG:-false}"
           TRIGGERED_8GPU_LABEL="${TRIGGERED_8GPU_LABEL:-false}"
 
-          # Decide which matrix entries to include based on event type
-          # Runs ROCm only for push tag OR when PR label gets triggered.
-          if [[ ( "$IS_8GPU_TAG" == "true" || "$TRIGGERED_8GPU_LABEL" == "true" ) && -n "$ROCM_MATRIX" ]]; then
+          # A ciflow tag is the canonical PR trigger for the Feature and Model
+          # workflows, so it runs the full configured matrix.
+          if [[ "$IS_8GPU_TAG" == "true" ]]; then
+            cat > matrix.json <<JSON
+          {"include": [$FULL_MATRIX]}
+          JSON
+
+          # Direct label events remain ROCm-only for workflows that consume
+          # pull_request events.
+          elif [[ "$TRIGGERED_8GPU_LABEL" == "true" && -n "$ROCM_MATRIX" ]]; then
             cat > matrix.json <<JSON
           {"include": [$ROCM_MATRIX]}
           JSON
 
-          # Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule
+          # Pushes to main and scheduled runs use the full configured matrix.
           elif [[ ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
             cat > matrix.json <<JSON
           {"include": [$FULL_MATRIX]}

@@ -7,10 +7,6 @@ on:
       - ciflow/8gpu/*
     paths-ignore:
       - 'torchtitan/experiments/**'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - 'torchtitan/experiments/**'
   schedule:
     # Runs every 6 hours
     - cron: '0 */6 * * *'
