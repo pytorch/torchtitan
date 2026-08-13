@@ -41,6 +41,9 @@ dev = [
     "expecttest", # test_tokenizer
     "pyrefly==0.45.1",
 ]
+torch-checkpointing = [
+    "torch_checkpointing>=0.1.0",
+]
 
 [tool.setuptools.dynamic]
 version = {file = "assets/version.txt"}
