@@ -8,7 +8,7 @@ import unittest
 
 import torch
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Shard
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -24,6 +24,7 @@ from torchtitan.distributed.flex_shard import (
     build_distributed_muon,
     ComputeLayout,
     MuonComputeShardingConfig,
+    SingleParticipant,
 )
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
@@ -40,6 +41,63 @@ class TestDistributedMuon(DTensorTestBase):
     @property
     def device_type(self):
         return "cuda"
+
+    @with_comms
+    def test_explicit_replicated_compute(self):
+        lr = 0.03
+        weight_decay = 0.2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(12, device=device).reshape(4, 3).float().div_(10)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), mesh, (Replicate(),))
+        )
+        fqn = "layers.0.replicated"
+        optimizer = build_distributed_muon(
+            [{"params": [parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: MuonComputeShardingConfig(
+                    compute_layout=ComputeLayout(
+                        distribution_by_mesh_axis={
+                            "dp_shard": Replicate(),
+                        },
+                    )
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=(fqn,))],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+
+        reference = torch.nn.Parameter(value.clone())
+        reference_optimizer = torch.optim.Muon(
+            [reference],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+        grad = torch.arange(1, 13, device=device).reshape(4, 3).float().div_(17)
+        parameter.grad = distribute_tensor(grad.clone(), mesh, (Replicate(),))
+        reference.grad = grad.clone()
+
+        optimizer.step()
+        reference_optimizer.step()
+
+        torch.testing.assert_close(
+            parameter.to_local(),
+            reference,
+            rtol=0,
+            atol=0,
+        )
 
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
@@ -78,12 +136,14 @@ class TestDistributedMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            matrix_ownership_axes=("dp_shard",),
+                            distribution_by_mesh_axis={
+                                "dp_shard": SingleParticipant(),
+                            },
                         )
                     ),
                     local_blocks_fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            placements_by_mesh_axis={"dp_shard": Shard(0)},
+                            distribution_by_mesh_axis={"dp_shard": Shard(0)},
                         ),
                         compute_view=AttentionPerHeadComputeView(
                             num_heads=num_heads,
@@ -285,7 +345,7 @@ class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
                 compute_sharding_by_fqn={
                     fqn: MuonComputeShardingConfig(
                         compute_layout=ComputeLayout(
-                            placements_by_mesh_axis={
+                            distribution_by_mesh_axis={
                                 "efsdp": Shard(0),
                                 "ep": Shard(0),
                             },
