@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
@@ -11,7 +12,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.models.common import ComplexRoPE, Embedding, Linear
-from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.attention import QKVLinear, VarlenAttention
 from torchtitan.models.common.config_utils import get_attention_config, make_ffn_config
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -34,6 +35,7 @@ from .model import (
 )
 from .parallelize import parallelize_muse_glimmer, pipeline_muse_glimmer
 from .sharding import set_muse_glimmer_vision_sharding_config
+from .state_dict_adapter import MuseGlimmerStateDictAdapter
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
 __all__ = [
@@ -133,7 +135,15 @@ def _build_muse_glimmer_attention(
 ) -> Attention.Config:
     # Attention.Config mirrors GQAttention.Config plus Muse Glimmer-specific fields
     # (scale_query_by, o_gate, per-layer window_size).
+    window = _layer_window_size(layer_id, n_layers, window_pattern)
     inner_attention = get_attention_config(attn_backend)
+    # Varlen carries the per-layer sliding window as an FA3 kernel arg (mirrors
+    # gpt_oss). The flex path instead selects a window-keyed BlockMask in
+    # Attention.forward, so it leaves inner_attention's window at the default.
+    if window is not None and isinstance(inner_attention, VarlenAttention.Config):
+        inner_attention = dataclasses.replace(
+            inner_attention, window_size=(window - 1, 0)
+        )
     return Attention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
@@ -174,7 +184,7 @@ def _build_muse_glimmer_attention(
             out_features=n_heads * head_dim,
             param_init=_LINEAR_INIT,
         ),
-        window_size=_layer_window_size(layer_id, n_layers, window_pattern),
+        window_size=window,
     )
 
 
@@ -498,5 +508,5 @@ def model_registry(
         parallelize_fn=parallelize_muse_glimmer,
         pipelining_fn=pipeline_muse_glimmer,
         post_optimizer_build_fn=None,
-        state_dict_adapter=None,
+        state_dict_adapter=MuseGlimmerStateDictAdapter,
     )
