@@ -24,6 +24,10 @@ Every other TorchTitan model resolves to a renderer that lives in
 PrimeIntellect-ai/renderers. This one ships here because Muse Glimmer is not in that
 library yet. Once it is upstreamed, delete ``register()`` and keep only the
 ``_RENDERER_BY_MODEL`` entry.
+
+It lives under ``experiments/rl`` rather than ``torchtitan/models/muse_glimmer`` because
+RL is its only consumer and ``renderers`` is an RL-only optional dependency; keeping it
+here leaves the core model package importable without it.
 """
 
 from __future__ import annotations
