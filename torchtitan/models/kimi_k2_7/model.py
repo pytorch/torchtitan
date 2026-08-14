@@ -195,7 +195,7 @@ class KimiK25Model(DeepSeekV3Model):
                     grid_thw=grid_thw,
                     pixel_values_videos=pixel_values_videos,
                     grid_thw_videos=grid_thw_videos,
-                    special_tokens=special_tokens,
+                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
                 )
             else:
                 x = tokens

@@ -105,7 +105,7 @@ def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _vl_scaled_bias_rowwise_linear(
+def _scaled_bias_rowwise_linear(
     in_features: int, out_features: int
 ) -> ScaledBiasRowwiseLinear.Config:
     return ScaledBiasRowwiseLinear.Config(
@@ -150,11 +150,11 @@ def _vision_encoder_config(
             wq=_vl_linear(dim, dim),
             wk=_vl_linear(dim, dim),
             wv=_vl_linear(dim, dim),
-            proj=_vl_scaled_bias_rowwise_linear(dim, dim),
+            proj=_scaled_bias_rowwise_linear(dim, dim),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),
-            fc2=_vl_scaled_bias_rowwise_linear(ffn_dim, dim),
+            fc2=_scaled_bias_rowwise_linear(ffn_dim, dim),
         ),
     )
 
@@ -180,7 +180,7 @@ def _vision_encoder_config(
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
             linear_1=_vl_linear(merged_dim, merged_dim),
-            linear_2=_vl_scaled_bias_rowwise_linear(merged_dim, text_hidden_size),
+            linear_2=_scaled_bias_rowwise_linear(merged_dim, text_hidden_size),
         ),
     )
 
