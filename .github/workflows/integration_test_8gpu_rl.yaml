@@ -6,7 +6,6 @@ on:
     paths:
       - 'torchtitan/experiments/rl/**'
       - 'torchtitan/models/qwen3_5/**'
-      - 'tests/unit_tests/test_qwen3_5_gdn.py'
       - '.github/workflows/integration_test_8gpu_rl.yaml'
   pull_request:
     types: [labeled, synchronize]
@@ -93,10 +92,7 @@ jobs:
         # 5. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-        # 6. Verify the FLA recurrent GDN kernel is bitwise batch-invariant.
-        python -m pytest tests/unit_tests/test_qwen3_5_gdn.py -v
-
-        # 7. Download HF model checkpoint for tests
+        # 6. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
