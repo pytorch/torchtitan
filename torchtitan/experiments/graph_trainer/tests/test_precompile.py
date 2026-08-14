@@ -83,6 +83,8 @@ class _StubCompileConfig:
     mode: str = "aot_fx_trace"
     backend: str = "aot_eager"
     passes: list = field(default_factory=list)
+    memory_policy: str = "default"
+    full_recompute_save_ops: str = ""
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
 
 
@@ -132,6 +134,22 @@ class TestConfigFingerprint(unittest.TestCase):
         fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
         self.assertEqual(fp1, fp2)
         self.assertEqual(len(fp1), 16)
+
+    def test_memory_policy_save_ops_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        dims = _StubParallelDims()
+        cfg_a = _StubCompileConfig(memory_policy="full")
+        cfg_b = _StubCompileConfig(
+            memory_policy="full",
+            full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.default"),
+        )
+
+        fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
+        fp_b = compute_config_fingerprint(_make_stub_model(), cfg_b, dims)
+        self.assertNotEqual(fp_a, fp_b)
 
     def test_model_shape_sensitivity(self):
         from torchtitan.experiments.graph_trainer.precompile import (
