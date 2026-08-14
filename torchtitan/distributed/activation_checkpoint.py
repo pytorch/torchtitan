@@ -63,10 +63,10 @@ def _suppress_metric_side_effects_during_recompute(contexts):
     return forward_context, recompute_without_metric_side_effects()
 
 
-def _save_forward_side_effects():
-    """Save tensor-statistic mutations during compiled recomputation."""
+def _save_routing_and_forward_side_effects():
+    """Save nondeterministic routing and metric mutations during recomputation."""
 
-    must_save = _registered_forward_side_effect_ops()
+    must_save = _registered_forward_side_effect_ops() | {torch.ops.aten.topk.default}
 
     def policy_fn(_context, op, *args, **kwargs):
         if op in must_save:
@@ -82,7 +82,7 @@ def _full_ac_contexts():
 
     if torch.compiler.is_compiling():
         if _is_installed():
-            return _save_forward_side_effects()
+            return _save_routing_and_forward_side_effects()
         # A compiled checkpoint context must return TorchDispatchModes even
         # when tensor logging is disabled. This policy is the no-save form.
         return create_selective_checkpoint_contexts(

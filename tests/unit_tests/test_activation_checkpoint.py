@@ -15,7 +15,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 from torch.utils.flop_counter import FlopCounterMode
 from torchtitan.distributed.activation_checkpoint import (
     _full_ac_contexts,
-    _save_forward_side_effects,
+    _save_routing_and_forward_side_effects,
     FullAC,
     SelectiveAC,
 )
@@ -57,15 +57,15 @@ class TestApplyAC(unittest.TestCase):
         code = """
 from torchtitan.distributed.activation_checkpoint import (
     _registered_forward_side_effect_ops,
-    _save_forward_side_effects,
+    _save_routing_and_forward_side_effects,
 )
 
 assert not _registered_forward_side_effect_ops()
-_save_forward_side_effects()
+_save_routing_and_forward_side_effects()
 """
         subprocess.run([sys.executable, "-c", code], check=True)
 
-    def test_compiled_full_ac_saves_tensor_statistic_mutations(self):
+    def test_compiled_full_ac_saves_routing_and_statistic_mutations(self):
         from torchtitan.observability.tensor_logging.statistics import (
             accumulate_tensor_statistics,
         )
@@ -78,7 +78,7 @@ _save_forward_side_effects()
             "create_selective_checkpoint_contexts",
             side_effect=lambda policy: policies.append(policy) or contexts,
         ):
-            self.assertIs(_save_forward_side_effects(), contexts)
+            self.assertIs(_save_routing_and_forward_side_effects(), contexts)
 
         policy = policies[0]
         self.assertIs(
@@ -86,6 +86,10 @@ _save_forward_side_effects()
                 None,
                 torch.ops.torchtitan.accumulate_tensor_statistics.default,
             ),
+            CheckpointPolicy.MUST_SAVE,
+        )
+        self.assertIs(
+            policy(None, torch.ops.aten.topk.default),
             CheckpointPolicy.MUST_SAVE,
         )
         self.assertIs(
