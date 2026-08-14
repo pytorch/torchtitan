@@ -784,7 +784,7 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
 
     def destroy_pg(self, device_id=None):
         super().destroy_pg(device_id)
-        set_spmd_backend("default")
+        set_spmd_backend("spmd_types")
 
     @property
     def world_size(self):

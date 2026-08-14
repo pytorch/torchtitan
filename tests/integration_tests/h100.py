@@ -103,9 +103,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
                     "--module deepseek_v3 --config "
                     "deepseek_v3_debugmodel_minimal_async_ep",
                     "--compile.no-enable",
-                    # TODO: Remove this per-test override once the H100 suite
-                    # is migrated to the spmd_types backend.
-                    "--parallelism.spmd_backend spmd_types",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.tensor_parallel_degree 2",

@@ -770,7 +770,7 @@ class QKVLinear(BaseQKVLinear):
             # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
             with spmd.local():
                 x_ = x.view(bs, seqlen, -1, self.head_dim)
-                if get_spmd_backend() == "spmd_types":
+                if spmd.is_type_checking():
                     spmd.assert_type(
                         x_, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
                     )
@@ -830,7 +830,7 @@ class FusedQKVLinear(BaseQKVLinear):
         qkv = self.wqkv(x)
         with spmd.local():  # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
             qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
-            if get_spmd_backend() == "spmd_types":
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None)
                 )

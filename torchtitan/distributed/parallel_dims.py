@@ -145,7 +145,9 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
-    spmd_backend: Literal["default", "full_dtensor", "spmd_types"] = "default"
+    spmd_backend: Literal["partial_dtensor", "full_dtensor", "spmd_types"] = (
+        "spmd_types"
+    )
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse
     # is required for ``mesh in spmd_meshes()`` checks.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -578,7 +580,7 @@ class ParallelDims:
         axes_list = [
             axis.value if isinstance(axis, MeshAxisName) else axis for axis in axes
         ]
-        if self.spmd_backend == "default":
+        if self.spmd_backend == "partial_dtensor":
             in_band = ("tp", "ep")
             axes_list = [axis for axis in axes_list if axis in in_band]
         elif self.spmd_backend == "full_dtensor":
