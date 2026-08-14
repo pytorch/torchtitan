@@ -1000,7 +1000,7 @@ def _build_matrix_batch_redistribution_plan(
     storage_shape: tuple[int, ...],
     compute_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
-    """Map flat row storage to block-aligned flat compute tensors."""
+    """Map row-concatenated storage to block-aligned compute tensors."""
     _require_valid_plan(
         len(storage_shape) == 2
         and len(compute_shape) == 3
@@ -1104,7 +1104,7 @@ def _build_matrix_batch_redistribution_plan(
                     ),
                     shape=(route_rows, matrix_columns),
                 )
-                flat_compute_region = _TensorRegion(
+                compute_tensor_region = _TensorRegion(
                     offsets=(
                         local_matrix_index * matrix_rows
                         + route_row_offset
@@ -1121,7 +1121,7 @@ def _build_matrix_batch_redistribution_plan(
                             source_holders,
                         ),
                         destination=_RouteEndpoint(
-                            flat_compute_region,
+                            compute_tensor_region,
                             destination_participants,
                         ),
                     )
