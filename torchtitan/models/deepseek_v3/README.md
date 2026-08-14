@@ -15,6 +15,10 @@ python scripts/download_hf_assets.py --repo_id deepseek-ai/deepseek-moe-16b-base
 
 ## Training
 
+The 16B and 671B MinimalAsyncEP configs use FlexAttention's FlashAttention 4
+backend. Install a compatible `flash-attn-4` build before running them, for
+example `pip install --pre "flash-attn-4[cu13]"` for CUDA 13.
+
 ```bash
 # Quick debug run with small model
 MODULE=deepseek_v3 CONFIG=deepseek_v3_debugmodel ./run_train.sh
