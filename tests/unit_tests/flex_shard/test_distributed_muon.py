@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from typing import Any, cast
 
 import torch
 from torch.distributed.device_mesh import init_device_mesh
@@ -25,139 +24,10 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     Owned,
 )
-from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import _TensorRegion
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
-    _build_matrix_batch_redistribution_plan,
-    _MatrixBatchView,
     DistributedMuon,
 )
-
-
-def _build_single_parameter_muon(
-    parameter, shardings_by_mesh_axis, *, num_stacked_matrices=None, **kwargs
-):
-    fqn = "layers.0.attention.wq.weight"
-    return build_distributed_muon(
-        [{"params": [parameter], "param_names": [fqn]}],
-        compute_sharding_by_fqn={
-            fqn: ComputeLayout(
-                shardings_by_mesh_axis=shardings_by_mesh_axis,
-            )
-        },
-        num_stacked_matrices_by_fqn=(
-            {} if num_stacked_matrices is None else {fqn: num_stacked_matrices}
-        ),
-        bucket_configs=[BucketConfig(patterns=(fqn,))],
-        **kwargs,
-    )
-
-
-class TestStackedMatrixConfiguration(unittest.TestCase):
-    def test_num_stacked_matrices_must_be_positive(self):
-        parameter = torch.nn.Parameter(torch.ones(2, 2))
-        for num_stacked_matrices in (True, 0, -1, 1.5):
-            with self.subTest(num_stacked_matrices=num_stacked_matrices):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "num_stacked_matrices_by_fqn.*must be a positive integer",
-                ):
-                    _build_single_parameter_muon(
-                        parameter,
-                        {"dp_shard": Shard(0)},
-                        num_stacked_matrices=cast(Any, num_stacked_matrices),
-                    )
-
-    def test_rejects_invalid_configuration_maps(self):
-        parameter = torch.nn.Parameter(torch.ones(2, 2))
-        fqn = "layers.0.attention.wq.weight"
-        params = [{"params": [parameter], "param_names": [fqn]}]
-        compute_layout = ComputeLayout(shardings_by_mesh_axis={"dp_shard": Shard(0)})
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "compute_sharding_by_fqn values must be ComputeLayout",
-        ):
-            build_distributed_muon(
-                params,
-                compute_sharding_by_fqn={fqn: cast(Any, object())},
-                num_stacked_matrices_by_fqn={},
-                bucket_configs=[],
-            )
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "num_stacked_matrices_by_fqn.*must be a positive integer",
-        ):
-            build_distributed_muon(
-                params,
-                compute_sharding_by_fqn={fqn: compute_layout},
-                num_stacked_matrices_by_fqn={fqn: cast(Any, object())},
-                bucket_configs=[],
-            )
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "num_stacked_matrices_by_fqn entries must also appear in "
-            "compute_sharding_by_fqn",
-        ):
-            build_distributed_muon(
-                params,
-                compute_sharding_by_fqn={},
-                num_stacked_matrices_by_fqn={fqn: 2},
-                bucket_configs=[],
-            )
-
-    def test_compute_input_view_is_zero_copy(self):
-        matrix_rows = 3
-        matrix_columns = 2
-        compute_view = _MatrixBatchView(
-            matrix_rows=matrix_rows,
-            matrix_columns=matrix_columns,
-        )
-
-        for num_matrices in (0, 2):
-            with self.subTest(num_matrices=num_matrices):
-                compute_input = torch.arange(
-                    num_matrices * matrix_rows * matrix_columns,
-                    dtype=torch.float32,
-                ).reshape(num_matrices * matrix_rows, matrix_columns)
-                compute = compute_view.view_compute_input(compute_input)
-
-                self.assertEqual(
-                    compute.shape,
-                    (num_matrices, matrix_rows, matrix_columns),
-                )
-                self.assertEqual(
-                    compute.stride(),
-                    (matrix_rows * matrix_columns, matrix_columns, 1),
-                )
-                self.assertEqual(compute.data_ptr(), compute_input.data_ptr())
-                if compute.numel():
-                    compute[0, 0, 0] = -1
-                    self.assertEqual(compute_input[0, 0].item(), -1)
-
-    def test_redistribution_destinations_are_flat_compute_inputs(self):
-        plan = _build_matrix_batch_redistribution_plan(
-            (
-                ((0,), _TensorRegion(offsets=(0, 0), shape=(6, 2))),
-                ((1,), _TensorRegion(offsets=(6, 0), shape=(6, 2))),
-            ),
-            participants=(0, 1),
-            storage_shape=(12, 2),
-            compute_shape=(4, 3, 2),
-        )
-
-        self.assertEqual(
-            tuple(partition.tensor_shape for partition in plan.compute_partitions),
-            ((6, 2), (6, 2)),
-        )
-        self.assertTrue(
-            all(
-                len(route.destination.tensor_region.shape) == 2
-                for route in plan.storage_to_compute_routes
-            )
-        )
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -169,77 +39,6 @@ class TestDistributedMuon(DTensorTestBase):
     @property
     def device_type(self):
         return "cuda"
-
-    @with_comms
-    def test_aligned_storage_uses_flat_compute_input_and_local_view(self):
-        num_heads = 4
-        matrix_rows = 3
-        matrix_columns = 2
-        mesh = init_device_mesh(
-            self.device_type,
-            (self.world_size,),
-            mesh_dim_names=("dp_shard",),
-        )
-        value = torch.arange(
-            num_heads * matrix_rows * matrix_columns,
-            device=torch.device(self.device_type, self.rank),
-            dtype=torch.float32,
-        ).reshape(num_heads * matrix_rows, matrix_columns)
-        parameter = torch.nn.Parameter(distribute_tensor(value, mesh, (Shard(0),)))
-
-        optimizer = _build_single_parameter_muon(
-            parameter,
-            {"dp_shard": Shard(0)},
-            num_stacked_matrices=num_heads,
-        )
-
-        compute_layout = optimizer._parameter_compute_layouts[0]
-        self.assertTrue(compute_layout.storage_is_compute_ready)
-        local_compute_input = compute_layout.local_compute_input
-        self.assertIsNotNone(local_compute_input)
-        self.assertEqual(
-            local_compute_input.shape,
-            (num_heads // self.world_size * matrix_rows, matrix_columns),
-        )
-        self.assertEqual(
-            local_compute_input.data_ptr(),
-            parameter.to_local().data_ptr(),
-        )
-        compute_view = compute_layout.compute_view
-        self.assertIsNotNone(compute_view)
-        compute = compute_view.view_compute_input(local_compute_input)
-        self.assertEqual(
-            compute.shape,
-            (num_heads // self.world_size, matrix_rows, matrix_columns),
-        )
-        self.assertEqual(compute.data_ptr(), local_compute_input.data_ptr())
-
-    @with_comms
-    def test_rejects_oversharded_matrix_batch_storage(self):
-        num_heads = 3
-        matrix_rows = 4
-        matrix_columns = 2
-        mesh = init_device_mesh(
-            self.device_type,
-            (self.world_size,),
-            mesh_dim_names=("dp_shard",),
-        )
-        value = torch.arange(
-            num_heads * matrix_rows * matrix_columns,
-            device=torch.device(self.device_type, self.rank),
-            dtype=torch.float32,
-        ).reshape(num_heads * matrix_rows, matrix_columns)
-        parameter = torch.nn.Parameter(distribute_tensor(value, mesh, (Shard(0),)))
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "matrix-batch storage shards are not aligned to matrix rows of size 4",
-        ):
-            _build_single_parameter_muon(
-                parameter,
-                {"dp_shard": Shard(0)},
-                num_stacked_matrices=num_heads,
-            )
 
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):

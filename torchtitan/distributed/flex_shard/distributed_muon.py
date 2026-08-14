@@ -65,18 +65,13 @@ def build_distributed_muon(
     ``[M * R, C]`` as stacked matrices ``[M, R, C]`` for local Muon compute.
     An absent FQN retains ordinary 2D matrix compute.
     """
-    normalized_param_groups = _normalize_param_groups(params)
-    optimizer = DistributedMuon(
-        normalized_param_groups,
+    return DistributedMuon(
+        _normalize_param_groups(params),
+        compute_sharding_by_fqn=compute_sharding_by_fqn,
         num_stacked_matrices_by_fqn=num_stacked_matrices_by_fqn,
+        bucket_configs=bucket_configs,
         **kwargs,
     )
-    _configure_distributed_muon(
-        optimizer,
-        compute_sharding_by_fqn=compute_sharding_by_fqn,
-        bucket_configs=bucket_configs,
-    )
-    return optimizer
 
 
 def _normalize_param_groups(
@@ -145,13 +140,13 @@ def _validate_num_stacked_matrices_by_fqn(
             )
 
 
-def _configure_distributed_muon(
+def _initialize_distributed_muon(
     optimizer: DistributedMuon,
     *,
     compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
 ) -> None:
-    """Configure one newly constructed DistributedMuon optimizer.
+    """Initialize FlexShard for one newly constructed DistributedMuon.
 
     Every group must provide aligned ``params`` and ``param_names``. Every
     local parameter FQN must have one entry in ``compute_sharding_by_fqn``;
@@ -164,7 +159,6 @@ def _configure_distributed_muon(
         optimizer,
         compute_sharding_by_fqn=compute_sharding_by_fqn,
     )
-    optimizer._validate_groups()
 
     parameters_to_prepare = []
     for param_group in optimizer.param_groups:
@@ -284,7 +278,9 @@ class DistributedMuon(Optimizer):
         self,
         params: Iterable[dict[str, Any]],
         *,
+        compute_sharding_by_fqn: Mapping[str, ComputeLayout],
         num_stacked_matrices_by_fqn: Mapping[str, int],
+        bucket_configs: Sequence[BucketConfig],
         lr: float = 1e-3,
         weight_decay: float = 0.1,
         momentum: float = 0.95,
@@ -314,6 +310,11 @@ class DistributedMuon(Optimizer):
         super().__init__(params, defaults)
         self._validate_groups()
         self._param_groups_frozen = True
+        _initialize_distributed_muon(
+            self,
+            compute_sharding_by_fqn=compute_sharding_by_fqn,
+            bucket_configs=bucket_configs,
+        )
 
     @overload
     def step(self, closure: None = None) -> None:
@@ -413,7 +414,6 @@ class DistributedMuon(Optimizer):
                     compute_view_key=prepared.compute_view_key,
                     global_compute_shape=global_compute_shape,
                     compute_view=prepared.compute_view,
-                    local_compute_input=resolved_transition.local_compute_input,
                     storage_mesh_ranks=_device_mesh_ranks(param.device_mesh),
                     storage_layout_signature=_storage_layout_signature(param),
                     local_storage_signature=_local_storage_signature(param.to_local()),
@@ -595,12 +595,9 @@ class DistributedMuon(Optimizer):
             DTensor,
             self.state[compute_layout.param]["momentum_buffer"],
         )
-        local_reference = (
-            compute_layout.local_compute_input
-            if compute_layout.storage_is_compute_ready
-            else compute_layout.param.to_local()
-        )
-        assert local_reference is not None
+        local_reference = compute_layout.param.to_local()
+        if compute_layout.storage_is_compute_ready:
+            local_reference = local_reference.detach()
         local_grad = grad.to_local().view_as(local_reference)
         local_momentum = momentum_state.to_local().view_as(local_reference)
         group = self._group(compute_layout)
@@ -622,32 +619,29 @@ class DistributedMuon(Optimizer):
         torch.autograd.graph.increment_version(momentum_state)
 
     def _compute_update(
-        self, compute_layout: _ParameterComputeLayout, compute_input: Tensor
+        self, compute_layout: _ParameterComputeLayout, compute_buffer: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        compute = (
-            compute_input
+        compute_tensor = (
+            compute_buffer
             if compute_layout.compute_view is None
-            else compute_layout.compute_view.view_compute_input(compute_input)
+            else compute_layout.compute_view.view_as_matrix_batch(compute_buffer)
         )
         _compute_muon_direction(
-            compute,
+            compute_tensor,
             ns_coefficients=group["ns_coefficients"],
             ns_steps=group["ns_steps"],
             eps=group["eps"],
-            out=compute,
+            out=compute_tensor,
         )
 
     def _apply_update(
         self, compute_layout: _ParameterComputeLayout, direction: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        local_param = (
-            compute_layout.local_compute_input
-            if compute_layout.storage_is_compute_ready
-            else compute_layout.param.to_local()
-        )
-        assert local_param is not None
+        local_param = compute_layout.param.to_local()
+        if compute_layout.storage_is_compute_ready:
+            local_param = local_param.detach()
         _apply_muon_update(
             local_param,
             direction,
@@ -662,8 +656,8 @@ class DistributedMuon(Optimizer):
     def _local_tensor_spec(
         compute_layout: _ParameterComputeLayout,
     ) -> tuple[torch.Size, torch.dtype, torch.device]:
-        tensor = compute_layout.local_compute_input
-        assert tensor is not None
+        assert compute_layout.storage_is_compute_ready
+        tensor = compute_layout.param.to_local().detach()
         return tensor.shape, tensor.dtype, tensor.device
 
 
@@ -693,30 +687,28 @@ class _MatrixBatchView:
             matrix_columns=storage_shape[1],
         )
 
-    def compute_tensor_shape(self, compute_input_shape: torch.Size) -> torch.Size:
+    def matrix_batch_shape(self, compute_buffer_shape: torch.Size) -> torch.Size:
         if not (
-            len(compute_input_shape) == 2
-            and not compute_input_shape[0] % self.matrix_rows
-            and compute_input_shape[1] == self.matrix_columns
+            len(compute_buffer_shape) == 2
+            and not compute_buffer_shape[0] % self.matrix_rows
+            and compute_buffer_shape[1] == self.matrix_columns
         ):
             raise RuntimeError(
-                "compute input shape is inconsistent with the prepared "
+                "compute buffer shape is inconsistent with the prepared "
                 "matrix-batch view"
             )
         return torch.Size(
             (
-                compute_input_shape[0] // self.matrix_rows,
+                compute_buffer_shape[0] // self.matrix_rows,
                 self.matrix_rows,
                 self.matrix_columns,
             )
         )
 
-    def view_compute_input(self, compute_input: Tensor) -> Tensor:
-        """Return a zero-copy local Muon view of a flattened compute input."""
-        compute_tensor_shape = self.compute_tensor_shape(
-            torch.Size(compute_input.shape)
-        )
-        return compute_input.unflatten(0, compute_tensor_shape[:2])
+    def view_as_matrix_batch(self, compute_buffer: Tensor) -> Tensor:
+        """Return a zero-copy matrix-batch view of a flat compute buffer."""
+        matrix_batch_shape = self.matrix_batch_shape(torch.Size(compute_buffer.shape))
+        return compute_buffer.unflatten(0, matrix_batch_shape[:2])
 
 
 def _validate_matrix_batch_storage_alignment(
@@ -777,7 +769,6 @@ class _ParameterComputeLayout:
     compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
     compute_view: _MatrixBatchView | None
-    local_compute_input: Tensor | None
     storage_mesh_ranks: tuple[int, ...]
     storage_layout_signature: tuple[Any, ...]
     local_storage_signature: tuple[Any, ...]
@@ -820,7 +811,6 @@ class _ResolvedStorageToComputeTransition:
     compute_sharding: _ComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
-    local_compute_input: Tensor | None
     redistribution_storage_mesh_axis: int | None = None
 
 
@@ -1010,7 +1000,7 @@ def _build_matrix_batch_redistribution_plan(
     storage_shape: tuple[int, ...],
     compute_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
-    """Map flat row storage to block-aligned flat compute inputs."""
+    """Map flat row storage to block-aligned flat compute buffers."""
     _require_valid_plan(
         len(storage_shape) == 2
         and len(compute_shape) == 3
@@ -1057,8 +1047,8 @@ def _build_matrix_batch_redistribution_plan(
         for participant in participants
     )
 
-    compute_input_endpoints = []
-    compute_input_partitions = []
+    compute_matrix_assignments = []
+    compute_partitions = []
     for mesh_rank, participant in enumerate(participants):
         local_num_matrices, matrix_offset = Shard.local_shard_size_and_offset(
             num_matrices,
@@ -1069,27 +1059,26 @@ def _build_matrix_batch_redistribution_plan(
             offsets=(matrix_offset * matrix_rows, 0),
             shape=(local_num_matrices * matrix_rows, matrix_columns),
         )
-        compute_input_endpoints.append(
+        compute_matrix_assignments.append(
             ((participant,), matrix_offset, local_num_matrices)
         )
-        compute_input_partitions.append(
+        compute_partitions.append(
             _ParticipantPartition(
                 participant=participant,
                 tensor_shape=logical_region.shape,
                 logical_regions=(logical_region,),
             )
         )
-    compute_partitions = tuple(compute_input_partitions)
 
     storage_to_compute_routes = []
     for source_holders, storage_region, storage_tensor_base in storage_endpoints:
         storage_row_offset = storage_region.offsets[0]
         storage_row_end = storage_row_offset + storage_region.shape[0]
         for (
-            destination_holders,
+            destination_participants,
             matrix_offset,
             local_num_matrices,
-        ) in compute_input_endpoints:
+        ) in compute_matrix_assignments:
             for local_matrix_index in range(local_num_matrices):
                 matrix_index = matrix_offset + local_matrix_index
                 matrix_row_offset = matrix_index * matrix_rows
@@ -1115,7 +1104,7 @@ def _build_matrix_batch_redistribution_plan(
                     ),
                     shape=(route_rows, matrix_columns),
                 )
-                compute_input_tensor_region = _TensorRegion(
+                compute_buffer_region = _TensorRegion(
                     offsets=(
                         local_matrix_index * matrix_rows
                         + route_row_offset
@@ -1132,8 +1121,8 @@ def _build_matrix_batch_redistribution_plan(
                             source_holders,
                         ),
                         destination=_RouteEndpoint(
-                            compute_input_tensor_region,
-                            destination_holders,
+                            compute_buffer_region,
+                            destination_participants,
                         ),
                     )
                 )
@@ -1142,7 +1131,7 @@ def _build_matrix_batch_redistribution_plan(
         participants=participants,
         logical_shape=storage_shape,
         storage_partitions=storage_partitions,
-        compute_partitions=compute_partitions,
+        compute_partitions=tuple(compute_partitions),
         storage_to_compute_routes=tuple(storage_to_compute_routes),
     )
 
@@ -1381,14 +1370,12 @@ def _resolve_storage_to_compute_transition(
             compute_sharding=compute_sharding,
             storage_to_compute_transition=_NoRedistributionTransition(),
             resolved_compute_layout_signature=resolved_compute_layout_signature,
-            local_compute_input=param.to_local().detach(),
         )
 
     return _ResolvedStorageToComputeTransition(
         compute_sharding=compute_sharding,
         storage_to_compute_transition=_RedistributionTransition(),
         resolved_compute_layout_signature=resolved_compute_layout_signature,
-        local_compute_input=None,
         redistribution_storage_mesh_axis=redistribution_storage_mesh_axis,
     )
 

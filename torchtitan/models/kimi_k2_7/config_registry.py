@@ -219,7 +219,7 @@ def _distributed_muon_optimizer(
             MeshAxisName.EP.value: Shard(0),
         },
     )
-    query_compute_layouts: dict[str, ComputeLayout] = (
+    query_shardings: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
             "wq_b": per_head,
@@ -227,8 +227,8 @@ def _distributed_muon_optimizer(
         if attention.q_lora_rank
         else {"wq": per_head}
     )
-    attention_compute_layouts = {
-        **query_compute_layouts,
+    attention_shardings = {
+        **query_shardings,
         "wkv_a": owned,
         "wkv_b": per_head,
         "wo": owned,
@@ -254,44 +254,44 @@ def _distributed_muon_optimizer(
     }
     expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
 
-    def compute_layouts_for_layer(
+    def compute_shardings_for_layer(
         layer_id: int,
     ) -> dict[str, ComputeLayout]:
         prefix = f"layers.{layer_id}"
-        compute_layouts = {
-            f"{prefix}.attention.{projection}.weight": compute_layout
-            for projection, compute_layout in attention_compute_layouts.items()
+        shardings = {
+            f"{prefix}.attention.{projection}.weight": compute_sharding
+            for projection, compute_sharding in attention_shardings.items()
         }
         if not layer_id:
-            compute_layouts.update(
+            shardings.update(
                 {
                     f"{prefix}.feed_forward.{projection}.weight": owned
                     for projection in ("w1", "w2", "w3")
                 }
             )
         else:
-            compute_layouts.update(
+            shardings.update(
                 {
                     f"{prefix}.moe.routed_experts.inner_experts.{projection}": per_expert
                     for projection in expert_projections
                 }
             )
-            compute_layouts[f"{prefix}.moe.router.gate.weight"] = owned
-            compute_layouts.update(
+            shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shardings.update(
                 {
                     f"{prefix}.moe.shared_experts.{projection}.weight": owned
                     for projection in ("w1", "w2", "w3")
                 }
             )
-        return compute_layouts
+        return shardings
 
-    compute_layouts_by_layer = tuple(
-        compute_layouts_for_layer(layer_id) for layer_id in range(num_layers)
+    compute_sharding_by_fqn_per_layer = tuple(
+        compute_shardings_for_layer(layer_id) for layer_id in range(num_layers)
     )
     compute_sharding_by_fqn = {
-        fqn: compute_layout
-        for layer_compute_layouts in compute_layouts_by_layer
-        for fqn, compute_layout in layer_compute_layouts.items()
+        fqn: compute_sharding
+        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
+        for fqn, compute_sharding in layer_compute_sharding_by_fqn.items()
     }
     num_stacked_matrices_by_fqn = {
         f"layers.{layer_id}.attention.{projection}.weight": attention.n_heads
@@ -299,8 +299,8 @@ def _distributed_muon_optimizer(
         for projection in per_head_attention_projections
     }
     layer_bucket_fqns = tuple(
-        tuple(layer_compute_layouts)
-        for layer_compute_layouts in compute_layouts_by_layer
+        tuple(layer_compute_sharding_by_fqn)
+        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
     )
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
     # collective launch overhead across pairs of MoE layers.
@@ -329,7 +329,7 @@ def _distributed_muon_optimizer(
     # https://arxiv.org/abs/2502.16982
     muon_pattern = (
         r"(?:"
-        rf"attention\.(?:{'|'.join(attention_compute_layouts)})\.weight|"
+        rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
         rf"routed_experts\.inner_experts\.(?:{'|'.join(expert_projections)})|"
         r"feed_forward\.w[123]\.weight|"
         # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
