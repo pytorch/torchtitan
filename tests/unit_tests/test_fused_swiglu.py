@@ -10,6 +10,10 @@ FusedSwiGLU stores a single fused ``w13`` parameter but checkpoints in the stock
 ``FeedForward`` layout (``w1.weight`` / ``w3.weight``) via state_dict hooks, so
 its checkpoints round-trip with the non-fused module and the HF state-dict
 adapter. These run on CPU.
+
+``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on
+``tp_gemm_backend="dist_gemm"``, which must keep the TP overlap rather than
+silently replacing the overlapping FFN with the plain fused one.
 """
 
 import unittest
@@ -108,6 +112,47 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         fused = _build_fused()
         with self.assertRaises(RuntimeError):
             fused.load_state_dict({"w2.weight": fused.w2.weight.detach().clone()})
+
+
+def _dist_gemm_ffn_config(**kwargs):
+    from torchtitan.models.common.config_utils import make_ffn_config
+
+    init = {"weight": torch.nn.init.zeros_}
+    return make_ffn_config(
+        dim=_DIM, hidden_dim=_HIDDEN, w1_param_init=init, w2w3_param_init=init, **kwargs
+    )
+
+
+class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
+    """Stacking this override on the dist-GEMM FFN must keep the TP overlap.
+
+    Asserts on the *built module* rather than the config type: the failure mode is
+    getting a working-but-unoverlapped FFN, which a config-type check on the
+    override's declared return type would not catch.
+    """
+
+    def test_dist_gemm_config_keeps_overlap(self):
+        from torchtitan.overrides.fused_swiglu import AllGatherFusedSwiGLU
+
+        self.assertIsInstance(
+            fused_swiglu(_dist_gemm_ffn_config()).build(), FusedSwiGLU
+        )
+        fused = fused_swiglu(_dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")).build()
+        self.assertIsInstance(fused, AllGatherFusedSwiGLU)
+
+    def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
+        fused = fused_swiglu(_dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")).build()
+        with torch.no_grad():
+            fused.w13.copy_(torch.randn(_HIDDEN, 2, _DIM))
+        state_dict = fused.state_dict()
+        self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
+        torch.testing.assert_close(state_dict["w1.weight"], fused.w13[:, 0])
+
+        reloaded = fused_swiglu(
+            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
+        ).build()
+        reloaded.load_state_dict(state_dict)
+        torch.testing.assert_close(reloaded.w13, fused.w13)
 
 
 class TestFusedSwiGLUHFAdapter(unittest.TestCase):
