@@ -356,8 +356,8 @@ def _distributed_muon_optimizer(
         ],
         optimizer_factory_kwargs_by_name={
             "DistributedMuon": {
-                "bucket_configs": bucket_configs,
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
+                "bucket_configs": bucket_configs,
                 "num_stacked_matrices_by_fqn": num_stacked_matrices_by_fqn,
             }
         },

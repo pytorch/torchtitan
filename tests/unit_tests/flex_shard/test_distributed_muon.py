@@ -80,13 +80,13 @@ class TestDistributedMuon(DTensorTestBase):
                         shardings_by_mesh_axis={"dp_shard": Shard(0)},
                     ),
                 },
-                num_stacked_matrices_by_fqn={local_blocks_fqn: self.world_size},
                 bucket_configs=[
                     BucketConfig(
                         patterns=("layers.0.*",),
                         name="layers.0",
                     )
                 ],
+                num_stacked_matrices_by_fqn={local_blocks_fqn: self.world_size},
                 lr=lr,
                 weight_decay=weight_decay,
                 momentum=0.8,
@@ -261,8 +261,8 @@ class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
                         },
                     )
                 },
-                num_stacked_matrices_by_fqn={},
                 bucket_configs=[BucketConfig(patterns=(fqn,))],
+                num_stacked_matrices_by_fqn={},
             )
 
 

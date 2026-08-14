@@ -55,8 +55,8 @@ def build_distributed_muon(
     params: Iterable[dict[str, Any]],
     *,
     compute_sharding_by_fqn: Mapping[str, ComputeLayout],
-    num_stacked_matrices_by_fqn: Mapping[str, int],
     bucket_configs: Sequence[BucketConfig],
+    num_stacked_matrices_by_fqn: Mapping[str, int],
     **kwargs: Any,
 ) -> DistributedMuon:
     """Construct a DistributedMuon optimizer with FlexShard redistribution.
@@ -68,8 +68,8 @@ def build_distributed_muon(
     return DistributedMuon(
         _normalize_param_groups(params),
         compute_sharding_by_fqn=compute_sharding_by_fqn,
-        num_stacked_matrices_by_fqn=num_stacked_matrices_by_fqn,
         bucket_configs=bucket_configs,
+        num_stacked_matrices_by_fqn=num_stacked_matrices_by_fqn,
         **kwargs,
     )
 
@@ -279,8 +279,8 @@ class DistributedMuon(Optimizer):
         params: Iterable[dict[str, Any]],
         *,
         compute_sharding_by_fqn: Mapping[str, ComputeLayout],
-        num_stacked_matrices_by_fqn: Mapping[str, int],
         bucket_configs: Sequence[BucketConfig],
+        num_stacked_matrices_by_fqn: Mapping[str, int],
         lr: float = 1e-3,
         weight_decay: float = 0.1,
         momentum: float = 0.95,
@@ -619,20 +619,20 @@ class DistributedMuon(Optimizer):
         torch.autograd.graph.increment_version(momentum_state)
 
     def _compute_update(
-        self, compute_layout: _ParameterComputeLayout, compute_buffer: Tensor
+        self, compute_layout: _ParameterComputeLayout, compute_tensor: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        compute_tensor = (
-            compute_buffer
+        muon_tensor = (
+            compute_tensor
             if compute_layout.compute_view is None
-            else compute_layout.compute_view.view_as_matrix_batch(compute_buffer)
+            else compute_layout.compute_view.view_as_matrix_batch(compute_tensor)
         )
         _compute_muon_direction(
-            compute_tensor,
+            muon_tensor,
             ns_coefficients=group["ns_coefficients"],
             ns_steps=group["ns_steps"],
             eps=group["eps"],
-            out=compute_tensor,
+            out=muon_tensor,
         )
 
     def _apply_update(
@@ -687,28 +687,28 @@ class _MatrixBatchView:
             matrix_columns=storage_shape[1],
         )
 
-    def matrix_batch_shape(self, compute_buffer_shape: torch.Size) -> torch.Size:
+    def matrix_batch_shape(self, compute_tensor_shape: torch.Size) -> torch.Size:
         if not (
-            len(compute_buffer_shape) == 2
-            and not compute_buffer_shape[0] % self.matrix_rows
-            and compute_buffer_shape[1] == self.matrix_columns
+            len(compute_tensor_shape) == 2
+            and not compute_tensor_shape[0] % self.matrix_rows
+            and compute_tensor_shape[1] == self.matrix_columns
         ):
             raise RuntimeError(
-                "compute buffer shape is inconsistent with the prepared "
+                "compute tensor shape is inconsistent with the prepared "
                 "matrix-batch view"
             )
         return torch.Size(
             (
-                compute_buffer_shape[0] // self.matrix_rows,
+                compute_tensor_shape[0] // self.matrix_rows,
                 self.matrix_rows,
                 self.matrix_columns,
             )
         )
 
-    def view_as_matrix_batch(self, compute_buffer: Tensor) -> Tensor:
-        """Return a zero-copy matrix-batch view of a flat compute buffer."""
-        matrix_batch_shape = self.matrix_batch_shape(torch.Size(compute_buffer.shape))
-        return compute_buffer.unflatten(0, matrix_batch_shape[:2])
+    def view_as_matrix_batch(self, compute_tensor: Tensor) -> Tensor:
+        """Return a zero-copy matrix-batch view of the compute tensor."""
+        matrix_batch_shape = self.matrix_batch_shape(torch.Size(compute_tensor.shape))
+        return compute_tensor.unflatten(0, matrix_batch_shape[:2])
 
 
 def _validate_matrix_batch_storage_alignment(
@@ -1000,7 +1000,7 @@ def _build_matrix_batch_redistribution_plan(
     storage_shape: tuple[int, ...],
     compute_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
-    """Map flat row storage to block-aligned flat compute buffers."""
+    """Map flat row storage to block-aligned flat compute tensors."""
     _require_valid_plan(
         len(storage_shape) == 2
         and len(compute_shape) == 3
@@ -1104,7 +1104,7 @@ def _build_matrix_batch_redistribution_plan(
                     ),
                     shape=(route_rows, matrix_columns),
                 )
-                compute_buffer_region = _TensorRegion(
+                flat_compute_region = _TensorRegion(
                     offsets=(
                         local_matrix_index * matrix_rows
                         + route_row_offset
@@ -1121,7 +1121,7 @@ def _build_matrix_batch_redistribution_plan(
                             source_holders,
                         ),
                         destination=_RouteEndpoint(
-                            compute_buffer_region,
+                            flat_compute_region,
                             destination_participants,
                         ),
                     )
