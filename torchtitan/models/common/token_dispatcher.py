@@ -20,6 +20,11 @@ from torchtitan.distributed.minimal_async_ep import (
     init_buffer as minimal_async_ep_init_buffer,
     MinimalAsyncEPDispatchMetadata,
 )
+from torchtitan.distributed.minimal_async_ep.api import (
+    reduce_topk_op as minimal_async_ep_reduce_topk_op,
+    wait_combine as minimal_async_ep_wait_combine,
+    wait_dispatch_op as minimal_async_ep_wait_dispatch_op,
+)
 from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_sparse_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
@@ -1150,6 +1155,14 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             receive_capacity,
             ep_size,
         )
+        (
+            hidden_states_RD,
+            num_tokens_per_local_expert_e,
+        ) = minimal_async_ep_wait_dispatch_op(
+            hidden_states_RD,
+            num_tokens_per_local_expert_e,
+            [x_TD, topk_expert_ids_TK, num_local_tokens_per_expert_E],
+        )
 
         state = MinimalAsyncEPDispatchMetadata(
             dispatch_dst_ranks=dispatch_dst_ranks,
@@ -1177,13 +1190,26 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         """Combine tokens via MinimalAsyncEP."""
         del x_TD
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
-        combined_TD, _routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
+        routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
             routed_output_RD,
             state.dispatch_dst_ranks,
             state.dispatch_dst_rows,
             state.combine_dst_ranks,
             state.combine_dst_rows,
             state.combine_num_valid_rows,
+            state.num_tokens * state.top_k,
+        )
+        routed_output_ND = minimal_async_ep_wait_combine(
+            routed_output_ND,
+            [
+                routed_output_RD,
+                state.combine_dst_ranks,
+                state.combine_dst_rows,
+                state.combine_num_valid_rows,
+            ],
+        )
+        combined_TD = minimal_async_ep_reduce_topk_op(  # noqa: N806
+            routed_output_ND,
             state.T_row_to_E_row,
             state.E_row_to_T_row,
             state.routed_scores,
