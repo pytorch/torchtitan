@@ -29,7 +29,7 @@ library yet. Once it is upstreamed, delete ``register()`` and keep only the
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import ClassVar, Literal
 
 from renderers.base import ParsedResponse, ParsedToolCall, RenderedTokens
 from renderers.configs import BaseRendererConfig
@@ -43,6 +43,18 @@ class MuseGlimmerRendererConfig(BaseRendererConfig):
     """Muse Glimmer (harmony chat format + ATEM tool calls) renderer config."""
 
     name: Literal["muse_glimmer"] = RENDERER_NAME
+
+    # renderers validates in BaseRendererConfig.__pydantic_init_subclass__ that every
+    # non-base field is classified as either a chat-template kwarg or a renderer-internal
+    # knob; the two sets must be disjoint and together cover all of them. Declared
+    # unconditionally -- versions without the validator ignore these ClassVars, so this
+    # is compatible with both. ``reasoning_strength`` belongs in _template_fields, not
+    # _internal_fields: it is forwarded to the chat template verbatim, so it is exactly
+    # the kind of field the library's template-parity matrix is meant to cover.
+    _template_fields: ClassVar[frozenset[str]] = frozenset({"reasoning_strength"})
+    _internal_fields: ClassVar[frozenset[str]] = frozenset(
+        {"retain_reasoning_in_history", "answer_from_reasoning_fallback"}
+    )
 
     reasoning_strength: str | None = None
     """Passed through to the chat template to size the reasoning budget.
