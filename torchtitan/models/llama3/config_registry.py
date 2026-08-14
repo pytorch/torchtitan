@@ -88,7 +88,7 @@ def llama3_debugmodel_dist_gemm() -> Trainer.Config:
     are being deprecated and are not supported here.
     """
     config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel", tp_comm_overlap="dist_gemm")
+    config.model_spec = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
     config.parallelism.spmd_backend = "spmd_types"
     return config
 

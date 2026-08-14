@@ -9,7 +9,7 @@
 Three layers, cheapest first. If you are adding a new fused module, this file is
 the template:
 
-1. ``TestDistGemmAttentionConfig`` -- no devices. Does ``tp_comm_overlap`` select the
+1. ``TestDistGemmAttentionConfig`` -- no devices. Does ``tp_gemm_backend`` select the
    fused configs, does the sharding setup declare the right contracts for them,
    and does the runtime config reach them? Catches wiring mistakes in
    milliseconds.
@@ -62,17 +62,17 @@ def spmd_types_backend():
 class TestDistGemmAttentionConfig(unittest.TestCase):
     """Config-graph rewriting. No devices involved."""
 
-    def test_tp_comm_overlap_selects_the_fused_configs(self):
-        """model_registry(tp_comm_overlap="dist_gemm") swaps all three pieces."""
+    def test_tp_gemm_backend_selects_the_fused_configs(self):
+        """model_registry(tp_gemm_backend="dist_gemm") swaps all three pieces."""
         from torchtitan.models.llama3 import model_registry
 
-        spec = model_registry("debugmodel", tp_comm_overlap="dist_gemm")
+        spec = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
         for layer in spec.model.layers:
             attn = layer.attention
             self.assertIsInstance(attn.qkv_linear, AllGatherFusedQKVLinear.Config)
             self.assertIsInstance(attn.wo, RowParallelLinear.Config)
 
-    def test_default_tp_comm_overlap_is_untouched(self):
+    def test_default_tp_gemm_backend_is_untouched(self):
         """The default must stay stock, or every model silently changes."""
         from torchtitan.models.llama3 import model_registry
 
@@ -85,7 +85,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
         stock = model_registry("debugmodel").model.layers[0].attention
         fused = (
-            model_registry("debugmodel", tp_comm_overlap="dist_gemm")
+            model_registry("debugmodel", tp_gemm_backend="dist_gemm")
             .model.layers[0]
             .attention
         )
@@ -112,14 +112,14 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
                 inner_attention=FlexAttention.Config(),
                 rope=ComplexRoPE.Config(dim=DIM // N_HEADS, max_seq_len=128),
                 fuse_qkv=False,
-                tp_comm_overlap="dist_gemm",
+                tp_gemm_backend="dist_gemm",
             )
 
     def test_dtensor_backend_is_rejected(self):
         """dist-GEMM is spmd_types-only; the DTensor backends are deprecated."""
         from torchtitan.models.llama3 import model_registry
 
-        attn = model_registry("debugmodel", tp_comm_overlap="dist_gemm")
+        attn = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
         attn = attn.model.layers[0].attention
         # the default backend is active here, which is exactly what must be refused
         with self.assertRaisesRegex(ValueError, "requires parallelism.spmd_backend"):
@@ -130,7 +130,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         and wo would reduce-scatter where it must all-reduce."""
         from torchtitan.models.llama3 import model_registry
 
-        attn = model_registry("debugmodel", tp_comm_overlap="dist_gemm")
+        attn = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
         attn = attn.model.layers[0].attention
         with spmd_types_backend():
             with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
@@ -166,7 +166,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
         stock = model_registry("debugmodel").model.layers[0].attention
         fused = (
-            model_registry("debugmodel", tp_comm_overlap="dist_gemm")
+            model_registry("debugmodel", tp_gemm_backend="dist_gemm")
             .model.layers[0]
             .attention
         )
@@ -275,7 +275,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
                 hidden_dim=hidden,
                 w1_param_init=init,
                 w2w3_param_init=init,
-                tp_comm_overlap="dist_gemm",
+                tp_gemm_backend="dist_gemm",
             )
             .build()
             .to(dev)

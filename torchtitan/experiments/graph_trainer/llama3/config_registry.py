@@ -42,7 +42,7 @@ def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
     """
     config = to_graph_trainer_config(
         llama3_debugmodel_dist_gemm(),
-        partial(model_registry, tp_comm_overlap="dist_gemm"),
+        partial(model_registry, tp_gemm_backend="dist_gemm"),
     )
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config

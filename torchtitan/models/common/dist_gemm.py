@@ -17,7 +17,7 @@ projections could use the same pair.
 What lives here is the wiring -- the reshaping around each collective, and the
 fallbacks -- while ``torchtitan/distributed/linear.py`` holds the collective+GEMM math itself.
 
-Selected by passing ``tp_comm_overlap="dist_gemm"`` to ``make_gqa_config`` or
+Selected by passing ``tp_gemm_backend="dist_gemm"`` to ``make_gqa_config`` or
 ``make_ffn_config`` (see ``config_utils.py``), which also drops the boundary
 all-gather these modules take over. No attention or FFN subclass is needed beyond
 the projections: the stock ``GQAttention`` forward handles a QKV that changes the
@@ -62,7 +62,7 @@ def _warn_once_unfused() -> None:
     if not _WARNED_NO_TP:
         _WARNED_NO_TP = True
         logger.warning(
-            "tp_comm_overlap='dist_gemm' selected but tensor parallelism is not "
+            "tp_gemm_backend='dist_gemm' selected but tensor parallelism is not "
             "active; running the stock projections. Nothing is fused."
         )
 
@@ -96,14 +96,14 @@ def validate_dist_gemm_preconditions(*, enable_sp: bool) -> None:
     backend = get_spmd_backend()
     if backend != "spmd_types":
         raise ValueError(
-            "tp_comm_overlap='dist_gemm' requires "
+            "tp_gemm_backend='dist_gemm' requires "
             f"parallelism.spmd_backend='spmd_types', got {backend!r}. The fused "
             "modules take and return plain local tensors; the DTensor backends are "
             "being deprecated and are not supported."
         )
     if not enable_sp:
         raise ValueError(
-            "tp_comm_overlap='dist_gemm' requires "
+            "tp_gemm_backend='dist_gemm' requires "
             "parallelism.enable_sequence_parallel; the fused GEMMs replace the SP "
             "all-gather and reduce-scatter, so there is nothing for them to fuse "
             "with SP disabled."
