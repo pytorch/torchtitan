@@ -1062,10 +1062,12 @@ def schedule_fsdp_comms_to_dense_regions_pass(
         torch.ops._c10d_functional.all_gather_into_tensor.default,
         torch.ops._c10d_functional.all_gather_into_tensor_out.default,
         torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        torch.ops.aten.constant_pad_nd.default,
         torch.ops.aten.slice.Tensor,
     }
     _FSDP_WAIT_OUTPUT_OPS = {
         operator.getitem,
+        torch.ops.aten.alias.default,
         torch.ops.aten._to_copy.default,
         torch.ops.aten._unsafe_view.default,
         torch.ops.aten.clone.default,
