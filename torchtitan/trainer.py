@@ -45,9 +45,19 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.distributed.cudagraph import (
+    cudagraph_teardown,
+    ForwardBackwardFn,
+    wrap_with_cuda_graph,
+)
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.token_dispatcher import (
+    HybridEPTokenDispatcher,
+    LocalTokenDispatcher,
+    MinimalAsyncEPTokenDispatcher,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -129,6 +139,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     f"({pp_microbatch_size}) when pipeline parallelism is enabled."
                 )
 
+            self._validate_cuda_graphs()
+
             if (
                 self.parallelism.spmd_backend == "spmd_types"
                 and self.debug.spmd_typechecking
@@ -163,6 +175,39 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "Memory budget activation checkpointing requires the model to be "
                     "compiled: set --compile.enable and include 'model' in "
                     "--compile.components."
+                )
+
+        def _validate_cuda_graphs(self) -> None:
+            if self.training.disable_cuda_graphs:
+                return
+
+            if self.parallelism.pipeline_parallel_degree > 1:
+                raise ValueError(
+                    "CUDA graphs do not support pipeline parallelism yet. "
+                    "Set --training.disable_cuda_graphs."
+                )
+
+            if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
+                return
+
+            for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
+                LocalTokenDispatcher.Config
+            ):
+                if isinstance(
+                    dispatcher_config, MinimalAsyncEPTokenDispatcher.Config
+                ) or (
+                    isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
+                    and dispatcher_config.non_blocking_capacity_factor is not None
+                ):
+                    continue
+
+                raise ValueError(
+                    "CUDA graphs support only expert parallel token dispatcher "
+                    "configurations without CPU synchronization. "
+                    "Set HybridEP non_blocking_capacity_factor, or use "
+                    "MinimalAsyncEP, or set --training.disable_cuda_graphs. "
+                    "Unsupported token "
+                    f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
 
         def to_dict(self) -> dict[str, Any]:
@@ -229,6 +274,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     device: torch.device
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.SpmdContext
+    fwd_bwd_fn: ForwardBackwardFn
     gradient_accumulation_steps: int
     num_pipeline_parallel_microbatches: int
     pp_has_first_stage: bool
@@ -311,6 +357,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # loss, dataloader, …) are built later in __init__.
         if config.override.imports:
             apply_overrides(config.override, config)
+        config._validate_cuda_graphs()
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
@@ -563,6 +610,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and config.debug.spmd_typechecking
             ),
         )
+        self.fwd_bwd_fn = self._forward_backward_body
+        if not config.training.disable_cuda_graphs:
+            self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -752,8 +802,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
         assert len(model_parts) == 1
+        return self.fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs)
+
+    def _forward_backward_body(
+        self,
+        inputs: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
+        extra_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
         with self.train_context():
-            pred = model_parts[0](inputs, **extra_kwargs)
+            pred = self.model_parts[0](inputs, **extra_kwargs)
             loss_kwargs = {}
             if "positions" in extra_kwargs:
                 loss_kwargs["positions"] = extra_kwargs["positions"]
@@ -813,9 +872,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        self.optimizers.zero_grad()
+        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
+        should_log = self.metrics_processor.should_log(self.step)
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -844,7 +904,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_valid_tokens = local_valid_tokens.to(self.device)
 
         # Process each gradient accumulation step, then free its inputs.
-        accumulated_losses = []
+        accumulated_loss: torch.Tensor | None = None
         for microbatches in microbatch_groups:
             input_dict_mbs = []
             label_mbs = []
@@ -868,7 +928,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 labels=fwd_bwd_labels,
                 global_valid_tokens=global_valid_tokens,
             )
-            accumulated_losses.append(loss.detach())
+            if should_log:
+                loss = loss.detach()
+                if accumulated_loss is None:
+                    # Take ownership before the next replay overwrites the
+                    # graph-owned output. Later losses accumulate in place.
+                    accumulated_loss = loss.clone()
+                else:
+                    accumulated_loss.add_(loss)
 
         with sl.log_trace_span("optim"):
             grad_norm = dist_utils.clip_grad_norm_(
@@ -882,33 +949,33 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.optimizers.step()
             self.lr_schedulers.step()
 
-        # Reduce the data collected over gradient accumulation steps.
-        loss = torch.sum(torch.stack(accumulated_losses))
-
         # log metrics
-        if not self.metrics_processor.should_log(self.step):
+        if not should_log:
             return
+
+        assert accumulated_loss is not None
 
         with sl.log_trace_span("collect_dist_metrics"):
 
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
             if parallel_dims.dp_cp_enabled:
-                loss = loss.detach()
                 loss_mesh = parallel_dims.get_optional_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
-                # loss = local_loss_sum / global_valid_tokens
+                # accumulated_loss = local_loss_sum / global_valid_tokens
                 # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
-                #                 = sum(loss)
+                #                 = sum(accumulated_loss)
                 #
                 # For global_max_loss, we want the max of local average losses across ranks:
                 # local_avg_loss = local_loss_sum / local_valid_tokens
-                #                = (loss * global_valid_tokens) / local_valid_tokens
+                #                = (accumulated_loss * global_valid_tokens) / local_valid_tokens
                 # global_max_loss = max(local_avg_loss)
-                local_avg_loss = loss * global_valid_tokens / local_valid_tokens
+                local_avg_loss = (
+                    accumulated_loss * global_valid_tokens / local_valid_tokens
+                )
                 global_avg_loss, global_max_loss, global_ntokens_seen = (
-                    dist_utils.dist_sum(loss, loss_mesh),
+                    dist_utils.dist_sum(accumulated_loss, loss_mesh),
                     dist_utils.dist_max(local_avg_loss, loss_mesh),
                     dist_utils.dist_sum(
                         torch.tensor(
@@ -918,7 +985,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     ),
                 )
             else:
-                global_avg_loss = global_max_loss = float(loss.detach().item())
+                global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = self.ntokens_seen
 
         # Crash on invalid loss. global_avg_loss is a SUM reduction, so a infinite
@@ -1017,6 +1084,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
+        if not self.config.training.disable_cuda_graphs:
+            cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
