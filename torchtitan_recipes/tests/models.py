@@ -6,6 +6,7 @@
 
 """Configurations for the ``models`` integration test suite."""
 
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -252,6 +253,8 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4_compile() -> Trainer.Config:
 
 def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
     config = gpt_oss_debugmodel(seq_len=2048)
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = None
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4

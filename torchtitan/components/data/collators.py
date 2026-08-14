@@ -58,6 +58,7 @@ class TextCollator(Collator):
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         del config
         self._num_tokens_per_batch = context.num_tokens_per_batch
+        self._max_context_length = context.max_context_length
 
     def __call__(self, rows: Sequence[TextSequence]) -> TrainerBatch:
         num_tokens = sum(len(row.input_ids) for row in rows)
@@ -70,6 +71,7 @@ class TextCollator(Collator):
         labels = torch.full(
             (size,), IGNORE_INDEX, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY
         )
+        padding_mask = torch.ones(size, dtype=torch.bool, pin_memory=HAS_PIN_MEMORY)
 
         torch.cat(
             [torch.as_tensor(row.input_ids) for row in rows],
@@ -81,16 +83,35 @@ class TextCollator(Collator):
         )
         torch.cat(
             [
-                torch.arange(len(row.input_ids))
-                if row.positions is None
-                else torch.as_tensor(row.positions)
+                (
+                    torch.arange(len(row.input_ids))
+                    if row.positions is None
+                    else torch.as_tensor(row.positions)
+                )
                 for row in rows
             ],
             out=positions[:num_tokens],
         )
+        torch.cat(
+            [
+                (
+                    torch.zeros(len(row.input_ids), dtype=torch.bool)
+                    if row.padding_mask is None
+                    else torch.as_tensor(row.padding_mask, dtype=torch.bool)
+                )
+                for row in rows
+            ],
+            out=padding_mask[:num_tokens],
+        )
+
+        pad_len = self._num_tokens_per_batch - num_tokens
+        if pad_len:
+            torch.arange(pad_len, out=positions[num_tokens:])
+            positions[num_tokens:].remainder_(self._max_context_length)
 
         return {
             "input": input_ids,
             "positions": positions,
+            "padding_mask": padding_mask,
             "num_valid_tokens": int((labels != IGNORE_INDEX).sum()),
         }, labels

@@ -51,7 +51,12 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
                 )
             ],
             parallel_dims=SimpleNamespace(pp_enabled=True),
-            config=SimpleNamespace(parallelism="PARA"),
+            dataloader=SimpleNamespace(max_num_documents=None),
+            config=SimpleNamespace(
+                parallelism="PARA",
+                dataloader=SimpleNamespace(max_num_documents=None),
+                training=SimpleNamespace(max_context_length=2048),
+            ),
             ntokens_seen=0,
             device=torch.device("cpu"),
             _pp_loss_sentinel_on_non_last_stage=sentinel,
@@ -104,7 +109,11 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
                 )
             ],
             parallel_dims=SimpleNamespace(pp_enabled=True),
-            config=SimpleNamespace(parallelism="PARA"),
+            dataloader=SimpleNamespace(max_num_documents=None),
+            config=SimpleNamespace(
+                parallelism="PARA",
+                training=SimpleNamespace(max_context_length=2048),
+            ),
             ntokens_seen=0,
             device=torch.device("cpu"),
         ),
@@ -145,7 +154,11 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
             pp_has_last_stage=True,
             model_parts=[_FakeModel()],
             parallel_dims=SimpleNamespace(pp_enabled=True),
-            config=SimpleNamespace(parallelism="PARA"),
+            dataloader=SimpleNamespace(max_num_documents=4),
+            config=SimpleNamespace(
+                parallelism="PARA",
+                training=SimpleNamespace(max_context_length=2048),
+            ),
             ntokens_seen=0,
             fwd_bwd_fn=fwd_bwd_fn,
         ),
@@ -188,8 +201,16 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
 
     fake = SimpleNamespace(
         model_parts=[_FakeModel()],
+        dataloader=SimpleNamespace(max_num_documents=4),
         parallel_dims=SimpleNamespace(pp_enabled=False),
-        config=SimpleNamespace(parallelism="PARA"),
+        config=SimpleNamespace(
+            parallelism="PARA",
+            dataloader=SimpleNamespace(max_num_documents=4),
+            training=SimpleNamespace(
+                disable_cuda_graphs=True,
+                max_context_length=2048,
+            ),
+        ),
         ntokens_seen=100,
         fwd_bwd_fn=fwd_bwd_fn,
     )
@@ -209,6 +230,8 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
     assert captured["preprocess_kwargs"] == {
         "parallel_dims": fake.parallel_dims,
         "parallelism": "PARA",
+        "max_num_documents": 4,
+        "max_context_length": 2048,
     }
 
 

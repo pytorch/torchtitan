@@ -516,6 +516,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
                     post_filters=(lambda sample: sample is not None,),
                 ),
             ),
+            max_num_documents=32,
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,

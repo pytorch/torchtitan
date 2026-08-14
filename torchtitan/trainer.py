@@ -50,7 +50,7 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
@@ -72,9 +72,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         Default container for training configuration.
         """
 
-        # NOTE: model_spec is suppressed from tyro CLI parsing and is always
-        # set programmatically by the model registry before Trainer construction.
-        model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
+        # model_spec is always set by the registry. The unused string constructor
+        # keeps Tyro from traversing the model config before applying Suppress.
+        model_spec: Annotated[
+            ModelSpec,
+            tyro.conf.Suppress,
+            tyro.conf.arg(constructor=str),
+        ]
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
@@ -151,7 +155,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallelism.spmd_backend == "spmd_types"
                 and self.debug.spmd_typechecking
                 and isinstance(self.activation_checkpoint, SelectiveAC.Config)
-                and self.model_spec is not None
                 and any(self.model_spec.model.traverse(FlexAttention.Config))
             ):
                 # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
@@ -195,7 +198,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "Use a single-stage pipeline schedule or disable CUDA graphs."
                     )
 
-            if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
+            if self.dataloader.max_num_documents is None:
+                for fqn, _, _, _ in self.model_spec.model.traverse(
+                    VarlenAttention.Config
+                ):
+                    raise ValueError(
+                        "CUDA graphs require fixed-shape varlen document "
+                        f"metadata for {fqn}, but "
+                        "dataloader.max_num_documents is unset. Set it to "
+                        "an upper bound on documents per local token batch, "
+                        "or set --training.disable_cuda_graphs."
+                    )
+
+            if self.parallelism.expert_parallel_degree == 1:
                 return
 
             for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
@@ -244,7 +259,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             d = {}
             for f in dataclasses.fields(self):
                 if f.name == "model_spec":
-                    assert self.model_spec is not None
                     # ModelSpec contains callables that can't be serialized
                     d["model_spec"] = {
                         "name": self.model_spec.name,
@@ -322,9 +336,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
-        assert (
-            config.model_spec is not None
-        ), "model_spec must be set before creating Trainer"
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
@@ -772,6 +783,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         {**input_dict_mb, "labels": labels_mb},
                         parallel_dims=parallel_dims,
                         parallelism=self.config.parallelism,
+                        max_num_documents=self.dataloader.max_num_documents,
+                        max_context_length=self.config.training.max_context_length,
                     )
                     self.ntokens_seen += labels_mb.numel()
                 if self.pp_has_first_stage:
@@ -796,6 +809,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 {**input_dict, "labels": labels},
                 parallel_dims=self.parallel_dims,
                 parallelism=self.config.parallelism,
+                max_num_documents=self.dataloader.max_num_documents,
+                max_context_length=self.config.training.max_context_length,
             )
             self.ntokens_seen += labels.numel()
 
