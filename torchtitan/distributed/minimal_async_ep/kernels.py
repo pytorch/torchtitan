@@ -58,6 +58,7 @@ def _fill_dispatch_metadata_kernel(
     local_count_starts: tl.pointer_type(tl.int64),
     dst_ranks: tl.pointer_type(tl.int64),
     dst_rows: tl.pointer_type(tl.int64),
+    segments: tl.pointer_type(tl.int64),
     NUM_EXPERTS: tl.constexpr,
     NUM_LOCAL_EXPERTS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -77,10 +78,16 @@ def _fill_dispatch_metadata_kernel(
     block = tl.program_id(1)
     offset = block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     count = tl.load(counts + expert)
+    row_start = tl.load(local_count_starts + expert)
+    dst_start = tl.load(local_dest_offsets + expert)
     mask = (expert < NUM_EXPERTS) & (offset < count)
-    row = tl.load(local_count_starts + expert) + offset
+    row = row_start + offset
     tl.store(dst_ranks + row, expert // NUM_LOCAL_EXPERTS, mask=mask)
-    tl.store(dst_rows + row, tl.load(local_dest_offsets + expert) + offset, mask=mask)
+    tl.store(dst_rows + row, dst_start + offset, mask=mask)
+    if block == 0:
+        tl.store(segments + expert * 3, row_start)
+        tl.store(segments + expert * 3 + 1, dst_start)
+        tl.store(segments + expert * 3 + 2, count)
 
 
 @triton.jit(do_not_specialize=["ep_rank"])
@@ -90,6 +97,7 @@ def _fill_combine_metadata_kernel(
     source_input_starts: tl.pointer_type(tl.int64),
     dst_ranks: tl.pointer_type(tl.int64),
     dst_rows: tl.pointer_type(tl.int64),
+    segments: tl.pointer_type(tl.int64),
     ep_rank: tl.int64,
     EP_SIZE: tl.constexpr,
     NUM_LOCAL_EXPERTS: tl.constexpr,
@@ -123,6 +131,11 @@ def _fill_combine_metadata_kernel(
 
     tl.store(dst_ranks + row, src_rank, mask=mask)
     tl.store(dst_rows + row, source_start + offset, mask=mask)
+    if block == 0:
+        peer_segment = src_rank * NUM_LOCAL_EXPERTS + local_expert
+        tl.store(segments + peer_segment * 3, output_start)
+        tl.store(segments + peer_segment * 3 + 1, source_start)
+        tl.store(segments + peer_segment * 3 + 2, count)
 
 
 @triton.jit
@@ -340,62 +353,77 @@ def _copy_rows_to_peer_ptrs_kernel(
     tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
 
 
-# Preserve the 2-D launch above for unbounded copies. Flattening its grid changes
-# peer issue order and causes severe rank imbalance at EP64.
-@triton.jit
-def _copy_rows_to_peer_ptrs_persistent_kernel(
+# Preserve the 2-D launch above for unbounded copies. Bounded copies use compact
+# segments and a rank-rotated peer order to avoid synchronized destination fan-in.
+@triton.jit(do_not_specialize=["rank"])
+def _copy_peer_segments_persistent_kernel(
     src,
     dst_ptrs: tl.pointer_type(tl.int64),
-    dst_ranks: tl.pointer_type(tl.int64),
-    dst_rows: tl.pointer_type(tl.int64),
-    num_valid_rows: tl.pointer_type(tl.int64),
+    segments: tl.pointer_type(tl.int64),
     src_rows: tl.pointer_type(tl.int64),
-    NUM_ROWS: tl.constexpr,
+    rank: tl.int64,
     NUM_COLS: tl.constexpr,
     SRC_ROW_STRIDE: tl.constexpr,
     SRC_COL_STRIDE: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
     DST_DTYPE: tl.constexpr,
-    HAS_NUM_VALID_ROWS: tl.constexpr,
     HAS_SRC_ROWS: tl.constexpr,
     SRC_ROW_DIVISOR: tl.constexpr,
+    EP_SIZE: tl.constexpr,
+    NUM_SEGMENTS_PER_PEER: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_COL_TILES: tl.constexpr,
 ) -> None:
-    row_limit = NUM_ROWS
-    if HAS_NUM_VALID_ROWS:
-        row_limit = tl.load(num_valid_rows)
-    num_tiles = tl.cdiv(row_limit, BLOCK_M) * NUM_COL_TILES
-    tile = tl.program_id(0)
-    while tile < num_tiles:
-        row_tile = tile // NUM_COL_TILES
-        col_tile = tile % NUM_COL_TILES
-        row = (row_tile * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
-        col = col_tile * BLOCK_N + tl.arange(0, BLOCK_N)
-        row_mask = row < row_limit
-        col_mask = col < NUM_COLS
-        mask = row_mask[:, None] & col_mask[None, :]
-        src_row = row
-        if HAS_SRC_ROWS:
-            src_row = tl.load(src_rows + row, mask=row_mask, other=0).to(tl.int64)
-            if SRC_ROW_DIVISOR != 1:
-                src_row = src_row // SRC_ROW_DIVISOR
-        dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
-        dst_row = tl.load(dst_rows + row, mask=row_mask, other=0).to(tl.int64)
-        dst_rank_mask = row_mask & (dst_rank >= 0)
-        values = tl.load(
-            src + src_row[:, None] * SRC_ROW_STRIDE + col[None, :] * SRC_COL_STRIDE,
-            mask=mask,
-        )
-        dst_base = tl.load(dst_ptrs + dst_rank, mask=dst_rank_mask, other=0)
-        dst_ptr = (
-            dst_base.to(tl.pointer_type(DST_DTYPE))[:, None]
-            + dst_row[:, None] * DST_ROW_STRIDE
-            + col[None, :]
-        )
-        tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
-        tile += tl.num_programs(0)
+    """Copy peer-major segments in rank-rotated order."""
+    pid = tl.program_id(0)
+    num_ctas = tl.num_programs(0)
+
+    # CTAs advance independently, so small peer segments do not stall the grid
+    # under skewed routing.
+    for peer_offset in tl.range(0, EP_SIZE):
+        peer = (peer_offset + rank) % EP_SIZE
+        peer_tile_base = 0
+        for segment_in_peer in tl.static_range(0, NUM_SEGMENTS_PER_PEER):
+            segment = peer * NUM_SEGMENTS_PER_PEER + segment_in_peer
+            src_start = tl.load(segments + segment * 3)
+            dst_start = tl.load(segments + segment * 3 + 1)
+            count = tl.load(segments + segment * 3 + 2)
+            num_tiles = tl.cdiv(count, BLOCK_M) * NUM_COL_TILES
+            peer_tile_offset = peer_tile_base % num_ctas
+            tile = (pid + num_ctas - peer_tile_offset) % num_ctas
+            while tile < num_tiles:
+                row_offset = (
+                    tile // NUM_COL_TILES * BLOCK_M + tl.arange(0, BLOCK_M)
+                ).to(tl.int64)
+                col = tile % NUM_COL_TILES * BLOCK_N + tl.arange(0, BLOCK_N)
+                row_mask = row_offset < count
+                col_mask = col < NUM_COLS
+                mask = row_mask[:, None] & col_mask[None, :]
+                src_row = src_start + row_offset
+                if HAS_SRC_ROWS:
+                    src_row = tl.load(
+                        src_rows + src_row,
+                        mask=row_mask,
+                        other=0,
+                    ).to(tl.int64)
+                    if SRC_ROW_DIVISOR != 1:
+                        src_row = src_row // SRC_ROW_DIVISOR
+                values = tl.load(
+                    src
+                    + src_row[:, None] * SRC_ROW_STRIDE
+                    + col[None, :] * SRC_COL_STRIDE,
+                    mask=mask,
+                )
+                dst_base = tl.load(dst_ptrs + peer)
+                dst_ptr = (
+                    dst_base.to(tl.pointer_type(DST_DTYPE))[:, None]
+                    + (dst_start + row_offset)[:, None] * DST_ROW_STRIDE
+                    + col[None, :]
+                )
+                tl.store(dst_ptr, values, mask=mask)
+                tile += num_ctas
+            peer_tile_base += num_tiles
 
 
 def copy_full_counts_to_peers_kernel(
@@ -445,6 +473,8 @@ def copy_rows_to_peers_kernel(
     src_row_divisor: int = 1,
     num_valid_rows: torch.Tensor | None = None,
     num_ctas: int | None = None,
+    segments: torch.Tensor | None = None,
+    rank: int = 0,
 ) -> None:
     if len(dsts) != ep_size:
         raise ValueError(f"expected {ep_size} destination buffers, got {len(dsts)}.")
@@ -486,11 +516,32 @@ def copy_rows_to_peers_kernel(
             **common_kwargs,
         )
     else:
-        num_tiles = num_row_tiles * num_col_tiles
-        _copy_rows_to_peer_ptrs_persistent_kernel[(min(num_tiles, num_ctas),)](
-            *common_args,
+        assert (
+            segments is not None
+            and segments.dtype == torch.int64
+            and segments.ndim == 2
+            and segments.shape[1] == 3
+            and segments.shape[0] % ep_size == 0
+        ), "bounded copies require peer-major int64 segments with shape (S, 3)"
+        _copy_peer_segments_persistent_kernel[(num_ctas,)](
+            src,
+            dst_ptrs,
+            segments,
+            src_rows if src_rows is not None else dst_rows,
+            rank,
+            EP_SIZE=ep_size,
+            NUM_SEGMENTS_PER_PEER=segments.shape[0] // ep_size,
+            NUM_COLS=num_cols,
+            SRC_ROW_STRIDE=src.stride(0),
+            SRC_COL_STRIDE=src.stride(1),
+            DST_ROW_STRIDE=dsts[0].stride(0),
+            DST_DTYPE=dst_dtype,
+            HAS_SRC_ROWS=src_rows is not None,
+            SRC_ROW_DIVISOR=src_row_divisor,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
             NUM_COL_TILES=num_col_tiles,
-            **common_kwargs,
+            num_warps=num_warps,
         )
 
 
@@ -504,7 +555,8 @@ def fill_dispatch_metadata_kernel(
     max_tokens_per_segment: int,
     dst_ranks: torch.Tensor | None = None,
     dst_rows: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    segments: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     counts = counts.contiguous()
     local_dest_offsets = local_dest_offsets.contiguous()
     local_count_starts = local_count_starts.contiguous()
@@ -516,6 +568,10 @@ def fill_dispatch_metadata_kernel(
         )
     if dst_rows is None:
         dst_rows = torch.empty_like(dst_ranks)
+    if segments is None:
+        segments = torch.empty(
+            counts.numel(), 3, device=counts.device, dtype=torch.int64
+        )
     block_size = _METADATA_BLOCK_SIZE
     grid = (
         counts.numel(),
@@ -527,12 +583,13 @@ def fill_dispatch_metadata_kernel(
         local_count_starts,
         dst_ranks,
         dst_rows,
+        segments,
         NUM_EXPERTS=counts.numel(),
         NUM_LOCAL_EXPERTS=num_local_experts,
         BLOCK_SIZE=block_size,
         num_warps=4,
     )
-    return dst_ranks, dst_rows
+    return dst_ranks, dst_rows, segments
 
 
 def fill_combine_metadata_kernel(
@@ -548,7 +605,8 @@ def fill_combine_metadata_kernel(
     dst_ranks: torch.Tensor | None = None,
     dst_rows: torch.Tensor | None = None,
     num_valid_rows: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    segments: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     segment_lens = segment_lens.contiguous()
     output_starts = output_starts.contiguous()
     source_input_starts = source_input_starts.contiguous()
@@ -562,6 +620,13 @@ def fill_combine_metadata_kernel(
         dst_rows = torch.empty_like(dst_ranks)
     if num_valid_rows is None:
         num_valid_rows = torch.empty(1, device=segment_lens.device, dtype=torch.int64)
+    if segments is None:
+        segments = torch.empty(
+            segment_lens.numel(),
+            3,
+            device=segment_lens.device,
+            dtype=torch.int64,
+        )
     block_size = _METADATA_BLOCK_SIZE
     grid = (
         segment_lens.numel(),
@@ -573,6 +638,7 @@ def fill_combine_metadata_kernel(
         source_input_starts,
         dst_ranks,
         dst_rows,
+        segments,
         ep_rank=ep_rank,
         EP_SIZE=ep_size,
         NUM_LOCAL_EXPERTS=num_local_experts,
@@ -581,7 +647,7 @@ def fill_combine_metadata_kernel(
         num_warps=4,
     )
     torch.add(output_starts[-1:], segment_lens[-1:], out=num_valid_rows)
-    return dst_ranks, dst_rows, num_valid_rows
+    return dst_ranks, dst_rows, num_valid_rows, segments
 
 
 def invert_flat_indices_kernel(

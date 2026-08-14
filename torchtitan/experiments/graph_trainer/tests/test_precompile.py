@@ -395,12 +395,23 @@ class TestCudagraphPass(unittest.TestCase):
                 expert_output,
                 dispatched[1],
                 dispatched[2],
+                dispatched[9],
                 dispatched[3],
                 dispatched[4],
+                dispatched[10],
                 dispatched[5],
                 8,
             )
-            combined = wait_combine(combined, [expert_output, *dispatched[3:6]])
+            combined = wait_combine(
+                combined,
+                [
+                    expert_output,
+                    dispatched[3],
+                    dispatched[4],
+                    dispatched[10],
+                    dispatched[5],
+                ],
+            )
             return reduce_topk_op(combined, dispatched[7], dispatched[6], scores, 4, 2)
 
         gm = make_fx(exchange, tracing_mode="fake")(
