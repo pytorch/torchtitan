@@ -21,7 +21,7 @@ import triton.language as tl
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from torchtitan.distributed.minimal_async_ep.kernels import (
-    _copy_rows_to_peer_ptrs_kernel,
+    _copy_peer_segments_persistent_kernel,
     copy_full_counts_to_peers_kernel,
     copy_rows_to_peers_kernel,
     expand_topk_grad_kernel,
@@ -122,7 +122,13 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
     assert wait_hidden not in dispatch.users
     assert source_wait.args == (
         combine,
-        [combine.args[0], combine.args[3], combine.args[4], combine.args[5]],
+        [
+            combine.args[0],
+            combine.args[4],
+            combine.args[5],
+            combine.args[6],
+            combine.args[7],
+        ],
     )
     assert ready_wait.args[1] == []
     assert list(combine.users) == [source_wait]
@@ -237,7 +243,7 @@ def test_buffer_rows_use_configured_receive_capacity():
     assert capacity_limited == (524_288, 262_144)
 
 
-def test_receive_capacity_propagates_through_runtime_config():
+def test_minimal_async_ep_runtime_config_propagation():
     from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
         graph_trainer_deepseek_v3_debugmodel_minimal_async_ep,
     )
@@ -266,6 +272,11 @@ def test_receive_capacity_propagates_through_runtime_config():
         and dispatcher.receive_capacity == expected
         for dispatcher in dispatchers
     )
+    assert all(dispatcher.num_row_copy_ctas is None for dispatcher in dispatchers)
+
+    config.compile.ep_overlap.enabled = True
+    config.model_spec.model.update_from_config(config=config)
+    assert all(dispatcher.num_row_copy_ctas == 72 for dispatcher in dispatchers)
 
 
 def test_receive_capacity_rejects_global_routing_overflow():
@@ -310,6 +321,8 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 expert_to_token,
                 token_to_expert,
                 tokens_per_expert,
+                dispatch_peer_segments,
+                combine_peer_segments,
             ) = minimal_async_ep_api.dispatch_op(x, expert_ids, counts, 16, 2)
             hidden, tokens_per_expert = minimal_async_ep_api.wait_dispatch_op(
                 hidden,
@@ -321,14 +334,22 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 expert_output,
                 dispatch_ranks,
                 dispatch_rows,
+                dispatch_peer_segments,
                 combine_ranks,
                 combine_rows,
+                combine_peer_segments,
                 num_valid,
                 8,
             )
             routed = minimal_async_ep_api.wait_combine(
                 routed,
-                [expert_output, combine_ranks, combine_rows, num_valid],
+                [
+                    expert_output,
+                    combine_ranks,
+                    combine_rows,
+                    combine_peer_segments,
+                    num_valid,
+                ],
             )
             return minimal_async_ep_api.reduce_topk_op(
                 routed,
@@ -343,12 +364,13 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             minimal_async_ep_api.init_buffer(
                 dist.group.WORLD,
                 hidden_dim=4,
-                tokens_per_rank=4,
+                num_max_tokens_per_rank=4,
                 num_local_experts=2,
                 top_k=2,
                 dtype=torch.float32,
                 device=device,
                 receive_capacity_factor=2.0,
+                num_row_copy_ctas=17,
             )
             rank = dist.get_rank()
             x = (
@@ -356,9 +378,12 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 + rank * 100
             )
             scores = torch.linspace(0.1, 0.8, 8, device=device).view(4, 2)
-            token_ids = torch.arange(4, device=device)
-            expert_ids = torch.stack(
-                ((token_ids + rank) % 4, (token_ids + rank + 2) % 4), dim=1
+            expert_ids = torch.tensor(
+                (
+                    [[0, 1], [0, 2], [1, 3], [0, 1]],
+                    [[0, 3], [1, 2], [0, 2], [2, 3]],
+                )[rank],
+                device=device,
             )
 
             actual_x = x.clone().requires_grad_()
@@ -399,8 +424,32 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
 
             buffer_state = minimal_async_ep_api._buffer_state
             assert buffer_state is not None
-            comm_stream = buffer_state.comm_stream.cuda_stream
-            self.assertEqual({stream for _, stream in launch_streams}, {comm_stream})
+            prep_stream = buffer_state.prep_stream.cuda_stream
+            copy_stream = buffer_state.copy_stream.cuda_stream
+            self.assertNotEqual(prep_stream, copy_stream)
+            self.assertLess(
+                buffer_state.copy_stream.priority,
+                buffer_state.prep_stream.priority,
+            )
+            self.assertEqual(
+                buffer_state.num_row_copy_ctas,
+                17,
+            )
+            prep_functions = {
+                "copy_full_counts_to_peers_kernel",
+                "fill_dispatch_metadata_kernel",
+                "fill_combine_metadata_kernel",
+                "invert_flat_indices_kernel",
+            }
+            for name, stream in launch_streams:
+                if name in prep_functions:
+                    self.assertEqual(stream, prep_stream)
+                elif name == "copy_rows_to_peers_kernel":
+                    self.assertEqual(stream, copy_stream)
+            wait_streams = {
+                stream for name, stream in launch_streams if name == "_wait_ready"
+            }
+            self.assertEqual(wait_streams, {prep_stream, copy_stream})
             self.assertEqual(
                 {name for name, _ in launch_streams}, set(launch_functions)
             )
@@ -646,7 +695,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         self.assertFalse(counts.is_contiguous())
         self.assertFalse(local_dest_offsets.is_contiguous())
         self.assertFalse(local_count_starts.is_contiguous())
-        dst_ranks, dst_rows = fill_dispatch_metadata_kernel(
+        dst_ranks, dst_rows, dispatch_peer_segments = fill_dispatch_metadata_kernel(
             counts,
             local_dest_offsets,
             local_count_starts,
@@ -661,6 +710,14 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(
             dst_rows,
             torch.tensor([0, 1, 5, 9], device="cuda", dtype=torch.int64),
+        )
+        assert_equal(
+            dispatch_peer_segments,
+            torch.tensor(
+                [[0, 0, 2], [2, 0, 0], [2, 5, 1], [3, 9, 1]],
+                device="cuda",
+                dtype=torch.int64,
+            ),
         )
 
         segment_lens_storage = torch.tensor(
@@ -698,7 +755,12 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         self.assertFalse(segment_lens.is_contiguous())
         self.assertFalse(output_starts.is_contiguous())
         self.assertFalse(source_input_starts.is_contiguous())
-        combine_ranks, combine_rows, num_valid_rows = fill_combine_metadata_kernel(
+        (
+            combine_ranks,
+            combine_rows,
+            num_valid_rows,
+            combine_peer_segments,
+        ) = fill_combine_metadata_kernel(
             segment_lens,
             output_starts,
             source_input_starts,
@@ -719,6 +781,14 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(
             num_valid_rows,
             torch.tensor([4], device="cuda", dtype=torch.int64),
+        )
+        assert_equal(
+            combine_peer_segments,
+            torch.tensor(
+                [[0, 4, 2], [3, 6, 0], [2, 8, 1], [3, 10, 1]],
+                device="cuda",
+                dtype=torch.int64,
+            ),
         )
 
     def test_copy_kernels_handle_strides_and_active_row_masks(self):
@@ -779,6 +849,27 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(row_dsts[0][4], src[0])
         assert_equal(row_dsts[1][5], torch.zeros(2, device="cuda"))
 
+        bounded_src = torch.arange(128, device="cuda", dtype=torch.float32).view(64, 2)
+        bounded_dst = torch.zeros_like(bounded_src)
+        bounded_dst_ptrs = torch.tensor(
+            [bounded_dst.data_ptr()], device="cuda", dtype=torch.int64
+        )
+        copy_rows_to_peers_kernel(
+            bounded_src,
+            [bounded_dst],
+            torch.zeros(64, device="cuda", dtype=torch.int64),
+            torch.arange(64, device="cuda", dtype=torch.int64),
+            ep_size=1,
+            num_rows=64,
+            num_cols=2,
+            dst_ptrs=bounded_dst_ptrs,
+            block_m=1,
+            num_ctas=2,
+            segments=torch.tensor([[0, 0, 64]], device="cuda", dtype=torch.int64),
+        )
+        torch.cuda.synchronize()
+        assert_equal(bounded_dst, bounded_src)
+
     def test_copy_rows_uses_int64_for_source_stride_arithmetic(self):
         row = 1_048_576
         stride = 2048
@@ -798,35 +889,31 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         src = src_storage[base_offset:]
         dst = torch.zeros(1, device="cuda", dtype=torch.uint8)
         dst_ptrs = torch.tensor([dst.data_ptr()], device="cuda", dtype=torch.int64)
-        dst_ranks = torch.full((metadata_numel,), -1, device="cuda", dtype=torch.int64)
-        dst_ranks[row] = 0
         dst_rows = torch.zeros(metadata_numel, device="cuda", dtype=torch.int64)
-        num_valid_rows = torch.tensor(
-            [metadata_numel], device="cuda", dtype=torch.int64
-        )
+        segments = torch.tensor([[row, 0, 1]], device="cuda", dtype=torch.int64)
 
         src_storage[0] = 17
         src_storage[base_offset + high_offset] = 93
         torch.cuda.synchronize()
 
-        _copy_rows_to_peer_ptrs_kernel[(metadata_numel, 1)](
+        _copy_peer_segments_persistent_kernel[(20,)](
             src,
             dst_ptrs,
-            dst_ranks,
+            segments,
             dst_rows,
-            num_valid_rows,
-            dst_rows,
-            NUM_ROWS=metadata_numel,
+            0,
             NUM_COLS=1,
             SRC_ROW_STRIDE=stride,
             SRC_COL_STRIDE=1,
             DST_ROW_STRIDE=1,
             DST_DTYPE=tl.uint8,
-            HAS_NUM_VALID_ROWS=True,
             HAS_SRC_ROWS=False,
             SRC_ROW_DIVISOR=1,
+            EP_SIZE=1,
+            NUM_SEGMENTS_PER_PEER=1,
             BLOCK_M=1,
             BLOCK_N=1,
+            NUM_COL_TILES=1,
         )
         torch.cuda.synchronize()
 

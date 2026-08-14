@@ -1033,6 +1033,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
     num_max_tokens_per_rank: int | None
     dtype: torch.dtype | None
     buffer_device: torch.device
+    num_row_copy_ctas: int | None
     force_load_balance: bool
     receive_capacity_factor: float | None
     receive_capacity: int | None
@@ -1043,6 +1044,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         num_max_tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
+        num_row_copy_ctas: int | None = None
         force_load_balance: bool = False
         receive_capacity_factor: float | None = None
         receive_capacity: int | None = None
@@ -1052,6 +1054,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         self.hidden_dim = config.hidden_dim
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.dtype = config.dtype
+        self.num_row_copy_ctas = config.num_row_copy_ctas
         self.force_load_balance = config.force_load_balance
         self.receive_capacity_factor = config.receive_capacity_factor
         self.receive_capacity = config.receive_capacity
@@ -1117,6 +1120,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             device=self.buffer_device,
             force_load_balance=self.force_load_balance,
             receive_capacity_factor=self.receive_capacity_factor,
+            num_row_copy_ctas=self.num_row_copy_ctas,
         )
 
     def dispatch(
@@ -1160,6 +1164,8 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             E_row_to_T_row_N,  # local E-major row -> local T-major row
             T_row_to_E_row_N,  # local T-major row -> local E-major row
             num_tokens_per_local_expert_e,  # local expert -> active row count
+            dispatch_peer_segments,
+            combine_peer_segments,
         ) = minimal_async_ep_dispatch_op(
             x_TD,
             topk_expert_ids_TK,
@@ -1179,8 +1185,10 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         state = MinimalAsyncEPDispatchMetadata(
             dispatch_dst_ranks=dispatch_dst_ranks,
             dispatch_dst_rows=dispatch_dst_rows,
+            dispatch_peer_segments=dispatch_peer_segments,
             combine_dst_ranks=combine_dst_ranks,
             combine_dst_rows=combine_dst_rows,
+            combine_peer_segments=combine_peer_segments,
             combine_num_valid_rows=combine_num_valid_rows,
             E_row_to_T_row=E_row_to_T_row_N,
             T_row_to_E_row=T_row_to_E_row_N,
@@ -1206,8 +1214,10 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD,
             state.dispatch_dst_ranks,
             state.dispatch_dst_rows,
+            state.dispatch_peer_segments,
             state.combine_dst_ranks,
             state.combine_dst_rows,
+            state.combine_peer_segments,
             state.combine_num_valid_rows,
             state.num_tokens * state.top_k,
         )
@@ -1217,6 +1227,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
                 routed_output_RD,
                 state.combine_dst_ranks,
                 state.combine_dst_rows,
+                state.combine_peer_segments,
                 state.combine_num_valid_rows,
             ],
         )

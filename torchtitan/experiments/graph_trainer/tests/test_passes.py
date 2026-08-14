@@ -39,6 +39,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
+    validate_ep_overlap_config,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
@@ -3664,6 +3665,12 @@ class TestChunkPasses(TestCase):
             disabled_post_chunk_dce,
             disabled_names.index("joint_transformer_block_bucketing_reordering_pass"),
         )
+
+    def test_ep_overlap_rejects_invalid_minimal_async_ep_copy_grid(self):
+        with self.assertRaisesRegex(ValueError, "must be positive or None"):
+            validate_ep_overlap_config(
+                EpOverlapConfig(enabled=True, minimal_async_ep_num_copy_ctas=0)
+            )
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
