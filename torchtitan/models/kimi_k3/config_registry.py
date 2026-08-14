@@ -12,7 +12,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -61,13 +61,6 @@ def kimi_k3_debugmodel() -> Trainer.Config:
             seq_len=256,
             steps=10,
             dtype="bfloat16",
-        ),
-        parallelism=ParallelismConfig(
-            data_parallel_shard_degree=1,
-            tensor_parallel_degree=1,
-            pipeline_parallel_degree=1,
-            context_parallel_degree=1,
-            expert_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
