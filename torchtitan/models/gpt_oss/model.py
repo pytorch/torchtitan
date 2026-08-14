@@ -93,14 +93,14 @@ class Attention(BaseAttention):
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
+            x: Input tensor with shape ``[T, D]``.
             attention_masks: a ``BlockMask`` (flex) or ``VarlenMetadata`` (varlen).
             positions: Optional position indices (unused, for API compatibility).
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        bsz, seqlen, _ = x.size()
+        num_tokens = x.shape[0]
 
         q, k, v = self.qkv_linear(x)
 
@@ -117,11 +117,8 @@ class Attention(BaseAttention):
         )
 
         # Reshape and project output
-        output = output.reshape(
-            bsz, seqlen, -1
-        ).contiguous()  # (bsz, seqlen, n_heads * v_head_dim)
-        output = self.wo(output)  # (bsz, seqlen, dim)
-        return output
+        output = output.reshape(num_tokens, -1).contiguous()
+        return self.wo(output)
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""
@@ -166,7 +163,7 @@ class GptOssTransformerBlock(TransformerBlock):
         Forward pass for the Transformer block.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
+            x (torch.Tensor): Input tensor of shape (num_tokens, dim).
             attention_masks (AttentionMasksType): with flex, a dict of per-window
                 ``BlockMask``s from which this layer picks its mask; with varlen,
                 a single ``VarlenMetadata`` shared by all layers (the per-layer

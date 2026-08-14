@@ -423,7 +423,7 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
                         )
 
 
-class TestChatDataLoaderTokenMajor(unittest.TestCase):
+class TestChatDataLoaderPackedTokens(unittest.TestCase):
     def test_each_batch_is_one_pp_microbatch(self):
         max_seq_len = 128
         num_tokens_per_dp_rank = 512
@@ -525,7 +525,7 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
         packed = input_ids_0 + input_ids_1
         boundary = len(input_ids_0)
         positions = torch.tensor(
-            [list(range(len(input_ids_0))) + list(range(len(input_ids_1)))]
+            list(range(len(input_ids_0))) + list(range(len(input_ids_1)))
         )
 
         mask_mod = get_document_mask_mod(positions)
@@ -548,13 +548,8 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
 
     def test_packed_document_mask_composes_with_causal_mask(self):
         for positions in (
-            torch.tensor([[0, 1, 2, 0, 1, 0, 1, 2]]),
-            torch.tensor(
-                [
-                    [0, 1, 2, 0, 1, 0, 1, 2],
-                    [0, 1, 0, 1, 2, 3, 0, 1],
-                ]
-            ),
+            torch.tensor([0, 1, 2, 0, 1, 0, 1, 2]),
+            torch.tensor([0, 1, 0, 1, 2, 3, 0, 1]),
         ):
             causal_mask = get_causal_mask_mod()
             document_mask = get_document_mask_mod(positions)
@@ -564,26 +559,22 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             )
             h = torch.tensor(0)
 
-            for b in range(positions.shape[0]):
-                b_tensor = torch.tensor(b)
-                for q_idx in range(positions.shape[1]):
-                    q_tensor = torch.tensor(q_idx)
-                    for kv_idx in range(positions.shape[1]):
-                        kv_tensor = torch.tensor(kv_idx)
-                        expected = causal_mask(
-                            b_tensor, h, q_tensor, kv_tensor
-                        ) & document_mask(b_tensor, h, q_tensor, kv_tensor)
-                        self.assertEqual(
-                            packed_mask(b_tensor, h, q_tensor, kv_tensor).item(),
-                            expected.item(),
-                        )
+            b = torch.tensor(0)
+            for q_idx in range(positions.shape[0]):
+                q_tensor = torch.tensor(q_idx)
+                for kv_idx in range(positions.shape[0]):
+                    kv_tensor = torch.tensor(kv_idx)
+                    expected = causal_mask(b, h, q_tensor, kv_tensor) & document_mask(
+                        b, h, q_tensor, kv_tensor
+                    )
+                    self.assertEqual(
+                        packed_mask(b, h, q_tensor, kv_tensor).item(),
+                        expected.item(),
+                    )
 
     def test_decoder_block_causal_flex_mask_supports_multiple_samples(self):
         positions = torch.tensor(
-            [
-                [0, 1, 2, 0, 1, 0, 1, 2],
-                [0, 1, 0, 1, 2, 3, 0, 1],
-            ],
+            [0, 1, 2, 0, 1, 0, 1, 2],
             dtype=torch.int32,
         )
         attn_config = BaseAttention.Config(
@@ -594,7 +585,7 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
         decoder = Decoder.__new__(Decoder)
         mask = decoder._create_flex_attention_mask_for_document(positions, attn_config)
 
-        self.assertEqual(mask.shape, (positions.shape[0], 1, 8, 8))
+        self.assertEqual(mask.shape, (1, 1, 8, 8))
 
 
 class TestInterleavedChatDataLoader(unittest.TestCase):

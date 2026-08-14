@@ -133,7 +133,7 @@ def parallelize_inputs(
 ) -> tuple[DTensor, DTensor, dict[str, Any]]:
     """Wrap ``inputs``, ``labels``, and tensor ``extra_kwargs`` as DTensors.
 
-    Placements on the dense storage mesh: DP -> Shard(0), CP -> Shard(1),
+    Placements on the dense storage mesh: DP -> Shard(0), CP -> Shard(0),
     TP -> Replicate. Inputs are assumed already sharded; this only
     re-wraps via ``from_local``.
     """
@@ -146,7 +146,7 @@ def parallelize_inputs(
     if parallel_dims.dp_shard_enabled:
         input_shardings["dp_shard"] = Shard(0)
     if parallel_dims.cp_enabled:
-        input_shardings["cp"] = Shard(1)
+        input_shardings["cp"] = Shard(0)
     placements: list[Placement] = [
         input_shardings.get(name, Replicate()) for name in mesh.mesh_dim_names
     ]

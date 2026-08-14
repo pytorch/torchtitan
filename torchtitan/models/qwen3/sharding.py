@@ -78,14 +78,14 @@ def _set_qwen3_layer_sharding(
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(attention.inner_attention)
 
-    # QK norms: shard on head dim (dim=2) — independent of SP.
+    # QK norms: shard on head dim (dim=1), independent of SP.
     if attention.qk_norm is not None:
         attention.qk_norm.sharding_config = ShardingConfig(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-            in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
-            in_dst_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
-            out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
-            out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
+            in_src_shardings={"input": dense_activation_placement(tp=spmd.S(1))},
+            in_dst_shardings={"input": dense_activation_placement(tp=spmd.S(1))},
+            out_src_shardings=dense_activation_placement(tp=spmd.S(1)),
+            out_dst_shardings=dense_activation_placement(tp=spmd.S(1)),
         )
 
     # Dense FFN (non-MoE layers only)

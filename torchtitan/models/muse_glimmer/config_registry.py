@@ -155,7 +155,7 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
 def muse_glimmer_30b() -> Trainer.Config:
     model_spec = model_registry("30B", attn_backend="flex")
     return Trainer.Config(
-        # ChunkedLossWrapper avoids materializing the full [B, L, vocab] logits;
+        # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
         # per-chunk.
         loss=ChunkedLossWrapper.Config(
@@ -190,7 +190,7 @@ def muse_glimmer_30b() -> Trainer.Config:
 def muse_glimmer_30b_mm() -> Trainer.Config:
     model_spec = model_registry("30B_mm", attn_backend="flex")
     return Trainer.Config(
-        # ChunkedLossWrapper avoids materializing the full [B, L, vocab] logits;
+        # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
         # per-chunk.
         loss=ChunkedLossWrapper.Config(

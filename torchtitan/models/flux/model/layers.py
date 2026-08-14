@@ -12,10 +12,52 @@ import spmd_types as spmd
 import torch
 from einops import rearrange
 from torch import nn, Tensor
+import torch.nn.functional as F
+from torch.nn.attention import sdpa_kernel
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm, SiLU
 from torchtitan.protocols.module import Module, Sequential
+
+
+class FluxScaledDotProductAttention(ScaledDotProductAttention):
+    """Scaled dot-product attention for Flux's batched diffusion sequences."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ScaledDotProductAttention.Config):
+        pass
+
+    def forward(
+        self,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
+        *,
+        attention_masks=None,
+        scale: float | None = None,
+        enable_gqa: bool = False,
+        is_causal: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        if attention_masks is not None:
+            raise ValueError(
+                "FluxScaledDotProductAttention does not support attention_masks."
+            )
+        q_BNLH, k_BNLH, v_BNLH = (
+            q_BLNH.transpose(1, 2),
+            k_BLNH.transpose(1, 2),
+            v_BLNH.transpose(1, 2),
+        )
+        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+            out_BNLH = F.scaled_dot_product_attention(
+                q_BNLH,
+                k_BNLH,
+                v_BNLH,
+                scale=scale,
+                is_causal=is_causal,
+                enable_gqa=enable_gqa,
+            )
+        return out_BNLH.transpose(1, 2)
 
 
 @spmd.local_map(
@@ -149,8 +191,8 @@ class SelfAttention(Module):
         norm: QKNorm.Config
         num_heads: int = 8
         qkv_bias: bool = False
-        inner_attention: ScaledDotProductAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
+        inner_attention: FluxScaledDotProductAttention.Config = field(
+            default_factory=FluxScaledDotProductAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -217,8 +259,8 @@ class DoubleStreamBlock(Module):
         txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
-        inner_attention: ScaledDotProductAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
+        inner_attention: FluxScaledDotProductAttention.Config = field(
+            default_factory=FluxScaledDotProductAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -337,8 +379,8 @@ class SingleStreamBlock(Module):
         norm: QKNorm.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
-        inner_attention: ScaledDotProductAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
+        inner_attention: FluxScaledDotProductAttention.Config = field(
+            default_factory=FluxScaledDotProductAttention.Config
         )
 
     def __init__(self, config: Config):

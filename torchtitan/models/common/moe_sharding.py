@@ -90,8 +90,8 @@ def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConf
     """Router gate: Replicate weights, output stays DTensor.
 
     EP off: input Replicate, gate computes on all tokens, output DTensor(Replicate).
-    EP on:  input Shard(1) (slen dim of 3-D activation), gate computes on
-            local shard, output DTensor(Shard(1)).
+    EP on: input Shard(0) on tokens, gate computes on the local shard, and the
+           output remains Shard(0).
     """
     state = {
         "weight": dense_param_placement(tp=spmd.R),
@@ -124,8 +124,7 @@ def _shared_expert_colwise_config() -> ShardingConfig:
     """Colwise shared-expert FFN (w1/w3).
 
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
-    to Replicate for the column-sharded matmul; output is Shard(2)
-    (feature dim for 3-D activations from MoE).
+    to Replicate for the column-sharded matmul; output is Shard(1) on features.
     """
     return ShardingConfig(
         state_shardings={
@@ -134,15 +133,15 @@ def _shared_expert_colwise_config() -> ShardingConfig:
         },
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
-        out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
+        out_src_shardings=dense_activation_placement(tp=spmd.S(1)),
+        out_dst_shardings=dense_activation_placement(tp=spmd.S(1)),
     )
 
 
 def _shared_expert_rowwise_config(*, output_layout: SpmdLayout) -> ShardingConfig:
     """Rowwise shared-expert FFN (w2).
 
-    Mirrors ``RowwiseParallel``: input is Shard(2) on the feature dim from
+    Mirrors ``RowwiseParallel``: input is Shard(1) on the feature dim from
     upstream colwise; rowwise matmul produces Partial, then redistributes to
     ``output_layout``.
     """
@@ -153,7 +152,7 @@ def _shared_expert_rowwise_config(*, output_layout: SpmdLayout) -> ShardingConfi
             # to match the rowwise matmul output placement.
             "bias": dense_param_placement(tp=spmd.R),
         },
-        in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
+        in_src_shardings={"input": dense_activation_placement(tp=spmd.S(1))},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
         out_dst_shardings=output_layout,
     )
@@ -234,15 +233,15 @@ def _routed_experts_sharding_configs(
     return (
         ShardingConfig(
             in_src_shardings={
-                "x_BLD": pre_experts_input_layout,
-                "topk_scores_BLK": experts_input_layout,
-                "topk_expert_ids_BLK": experts_input_layout,
+                "x_TD": pre_experts_input_layout,
+                "topk_scores_TK": experts_input_layout,
+                "topk_expert_ids_TK": experts_input_layout,
                 "num_local_tokens_per_expert_E": tokens_per_expert_layout,
             },
             in_dst_shardings={
-                "x_BLD": experts_input_layout,
-                "topk_scores_BLK": experts_input_layout,
-                "topk_expert_ids_BLK": experts_input_layout,
+                "x_TD": experts_input_layout,
+                "topk_scores_TK": experts_input_layout,
+                "topk_expert_ids_TK": experts_input_layout,
                 "num_local_tokens_per_expert_E": tokens_per_expert_layout,
             },
             out_src_shardings=experts_output_layout,
@@ -289,8 +288,8 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
             "expert_bias_E": dense_param_placement(tp=spmd.R),
             "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
-        in_src_shardings={"x_BLD": sp_layout},
-        in_dst_shardings={"x_BLD": desired_input_layout},
+        in_src_shardings={"x_TD": sp_layout},
+        in_dst_shardings={"x_TD": desired_input_layout},
         out_src_shardings=output_layout,
         out_dst_shardings=sp_layout,
     )

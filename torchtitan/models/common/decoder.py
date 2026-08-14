@@ -256,11 +256,10 @@ class Decoder(BaseModel):
         """Build a flex-attention BlockMask from mask_mods (ANDed together),
         respecting the config's block_size and batch-invariant mode."""
         assert isinstance(attn_config.inner_attention, FlexAttention.Config)
-        B = positions.shape[0]
-        seq_len = positions.shape[1]
+        seq_len = positions.shape[0]
         return create_attention_mask(
             and_masks(*mask_mods),
-            B,
+            1,
             None,
             seq_len,
             seq_len,

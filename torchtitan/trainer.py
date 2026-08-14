@@ -117,20 +117,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
-            local_batch_size = self.training.get_num_sequences(
-                self.training.num_tokens_per_dp_rank,
-                field_name="training.num_tokens_per_dp_rank",
-            )
             if (
                 self.parallelism.pipeline_parallel_degree > 1
-                and local_batch_size % num_pp_microbatches != 0
+                and self.training.num_tokens_per_dp_rank % num_pp_microbatches != 0
             ):
                 raise ValueError(
-                    f"The rectangular batch size ({local_batch_size}) derived "
-                    "from training.num_tokens_per_dp_rank must be evenly "
-                    "divisible by parallelism.num_pp_microbatches "
-                    f"({num_pp_microbatches}) while model inputs use the "
-                    "rectangular [batch, seq] layout."
+                    "training.num_tokens_per_dp_rank must be evenly divisible "
+                    "by parallelism.num_pp_microbatches."
                 )
 
             if (

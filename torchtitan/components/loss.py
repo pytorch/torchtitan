@@ -43,23 +43,23 @@ def cross_entropy_loss(
         assert get_spmd_backend() == "default"
         if pred.placements == (Shard(pred.ndim - 1),):
             return _LossParallelCrossEntropy.apply(
-                pred.to_local().flatten(0, 1).float(),
-                labels.flatten(0, 1),
+                pred.to_local().reshape(-1, pred.shape[-1]).float(),
+                labels.reshape(-1),
                 pred.device_mesh.get_group("tp"),
                 pred.shape[-1],
                 "sum",
             )
     elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
         return _LossParallelCrossEntropy.apply(
-            pred.flatten(0, 1).float(),
-            labels.flatten(0, 1),
+            pred.reshape(-1, pred.shape[-1]).float(),
+            labels.reshape(-1),
             current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
             global_vocab_size,
         )
 
     return torch.nn.functional.cross_entropy(
-        pred.flatten(0, 1).float(),
-        labels.flatten(0, 1),
+        pred.reshape(-1, pred.shape[-1]).float(),
+        labels.reshape(-1),
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )
@@ -226,9 +226,10 @@ def _cross_entropy_via_local_map(
     labels: DTensor,
 ) -> torch.Tensor:
     mesh = pred.device_mesh
+    vocab_dim = pred.ndim - 1
     # Labels don't have a vocab dim.
     expected_labels_placements = tuple(
-        Replicate() if isinstance(p, Shard) and p.dim == 2 else p
+        Replicate() if isinstance(p, Shard) and p.dim == vocab_dim else p
         for p in pred.placements
     )
     if labels.placements != expected_labels_placements:
@@ -237,17 +238,19 @@ def _cross_entropy_via_local_map(
             f"got {labels.placements}"
         )
 
-    # After local flatten(0, 1), tensor dims are [batch*seq, vocab].
+    # After local reshape, tensor dims are [tokens, vocab].
     # Per-axis placement:
-    #   Shard on batch/seq -> Shard(0) (valid because reduction is sum)
+    #   Shard on tokens -> Shard(0) (valid because reduction is sum)
     #   Shard on vocab -> Shard(1)
-    vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
+    vocab_sharded = any(
+        isinstance(p, Shard) and p.dim == vocab_dim for p in pred.placements
+    )
 
     # Per-axis output placement for sum reduction:
     #   Shard on non-vocab-dim -> Partial
     #   Shard on vocab-dim -> Replicate
     out_placements = [
-        Partial() if isinstance(p, Shard) and p.dim != 2 else Replicate()
+        Partial() if isinstance(p, Shard) and p.dim != vocab_dim else Replicate()
         for p in pred.placements
     ]
 
@@ -260,8 +263,8 @@ def _cross_entropy_via_local_map(
     def _local_cross_entropy(
         pred_local: torch.Tensor, labels_local: torch.Tensor
     ) -> torch.Tensor:
-        flat_pred = pred_local.flatten(0, 1).float()
-        flat_labels = labels_local.flatten(0, 1)
+        flat_pred = pred_local.reshape(-1, pred_local.shape[-1]).float()
+        flat_labels = labels_local.reshape(-1)
         if not vocab_sharded:
             return torch.nn.functional.cross_entropy(
                 flat_pred,
@@ -385,15 +388,15 @@ def compute_logprobs(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Per-position logprobs from logits and labels, optionally with entropy.
 
-    Output shape matches input: ``[batch, seq_len]``. Any DTensor placement
+    Output shape matches ``labels``. Any DTensor placement
     handling is centralized here so RL losses that call ``compute_logprobs`` do
     not need to duplicate the vocab-gather logic.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, shape
-    ``[batch, seq_len]``. Both share the single vocab gather + fp32 upcast.
+    matching ``labels``. Both share the single vocab gather + fp32 upcast.
     Entropy is a metric only, so it is computed under ``no_grad``: it never
-    contributes gradient and must not build an autograd graph over the [B, L, V]
+    contributes gradient and must not build an autograd graph over the logits
     softmax.
 
     Returns ``logprobs`` when ``return_entropy`` is False, else
@@ -428,13 +431,13 @@ def compute_logprobs(
 
     # Single bf16->fp32 upcast, reused by both logprobs and (optionally) entropy.
     logits = logits.float()
-    B, L, V = logits.shape
+    vocab_size = logits.shape[-1]
     logprobs = -F.cross_entropy(
-        logits.reshape(B * L, V),
-        labels.reshape(B * L),
+        logits.reshape(-1, vocab_size),
+        labels.reshape(-1),
         reduction="none",
         ignore_index=IGNORE_INDEX,
-    ).reshape(B, L)
+    ).reshape(labels.shape)
     if not return_entropy:
         return logprobs
     with torch.no_grad():
@@ -474,7 +477,7 @@ class GradAccumulator:
         reference: torch.Tensor,
         *,
         num_chunks: int,
-        seq_dim: int = 1,
+        seq_dim: int = 0,
         dtype: torch.dtype,
     ):
         from torch.distributed.device_mesh import DeviceMesh
@@ -565,22 +568,22 @@ class GradAccumulator:
 class ChunkedLossWrapper(BaseLoss):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
-    Instead of materializing the full [B, L, V] logits tensor at once, this splits
-    the hidden states into N chunks along the sequence dimension and computes
+    Instead of materializing the full [T, V] logits tensor at once, this splits
+    the hidden states into N chunks along the token dimension and computes
     lm_head + loss on each chunk sequentially. This reduces peak memory
-    from O(B*L*V) to O(B*L/N*V).
+    from O(T*V) to O(T/N*V).
 
     The inner ``loss_fn`` defaults to ``CrossEntropyLoss`` and is called once per
     chunk on logits from that chunk. Additional per-token ``loss_inputs`` are
     chunked along the same sequence dimension and forwarded to the inner loss.
 
     The flow:
-    1. Model forward with _skip_lm_head=True to get hidden states [B, L, D]
+    1. Model forward with _skip_lm_head=True to get hidden states [T, D]
     2. Detach hidden states at the boundary
     3. Split detached hidden states into N chunks along seq dim
     4. Disable FSDP reshard on lm_head to keep weight unsharded across chunks
     5. For each chunk: lm_head(chunk) -> loss_fn(logits, labels, gvt) -> backward()
-    6. Assemble chunk gradients into a full gradient [B, L, D] via GradAccumulator
+    6. Assemble chunk gradients into a full gradient [T, D] via GradAccumulator
     7. Backward through the decoder via hidden_states.backward(accumulated_grad)
 
     FSDP2 composability:
@@ -655,7 +658,7 @@ class ChunkedLossWrapper(BaseLoss):
         requires_grad = hidden_states.requires_grad
 
         # Chunking always operates on the *local* view: when ``t`` is a
-        # Shard(1) DTensor, chunking the global view would distribute whole
+        # Shard(0) DTensor, chunking the global view would distribute whole
         # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
         # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
         # local seq=0 and breaking GradAccumulator's slice writes.
@@ -664,14 +667,14 @@ class ChunkedLossWrapper(BaseLoss):
         # Equal chunk sizes also match GradAccumulator's sequential slice
         # writes, which use one chunk length for each write offset.
         def _chunk_local(t):
-            seq_len = t.shape[1]
+            seq_len = t.shape[0]
             torch._check(
                 seq_len % num_chunks == 0,
                 lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
             )
             chunk_len = seq_len // num_chunks
             return tuple(
-                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=1)
+                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=0)
             )
 
         def _chunk(t):

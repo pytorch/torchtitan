@@ -38,12 +38,12 @@ def set_muse_glimmer_sharding_config(
     differ only in how the token embeddings flow into the first decoder layer:
 
     * **Text-only**: the base decoder sharding is the whole story. The token
-      embeddings emit sequence-parallel (``Shard(1)``) activations that flow
+      embeddings emit sequence-parallel (``Shard(0)``) activations that flow
       straight into the decoder layers.
     * **Multimodal** (``config.vision_encoder is not None``): ``MuseGlimmerModel.forward``
       scatters vision features into the token embeddings over the full
-      ``[batch, seq]`` *between* ``tok_embeddings`` and the decoder layers, so the
-      embedding output must be ``Replicate`` -- not ``Shard(1)``/SP.
+      ``[T]`` sequence *between* ``tok_embeddings`` and the decoder layers, so the
+      embedding output must be TP-replicated -- not TP sequence-sharded.
       :func:`_set_multimodal_sharding` overrides the embedding + norm (and the
       vision-injection modules) to ``Replicate``, and the layer loop gives the
       first decoder layer a ``Replicate`` input that its attention reduce-scatters
@@ -102,19 +102,19 @@ def _set_multimodal_sharding(
     """Override the text-path sharding for the multimodal (vision) model.
 
     ``MuseGlimmerModel.forward`` scatters vision features into the token embeddings
-    (masked index over the full ``[batch, seq]``) between ``tok_embeddings`` and
-    the decoder layers, so that activation must be ``Replicate`` -- not
-    ``Shard(1)``/SP. This re-points the embedding children at ``Replicate``
+    (masked index over ``[T]``) between ``tok_embeddings`` and the decoder
+    layers, so that activation must be TP-replicated. This re-points the
+    embedding children at TP-replicated
     outputs, marks the vision-injection modules ``Replicate`` so the whole vision
     path stays DTensor-consistent, and (under SP) re-shards the first decoder
     layer to take that ``Replicate`` input -- its rowwise ``wo`` reduce-scatters
-    back to ``Shard(1)``, restoring SP activations for every later layer. Mirrors
+    back to ``Shard(0)``, restoring SP activations for every later layer. Mirrors
     qwen3_5's multimodal sharding overrides.
     """
     replicate = dense_activation_placement(tp=spmd.R)
     emb_cfg = config.tok_embeddings
 
-    # Embedding output Replicate (vs Shard(1)/SP): the vision scatter needs the
+    # Embedding output Replicate (vs Shard(0)/SP): the vision scatter needs the
     # full sequence. Vocab-parallel Embedding.forward runs a manual local masked
     # lookup on a Shard(0) weight and emits a Partial sum; local_map localizes the
     # Replicate DTensor input so the manual path sees a plain tensor (otherwise it
@@ -160,9 +160,9 @@ def _set_multimodal_sharding(
         )
 
     # First-layer SP bridge: tok_embeddings now emits Replicate activations, but the
-    # rest of the decoder expects sequence-parallel activations (Shard(1)). Re-shard
+    # rest of the decoder expects sequence-parallel activations (Shard(0)). Re-shard
     # the first layer to take a Replicate input; its rowwise ``wo`` (output_sp)
-    # reduce-scatters back to Shard(1), restoring SP activations for every later layer.
+    # reduce-scatters back to Shard(0), restoring SP activations for every later layer.
     # Only needed under SP -- without SP the whole decoder already uses Replicate
     # activations. Mirrors qwen3_5's first-layer Replicate input layout.
     if enable_sp and config.layers:
@@ -218,21 +218,25 @@ def _set_muse_glimmer_layer_sharding(
     layer_cfg.post_ffn_norm.sharding_config = norm
 
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
+    assert attention.sharding_config is not None
+    attn_in_src = attention.sharding_config.in_src_shardings
+    attn_in_dst = attention.sharding_config.in_dst_shardings
+    assert attn_in_src is not None and attn_in_dst is not None
+    attn_in_src["x"] = attn_in_src.pop("x_TD")
+    attn_in_dst["x"] = attn_in_dst.pop("x_TD")
     set_gqa_inner_attention_local_map(attention.inner_attention)
     # Re-point the attention's activation input to this layer's input layout.
     # set_gqa_attention_sharding declares exactly the activation arg in in_src, so
     # overwriting every entry pins the input without hardcoding the arg name (a
     # no-op for non-first layers, where the layout already matches).
     # pyrefly: ignore [missing-attribute]
-    attn_in_src = attention.sharding_config.in_src_shardings
-    assert attn_in_src is not None
     for arg_name in attn_in_src:
         attn_in_src[arg_name] = attention_input_layout
 
-    # QK norms: shard on head dim (dim=2), independent of SP. Scaleless, so no
+    # QK norms: shard on head dim (dim=1), independent of SP. Scaleless, so no
     # weight state to distribute.
     if attention.qk_norm is not None:
-        head_shard = dense_activation_placement(tp=spmd.S(2))
+        head_shard = dense_activation_placement(tp=spmd.S(1))
         attention.qk_norm.sharding_config = ShardingConfig(
             in_src_shardings={"input": head_shard},
             in_dst_shardings={"input": head_shard},

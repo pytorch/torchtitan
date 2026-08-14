@@ -60,8 +60,8 @@ def _replicate_norm() -> ShardingConfig:
 
 
 def _qk_norm_sharding() -> ShardingConfig:
-    """Per-head QK-norm sharding: weight Replicate, activations Shard(2)."""
-    head_plc = dense_activation_placement(tp=spmd.S(2))
+    """Per-head QK-norm sharding: weight Replicate, activations Shard(1)."""
+    head_plc = dense_activation_placement(tp=spmd.S(1))
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"input": head_plc},
@@ -101,12 +101,12 @@ def set_qwen35_sharding_config(
 
     Uses SP for decoder layers, norm, and lm_head. tok_embeddings output
     stays Replicate so vision scatter and MRoPE can access the full sequence.
-    The model forward redistributes to Shard(1) before entering the layers.
+    The model forward redistributes to Shard(0) before entering the layers.
     """
     # SP on norm, lm_head, and layers. Each full-attention layer owns its rope;
     # its cache buffer is sharded Replicate in _set_full_attention_sharding.
     set_decoder_sharding_config(config, enable_sp=True)
-    # Override tok_embeddings: output Replicate (not Shard(1)) for vision scatter
+    # Override tok_embeddings: output TP-replicated for vision scatter.
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
@@ -253,8 +253,8 @@ def _set_full_attention_sharding(
 ) -> None:
     """TP sharding for Qwen35Attention (output gating + partial RoPE)."""
     attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={"x_BLD": attention_input_layout},
-        in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
+        in_src_shardings={"x_TD": attention_input_layout},
+        in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R)},
     )
     # The per-layer rope ``cache`` buffer is a Replicate DTensor; MRoPE builds the
     # position-resolved cache from it (``positions`` stays a plain input).
@@ -279,10 +279,10 @@ def _set_deltanet_sharding(
 ) -> None:
     """Sharding for GatedDeltaNet: head-sharded TP on projections.
 
-    Input is allgathered (Shard(1)→Replicate) so that the recurrence
+    Input is all-gathered (Shard(0) -> Replicate) so that the recurrence
     sees the full sequence. Projections are ColwiseParallel (head-sharded
     output). The FLA kernel runs on local tensors via local_map.
-    out_proj is RowwiseParallel (reduce-scatter back to Shard(1)).
+    out_proj is RowwiseParallel (reduce-scatter back to Shard(0)).
 
     A_log and dt_bias are per-head parameters, Shard(0) on TP.
     Conv1d weights are Shard(0) (out-channels); the DTensor->local conversion
@@ -307,8 +307,8 @@ def _set_deltanet_sharding(
     # RowwiseParallel on output projection (reduce-scatter to SP)
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
 
-    # RMSNormGated: per-head norm, weight Replicate, activations Shard(2)
-    _norm_plc = dense_activation_placement(tp=spmd.S(2))
+    # RMSNormGated: per-head norm, weight Replicate, activations Shard(1)
+    _norm_plc = dense_activation_placement(tp=spmd.S(1))
     deltanet_cfg.norm.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"x": _norm_plc, "gate": _norm_plc},
@@ -317,14 +317,14 @@ def _set_deltanet_sharding(
     )
 
     # GatedDeltaKernel: local_map converts DTensor q/k/v/g/beta to local.
-    _kernel_plc = dense_activation_placement(tp=spmd.S(2))
+    _kernel_plc = dense_activation_placement(tp=spmd.S(1))
     deltanet_cfg.kernel.sharding_config = ShardingConfig(
         in_dst_shardings={
-            "xq_BLNK": _kernel_plc,
-            "xk_BLNK": _kernel_plc,
-            "xv_BLNV": _kernel_plc,
-            "g_BLN": _kernel_plc,
-            "beta_BLN": _kernel_plc,
+            "xq_TNK": _kernel_plc,
+            "xk_TNK": _kernel_plc,
+            "xv_TNV": _kernel_plc,
+            "g_TN": _kernel_plc,
+            "beta_TN": _kernel_plc,
         },
         out_src_shardings=_kernel_plc,
         local_map=LocalMapConfig(
@@ -337,7 +337,7 @@ def _set_deltanet_sharding(
             "A_log": dense_param_placement(tp=spmd.S(0)),
             "dt_bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings={"x_BLD": attention_input_layout},
-        in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
+        in_src_shardings={"x_TD": attention_input_layout},
+        in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R)},
         out_dst_shardings=dense_sequence_parallel_placement(),
     )

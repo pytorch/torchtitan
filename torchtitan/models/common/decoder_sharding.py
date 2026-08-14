@@ -8,7 +8,11 @@ import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
-from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
+from torchtitan.models.common.attention import (
+    FusedQKVLinear,
+    GQAttention,
+    QKVLinear,
+)
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 DP = MeshAxisName.DP
@@ -34,31 +38,39 @@ def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdLayout:
 def dense_activation_placement(
     *,
     tp: spmd.PerMeshAxisSpmdType,
-    cp: spmd.PerMeshAxisSpmdType = spmd.S(1),
+    cp: spmd.PerMeshAxisSpmdType = spmd.S(0),
 ) -> SpmdLayout:
-    """Placement for dense-path activations.
+    """Placement for token-leading activations.
 
-    DP is batch-sharded. CP defaults to seq-sharded S(1); override to R/I
-    for K/V after all-gather. TP placement is caller-specified.
+    DP is token-sharded. CP defaults to token-sharded S(0); override to R/I
+    for K/V after all-gather or P for K/V gradients. TP placement is
+    caller-specified. Tensor dimensions not listed in the PartitionSpec are
+    replicated.
     """
+    cp_shards_tokens = isinstance(cp, spmd.Shard)
+    tp_shards_features = isinstance(tp, spmd.Shard)
     return SpmdLayout(
         {
-            DP: spmd.S(0),
-            CP: cp,
-            TP: tp,
-        }
+            DP: spmd.V,
+            CP: spmd.V if cp_shards_tokens else cp,
+            TP: spmd.V if tp_shards_features else tp,
+        },
+        partition_spec=(
+            (DP, CP) if cp_shards_tokens else DP,
+            TP if tp_shards_features else None,
+        ),
     )
 
 
 def dense_sequence_parallel_placement() -> SpmdLayout:
-    """Sequence-parallel ``(batch, seq, hidden)`` activation placement."""
+    """Sequence-parallel ``(tokens, hidden)`` activation placement."""
     return SpmdLayout(
         {
             DP: spmd.V,
             CP: spmd.V,
             TP: spmd.V,
         },
-        partition_spec=(DP, (CP, TP), None),
+        partition_spec=((DP, CP, TP), None),
     )
 
 
@@ -155,9 +167,9 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
-    Shared by llama3 and qwen3 -- both have a GQA block whose
-    ``forward(x_BLD, ...)`` takes ``x_BLD`` (per-SP layout, gathered to
-    Replicate internally) and uses the attention layer's local RoPE cache.
+    Shared by llama3 and qwen3 -- both have a GQA block whose input uses the
+    per-SP layout, is gathered to Replicate internally, and uses the attention
+    layer's local RoPE cache.
 
     Callers that have additional attention sub-state (e.g. ``qk_norm``,
     ``sinks``) set those after calling this helper.
@@ -173,10 +185,10 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     )
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x_BLD": attn_x_layout,
+            "x_TD": attn_x_layout,
         },
         in_dst_shardings={
-            "x_BLD": dense_activation_placement(tp=spmd.R),
+            "x_TD": dense_activation_placement(tp=spmd.R),
         },
     )
     if attention_cfg.rope is not None:
@@ -190,37 +202,38 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
 def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     """Install a ``LocalMapConfig`` on an inner-attention config.
 
-    q/k/v arrive as ``(bs, seq, heads, head_dim)`` DTensors with heads
-    TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
-    to local tensors before the kernel runs, then wraps outputs back.
+    q/k/v use ``(T, N, H)`` layout. DP/CP shard T and TP shards N.
+    ``local_map`` converts DTensors to local tensors before the kernel runs,
+    then wraps outputs back.
 
     Declares placements over the full dense SPMD axis set (DP/CP/TP) so
     the LocalMap composes under ``full_dtensor`` (where the surrounding
     mesh is multi-axis); under non-full_dtensor, the (tp,)-only mesh only
     consumes the ``TP`` placement and the rest are ignored.
 
-    Under ``full_dtensor`` + CP, q stays seq-sharded on the CP axis
-    (``Shard(1)``) while k/v are ``Replicate`` on CP -- DTensor all-gathers
+    Under ``full_dtensor`` + CP, q stays token-sharded on the CP axis while k/v
+    are ``Replicate`` on CP -- DTensor all-gathers
     k/v at the local_map boundary so the kernel sees full-length keys
     (matching the BlockMask's kv dimension). Q's local grad is naturally
     seq-sharded; k/v's local grads accumulate as ``Partial`` on CP and
     DTensor reduces them on the way out.
     """
-    q_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
-    kv_src_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
-    kv_dst_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
-    kv_grad_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
+    q_placements = dense_activation_placement(tp=spmd.S(1))
+    kv_src_placements = dense_activation_placement(tp=spmd.S(1))
+    kv_dst_placements = dense_activation_placement(tp=spmd.S(1), cp=spmd.R)
+    kv_grad_placements = dense_activation_placement(tp=spmd.S(1), cp=spmd.P)
+
     out_src: SpmdLayout = q_placements
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "q_BLNH": q_placements,
-            "k_BLNH": kv_src_placements,
-            "v_BLNH": kv_src_placements,
+            "q_TNH": q_placements,
+            "k_TNH": kv_src_placements,
+            "v_TNH": kv_src_placements,
         },
         in_dst_shardings={
-            "q_BLNH": q_placements,
-            "k_BLNH": kv_dst_placements,
-            "v_BLNH": kv_dst_placements,
+            "q_TNH": q_placements,
+            "k_TNH": kv_dst_placements,
+            "v_TNH": kv_dst_placements,
         },
         out_src_shardings=out_src,
         local_map=LocalMapConfig(
@@ -257,7 +270,7 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     Per-layer sharding (attention, feed_forward, per-layer norms) is the
     caller's responsibility — this helper does not walk ``config.layers``.
 
-    ``enable_sp=True``  -> SequenceParallel: activations are ``Shard(1)`` between
+    ``enable_sp=True``  -> SequenceParallel: activations are ``Shard(0)`` between
     the embedding, norm, and output layers.
     ``enable_sp=False`` -> activations stay ``Replicate``; root norm is left
     unsharded (equivalent to the legacy ``NoParallel`` plan).

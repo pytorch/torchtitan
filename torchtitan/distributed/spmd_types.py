@@ -141,22 +141,29 @@ def annotate_input_spmd_types(
     """Annotate decoder inputs/labels with SPMD types.
 
     Hardcodes the standard decoder convention: inputs and positions are
-    ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
+    ``S(0)@DP, S(0)@CP, R@TP``; labels are
+    ``S(0)@DP, S(0)@CP, I@TP``.
     Analogous to ``full_dtensor.parallelize_inputs()`` but for the
     ``spmd_types`` path.
     """
     from torchtitan.distributed.parallel_dims import MeshAxisName
 
-    token_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.CP: spmd.S(1),
-        MeshAxisName.TP: spmd.R,
-    }
-    label_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.CP: spmd.S(1),
-        MeshAxisName.TP: spmd.I,
-    }
+    token_type = (
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.V,
+            MeshAxisName.TP: spmd.R,
+        },
+        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
+    )
+    label_type = (
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.V,
+            MeshAxisName.TP: spmd.I,
+        },
+        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
+    )
 
     mesh = parallel_dims.spmd_dense_mesh()
     with set_current_spmd_mesh(mesh):

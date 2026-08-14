@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 import unittest
 
 import torch
@@ -142,7 +143,7 @@ class TestParallelAwareDataloader(unittest.TestCase):
         # Verify that batch_size is the explicit one, not the config one
         self.assertEqual(dataloader.batch_size, explicit_batch_size)
 
-    def test_build_token_major_dataloader(self):
+    def test_build_packed_token_dataloader(self):
         """Verify the DP-rank token budget is returned without batching."""
         tokenizer = DummyTokenizer()
 
@@ -181,12 +182,14 @@ class TestParallelAwareDataloader(unittest.TestCase):
             num_tokens_per_batch=4096,
         )
 
-        for batch, _ in zip(map(lambda x: x[0], dataloader), range(10)):
+        for batch, _ in itertools.islice(dataloader, 10):
             batch_input_ids = batch["input"]
             batch_positions = batch["positions"]
             self.assertEqual(batch_input_ids.shape, (4096,))
             self.assertEqual(batch_positions.shape, (4096,))
-            for i, (tok, pos) in enumerate(zip(batch_input_ids, batch_positions)):
+            for i, (tok, pos) in enumerate(
+                zip(batch_input_ids, batch_positions, strict=True)
+            ):
                 self.assertLess(pos.item(), max_seq_len)
                 self.assertGreaterEqual(pos.item(), 0)
                 if i % max_seq_len == 0:

@@ -44,9 +44,9 @@ Workflow overview::
     │                                                       │
     │  1. collate_images: for each image Tensor(T,H,W,C),  │
     │     reshape into patches (num_patches, patch_dim),    │
-    │     pad all images to same num_patches                │
-    │     → pixel_values: (N, max_patches, patch_dim)       │
-    │     → grid_thw: (N, 3) per-image [T, H', W'] dims    │
+    |     concatenate all valid patches                     |
+    |     -> pixel_values: (total_patches, patch_dim)       |
+    |     -> grid_thw: (N, 3) per-image [T, H', W'] dims   |
     │     (same for videos)                                 │
     │                                                       │
     │  2. collate_text: pad input_ids/labels across batch   │
@@ -470,9 +470,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
 
         if self.enable_packing and "packer_state" in state_dict:
             packer_state = state_dict["packer_state"]
-            self.packer._sample_buffer = {
-                i: s for i, s in enumerate(packer_state["sample_buffer"])
-            }
+            self.packer._sample_buffer = dict(enumerate(packer_state["sample_buffer"]))
             self.packer._next_id = len(packer_state["sample_buffer"])
             self.packer.packed_samples.clear()
             self.packer.packed_samples.extend(packer_state["packed_samples"])
@@ -588,7 +586,7 @@ class MMDataLoader(ParallelAwareDataloader):
         if num_tokens_per_batch % max_seq_len != 0:
             raise ValueError(
                 "num_tokens_per_batch must be evenly divisible by max_seq_len "
-                "while multimodal inputs use [batch, seq]."
+                "so multimodal sample segments have a fixed length."
             )
         local_batch_size = num_tokens_per_batch // max_seq_len
         dataset = HuggingFaceMultiModalDataset(

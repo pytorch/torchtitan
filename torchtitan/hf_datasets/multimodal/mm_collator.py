@@ -4,19 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multimodal collator for VLM datasets."""
+"""Multimodal collator for VLM datasets.
+
+Shape conventions:
+- T = packed tokens (text tokens or vision patches, depending on the tensor)
+- Each ``grid_thw`` row is ``[t, h, w]``, where lowercase ``t`` is the
+  temporal patch count for one visual item
+"""
 
 from dataclasses import dataclass
 from typing import Any
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.tools.logging import logger
 from .utils.image import vision_to_patches
-from .utils.text import pad_batch_dim, pad_seq_len
 
 
 @dataclass
@@ -40,16 +44,17 @@ class MultiModalCollator:
     def collate_images(
         self, all_images: list[torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Process a list of image/video tensors into padded patches with grid dimensions.
+        """Process a list of image/video tensors into packed patches with grid dimensions.
 
         Args:
             all_images: Non-empty list of image/video tensors, each of shape (T, H, W, C)
 
         Returns:
-            pixel_values: Padded patches (num_images, max_num_patch, patch_dim)
+            pixel_values: Packed patches (num_patches, patch_dim).
             grid_thw: Grid dimensions (num_images, 3) with [T, H_patches, W_patches]
 
-        NOTE: Both num_images and max_num_patch vary per batch.
+        ``grid_thw.prod(-1)`` gives each visual item's segment length in the
+        packed patch sequence.
         """
         results = [
             vision_to_patches(
@@ -64,80 +69,51 @@ class MultiModalCollator:
         all_patches = [r[0] for r in results]
         grid_thw_list = [r[1] for r in results]
 
-        # Pad to same length for batched processing
-        # Ensure max_num_patch is divisible by spatial_merge_size^2 for merger
-        merge_unit = self.spatial_merge_size**2
-        max_num_patch = max(p.shape[0] for p in all_patches)
-        if max_num_patch % merge_unit != 0:
-            max_num_patch = ((max_num_patch // merge_unit) + 1) * merge_unit
-
-        patch_dim = all_patches[0].shape[1]
-
-        padded_patches = torch.zeros(len(all_patches), max_num_patch, patch_dim)
-        for i, patches in enumerate(all_patches):
-            padded_patches[i, : patches.shape[0]] = patches
-
+        packed_patches = torch.cat(all_patches, dim=0)
         grid_thw = torch.stack(grid_thw_list, dim=0)  # (num_images, 3)
 
-        return padded_patches, grid_thw
+        return packed_patches, grid_thw
 
     def collate_text(
         self,
         batch: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Process text inputs, labels, and positions from batch."""
-        # Pad sequences to the longest in the batch
-        input_ids = pad_sequence(
-            [s["input_ids"] for s in batch],
-            batch_first=True,
-            # pyrefly: ignore [missing-attribute]
-            padding_value=self.tokenizer.pad_id,
-        )
-        labels = pad_sequence(
-            [s["labels"] for s in batch],
-            batch_first=True,
-            padding_value=IGNORE_INDEX,
-        )
-        positions = pad_sequence(
-            [s["positions"] for s in batch],
-            batch_first=True,
-            padding_value=0,
-        )
-        # Pad or truncate to seq_len + 1
-        input_ids, labels = pad_seq_len(
-            input_ids,
-            labels,
-            self.seq_len + 1,
-            # pyrefly: ignore [missing-attribute]
-            padding_idx=self.tokenizer.pad_id,
-            ignore_idx=IGNORE_INDEX,
-        )
-        # Pad or truncate positions to seq_len + 1
-        if positions.shape[1] < self.seq_len + 1:
-            positions = torch.nn.functional.pad(
-                positions,
-                (0, self.seq_len + 1 - positions.shape[1]),
-                value=0,
-            )
-        else:
-            positions = positions[:, : self.seq_len + 1]
-        # Pad dummy rows to reach target batch size
-        input_ids, labels = pad_batch_dim(
-            input_ids,
-            labels,
-            self.batch_size,
-            # pyrefly: ignore [missing-attribute]
-            padding_idx=self.tokenizer.pad_id,
-            ignore_idx=IGNORE_INDEX,
-        )
-        if positions.shape[0] < self.batch_size:
-            positions = torch.nn.functional.pad(
-                positions,
-                (0, 0, 0, self.batch_size - positions.shape[0]),
-                value=0,
+        """Build one flat token sequence from fixed-size sample segments."""
+        segment_len = self.seq_len + 1
+
+        def _fixed_length(x: torch.Tensor, value: int) -> torch.Tensor:
+            x = x[:segment_len]
+            return torch.nn.functional.pad(
+                x, (0, segment_len - x.shape[0]), value=value
             )
 
-        return input_ids[:, :-1], labels[:, 1:], positions[:, :-1]
+        inputs: list[torch.Tensor] = []
+        labels: list[torch.Tensor] = []
+        positions: list[torch.Tensor] = []
+        for sample in batch:
+            input_ids = _fixed_length(
+                sample["input_ids"],
+                # pyrefly: ignore [missing-attribute]
+                self.tokenizer.pad_id,
+            )
+            sample_labels = _fixed_length(sample["labels"], IGNORE_INDEX)
+            sample_positions = _fixed_length(sample["positions"], 0)
+            inputs.append(input_ids[:-1])
+            labels.append(sample_labels[1:])
+            positions.append(sample_positions[:-1])
+
+        num_padding_segments = self.batch_size - len(batch)
+        if num_padding_segments > 0:
+            inputs.extend(
+                [torch.full_like(inputs[0], self.tokenizer.pad_id)]
+                * num_padding_segments
+            )
+            labels.extend(
+                [torch.full_like(labels[0], IGNORE_INDEX)] * num_padding_segments
+            )
+            positions.extend([torch.zeros_like(positions[0])] * num_padding_segments)
+
+        return torch.cat(inputs), torch.cat(labels), torch.cat(positions)
 
     def _build_mrope_positions(
         self,
@@ -151,23 +127,20 @@ class MultiModalCollator:
     ) -> torch.Tensor:
         """Build 3D (temporal, height, width) MRoPE position IDs per token.
 
-        Returns ``(batch, seq_len, 3)`` — batch/seq leading (like the 2D
-        ``positions``) so pipeline-parallel microbatching chunks the batch dim
-        and context parallel can shard the seq dim, with the 3 T/H/W coords as
-        the last (feature) axis. Runs here on CPU data workers, off the GPU
-        training path.
+        Returns ``(T, 3)`` with temporal/height/width coordinates in the final
+        dimension. Runs here on CPU data workers, off the GPU training path.
 
         Args:
-            tokens: (batch, seq_len) token IDs.
+            tokens: ``(T,)`` token IDs.
             grid_thw: (num_images, 3) image grid dims, or None.
             grid_thw_videos: (num_videos, 3) video grid dims, or None.
-            positions: (batch, seq_len) per-token positions; document
+            positions: ``(T,)`` per-token positions; document
                 boundaries are detected where positions reset.
             image_token_id: Placeholder token ID marking image positions.
             video_token_id: Placeholder token ID marking video positions.
 
         Returns:
-            (batch, seq_len, 3) MRoPE position IDs.
+            ``(T, 3)`` MRoPE position IDs.
         """
         # MRoPE position IDs are laid out in block order; a raster patch order
         # would desync them from the patch sequence.
@@ -186,130 +159,98 @@ class MultiModalCollator:
 
         spatial_merge_size = self.spatial_merge_size
 
-        batch_size, seq_len = tokens.shape
-        mrope_positions = torch.zeros(
-            batch_size, seq_len, 3, dtype=tokens.dtype, device=tokens.device
-        )
-
+        num_tokens = tokens.shape[0]
         if positions is not None:
-            resets = positions[:, 1:] < positions[:, :-1]  # (batch, seq_len-1)
+            reset_indices = torch.where(positions[1:] < positions[:-1])[0] + 1
+            doc_starts = [0] + reset_indices.tolist()
+            doc_ranges = [
+                (
+                    doc_starts[d],
+                    doc_starts[d + 1] if d + 1 < len(doc_starts) else num_tokens,
+                )
+                for d in range(len(doc_starts))
+            ]
+        else:
+            doc_ranges = [(0, num_tokens)]
+
         # First token of each consecutive vision region (image or video).
         vision_mask = (tokens == image_token_id) | (tokens == video_token_id)
         prev_vision = torch.cat(
-            [torch.zeros_like(vision_mask[:, :1]), vision_mask[:, :-1]], dim=1
+            [torch.zeros_like(vision_mask[:1]), vision_mask[:-1]], dim=0
         )
-        batch_vision_starts = vision_mask & ~prev_vision  # (batch, seq_len)
+        vision_starts = torch.where(vision_mask & ~prev_vision)[0].tolist()
         grid_cache: dict[tuple[int, int, int], torch.Tensor] = {}
 
         image_index, video_index = 0, 0
-        # With sample packing, each sample may contain multiple documents.
-        for sample_i in range(batch_size):
-            llm_pos_ids_list: list[torch.Tensor] = []
+        vision_start_index = 0
+        llm_pos_ids_list: list[torch.Tensor] = []
+        for doc_start, doc_end in doc_ranges:
+            doc_pos_ids_list: list[torch.Tensor] = []
+            doc_vision_starts: list[int] = []
+            while (
+                vision_start_index < len(vision_starts)
+                and vision_starts[vision_start_index] < doc_end
+            ):
+                doc_vision_starts.append(vision_starts[vision_start_index])
+                vision_start_index += 1
 
-            if positions is not None:
-                # pyrefly: ignore [unbound-name]
-                reset_indices = torch.where(resets[sample_i])[0] + 1
-                doc_starts = [0] + reset_indices.tolist()
-                doc_ranges = [
-                    (
-                        doc_starts[d],
-                        doc_starts[d + 1] if d + 1 < len(doc_starts) else seq_len,
+            pair_cursor = doc_start
+            for vision_start in doc_vision_starts:
+                if tokens[vision_start] == image_token_id:
+                    # pyrefly: ignore [unsupported-operation]
+                    t, h, w = grid_thw[image_index]
+                    image_index += 1
+                else:
+                    # pyrefly: ignore [unsupported-operation]
+                    t, h, w = grid_thw_videos[video_index]
+                    video_index += 1
+
+                llm_grid_t, llm_grid_h, llm_grid_w = (
+                    int(t.item()),
+                    int(h.item()) // spatial_merge_size,
+                    int(w.item()) // spatial_merge_size,
+                )
+                text_len = vision_start - pair_cursor
+                pos_id_offset = (
+                    doc_pos_ids_list[-1].max() + 1 if doc_pos_ids_list else 0
+                )
+                # Text positions are sequential and identical on all three axes.
+                doc_pos_ids_list.append(
+                    torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
+                )
+                grid_key = (llm_grid_t, llm_grid_h, llm_grid_w)
+                if grid_key not in grid_cache:
+                    hw = llm_grid_h * llm_grid_w
+                    t_index = (
+                        torch.arange(llm_grid_t).view(-1, 1).expand(-1, hw).flatten()
                     )
-                    for d in range(len(doc_starts))
-                ]
-            else:
-                doc_ranges = [(0, seq_len)]
-
-            sample_tokens = tokens[sample_i]
-            sample_vision_starts = torch.where(batch_vision_starts[sample_i])[
-                0
-            ].tolist()
-            vision_start_index = 0
-
-            for doc_start, doc_end in doc_ranges:
-                doc_pos_ids_list: list[torch.Tensor] = []
-
-                doc_vision_starts: list[int] = []
-                while (
-                    vision_start_index < len(sample_vision_starts)
-                    and sample_vision_starts[vision_start_index] < doc_end
-                ):
-                    doc_vision_starts.append(sample_vision_starts[vision_start_index])
-                    vision_start_index += 1
-
-                pair_cursor = doc_start
-                for vision_start in doc_vision_starts:
-                    if sample_tokens[vision_start] == image_token_id:
-                        # pyrefly: ignore [unsupported-operation]
-                        t, h, w = grid_thw[image_index]
-                        image_index += 1
-                    else:
-                        # pyrefly: ignore [unsupported-operation]
-                        t, h, w = grid_thw_videos[video_index]
-                        video_index += 1
-
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        int(t.item()),
-                        int(h.item()) // spatial_merge_size,
-                        int(w.item()) // spatial_merge_size,
+                    h_index = (
+                        torch.arange(llm_grid_h)
+                        .view(1, -1, 1)
+                        .expand(llm_grid_t, -1, llm_grid_w)
+                        .flatten()
                     )
-                    text_len = vision_start - pair_cursor
-
-                    pos_id_offset = (
-                        doc_pos_ids_list[-1].max() + 1
-                        if len(doc_pos_ids_list) > 0
-                        else 0
+                    w_index = (
+                        torch.arange(llm_grid_w)
+                        .view(1, 1, -1)
+                        .expand(llm_grid_t, llm_grid_h, -1)
+                        .flatten()
                     )
-                    # [text tokens] — sequential positions, identical on all 3 axes.
-                    doc_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
-                    )
-                    # [vision tokens] — 3D grid positions (T, H, W).
-                    grid_key = (llm_grid_t, llm_grid_h, llm_grid_w)
-                    if grid_key not in grid_cache:
-                        hw = llm_grid_h * llm_grid_w
-                        t_index = (
-                            torch.arange(llm_grid_t)
-                            .view(-1, 1)
-                            .expand(-1, hw)
-                            .flatten()
-                        )
-                        h_index = (
-                            torch.arange(llm_grid_h)
-                            .view(1, -1, 1)
-                            .expand(llm_grid_t, -1, llm_grid_w)
-                            .flatten()
-                        )
-                        w_index = (
-                            torch.arange(llm_grid_w)
-                            .view(1, 1, -1)
-                            .expand(llm_grid_t, llm_grid_h, -1)
-                            .flatten()
-                        )
-                        grid_cache[grid_key] = torch.stack([t_index, h_index, w_index])
-                    doc_pos_ids_list.append(
-                        grid_cache[grid_key] + text_len + pos_id_offset
-                    )
-                    pair_cursor = vision_start + llm_grid_t * llm_grid_h * llm_grid_w
+                    grid_cache[grid_key] = torch.stack([t_index, h_index, w_index])
+                doc_pos_ids_list.append(grid_cache[grid_key] + text_len + pos_id_offset)
+                pair_cursor = vision_start + llm_grid_t * llm_grid_h * llm_grid_w
 
-                # Trailing [text tokens] after the last text/vision pair.
-                if pair_cursor < doc_end:
-                    pos_id_offset = (
-                        doc_pos_ids_list[-1].max() + 1
-                        if len(doc_pos_ids_list) > 0
-                        else 0
-                    )
-                    text_len = doc_end - pair_cursor
-                    doc_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
-                    )
+            if pair_cursor < doc_end:
+                pos_id_offset = (
+                    doc_pos_ids_list[-1].max() + 1 if doc_pos_ids_list else 0
+                )
+                text_len = doc_end - pair_cursor
+                doc_pos_ids_list.append(
+                    torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
+                )
+            llm_pos_ids_list.extend(doc_pos_ids_list)
 
-                llm_pos_ids_list.extend(doc_pos_ids_list)
-
-            # llm_pos_ids_list is (3, segment_len); concat -> (3, seq), then transpose
-            mrope_positions[sample_i] = torch.cat(llm_pos_ids_list, dim=1).T
-
-        return mrope_positions
+        return torch.cat(llm_pos_ids_list, dim=1).T
 
     def __call__(
         self, batch: list[dict[str, Any]]

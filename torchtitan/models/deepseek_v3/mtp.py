@@ -40,20 +40,19 @@ def roll_mtp_sequence(
     """Left-roll an MTP sequence while preserving packed-document boundaries.
 
     MTP depth ``k`` needs the token or label at ``i + k`` for each position
-    ``i``. This helper builds that shifted view along the sequence axis
-    (dimension 1). Tail positions, and positions that would cross a packed
+    ``i``. This helper builds that shifted view along the token axis
+    (dimension 0). Tail positions, and positions that would cross a packed
     document boundary, are filled instead of wrapped around.
 
     Args:
-        sequence: Tensor to shift, with shape ``[batch, seq_len, ...]``. The
-            first two dimensions are batch and sequence; any trailing dimensions
-            are carried along unchanged.
+        sequence: Tensor to shift, with shape ``[T, ...]``. Any trailing
+            dimensions are carried along unchanged.
         shift: Future-token offset to use. ``shift=1`` maps each position to the
             next token, ``shift=2`` maps to the token after next, and so on.
             Must be positive and no larger than ``seq_len``.
-        positions: Optional reset-style position IDs with shape
-            ``[batch, seq_len]``. When present, a shifted source position is
-            valid only if ``positions[:, i + shift] == positions[:, i] + shift``.
+        positions: Optional reset-style position IDs with shape ``[T]``. When
+            present, a shifted source position is valid only if
+            ``positions[i + shift] == positions[i] + shift``.
             This prevents MTP inputs or labels from crossing packed-document
             boundaries.
         fill_value: Value used for invalid positions. Use token id ``0`` for
@@ -70,36 +69,34 @@ def roll_mtp_sequence(
         ``positions=[0, 1, 2, 0, 1]`` with ``shift=1`` returns
         ``[A1, A2, fill, B1, fill]``.
     """
-    seq_len = sequence.shape[1]
+    seq_len = sequence.shape[0]
     if shift <= 0 or shift > seq_len:
         raise ValueError(f"MTP roll shift must be in [1, {seq_len}], got {shift}.")
 
     rolled = torch.full_like(sequence, fill_value)
     valid_mask = torch.zeros_like(sequence, dtype=torch.bool)
 
-    source = sequence[:, shift:]
+    source = sequence[shift:]
     if positions is None:
-        rolled[:, : seq_len - shift] = source
-        valid_mask[:, : seq_len - shift] = True
+        rolled[: seq_len - shift] = source
+        valid_mask[: seq_len - shift] = True
         if return_valid_mask:
             return rolled, valid_mask
         return rolled
 
-    if positions.shape[1] < seq_len:
+    if positions.shape[0] < seq_len:
         raise ValueError(
-            f"MTP positions need at least {seq_len} tokens, got {positions.shape[1]}."
+            f"MTP positions need at least {seq_len} tokens, got {positions.shape[0]}."
         )
-    valid_tokens = (
-        positions[:, shift:seq_len] == positions[:, : seq_len - shift] + shift
-    )
+    valid_tokens = positions[shift:seq_len] == positions[: seq_len - shift] + shift
     # valid_tokens follows positions placement, while valid_mask intentionally
     # follows sequence placement for the following where.
     with spmd.no_typecheck():
-        valid_mask[:, : seq_len - shift] = valid_tokens
-    rolled[:, : seq_len - shift] = torch.where(
-        valid_mask[:, : seq_len - shift],
+        valid_mask[: seq_len - shift] = valid_tokens
+    rolled[: seq_len - shift] = torch.where(
+        valid_mask[: seq_len - shift],
         source,
-        rolled[:, : seq_len - shift],
+        rolled[: seq_len - shift],
     )
     if return_valid_mask:
         return rolled, valid_mask
@@ -246,8 +243,8 @@ class MTPDecoder(Decoder):
         mtp_outputs = []
         for depth, layer in enumerate(self.mtp_layers, 1):
             # NOTE: Without SP, the local main embedding output has shape
-            # [batch, seq_len, hidden_dim] and could be shifted and reused.
-            # Under SP, its sequence dimension is sharded, so a local shift
+            # [tokens, hidden_dim] and could be shifted and reused. Under SP,
+            # its token dimension is sharded, so a local shift
             # would be incorrect at shard boundaries. Reuse in that case
             # would require a cross-shard shift or redistribution.
             mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
@@ -362,28 +359,28 @@ class MTPLoss(BaseLoss):
 
         main_loss = self.fn(
             pred[0],
-            labels[:, : pred[0].shape[1]],
+            labels[: pred[0].shape[0]],
             global_vocab_size=self.global_vocab_size,
         )
         mtp_loss: torch.Tensor | None = None
 
         for label_offset, mtp_pred in enumerate(pred[1:], 1):
-            mtp_seq_len = mtp_pred.shape[1]
-            if labels.shape[1] < mtp_seq_len:
+            mtp_seq_len = mtp_pred.shape[0]
+            if labels.shape[0] < mtp_seq_len:
                 raise ValueError(
                     f"MTP labels need at least {mtp_seq_len} "
-                    f"tokens for depth {label_offset}, got {labels.shape[1]}."
+                    f"tokens for depth {label_offset}, got {labels.shape[0]}."
                 )
-            if positions.shape[1] < mtp_seq_len:
+            if positions.shape[0] < mtp_seq_len:
                 raise ValueError(
                     f"MTP positions need at least {mtp_seq_len} tokens "
-                    f"for depth {label_offset}, got {positions.shape[1]}."
+                    f"for depth {label_offset}, got {positions.shape[0]}."
                 )
             mtp_labels = roll_mtp_sequence(
-                labels[:, :mtp_seq_len],
+                labels[:mtp_seq_len],
                 shift=label_offset,
                 fill_value=IGNORE_INDEX,
-                positions=positions[:, :mtp_seq_len],
+                positions=positions[:mtp_seq_len],
             )
             depth_loss = self.fn(
                 mtp_pred,

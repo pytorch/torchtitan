@@ -432,7 +432,7 @@ class TestSpmdLayout(DTensorTestBase):
             )
 
         self.assertEqual(comm_mode.get_total_counts(), 1)
-        self.assertTrue(torch.equal(result, torch.ones(2, 8, device=self.device_type)))
+        self.assertTrue(torch.equal(result, torch.ones(8, 2, device=self.device_type)))
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):
@@ -940,7 +940,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             p.data = p.data.to(torch.bfloat16)
 
         tokens = torch.randint(
-            0, model_config.vocab_size, (2, 32), device=self.device_type
+            0, model_config.vocab_size, (64,), device=self.device_type
         )
         for iter_idx in range(10):
             optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
@@ -952,13 +952,13 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             ref_loss = ref_model_bf16(tokens).sum()
             ref_loss.backward()
             for p_fp32, p_bf16 in zip(
-                ref_model.parameters(), ref_model_bf16.parameters()
+                ref_model.parameters(), ref_model_bf16.parameters(), strict=True
             ):
                 p_fp32.grad = p_bf16.grad.to(p_fp32.dtype)
                 p_bf16.grad = None
             ref_optim.step()
             for p_fp32, p_bf16 in zip(
-                ref_model.parameters(), ref_model_bf16.parameters()
+                ref_model.parameters(), ref_model_bf16.parameters(), strict=True
             ):
                 p_bf16.detach().copy_(p_fp32)
 

@@ -6,12 +6,14 @@
 
 import dataclasses
 import unittest
+from unittest.mock import patch
 
 import torch
 from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
-    ScaledDotProductAttention,
+    VarlenAttention,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import (
@@ -26,21 +28,20 @@ from torchtitan.models.qwen3_5.rope import MRoPE
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
-        self.bsz = 2
-        self.seqlen = 16
+        self.num_tokens = 16
         self.n_heads = 4
         self.head_dim = 64
         self.xq = torch.randn(
-            self.bsz, self.seqlen, self.n_heads, self.head_dim, dtype=torch.bfloat16
+            self.num_tokens, self.n_heads, self.head_dim, dtype=torch.bfloat16
         )
         self.xk = torch.randn(
-            self.bsz, self.seqlen, self.n_heads, self.head_dim, dtype=torch.bfloat16
+            self.num_tokens, self.n_heads, self.head_dim, dtype=torch.bfloat16
         )
         self.rope_cache = torch.randn(
-            self.seqlen, self.head_dim * 2, dtype=torch.float32
-        ).view(1, self.seqlen, 1, self.head_dim * 2)
+            self.num_tokens, 1, self.head_dim * 2, dtype=torch.float32
+        )
         self.rope = CosSinRoPE(
-            CosSinRoPE.Config(dim=self.head_dim, max_seq_len=self.seqlen)
+            CosSinRoPE.Config(dim=self.head_dim, max_seq_len=self.num_tokens)
         )
 
     def test_output_dtype_matches_input(self):
@@ -95,18 +96,21 @@ class TestMaybeCheckMaxPos(unittest.TestCase):
     """Tests for the _maybe_check_max_pos bounds check."""
 
     def test_positions_within_bounds(self):
-        positions = torch.tensor([[0, 1, 2, 3]])
+        positions = torch.tensor([0, 1, 2, 3])
         _maybe_check_max_pos(positions, max_valid_pos=3)
 
     def test_positions_at_boundary(self):
-        positions = torch.tensor([[0, 5, 10, 15]])
+        positions = torch.tensor([0, 5, 10, 15])
         _maybe_check_max_pos(positions, max_valid_pos=15)
 
     def test_positions_out_of_bounds_raises(self):
-        positions = torch.tensor([[0, 1, 2, 16]])
-        with self.assertRaises(RuntimeError):
+        positions = torch.tensor([0, 1, 2, 16])
+
+        def check_positions():
             _maybe_check_max_pos(positions, max_valid_pos=15)
             torch.cuda.synchronize() if torch.cuda.is_available() else None
+
+        self.assertRaises(RuntimeError, check_positions)
 
 
 class TestRoPEPositionBoundsComplex(unittest.TestCase):
@@ -121,17 +125,17 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         self.assertIsInstance(self.rope, ComplexRoPE)
 
     def test_valid_positions(self):
-        bsz, seqlen = 2, 8
-        xq = torch.randn(bsz, seqlen, 4, self.head_dim)
-        xk = torch.randn(bsz, seqlen, 4, self.head_dim)
-        positions = torch.arange(seqlen).unsqueeze(0).expand(bsz, -1)
+        num_tokens = 16
+        xq = torch.randn(num_tokens, 4, self.head_dim)
+        xk = torch.randn(num_tokens, 4, self.head_dim)
+        positions = torch.arange(num_tokens) % 8
         self.rope(xq, xk, positions)
 
     def test_out_of_range_positions_raises(self):
-        bsz, seqlen = 1, 4
-        xq = torch.randn(bsz, seqlen, 4, self.head_dim)
-        xk = torch.randn(bsz, seqlen, 4, self.head_dim)
-        positions = torch.tensor([[0, 1, self.max_seq_len, self.max_seq_len + 1]])
+        num_tokens = 4
+        xq = torch.randn(num_tokens, 4, self.head_dim)
+        xk = torch.randn(num_tokens, 4, self.head_dim)
+        positions = torch.tensor([0, 1, self.max_seq_len, self.max_seq_len + 1])
         with self.assertRaises(RuntimeError):
             self.rope(xq, xk, positions)
 
@@ -148,40 +152,64 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         self.assertIsInstance(self.rope, CosSinRoPE)
 
     def test_valid_positions(self):
-        bsz, seqlen = 2, 8
-        xq = torch.randn(bsz, seqlen, 4, self.head_dim)
-        xk = torch.randn(bsz, seqlen, 4, self.head_dim)
-        positions = torch.arange(seqlen).unsqueeze(0).expand(bsz, -1)
+        num_tokens = 16
+        xq = torch.randn(num_tokens, 4, self.head_dim)
+        xk = torch.randn(num_tokens, 4, self.head_dim)
+        positions = torch.arange(num_tokens) % 8
         self.rope(xq, xk, positions)
 
     def test_out_of_range_positions_raises(self):
-        bsz, seqlen = 1, 4
-        xq = torch.randn(bsz, seqlen, 4, self.head_dim)
-        xk = torch.randn(bsz, seqlen, 4, self.head_dim)
-        positions = torch.tensor([[0, 1, self.max_seq_len, self.max_seq_len + 1]])
+        num_tokens = 4
+        xq = torch.randn(num_tokens, 4, self.head_dim)
+        xk = torch.randn(num_tokens, 4, self.head_dim)
+        positions = torch.tensor([0, 1, self.max_seq_len, self.max_seq_len + 1])
         with self.assertRaises(RuntimeError):
             self.rope(xq, xk, positions)
+
+
+class TestPackedRoPE(unittest.TestCase):
+    def test_preserves_tnh_shape(self):
+        torch.manual_seed(42)
+        num_tokens, num_heads, head_dim = 7, 3, 8
+        positions_T = torch.tensor([0, 1, 2, 0, 1, 2, 3])
+        q_TNH = torch.randn(num_tokens, num_heads, head_dim)
+        k_TNH = torch.randn(num_tokens, num_heads, head_dim)
+
+        for rope_cls in (ComplexRoPE, CosSinRoPE):
+            with self.subTest(rope=rope_cls.__name__):
+                rope = rope_cls.Config(
+                    dim=head_dim,
+                    max_seq_len=num_tokens,
+                ).build()
+                q_out_TNH, k_out_TNH = rope(q_TNH, k_TNH, positions_T)
+
+                self.assertEqual(q_out_TNH.shape, q_TNH.shape)
+                self.assertEqual(k_out_TNH.shape, k_TNH.shape)
 
 
 class TestMRoPECache(unittest.TestCase):
     def test_forward_accepts_three_axis_positions(self):
         torch.manual_seed(42)
-        bsz, seqlen, n_heads = 2, 3, 4
+        num_tokens, n_heads = 6, 4
         head_dim = 12
         rope = MRoPE.Config(
             dim=head_dim,
             max_seq_len=8,
             mrope_section=[2, 1, 1],
         ).build()
-        # (batch, seq, 3): per-token [temporal, height, width] positions.
+        # (tokens, 3): per-token [temporal, height, width] positions.
         position_ids = torch.tensor(
             [
-                [[0, 1, 2], [1, 2, 3], [2, 3, 4]],  # batch 0
-                [[3, 4, 5], [4, 5, 6], [5, 6, 7]],  # batch 1
+                [0, 1, 2],
+                [1, 2, 3],
+                [2, 3, 4],
+                [3, 4, 5],
+                [4, 5, 6],
+                [5, 6, 7],
             ]
         )
-        xq = torch.randn(bsz, seqlen, n_heads, head_dim)
-        xk = torch.randn(bsz, seqlen, n_heads, head_dim)
+        xq = torch.randn(num_tokens, n_heads, head_dim)
+        xk = torch.randn(num_tokens, n_heads, head_dim)
 
         xq_out, xk_out = rope(xq, xk, position_ids)
 
@@ -205,12 +233,19 @@ class TestPerLayerRoPECache(unittest.TestCase):
                 wkv=Linear.Config(in_features=dim, out_features=dim),
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
-            inner_attention=ScaledDotProductAttention.Config(),
+            inner_attention=VarlenAttention.Config(),
             rope=ComplexRoPE.Config(dim=head_dim, max_seq_len=16),
         ).build()
 
-        x = torch.randn(2, 4, dim)
-        out = attention(x, None)
+        x = torch.randn(8, dim)
+        positions = torch.arange(8)
+        attention_masks = create_varlen_metadata_for_document(positions)
+
+        with patch(
+            "torchtitan.models.common.attention.varlen_attn",
+            side_effect=lambda q, k, v, *args, **kwargs: q,
+        ):
+            out = attention(x, attention_masks, positions)
 
         self.assertIsNotNone(attention.rope)
         self.assertEqual(out.shape, x.shape)

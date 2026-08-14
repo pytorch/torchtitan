@@ -68,9 +68,9 @@ def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> Non
     """Keep ``tok_embeddings`` ``Replicate`` and resume SP at layer 0's output.
 
     The vision scatter writes features at arbitrary sequence positions, so it
-    needs the full (``Replicate``) embedding -- a ``Shard(1)`` one cannot be
+    needs the full (``Replicate``) embedding -- a ``Shard(0)`` one cannot be
     indexed by sequence position locally. Layer 0 then takes a ``Replicate``
-    input and its rowwise ``wo`` reduce-scatters back to ``Shard(1)``, so the
+    input and its rowwise ``wo`` reduce-scatters back to ``Shard(0)``, so the
     residual is sequence-parallel from layer 0's output and layers ``1..N-1``
     are unchanged full SP.
     """

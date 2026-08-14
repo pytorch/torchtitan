@@ -174,9 +174,9 @@ class TestHelionRoPEOverride(unittest.TestCase):
         helion_module = HelionCosSinRoPE.Config(dim=dim, max_seq_len=seqlen).build()
         self.assertIsInstance(helion_module, HelionCosSinRoPE)
 
-        xq = torch.randn(2, seqlen, 4, dim, dtype=torch.bfloat16)
-        xk = torch.randn(2, seqlen, 1, dim, dtype=torch.bfloat16)
-        positions = torch.arange(seqlen).unsqueeze(0).expand(2, -1)
+        xq = torch.randn(seqlen, 4, dim, dtype=torch.bfloat16)
+        xk = torch.randn(seqlen, 1, dim, dtype=torch.bfloat16)
+        positions = torch.arange(seqlen)
 
         ref_q, ref_k = cossin(xq, xk, positions)
         out_q, out_k = helion_module(xq, xk, positions)
@@ -191,9 +191,9 @@ class TestHelionRoPEOverride(unittest.TestCase):
         helion_module = HelionComplexRoPE.Config(dim=dim, max_seq_len=seqlen).build()
         self.assertIsInstance(helion_module, HelionComplexRoPE)
 
-        xq = torch.randn(2, seqlen, 4, dim, dtype=torch.bfloat16)
-        xk = torch.randn(2, seqlen, 1, dim, dtype=torch.bfloat16)
-        positions = torch.arange(seqlen).unsqueeze(0).expand(2, -1)
+        xq = torch.randn(seqlen, 4, dim, dtype=torch.bfloat16)
+        xk = torch.randn(seqlen, 1, dim, dtype=torch.bfloat16)
+        positions = torch.arange(seqlen)
 
         ref_q, ref_k = complex_rope(xq, xk, positions)
         out_q, out_k = helion_module(xq, xk, positions)
@@ -201,7 +201,10 @@ class TestHelionRoPEOverride(unittest.TestCase):
         torch.testing.assert_close(out_k, ref_k, rtol=0, atol=0)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+@unittest.skipUnless(
+    torch.cuda.is_available() and helion_rope_module._HELION_IMPORT_ERROR is None,
+    "requires CUDA and helion",
+)
 class TestHelionRoPEKernel(unittest.TestCase):
     """Fused-kernel numerics vs the PyTorch RoPE modules (helion + CUDA only)."""
 
@@ -214,11 +217,6 @@ class TestHelionRoPEKernel(unittest.TestCase):
         self.complex = ComplexRoPE.Config(
             dim=self.dim,
             max_seq_len=self.seqlen * 2,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=self.seqlen,
         ).build()
         self.helion = HelionCosSinRoPE.Config(
             dim=self.dim, max_seq_len=self.seqlen
@@ -226,20 +224,14 @@ class TestHelionRoPEKernel(unittest.TestCase):
         self.helion_complex = HelionComplexRoPE.Config(
             dim=self.dim,
             max_seq_len=self.seqlen * 2,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=self.seqlen,
         ).build()
         self.cossin.to(self.device)
         self.complex.to(self.device)
         self.helion.to(self.device)
         self.helion_complex.to(self.device)
 
-    def _inputs(self, *, batch=2, n_heads=8, n_kv_heads=1, requires_grad=False):
+    def _inputs(self, *, n_heads=8, n_kv_heads=1, requires_grad=False):
         xq = torch.randn(
-            batch,
             self.seqlen,
             n_heads,
             self.dim,
@@ -248,13 +240,32 @@ class TestHelionRoPEKernel(unittest.TestCase):
             requires_grad=requires_grad,
         )
         xk = torch.randn(
-            batch,
             self.seqlen,
             n_kv_heads,
             self.dim,
             device=self.device,
             dtype=torch.bfloat16,
             requires_grad=requires_grad,
+        )
+        positions = torch.arange(self.seqlen, device=self.device)
+        return xq, xk, positions
+
+    def _kernel_inputs(self, *, batch=2, n_heads=8, n_kv_heads=1):
+        xq = torch.randn(
+            batch,
+            self.seqlen,
+            n_heads,
+            self.dim,
+            device=self.device,
+            dtype=torch.bfloat16,
+        )
+        xk = torch.randn(
+            batch,
+            self.seqlen,
+            n_kv_heads,
+            self.dim,
+            device=self.device,
+            dtype=torch.bfloat16,
         )
         positions = (
             torch.arange(self.seqlen, device=self.device)
@@ -334,9 +345,8 @@ class TestHelionRoPEKernel(unittest.TestCase):
         # accepts those strided inputs and returns contiguous outputs, so the
         # Helion override must preserve that boundary contract without requiring
         # model-side layout changes.
-        batch, n_heads = 2, 8
+        n_heads = 8
         q_full = torch.randn(
-            batch,
             self.seqlen,
             n_heads,
             self.dim + 32,
@@ -345,7 +355,6 @@ class TestHelionRoPEKernel(unittest.TestCase):
             requires_grad=True,
         )
         k_full = torch.randn(
-            batch,
             self.seqlen,
             self.dim + 32,
             device=self.device,
@@ -353,17 +362,15 @@ class TestHelionRoPEKernel(unittest.TestCase):
             requires_grad=True,
         )
         q = q_full[..., -self.dim :]
-        k = k_full[..., -self.dim :].unsqueeze(2)
+        k = k_full[..., -self.dim :].unsqueeze(1)
         self.assertFalse(q.is_contiguous())
         self.assertFalse(k.is_contiguous())
 
         q_full_ref = q_full.detach().clone().requires_grad_(True)
         k_full_ref = k_full.detach().clone().requires_grad_(True)
         q_ref = q_full_ref[..., -self.dim :]
-        k_ref = k_full_ref[..., -self.dim :].unsqueeze(2)
-        positions = (
-            torch.arange(self.seqlen, device=self.device).unsqueeze(0).expand(batch, -1)
-        )
+        k_ref = k_full_ref[..., -self.dim :].unsqueeze(1)
+        positions = torch.arange(self.seqlen, device=self.device)
 
         self.assertIsNotNone(
             helion_rope_module._apply_helion_complex_rope(
@@ -381,7 +388,6 @@ class TestHelionRoPEKernel(unittest.TestCase):
         torch.testing.assert_close(helion_out[1], ref_out[1], rtol=2e-2, atol=2e-2)
 
         q_grad_full = torch.randn(
-            batch,
             self.seqlen,
             n_heads,
             self.dim + 32,
@@ -389,14 +395,13 @@ class TestHelionRoPEKernel(unittest.TestCase):
             dtype=torch.bfloat16,
         )
         k_grad_full = torch.randn(
-            batch,
             self.seqlen,
             self.dim + 32,
             device=self.device,
             dtype=torch.bfloat16,
         )
         q_grad = q_grad_full[..., -self.dim :]
-        k_grad = k_grad_full[..., -self.dim :].unsqueeze(2)
+        k_grad = k_grad_full[..., -self.dim :].unsqueeze(1)
         self.assertFalse(q_grad.is_contiguous())
         self.assertFalse(k_grad.is_contiguous())
 
@@ -410,9 +415,8 @@ class TestHelionRoPEKernel(unittest.TestCase):
         # contiguous in the last dimension. Other dimensions may have arbitrary
         # strides; Helion indexes them directly and still returns contiguous
         # outputs like stock ComplexRoPE.
-        batch, n_heads = 2, 8
+        n_heads = 8
         q_storage = torch.randn(
-            batch,
             n_heads,
             self.seqlen,
             self.dim,
@@ -420,9 +424,8 @@ class TestHelionRoPEKernel(unittest.TestCase):
             dtype=torch.bfloat16,
             requires_grad=True,
         )
-        q = q_storage.transpose(1, 2)
+        q = q_storage.transpose(0, 1)
         k = torch.randn(
-            batch,
             self.seqlen,
             1,
             self.dim,
@@ -434,14 +437,9 @@ class TestHelionRoPEKernel(unittest.TestCase):
         self.assertEqual(q.stride(-1), 1)
 
         q_storage_ref = q_storage.detach().clone().requires_grad_(True)
-        q_ref = q_storage_ref.transpose(1, 2)
+        q_ref = q_storage_ref.transpose(0, 1)
         k_ref = k.detach().clone().requires_grad_(True)
-        positions = (
-            torch.arange(self.seqlen, device=self.device)
-            .unsqueeze(0)
-            .expand(batch, -1)
-            .contiguous()
-        )
+        positions = torch.arange(self.seqlen, device=self.device)
 
         self.assertIsNotNone(
             helion_rope_module._apply_helion_complex_rope(
@@ -469,9 +467,8 @@ class TestHelionRoPEKernel(unittest.TestCase):
         # Autograd may give RoPE a split-view q grad and a contiguous k grad.
         # The optimized path must preserve stock ComplexRoPE semantics for that
         # layout as well as for split/split grads.
-        batch, n_heads = 2, 8
+        n_heads = 8
         q_full = torch.randn(
-            batch,
             self.seqlen,
             n_heads,
             self.dim + 32,
@@ -480,7 +477,6 @@ class TestHelionRoPEKernel(unittest.TestCase):
             requires_grad=True,
         )
         k_full = torch.randn(
-            batch,
             self.seqlen,
             self.dim + 32,
             device=self.device,
@@ -488,21 +484,18 @@ class TestHelionRoPEKernel(unittest.TestCase):
             requires_grad=True,
         )
         q = q_full[..., -self.dim :]
-        k = k_full[..., -self.dim :].unsqueeze(2)
+        k = k_full[..., -self.dim :].unsqueeze(1)
 
         q_full_ref = q_full.detach().clone().requires_grad_(True)
         k_full_ref = k_full.detach().clone().requires_grad_(True)
         q_ref = q_full_ref[..., -self.dim :]
-        k_ref = k_full_ref[..., -self.dim :].unsqueeze(2)
-        positions = (
-            torch.arange(self.seqlen, device=self.device).unsqueeze(0).expand(batch, -1)
-        )
+        k_ref = k_full_ref[..., -self.dim :].unsqueeze(1)
+        positions = torch.arange(self.seqlen, device=self.device)
 
         helion_out = self.helion_complex(q, k, positions)
         ref_out = self.complex(q_ref, k_ref, positions)
 
         q_grad_full = torch.randn(
-            batch,
             self.seqlen,
             n_heads,
             self.dim + 32,
@@ -569,7 +562,7 @@ class TestHelionRoPEKernel(unittest.TestCase):
     def test_custom_op_opcheck(self):
         from torchtitan.overrides.helion_rope import _helion_cossin_rope_fwd
 
-        xq, xk, positions = self._inputs()
+        xq, xk, positions = self._kernel_inputs()
         torch.library.opcheck(
             _helion_cossin_rope_fwd, (xq, xk, self.helion.cache, positions)
         )
@@ -577,7 +570,7 @@ class TestHelionRoPEKernel(unittest.TestCase):
     def test_complex_custom_op_opcheck(self):
         from torchtitan.overrides.helion_rope import _helion_complex_rope_fwd
 
-        xq, xk, positions = self._inputs()
+        xq, xk, positions = self._kernel_inputs()
         torch.library.opcheck(
             _helion_complex_rope_fwd,
             (xq, xk, torch.view_as_real(self.helion_complex.cache), positions),
