@@ -54,6 +54,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module llama3 --config llama3_debugmodel_float8",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
