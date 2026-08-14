@@ -118,6 +118,29 @@ def test_route_releases_reserved_load_on_failure():
     asyncio.run(_run())
 
 
+def test_least_loaded_tie_break_spreads_over_a_changing_candidate_set():
+    async def _run():
+        actors = [_Actor(f"gen{i}") for i in range(4)]
+        router = _router(actors)
+
+        # gen1 drains for a weight sync on every other request, so the candidate
+        # set alternates between four and three generators. Each route finishes
+        # before the next starts, so the survivors are always tied at zero load
+        # and only the tie-break decides.
+        chosen = []
+        for i in range(12):
+            draining = i % 2 == 1
+            if draining:
+                router._set_state(router._generators[1], _GeneratorState.SYNCING)
+            chosen.append(await router.route("generate", routing_ctx=RoutingContext()))
+            if draining:
+                router._set_state(router._generators[1], _GeneratorState.SERVING)
+
+        assert [chosen.count(f"gen{i}") for i in range(4)] == [3, 3, 3, 3]
+
+    asyncio.run(_run())
+
+
 def test_round_robin_cycles_through_generators():
     async def _run():
         actors = [_Actor("gen0"), _Actor("gen1"), _Actor("gen2")]

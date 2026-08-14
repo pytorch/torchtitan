@@ -36,10 +36,11 @@ def test_least_loaded_balances_in_flight_count():
     router = IntraGeneratorRouter.Config(
         strategy=LeastLoadedRoutingStrategy.Config()
     ).build(dp_degree=2)
-    # Each reserve adds one load unit; idle ties resolve to the lowest index.
+    # Each reserve adds one load unit; neither rank has been chosen yet, so the
+    # first tie goes to the lowest index.
     assert router.reserve("r0", routing_session_id=None) == 0
     assert router.reserve("r1", routing_session_id=None) == 1
-    # Both ranks now hold one request; the tie again resolves to rank 0.
+    # Both ranks now hold one request; rank 0 was chosen less recently.
     assert router.reserve("r2", routing_session_id=None) == 0
     assert _loads(router) == [2, 1]
     # Freeing rank 0's requests makes it the least loaded again.
