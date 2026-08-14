@@ -285,13 +285,13 @@ def _distributed_muon_optimizer(
             )
         return compute_layouts
 
-    compute_sharding_by_fqn_per_layer = tuple(
+    compute_layouts_by_layer = tuple(
         compute_layouts_for_layer(layer_id) for layer_id in range(num_layers)
     )
     compute_sharding_by_fqn = {
         fqn: compute_layout
-        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
-        for fqn, compute_layout in layer_compute_sharding_by_fqn.items()
+        for layer_compute_layouts in compute_layouts_by_layer
+        for fqn, compute_layout in layer_compute_layouts.items()
     }
     num_stacked_matrices_by_fqn = {
         f"layers.{layer_id}.attention.{projection}.weight": attention.n_heads
@@ -299,8 +299,8 @@ def _distributed_muon_optimizer(
         for projection in per_head_attention_projections
     }
     layer_bucket_fqns = tuple(
-        tuple(layer_compute_sharding_by_fqn)
-        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
+        tuple(layer_compute_layouts)
+        for layer_compute_layouts in compute_layouts_by_layer
     )
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
     # collective launch overhead across pairs of MoE layers.

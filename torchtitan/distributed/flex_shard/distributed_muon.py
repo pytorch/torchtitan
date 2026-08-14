@@ -128,6 +128,23 @@ def _validate_compute_sharding_configuration(
         )
 
 
+def _validate_num_stacked_matrices_by_fqn(
+    num_stacked_matrices_by_fqn: Mapping[str, int],
+) -> None:
+    """Validate per-parameter stacked-matrix counts."""
+    for fqn, num_stacked_matrices in num_stacked_matrices_by_fqn.items():
+        if not isinstance(fqn, str):
+            raise ValueError("num_stacked_matrices_by_fqn keys must be strings")
+        if (
+            isinstance(num_stacked_matrices, bool)
+            or not isinstance(num_stacked_matrices, int)
+            or num_stacked_matrices <= 0
+        ):
+            raise ValueError(
+                f"num_stacked_matrices_by_fqn[{fqn!r}] must be a positive integer"
+            )
+
+
 def _configure_distributed_muon(
     optimizer: DistributedMuon,
     *,
@@ -166,7 +183,7 @@ def _configure_distributed_muon(
     for param, fqn, compute_layout in parameters_to_prepare:
         num_stacked_matrices = optimizer._num_stacked_matrices_by_fqn.get(fqn)
         global_storage_shape = torch.Size(param.shape)
-        resolved_compute_view = None
+        compute_view = None
         if (
             num_stacked_matrices is not None
             and isinstance(param, DTensor)
@@ -180,31 +197,31 @@ def _configure_distributed_muon(
             )
         ):
             raise ValueError(
-                f"Muon parameter {fqn!r} with row-concatenated matrix storage "
+                f"Muon parameter {fqn!r} with matrix-batch storage "
                 "requires exact Shard or Replicate placements"
             )
         if num_stacked_matrices is not None:
-            resolved_compute_view = _ResolvedBatchedMatrixView.from_storage_shape(
+            compute_view = _MatrixBatchView.from_storage_shape(
                 global_storage_shape,
                 num_matrices=num_stacked_matrices,
             )
             if isinstance(param, DTensor):
-                _validate_row_concatenated_matrix_storage_alignment(
+                _validate_matrix_batch_storage_alignment(
                     fqn,
                     param,
-                    resolved_compute_view,
+                    compute_view,
                 )
         if num_stacked_matrices is None:
             compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
         else:
-            compute_view_key = ("stacked_matrices", num_stacked_matrices)
-            assert resolved_compute_view is not None
+            compute_view_key = ("matrix_batch", num_stacked_matrices)
+            assert compute_view is not None
             global_compute_shape = torch.Size(
                 (
                     num_stacked_matrices,
-                    resolved_compute_view.matrix_rows,
-                    resolved_compute_view.matrix_columns,
+                    compute_view.matrix_rows,
+                    compute_view.matrix_columns,
                 )
             )
         if len(global_compute_shape) not in (2, 3):
@@ -216,7 +233,7 @@ def _configure_distributed_muon(
             compute_view_key=compute_view_key,
             compute_layout=compute_layout,
             global_compute_shape=global_compute_shape,
-            resolved_compute_view=resolved_compute_view,
+            compute_view=compute_view,
         )
     optimizer._prepared_compute_layouts = prepared_compute_layouts
     tensor_device = optimizer._validate_parameter_storage()
@@ -251,7 +268,7 @@ class DistributedMuon(Optimizer):
     have a layout-compatible DTensor gradient before each rank enters
     ``step()``.
 
-    Batched matrix compute views use batched BF16 kernels. They implement the
+    Matrix-batch compute views use batched BF16 kernels. They implement the
     same mathematical update as ``torch.optim.Muon`` running one matrix at a
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
@@ -277,21 +294,10 @@ class DistributedMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
     ) -> None:
-        stacked_matrix_counts = {}
-        for fqn, num_stacked_matrices in num_stacked_matrices_by_fqn.items():
-            if not isinstance(fqn, str):
-                raise ValueError("num_stacked_matrices_by_fqn keys must be strings")
-            if (
-                isinstance(num_stacked_matrices, bool)
-                or not isinstance(num_stacked_matrices, int)
-                or num_stacked_matrices <= 0
-            ):
-                raise ValueError(
-                    f"num_stacked_matrices_by_fqn[{fqn!r}] must be a positive "
-                    "integer"
-                )
-            stacked_matrix_counts[fqn] = num_stacked_matrices
-        self._num_stacked_matrices_by_fqn = MappingProxyType(stacked_matrix_counts)
+        _validate_num_stacked_matrices_by_fqn(num_stacked_matrices_by_fqn)
+        self._num_stacked_matrices_by_fqn = MappingProxyType(
+            dict(num_stacked_matrices_by_fqn)
+        )
 
         defaults = {
             "lr": lr,
@@ -406,7 +412,7 @@ class DistributedMuon(Optimizer):
                     group_index=group_index,
                     compute_view_key=prepared.compute_view_key,
                     global_compute_shape=global_compute_shape,
-                    resolved_compute_view=prepared.resolved_compute_view,
+                    compute_view=prepared.compute_view,
                     local_compute_input=resolved_transition.local_compute_input,
                     storage_mesh_ranks=_device_mesh_ranks(param.device_mesh),
                     storage_layout_signature=_storage_layout_signature(param),
@@ -621,8 +627,8 @@ class DistributedMuon(Optimizer):
         group = self._group(compute_layout)
         compute = (
             compute_input
-            if compute_layout.resolved_compute_view is None
-            else compute_layout.resolved_compute_view.view_compute_input(compute_input)
+            if compute_layout.compute_view is None
+            else compute_layout.compute_view.view_compute_input(compute_input)
         )
         _compute_muon_direction(
             compute,
@@ -662,7 +668,7 @@ class DistributedMuon(Optimizer):
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedBatchedMatrixView:
+class _MatrixBatchView:
     matrix_rows: int
     matrix_columns: int
 
@@ -672,7 +678,7 @@ class _ResolvedBatchedMatrixView:
         storage_shape: torch.Size,
         *,
         num_matrices: int,
-    ) -> _ResolvedBatchedMatrixView:
+    ) -> _MatrixBatchView:
         if (
             len(storage_shape) != 2
             or storage_shape[0] == 0
@@ -695,7 +701,7 @@ class _ResolvedBatchedMatrixView:
         ):
             raise RuntimeError(
                 "compute input shape is inconsistent with the prepared "
-                "batched-matrix view"
+                "matrix-batch view"
             )
         return torch.Size(
             (
@@ -713,10 +719,10 @@ class _ResolvedBatchedMatrixView:
         return compute_input.unflatten(0, compute_tensor_shape[:2])
 
 
-def _validate_row_concatenated_matrix_storage_alignment(
+def _validate_matrix_batch_storage_alignment(
     fqn: str,
     param: DTensor,
-    resolved_compute_view: _ResolvedBatchedMatrixView,
+    compute_view: _MatrixBatchView,
 ) -> None:
     """Validate every storage shard from globally identical DTensor metadata."""
     for mesh_axis_size, placement in zip(
@@ -729,11 +735,11 @@ def _validate_row_concatenated_matrix_storage_alignment(
         assert type(placement) is Shard
         if placement.dim % param.ndim != 0:
             raise ValueError(
-                f"Muon parameter {fqn!r} with row-concatenated matrix storage "
+                f"Muon parameter {fqn!r} with matrix-batch storage "
                 "requires shards along tensor dimension 0"
             )
 
-    matrix_rows = resolved_compute_view.matrix_rows
+    matrix_rows = compute_view.matrix_rows
     # Every rank must validate all coordinates before DistributedMuon performs
     # collectives; checking only the local shard could strand its peers.
     coordinates = product(
@@ -750,7 +756,7 @@ def _validate_row_concatenated_matrix_storage_alignment(
             local_shape[0] % matrix_rows or global_offset[0] % matrix_rows
         ):
             raise ValueError(
-                f"Muon parameter {fqn!r} row-concatenated storage shards are "
+                f"Muon parameter {fqn!r} matrix-batch storage shards are "
                 f"not aligned to matrix rows of size {matrix_rows}"
             )
 
@@ -760,7 +766,7 @@ class _PreparedParameterComputeLayout:
     compute_view_key: tuple[Any, ...]
     compute_layout: ComputeLayout
     global_compute_shape: torch.Size
-    resolved_compute_view: _ResolvedBatchedMatrixView | None
+    compute_view: _MatrixBatchView | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -770,7 +776,7 @@ class _ParameterComputeLayout:
     group_index: int
     compute_view_key: tuple[Any, ...]
     global_compute_shape: torch.Size
-    resolved_compute_view: _ResolvedBatchedMatrixView | None
+    compute_view: _MatrixBatchView | None
     local_compute_input: Tensor | None
     storage_mesh_ranks: tuple[int, ...]
     storage_layout_signature: tuple[Any, ...]
@@ -989,7 +995,7 @@ def _build_parameter_redistribution_plan(
             logical_shape=tuple(compute_layout.global_compute_shape),
         )
 
-    return _build_row_concatenated_matrix_redistribution_plan(
+    return _build_matrix_batch_redistribution_plan(
         storage_regions,
         participants=group.participants,
         storage_shape=tuple(compute_layout.param.shape),
@@ -997,7 +1003,7 @@ def _build_parameter_redistribution_plan(
     )
 
 
-def _build_row_concatenated_matrix_redistribution_plan(
+def _build_matrix_batch_redistribution_plan(
     storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
     *,
     participants: tuple[int, ...],

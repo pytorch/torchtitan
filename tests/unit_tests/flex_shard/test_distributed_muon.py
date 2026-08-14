@@ -28,8 +28,8 @@ from torchtitan.distributed.flex_shard import (
 from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import _TensorRegion
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
-    _build_row_concatenated_matrix_redistribution_plan,
-    _ResolvedBatchedMatrixView,
+    _build_matrix_batch_redistribution_plan,
+    _MatrixBatchView,
     DistributedMuon,
 )
 
@@ -111,7 +111,7 @@ class TestStackedMatrixConfiguration(unittest.TestCase):
     def test_compute_input_view_is_zero_copy(self):
         matrix_rows = 3
         matrix_columns = 2
-        resolved_compute_view = _ResolvedBatchedMatrixView(
+        compute_view = _MatrixBatchView(
             matrix_rows=matrix_rows,
             matrix_columns=matrix_columns,
         )
@@ -122,7 +122,7 @@ class TestStackedMatrixConfiguration(unittest.TestCase):
                     num_matrices * matrix_rows * matrix_columns,
                     dtype=torch.float32,
                 ).reshape(num_matrices * matrix_rows, matrix_columns)
-                compute = resolved_compute_view.view_compute_input(compute_input)
+                compute = compute_view.view_compute_input(compute_input)
 
                 self.assertEqual(
                     compute.shape,
@@ -138,7 +138,7 @@ class TestStackedMatrixConfiguration(unittest.TestCase):
                     self.assertEqual(compute_input[0, 0].item(), -1)
 
     def test_redistribution_destinations_are_flat_compute_inputs(self):
-        plan = _build_row_concatenated_matrix_redistribution_plan(
+        plan = _build_matrix_batch_redistribution_plan(
             (
                 ((0,), _TensorRegion(offsets=(0, 0), shape=(6, 2))),
                 ((1,), _TensorRegion(offsets=(6, 0), shape=(6, 2))),
@@ -205,9 +205,9 @@ class TestDistributedMuon(DTensorTestBase):
             local_compute_input.data_ptr(),
             parameter.to_local().data_ptr(),
         )
-        resolved_compute_view = compute_layout.resolved_compute_view
-        self.assertIsNotNone(resolved_compute_view)
-        compute = resolved_compute_view.view_compute_input(local_compute_input)
+        compute_view = compute_layout.compute_view
+        self.assertIsNotNone(compute_view)
+        compute = compute_view.view_compute_input(local_compute_input)
         self.assertEqual(
             compute.shape,
             (num_heads // self.world_size, matrix_rows, matrix_columns),
@@ -215,7 +215,7 @@ class TestDistributedMuon(DTensorTestBase):
         self.assertEqual(compute.data_ptr(), local_compute_input.data_ptr())
 
     @with_comms
-    def test_rejects_oversharded_row_concatenated_matrix_storage(self):
+    def test_rejects_oversharded_matrix_batch_storage(self):
         num_heads = 3
         matrix_rows = 4
         matrix_columns = 2
@@ -233,7 +233,7 @@ class TestDistributedMuon(DTensorTestBase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "row-concatenated storage shards are not aligned to matrix rows of size 4",
+            "matrix-batch storage shards are not aligned to matrix rows of size 4",
         ):
             _build_single_parameter_muon(
                 parameter,
