@@ -54,7 +54,7 @@ __all__ = [
 def build_distributed_muon(
     params: Iterable[dict[str, Any]],
     *,
-    compute_layout_by_fqn: Mapping[str, ComputeLayout],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     num_stacked_matrices_by_fqn: Mapping[str, int],
     bucket_configs: Sequence[BucketConfig],
     **kwargs: Any,
@@ -88,52 +88,53 @@ def build_distributed_muon(
     )
     _configure_distributed_muon(
         optimizer,
-        compute_layout_by_fqn=compute_layout_by_fqn,
+        compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
     )
     return optimizer
 
 
-def _validate_compute_layout_configuration(
+def _validate_compute_sharding_configuration(
     optimizer: DistributedMuon,
     *,
-    compute_layout_by_fqn: Mapping[str, ComputeLayout],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
 ) -> None:
-    """Validate per-parameter compute layout configuration."""
-    for fqn, compute_layout in compute_layout_by_fqn.items():
+    """Validate per-parameter compute sharding configuration."""
+    for fqn, compute_layout in compute_sharding_by_fqn.items():
         if not isinstance(fqn, str):
-            raise ValueError("compute_layout_by_fqn keys must be strings")
+            raise ValueError("compute_sharding_by_fqn keys must be strings")
         if type(compute_layout) is not ComputeLayout:
-            raise ValueError("compute_layout_by_fqn values must be ComputeLayout")
+            raise ValueError("compute_sharding_by_fqn values must be ComputeLayout")
 
-    missing_compute_layouts = set(optimizer._num_stacked_matrices_by_fqn).difference(
-        compute_layout_by_fqn
+    missing_compute_shardings = set(optimizer._num_stacked_matrices_by_fqn).difference(
+        compute_sharding_by_fqn
     )
-    if missing_compute_layouts:
+    if missing_compute_shardings:
         raise ValueError(
-            "num_stacked_matrices_by_fqn entries must also have compute layouts: "
-            f"{sorted(missing_compute_layouts)}"
+            "num_stacked_matrices_by_fqn entries must also appear in "
+            "compute_sharding_by_fqn: "
+            f"{sorted(missing_compute_shardings)}"
         )
 
 
 def _configure_distributed_muon(
     optimizer: DistributedMuon,
     *,
-    compute_layout_by_fqn: Mapping[str, ComputeLayout],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
 ) -> None:
     """Configure one newly constructed DistributedMuon optimizer.
 
     Every group must provide aligned ``params`` and ``param_names``. Every
-    local parameter FQN must have one entry in ``compute_layout_by_fqn``;
-    extra compute-layout and stacked-matrix entries for parameters on other
+    local parameter FQN must have one entry in ``compute_sharding_by_fqn``;
+    extra compute-sharding and stacked-matrix entries for parameters on other
     pipeline stages are ignored. Parameter groups, stacked-matrix counts,
     compute layouts, and bucket configuration are frozen because optimizer
     state and collectives depend on them.
     """
-    _validate_compute_layout_configuration(
+    _validate_compute_sharding_configuration(
         optimizer,
-        compute_layout_by_fqn=compute_layout_by_fqn,
+        compute_sharding_by_fqn=compute_sharding_by_fqn,
     )
     optimizer._validate_groups()
 
@@ -145,9 +146,9 @@ def _configure_distributed_muon(
         if raw_param_names is None or len(group_params) != len(param_names):
             raise ValueError("params and param_names must be aligned")
         for param, fqn in zip(group_params, param_names, strict=True):
-            if fqn not in compute_layout_by_fqn:
-                raise ValueError(f"missing compute layout for Muon parameter {fqn!r}")
-            compute_layout = compute_layout_by_fqn[fqn]
+            if fqn not in compute_sharding_by_fqn:
+                raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
+            compute_layout = compute_sharding_by_fqn[fqn]
             parameters_to_prepare.append((param, fqn, compute_layout))
 
     prepared_compute_layouts = {}

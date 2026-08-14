@@ -16,14 +16,14 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
 - `build_distributed_muon` combines optimizer-agnostic per-parameter
-  `ComputeLayout` values with optimizer-owned `num_stacked_matrices_by_fqn`
-  counts. Each configured count interprets a 2D parameter `[M * R, C]` as `M`
-  independent matrices `[M, R, C]`. The builder validates named DTensor
-  parameters and plans their storage-to-compute transitions. An absent FQN uses
-  ordinary 2D Muon compute; an explicit count of one uses the stacked
-  `[1, R, C]` compute path.
+  `ComputeLayout` values in `compute_sharding_by_fqn` with optimizer-owned
+  `num_stacked_matrices_by_fqn` counts. Each configured count interprets a 2D
+  parameter `[M * R, C]` as `M` independent matrices `[M, R, C]`. The builder
+  validates named DTensor parameters and plans their storage-to-compute
+  transitions. An absent FQN uses ordinary 2D Muon compute; an explicit count
+  of one uses the stacked `[1, R, C]` compute path.
 
-Compute layouts and stacked-matrix counts are reconstruction configuration.
+Compute sharding and stacked-matrix counts are reconstruction configuration.
 They are validated and frozen when the optimizer is built, but are not stored
 in its state dict; checkpoint restore must rebuild the optimizer with matching
 values.
@@ -36,7 +36,7 @@ is the first TorchTitan integration. Its shared optimizer configuration:
 - Selects matrix parameters from attention, dense MLPs, routed and shared
   experts, and routers for DistributedMuon. Other parameters continue to use
   AdamW.
-- Defines each selected parameter's compute layout, including per-head Muon
+- Defines each selected parameter's compute sharding, including per-head Muon
   for compatible attention projections.
 - Groups layers into buckets so compute-ready work can overlap packed
   redistribution.

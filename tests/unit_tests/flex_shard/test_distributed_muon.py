@@ -40,7 +40,7 @@ def _build_single_parameter_muon(
     fqn = "layers.0.attention.wq.weight"
     return build_distributed_muon(
         [{"params": [parameter], "param_names": [fqn]}],
-        compute_layout_by_fqn={
+        compute_sharding_by_fqn={
             fqn: ComputeLayout(
                 shardings_by_mesh_axis=shardings_by_mesh_axis,
             )
@@ -76,11 +76,11 @@ class TestStackedMatrixConfiguration(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "compute_layout_by_fqn values must be ComputeLayout",
+            "compute_sharding_by_fqn values must be ComputeLayout",
         ):
             build_distributed_muon(
                 params,
-                compute_layout_by_fqn={fqn: cast(Any, object())},
+                compute_sharding_by_fqn={fqn: cast(Any, object())},
                 num_stacked_matrices_by_fqn={},
                 bucket_configs=[],
             )
@@ -91,18 +91,19 @@ class TestStackedMatrixConfiguration(unittest.TestCase):
         ):
             build_distributed_muon(
                 params,
-                compute_layout_by_fqn={fqn: compute_layout},
+                compute_sharding_by_fqn={fqn: compute_layout},
                 num_stacked_matrices_by_fqn={fqn: cast(Any, object())},
                 bucket_configs=[],
             )
 
         with self.assertRaisesRegex(
             ValueError,
-            "num_stacked_matrices_by_fqn entries must also have compute layouts",
+            "num_stacked_matrices_by_fqn entries must also appear in "
+            "compute_sharding_by_fqn",
         ):
             build_distributed_muon(
                 params,
-                compute_layout_by_fqn={},
+                compute_sharding_by_fqn={},
                 num_stacked_matrices_by_fqn={fqn: 2},
                 bucket_configs=[],
             )
@@ -270,7 +271,7 @@ class TestDistributedMuon(DTensorTestBase):
                         "param_names": [redistributed_fqn, local_blocks_fqn],
                     }
                 ],
-                compute_layout_by_fqn={
+                compute_sharding_by_fqn={
                     redistributed_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
                             "dp_shard": Owned(),
@@ -453,7 +454,7 @@ class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
         ):
             build_distributed_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
-                compute_layout_by_fqn={
+                compute_sharding_by_fqn={
                     fqn: ComputeLayout(
                         shardings_by_mesh_axis={
                             "efsdp": Shard(0),
