@@ -57,7 +57,8 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
-from torchtitan.observability import structured_logger as sl
+from torchtitan.observability import structured_logger as sl, tensor_logging
+from torchtitan.observability.tensor_logging.runtime import _include_recording_calls
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -267,6 +268,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
     metrics_processor: MetricsProcessor
+    tensor_logging: tensor_logging.TensorLoggingState | None
+    tensor_logging_freq: int
     checkpointer: BaseCheckpointManager
 
     # runtime utilities
@@ -551,6 +554,36 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
             )
+
+        self.tensor_logging = None
+        tensor_logging_config = config.metrics.tensor_logging
+        if tensor_logging_config.enabled:
+            self.tensor_logging_freq = tensor_logging_config.freq
+            effective_freq = math.lcm(
+                self.tensor_logging_freq,
+                config.metrics.log_freq,
+            )
+            if effective_freq != self.tensor_logging_freq:
+                logger.info(
+                    "Tensor statistics will publish every %s steps so cadence %s "
+                    "aligns with metrics cadence %s",
+                    effective_freq,
+                    self.tensor_logging_freq,
+                    config.metrics.log_freq,
+                )
+
+            # Model buffers and parallel wrappers are final before names are frozen.
+            self.tensor_logging = tensor_logging.init(
+                self.model_parts,
+                device=self.device,
+                publish_filter_regex=tensor_logging_config.publish_filter_regex,
+                model_part_prefixes=(
+                    {model_part: "" for model_part in self.model_parts}
+                    if parallel_dims.pp_enabled
+                    else None
+                ),
+            )
+
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
@@ -586,7 +619,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 else None
             ),
         )
-
         # build checkpointer
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
@@ -611,6 +643,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.fwd_bwd_fn = self._forward_backward_body
         if not config.training.disable_cuda_graphs:
+            if self.tensor_logging is not None:
+                fwd_bwd_fn = self.fwd_bwd_fn
+
+                def fwd_bwd_with_tensor_logging_calls(
+                    inputs: torch.Tensor,
+                    labels: torch.Tensor,
+                    global_valid_tokens: torch.Tensor,
+                    extra_kwargs: dict[str, Any],
+                ) -> torch.Tensor:
+                    # Capture gated mutations even if the graph is first recorded
+                    # on a non-logging step; the device flag controls each replay.
+                    with _include_recording_calls():
+                        return fwd_bwd_fn(
+                            inputs,
+                            labels,
+                            global_valid_tokens,
+                            extra_kwargs,
+                        )
+
+                self.fwd_bwd_fn = fwd_bwd_with_tensor_logging_calls
             self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
 
         # Build validator if validation is configured
@@ -871,6 +923,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
+        if self.tensor_logging is None:
+            return self._train_step(data_iterator)
+        is_tensor_log_step = (
+            self.metrics_processor.should_log(self.step)
+            and self.step % self.tensor_logging_freq == 0
+        )
+        with tensor_logging.set_enabled(is_tensor_log_step):
+            return self._train_step(data_iterator)
+
+    def _train_step(
+        self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
@@ -949,6 +1013,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.lr_schedulers.step()
 
         # log metrics
+        tensor_metrics: dict[str, int | float] = {}
+        if self.tensor_logging is not None and tensor_logging.is_enabled():
+            with sl.log_trace_span("tensor_logging_collect"):
+                tensor_metrics = self.tensor_logging.collect()
         if not should_log:
             return
 
@@ -1000,14 +1068,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
+            **tensor_metrics,
         }
-        self.metrics_processor.log(
-            self.step,
-            global_avg_loss,
-            global_max_loss,
-            float(grad_norm.item()),
-            extra_metrics=extra_metrics,
-        )
+        with sl.log_trace_span("metrics_publish"):
+            self.metrics_processor.log(
+                self.step,
+                global_avg_loss,
+                global_max_loss,
+                float(grad_norm.item()),
+                extra_metrics=extra_metrics,
+            )
 
     @record
     def train(self):
@@ -1087,5 +1157,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
+        if hasattr(self, "tensor_logging") and self.tensor_logging:
+            self.tensor_logging.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()

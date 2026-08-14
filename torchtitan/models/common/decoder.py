@@ -28,6 +28,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -202,6 +203,8 @@ class Decoder(BaseModel):
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
+        tensor_logging.register_fwd_bwd(self, ["input"])
+        tensor_logging.register_fwd_bwd(self.lm_head, ["output"])
 
         self.enable_weight_tying = config.enable_weight_tying
         if self.enable_weight_tying:
@@ -232,7 +235,10 @@ class Decoder(BaseModel):
         # positions to the right parameter (it would otherwise land in the
         # attention_masks slot and break the maskless SDPA backend).
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        # The decoder input boundary exists only on the stage that owns embeddings.
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        if self.tok_embeddings is not None:
+            tensor_logging.log_fwd_bwd_stats(self, input=h)
 
         for layer in self.layers.values():
             h = layer(h, attention_masks, positions)
@@ -244,7 +250,11 @@ class Decoder(BaseModel):
         # TODO: fix PP backward upstream to skip non-tensor inputs
         if self._skip_lm_head:
             return h
-        output = self.lm_head(h) if self.lm_head is not None else h
+        # The output boundary exists only on the stage that owns the LM head.
+        if self.lm_head is None:
+            return h
+        output = self.lm_head(h)
+        tensor_logging.log_fwd_bwd_stats(self.lm_head, output=output)
         return output
 
     def _create_flex_attention_mask(

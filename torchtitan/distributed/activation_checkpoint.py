@@ -7,6 +7,7 @@
 # This file provides the util functions to apply activation checkpointing to the model.
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
+import contextlib
 import os
 from dataclasses import dataclass, field
 from typing import Annotated, cast
@@ -26,6 +27,68 @@ from torch.utils.checkpoint import (
 
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
+
+
+_FORWARD_SIDE_EFFECT_OP_NAMES = ("accumulate_tensor_statistics",)
+
+
+def _registered_forward_side_effect_ops() -> set[torch._ops.OpOverload]:
+    # Resolve feature-owned mutation ops without depending on module import order.
+    # An absent custom op cannot appear in this model's checkpointed graph.
+    ops = set()
+    for name in _FORWARD_SIDE_EFFECT_OP_NAMES:
+        packet = getattr(torch.ops.torchtitan, name, None)
+        if packet is not None:
+            ops.add(packet.default)
+    return ops
+
+
+def _suppress_metric_side_effects_during_recompute(contexts):
+    """Prevent eager recomputation from mutating metric state twice."""
+
+    # Compiled checkpoint contexts must remain a pair of TorchDispatchModes.
+    if torch.compiler.is_compiling():
+        return contexts
+    forward_context, recompute_context = contexts
+
+    @contextlib.contextmanager
+    def recompute_without_metric_side_effects():
+        from torchtitan.observability.tensor_logging.runtime import (
+            _suppress_metric_side_effects,
+        )
+
+        with recompute_context, _suppress_metric_side_effects():
+            yield
+
+    return forward_context, recompute_without_metric_side_effects()
+
+
+def _save_forward_side_effects():
+    """Save tensor-statistic mutations during compiled recomputation."""
+
+    must_save = _registered_forward_side_effect_ops()
+
+    def policy_fn(_context, op, *args, **kwargs):
+        if op in must_save:
+            return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return create_selective_checkpoint_contexts(policy_fn)
+
+
+def _full_ac_contexts():
+    # Full-graph compile needs mutation ops preserved in its selective cache.
+    from torchtitan.observability.tensor_logging.runtime import _is_installed
+
+    if torch.compiler.is_compiling() and _is_installed():
+        return _save_forward_side_effects()
+
+    # Eager FullAC can suppress replay directly. Keeping this a plain context is
+    # important for CP, whose FlexAttention operator is itself compiled and
+    # cannot be replayed through selective-checkpoint storage.
+    return _suppress_metric_side_effects_during_recompute(
+        (contextlib.nullcontext(), contextlib.nullcontext())
+    )
 
 
 def _get_default_save_ops() -> set:
@@ -91,6 +154,7 @@ def _get_default_save_ops() -> set:
     }
     save_ops.update(_resolve_ops(compute_ops))
     save_ops.update(_resolve_ops(comm_ops))
+    save_ops.update(_registered_forward_side_effect_ops())
     return save_ops
 
 
@@ -173,8 +237,10 @@ class FullAC(ActivationCheckpointing):
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
+        # Prevent FullAC replay from double-counting tensor statistics.
         return ptd_checkpoint_wrapper(
             module,
+            context_fn=_full_ac_contexts,
             preserve_rng_state=self.config.preserve_rng_state,
             determinism_check=self.config.determinism_check,
             early_stop=False,
@@ -216,6 +282,8 @@ class SelectiveAC(ActivationCheckpointing):
     ) -> nn.Module:
         config = cast("SelectiveAC.Config", self.config)
         save_ops = self.get_save_ops()
+        # Preserve forward mutations even when a subclass replaces the save set.
+        save_ops.update(_registered_forward_side_effect_ops())
 
         # Collect weight shapes to force-recompute, stored as mm RHS shape
         # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup
@@ -277,8 +345,8 @@ class SelectiveAC(ActivationCheckpointing):
 
         return ptd_checkpoint_wrapper(
             module,
-            context_fn=lambda: create_selective_checkpoint_contexts(
-                _get_custom_policy()
+            context_fn=lambda: _suppress_metric_side_effects_during_recompute(
+                create_selective_checkpoint_contexts(_get_custom_policy())
             ),
             preserve_rng_state=config.preserve_rng_state,
             determinism_check=config.determinism_check,

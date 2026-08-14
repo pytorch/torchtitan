@@ -45,6 +45,10 @@ def _common_setup(config):
     """Common setup for precompile: fake PG, CooR, model build."""
     compile_config = config.compile
 
+    if config.metrics.tensor_logging.enabled:
+        raise NotImplementedError(
+            "tensor logging does not yet support Graph Trainer precompiled artifacts"
+        )
     if not compile_config.precompile_artifact_dir:
         raise ValueError(
             "precompile_main requires --compile.precompile_artifact_dir to be set."

@@ -151,6 +151,23 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--metrics.enable_tensorboard",
+                    "--metrics.log-freq 2",
+                    "--metrics.tensor-logging.enabled",
+                    "--metrics.tensor-logging.freq 2",
+                    "--training.steps 4",
+                    "--compile.enable",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "activation-checkpoint:full",
+                ],
+            ],
+            "Tensor logging with FullAC and compile",
+            "tensor_logging_core",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--compile.enable",
                 ],
             ],

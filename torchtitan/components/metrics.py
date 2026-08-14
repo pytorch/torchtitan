@@ -7,11 +7,12 @@
 import os
 import time
 from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import torch
+from tensorboard.compat.proto.summary_pb2 import Summary
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
@@ -120,9 +121,16 @@ class TensorBoardLogger(BaseLogger):
         logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
-        for k, v in metrics.items():
-            tag = k if self.tag is None else f"{self.tag}/{k}"
-            self.writer.add_scalar(tag, v, step)
+        summary = Summary()
+        for key, value in metrics.items():
+            summary.value.add(
+                tag=key if self.tag is None else f"{self.tag}/{key}",
+                simple_value=float(value),
+            )
+
+        # Submit one event instead of one queue operation per scalar.
+        file_writer = cast(Any, self.writer._get_file_writer())
+        file_writer.add_summary(summary, step)
 
     def close(self) -> None:
         self.writer.close()
@@ -257,6 +265,21 @@ def _get_metrics_rank(
     return (world_size // pp_size) * (pp_size - 1)
 
 
+@dataclass(kw_only=True, slots=True)
+class TensorLoggingConfig(Configurable.Config):
+    """Controls model-tensor statistics recorded with ordinary metrics."""
+
+    enabled: bool = False
+    freq: int = 5
+    publish_filter_regex: str = (
+        r"\.(?:numel|nonfinite_count|abs_mean|square_mean|abs_max)$"
+    )
+
+    def __post_init__(self) -> None:
+        if self.freq <= 0:
+            raise ValueError("metrics.tensor_logging.freq must be positive")
+
+
 class MetricsProcessor(Configurable):
     """Metrics processor to processes the metrics and log metrics.
 
@@ -298,6 +321,8 @@ class MetricsProcessor(Configurable):
 
         enable_wandb: bool = False
         """Whether to log metrics to Weights & Biases"""
+
+        tensor_logging: TensorLoggingConfig = field(default_factory=TensorLoggingConfig)
 
     config: Config
     logger: BaseLogger

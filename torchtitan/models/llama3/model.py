@@ -14,6 +14,7 @@ from torch import nn
 from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.observability import tensor_logging
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -38,6 +39,10 @@ class Llama3TransformerBlock(TransformerBlock):
         self.feed_forward = config.feed_forward.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
+        tensor_logging.register_fwd_bwd(
+            self,
+            ["attn_stream", "attn_out", "ffn_stream", "ffn_out"],
+        )
 
     def forward(
         self,
@@ -45,8 +50,18 @@ class Llama3TransformerBlock(TransformerBlock):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        # Record branch inputs and outputs before each residual addition.
+        attn_out = self.attention(
+            self.attention_norm(x),
+            attention_masks,
+            positions,
+        )
+        tensor_logging.log_fwd_bwd_stats(self, attn_stream=x, attn_out=attn_out)
+        h = x + attn_out
+
+        ffn_out = self.feed_forward(self.ffn_norm(h))
+        tensor_logging.log_fwd_bwd_stats(self, ffn_stream=h, ffn_out=ffn_out)
+        out = h + ffn_out
         return out
 
 

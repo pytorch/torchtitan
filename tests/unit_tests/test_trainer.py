@@ -101,7 +101,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 training=SimpleNamespace(
                     disable_cuda_graphs=False,
                     max_norm=1.0,
-                )
+                ),
             ),
             optimizers=MagicMock(),
             lr_schedulers=SimpleNamespace(
@@ -122,6 +122,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
+            tensor_logging=None,
             step=1,
             ntokens_seen=3,
         ),
@@ -134,7 +135,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         "torchtitan.trainer.dist_utils.clip_grad_norm_",
         return_value=torch.tensor(4.0),
     ):
-        Trainer.train_step(trainer, data_iterator)
+        Trainer._train_step(trainer, data_iterator)
 
     metrics_processor.log.assert_called_once_with(
         1,
@@ -150,7 +151,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         "torchtitan.trainer.dist_utils.clip_grad_norm_",
         return_value=torch.tensor(4.0),
     ):
-        Trainer.train_step(
+        Trainer._train_step(
             trainer,
             data_iterator=iter(
                 [({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))] * 3
