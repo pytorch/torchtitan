@@ -23,6 +23,7 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module flux",
                     "--config flux_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -41,6 +42,7 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module flux",
                     "--config flux_debugmodel",
                     "--compile.enable",
