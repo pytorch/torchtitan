@@ -168,6 +168,21 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--metrics.enable_tensorboard",
+                    "--metrics.log-freq 2",
+                    "--metrics.tensor-logging.enabled",
+                    "--metrics.tensor-logging.freq 2",
+                    "--training.steps 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "Tensor logging with strict SPMD typechecking",
+            "tensor_logging_spmd_typechecking",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--compile.enable",
                 ],
             ],
