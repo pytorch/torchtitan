@@ -21,6 +21,7 @@ from torchtitan.distributed.minimal_async_ep import (
     MinimalAsyncEPDispatchMetadata,
 )
 from torchtitan.distributed.minimal_async_ep.api import (
+    _get_buffer_set,
     reduce_topk_op as minimal_async_ep_reduce_topk_op,
     wait_combine as minimal_async_ep_wait_combine,
     wait_dispatch_op as minimal_async_ep_wait_dispatch_op,
@@ -1033,6 +1034,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
     num_max_tokens_per_rank: int | None
     dtype: torch.dtype | None
     buffer_device: torch.device
+    num_buffer_sets: int
     num_row_copy_ctas: int | None
     force_load_balance: bool
     receive_capacity_factor: float | None
@@ -1044,6 +1046,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         num_max_tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
+        num_buffer_sets: int = 1
         num_row_copy_ctas: int | None = None
         force_load_balance: bool = False
         receive_capacity_factor: float | None = None
@@ -1054,6 +1057,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         self.hidden_dim = config.hidden_dim
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.dtype = config.dtype
+        self.num_buffer_sets = config.num_buffer_sets
         self.num_row_copy_ctas = config.num_row_copy_ctas
         self.force_load_balance = config.force_load_balance
         self.receive_capacity_factor = config.receive_capacity_factor
@@ -1118,6 +1122,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             top_k=self.top_k,
             dtype=self.dtype,
             device=self.buffer_device,
+            num_buffer_sets=self.num_buffer_sets,
             force_load_balance=self.force_load_balance,
             receive_capacity_factor=self.receive_capacity_factor,
             num_row_copy_ctas=self.num_row_copy_ctas,
@@ -1153,6 +1158,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         num_tokens = x_TD.shape[0]
         assert self.receive_capacity is not None
         receive_capacity = self.receive_capacity
+        buffer_set = _get_buffer_set()
 
         (
             hidden_states_RD,
@@ -1172,6 +1178,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_tokens_per_expert_E,
             receive_capacity,
             ep_size,
+            buffer_set,
         )
         (
             hidden_states_RD,
@@ -1210,6 +1217,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         """Combine tokens via MinimalAsyncEP."""
         del x_TD
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
+        buffer_set = _get_buffer_set()
         routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
             routed_output_RD,
             state.dispatch_dst_ranks,
@@ -1220,6 +1228,7 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
             state.combine_peer_segments,
             state.combine_num_valid_rows,
             state.num_tokens * state.top_k,
+            buffer_set,
         )
         routed_output_ND = minimal_async_ep_wait_combine(
             routed_output_ND,

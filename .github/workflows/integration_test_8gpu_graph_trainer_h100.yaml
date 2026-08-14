@@ -104,6 +104,12 @@ jobs:
         # Run the MoE numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "moe"
 
+        # Exercise the real MinimalAsyncEP buffers, kernels, streams, and waits.
+        NCCL_NVLS_ENABLE=0 torchrun --standalone --nproc-per-node=2 -m pytest \
+          tests/unit_tests/test_minimal_async_ep_kernels.py::TestMinimalAsyncEPKernels::test_two_buffer_sets_match_reference_and_preserve_outputs -v
+        pytest tests/unit_tests/test_minimal_async_ep_kernels.py::TestMinimalAsyncEPKernels::test_wait_ops_compile_with_inductor -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py::TestCudagraphPass::test_minimal_async_ep_custom_ops_are_wrapped_by_cudagraph_pass -v
+
         # Run precompile integration tests (DSv3 with EP; Llama3 runs in default workflow)
         NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests $RUNNER_TEMP/artifacts-to-be-uploaded/precompile --ngpu 8 --test_name aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep
 

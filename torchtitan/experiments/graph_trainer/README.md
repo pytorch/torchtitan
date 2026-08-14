@@ -173,6 +173,11 @@ GEMM throughput, `d` bytes per element, and `H` expert hidden width. `R` and
 (`S=152`, `H=2048`, `B=1.06 TB/s`, `P=1.44 PFLOP/s`); tune neighboring values
 for other hardware or expert shapes. `None` selects the unbounded control.
 
+MinimalAsyncEP reuses static symmetric-memory receive buffers across training
+phases, so it requires full recomputation. Use
+`--compile.memory_policy full` with GraphTrainer, or `activation-checkpoint:full`
+with eager training.
+
 Graph chunking intentionally couples the tracer and EP-overlap passes through
 the `ep_overlap` trace-input preparer: before `minimal_fx_tracer` fakeifies
 inputs, the preparer marks token-grid dimensions with Dynamo symbolic-shape

@@ -238,6 +238,7 @@ def annotate_moe_ep_regions() -> None:
     from torchtitan.models.common.token_dispatcher import (
         AllToAllTokenDispatcher,
         LocalTokenDispatcher,
+        MinimalAsyncEPTokenDispatcher,
     )
 
     LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
@@ -264,6 +265,12 @@ def annotate_moe_ep_regions() -> None:
     AllToAllTokenDispatcher._combine_token_exchange = annotate_fn(
         {_EP_TOKEN_EXCHANGE: "combine"}
     )(AllToAllTokenDispatcher._combine_token_exchange)
+    MinimalAsyncEPTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        MinimalAsyncEPTokenDispatcher.dispatch
+    )
+    MinimalAsyncEPTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        MinimalAsyncEPTokenDispatcher.combine
+    )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
     _MOE_EP_REGIONS_ANNOTATED = True
 
