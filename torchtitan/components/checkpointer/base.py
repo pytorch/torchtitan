@@ -18,8 +18,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.tensor import DTensor
 
+from torch.distributed.tensor import DTensor
 from torchtitan.config import Configurable
 from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
@@ -29,6 +29,18 @@ OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+PostCheckpointCallback = Callable[[int, str], None]
+CallbackTrigger = Callable[[int], bool]
+RetentionExemption = Callable[[int], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class _PostCheckpointRegistration:
+    """One callback and the checkpoint policies associated with it."""
+
+    callback: PostCheckpointCallback
+    callback_trigger: CallbackTrigger | None
+    retention_exemption: RetentionExemption | None
 
 
 def purge_thread(
@@ -199,12 +211,117 @@ class BaseCheckpointManager(Configurable, ABC):
     keep_latest_k: int
     _storage: CheckpointStorage
 
+    # State for the callback invoked after a checkpoint is fully persisted.
+    _save_pending_finish: bool = False
+    _post_checkpoint_callback_completion: Future[None] | None = None
+    _post_checkpoint_registration: _PostCheckpointRegistration | None = None
+
     # A disabled manager returns early from ``__init__`` without setting up any
     # state, so none of its attributes exist. The public entry points below own
     # that check once, on behalf of every implementation, and dispatch to the
     # ``_``-prefixed hooks only when enabled. Subclasses override the hooks, not
     # these methods: overriding a public method here would silently bypass the
     # guard and run against uninitialized state.
+
+    def register_post_checkpoint_callback(
+        self,
+        callback: PostCheckpointCallback,
+        *,
+        callback_trigger: CallbackTrigger | None = None,
+        retention_exemption: RetentionExemption | None = None,
+    ) -> None:
+        """Register one post-checkpoint callback and its checkpoint policies."""
+        self._post_checkpoint_registration = _PostCheckpointRegistration(
+            callback=callback,
+            callback_trigger=callback_trigger,
+            retention_exemption=retention_exemption,
+        )
+
+    def _is_checkpoint_requested_by_callback_trigger(self, step: int) -> bool:
+        """Whether the configured callback trigger requests ``step``."""
+        registration = self._post_checkpoint_registration
+        return (
+            registration is not None
+            and registration.callback_trigger is not None
+            and registration.callback_trigger(step)
+        )
+
+    def _is_retention_exempt(self, step: int) -> bool:
+        """Whether the configured exemption protects ``step`` from deletion."""
+        registration = self._post_checkpoint_registration
+        return (
+            registration is not None
+            and registration.retention_exemption is not None
+            and registration.retention_exemption(step)
+        )
+
+    def _run_post_checkpoint_callback(self, step: int, checkpoint_id: str) -> None:
+        """Invoke the callback configured for a completed checkpoint save."""
+        registration = self._post_checkpoint_registration
+        if registration is not None:
+            registration.callback(step, checkpoint_id)
+
+    def _track_checkpoint_save(self, step: int, checkpoint_id: str) -> None:
+        """Start the post-persistence lifecycle of a save that was just issued.
+
+        A synchronous save is already durable here, so its callback runs
+        immediately and the lifecycle finishes before this returns. An
+        asynchronous save is still in flight: its callback runs later, on the
+        completion thread of ``save_future``, and ``maybe_wait_for_saving`` is
+        what finishes the lifecycle -- including whatever a concrete manager
+        defers to ``_finish_checkpoint_save``, such as retention cleanup.
+        """
+        assert not self._save_pending_finish
+        self._save_pending_finish = True
+
+        if self.save_future is None:
+            try:
+                self._run_post_checkpoint_callback(step, checkpoint_id)
+            finally:
+                self._finish_checkpoint_save()
+            return
+
+        post_checkpoint_callback_completion: Future[None] = Future()
+        self._post_checkpoint_callback_completion = (
+            post_checkpoint_callback_completion
+        )
+        self.save_future.add_done_callback(
+            lambda future: self._run_post_checkpoint_callback_after_async_save(
+                future, post_checkpoint_callback_completion, step, checkpoint_id
+            )
+        )
+
+    def _run_post_checkpoint_callback_after_async_save(
+        self,
+        save_future: Future,
+        post_checkpoint_callback_completion: Future[None],
+        step: int,
+        checkpoint_id: str,
+    ) -> None:
+        """Run the callback on the async-save completion thread.
+
+        The separate completion future lets the training thread wait for the
+        callback and receive its exception even though ``add_done_callback``
+        does not return a future for the callback itself.
+        """
+        try:
+            if not save_future.cancelled() and save_future.exception() is None:
+                self._run_post_checkpoint_callback(step, checkpoint_id)
+        except BaseException as error:
+            post_checkpoint_callback_completion.set_exception(error)
+        else:
+            post_checkpoint_callback_completion.set_result(None)
+
+    def _finish_checkpoint_save(self) -> None:
+        """Finish bookkeeping once persistence and callbacks are both done.
+
+        Concrete managers may extend this point with work that must happen only
+        after post-checkpoint consumers have received the checkpoint, such as
+        retention cleanup.
+        """
+        if not self._save_pending_finish:
+            return
+        self._save_pending_finish = False
 
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``."""
@@ -216,6 +333,8 @@ class BaseCheckpointManager(Configurable, ABC):
         """Persist state for ``curr_step``."""
         if not self.enable:
             return False
+        if self.save_future is not None and self.save_future.done():
+            self.maybe_wait_for_saving()
         return self._save(curr_step, last_step)
 
     def maybe_wait_for_staging(self) -> None:
@@ -226,11 +345,9 @@ class BaseCheckpointManager(Configurable, ABC):
 
     def close(self) -> None:
         """Release background threads and other resources."""
-        # getattr rather than a plain attribute read: ``__del__`` calls close(),
-        # and it can run on a partially constructed object whose ``__init__``
-        # raised before assigning ``enable``.
-        if not getattr(self, "enable", False):
+        if not self.enable:
             return
+        self.maybe_wait_for_saving()
         self._close()
 
     def maybe_wait_for_saving(self) -> None:
@@ -242,6 +359,12 @@ class BaseCheckpointManager(Configurable, ABC):
         if not self.enable or self.save_future is None:
             return
         self._wait_for_saving()
+        try:
+            if self._post_checkpoint_callback_completion is not None:
+                self._post_checkpoint_callback_completion.result()
+        finally:
+            self._post_checkpoint_callback_completion = None
+            self._finish_checkpoint_save()
 
     @abstractmethod
     def _wait_for_saving(self) -> None:
