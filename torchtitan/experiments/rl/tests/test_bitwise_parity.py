@@ -210,8 +210,8 @@ def build_inference_engine(
     """
     gen_config = config.generator
 
-    inner_attn = config.model_spec.model.first_inner_attention
-    use_flex = isinstance(inner_attn, FlexAttention.Config)
+    attention_backend = config.model_spec.model.first_full_attention_backend
+    use_flex = isinstance(attention_backend, FlexAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
     # batch-invariant path (v2 runner is required for the logprob-kernel patch).

@@ -101,7 +101,7 @@ class Decoder(BaseModel):
             )
 
         @property
-        def first_inner_attention(self) -> Module.Config | None:
+        def first_full_attention_backend(self) -> Module.Config | None:
             """Backend config of the first full-attention layer, else None."""
             attention = self.first_attention
             return attention.inner_attention if attention is not None else None
