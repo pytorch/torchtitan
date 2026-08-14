@@ -25,9 +25,6 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
-_MINIMAL_ASYNC_EP_ATTN_BACKEND = "flex_flash"
-
-
 def enable_fused_swiglu(config: Trainer.Config) -> None:
     # fused_swiglu.py registers two overrides (dense FeedForward + MoE grouped
     # experts); activate both by naming each factory.
@@ -188,7 +185,7 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
     config = deepseek_v3_16b()
     config.model_spec = model_registry(
         "16B",
-        attn_backend=_MINIMAL_ASYNC_EP_ATTN_BACKEND,
+        attn_backend="flex",
         moe_comm_backend="minimal_async_ep",
     )
     enable_fused_swiglu(config)
@@ -271,7 +268,7 @@ def deepseek_v3_671b_bf16_minimal_async_ep() -> Trainer.Config:
     config = deepseek_v3_671b()
     config.model_spec = model_registry(
         "671B",
-        attn_backend=_MINIMAL_ASYNC_EP_ATTN_BACKEND,
+        attn_backend="flex",
         moe_comm_backend="minimal_async_ep",
     )
     enable_fused_swiglu(config)
