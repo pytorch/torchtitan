@@ -26,6 +26,17 @@ SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset({TRANSFORMER_BLOCK_FQN, MOE_BLOCK_F
 
 
 @dataclass(kw_only=True, slots=True)
+class FP8GraphConfig:
+    """Controls GraphTrainer support for already-quantized FP8 modules."""
+
+    enabled: bool = False
+    """Enable FP8 graph analysis and validation."""
+
+    strict_validation: bool = True
+    """Require a supported FP8 compute operation for each quantized module region."""
+
+
+@dataclass(kw_only=True, slots=True)
 class EpOverlapConfig:
     enabled: bool = False
     """Enable EP-overlap support for the selected chunking and scheduling mode."""
@@ -168,6 +179,33 @@ class GraphTrainerCompileConfig(CompileConfig):
     enable_autoparallel: bool = False
     """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
     manual TP/FSDP/EP. Forces the AOT compilation path internally."""
+
+    fp8: FP8GraphConfig = field(default_factory=FP8GraphConfig)
+    """FP8 graph analysis and validation configuration."""
+
+
+def validate_fp8_graph_config(compile_config: GraphTrainerCompileConfig) -> None:
+    """Validate the supported FP8 GraphTrainer execution contracts."""
+    if not compile_config.fp8.enabled:
+        return
+    if not compile_config.enable:
+        raise ValueError("--compile.fp8.enabled requires --compile.enable")
+    if not compile_config.enable_passes:
+        raise ValueError("--compile.fp8.enabled requires --compile.enable_passes")
+    if compile_config.mode != "aot_fx_trace":
+        raise ValueError("--compile.fp8.enabled requires --compile.mode aot_fx_trace")
+    if compile_config.inductor_compilation not in {"full", "regional"}:
+        raise ValueError(
+            "--compile.fp8.enabled requires --compile.inductor_compilation full "
+            "or regional"
+        )
+    if (
+        compile_config.precompile_artifact_dir
+        and compile_config.inductor_compilation != "regional"
+    ):
+        raise ValueError(
+            "FP8 precompile requires --compile.inductor_compilation regional"
+        )
 
 
 def validate_autoparallel_config(

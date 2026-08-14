@@ -33,7 +33,7 @@ try:
         class Config(Linear.Config):
             """Drop-in replacement for Linear.Config that builds MXFP8Linear."""
 
-            pass
+            _quantization_recipe_name: str = "mxfp8_rceil"
 
         def __init__(self, config: Config):
             TorchAOMXFP8Linear.__init__(
@@ -41,6 +41,9 @@ try:
                 config.in_features,
                 config.out_features,
                 bias=config.bias,
+            )
+            self._torchtitan_quantization_recipe_name = (
+                config._quantization_recipe_name
             )
 
 except ImportError:
@@ -86,6 +89,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                     out_features=config.out_features,
                     bias=config.bias,
                     param_init=config.param_init,
+                    _quantization_recipe_name="mxfp8_rceil",
                 )
                 if parent is None:
                     model_config = new_config
@@ -120,6 +124,7 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             recipe_name: str = "mxfp8_rceil"
+            _quantization_pad_multiple: int = 32
 
         def __init__(self, config: Config):
             super().__init__(config)
@@ -130,6 +135,11 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
 
             recipe = MXFP8TrainingRecipe(config.recipe_name)
             self._mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+            self._torchtitan_quantization_recipe_name = config.recipe_name
+            self._torchtitan_quantization_emulate = False
+            self._torchtitan_quantization_pad_multiple = (
+                config._quantization_pad_multiple
+            )
 
         def _grouped_mm(self, *, A, B_t, offs):
             from torchao.prototype.moe_training.utils import (
@@ -191,6 +201,7 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
                 recipe_name=self.config.recipe_name,
+                _quantization_pad_multiple=self.config.pad_multiple,
             )
             if parent is None:
                 model_config = new_config

@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
+
+import torch.nn as nn
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
@@ -94,3 +98,73 @@ def has_quantization(model_config) -> bool:
         for _fqn, config, _parent, _attr in model_config.traverse(GroupedExperts.Config)
     )
     return has_quant_linear or has_quant_moe
+
+
+def get_quantization_kind(module: nn.Module) -> str | None:
+    """Return the stable quantization category for a runtime module."""
+    from torchtitan.components.quantization.float8 import (
+        _float8_experts_cache,
+        Float8Linear,
+    )
+    from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
+
+    if Float8Linear is not None and isinstance(module, Float8Linear):
+        return "float8_linear"
+    if MXFP8Linear is not None and isinstance(module, MXFP8Linear):
+        return "mxfp8_linear"
+
+    if any(isinstance(module, cls) for cls in _float8_experts_cache.values()):
+        return "float8_grouped_experts"
+    if any(isinstance(module, cls) for cls in _mxfp8_experts_cache.values()):
+        return "mxfp8_grouped_experts"
+    return None
+
+
+@dataclass(frozen=True)
+class QuantizationSignature:
+    """Stable lowering-relevant identity for one quantized runtime module."""
+
+    module_fqn: str
+    kind: str
+    recipe_name: str
+    emulate: bool
+    pad_multiple: int | None = None
+
+
+def get_quantization_signature(
+    model: nn.Module,
+) -> tuple[QuantizationSignature, ...]:
+    """Return sorted stable signatures for quantized runtime modules."""
+    signatures = []
+    for module_fqn, module in model.named_modules():
+        kind = get_quantization_kind(module)
+        if kind is None:
+            continue
+        recipe_name = getattr(module, "_torchtitan_quantization_recipe_name", "")
+        if not recipe_name:
+            raise ValueError(
+                "Quantized module is missing stable recipe metadata: "
+                f"{module_fqn} ({kind})."
+            )
+        pad_multiple = None
+        if kind.endswith("grouped_experts"):
+            pad_multiple = getattr(
+                module, "_torchtitan_quantization_pad_multiple", None
+            )
+            if not isinstance(pad_multiple, int):
+                raise ValueError(
+                    "Quantized grouped-expert module is missing stable padding "
+                    f"metadata: {module_fqn} ({kind})."
+                )
+        signatures.append(
+            QuantizationSignature(
+                module_fqn=module_fqn,
+                kind=kind,
+                recipe_name=recipe_name,
+                emulate=bool(
+                    getattr(module, "_torchtitan_quantization_emulate", False)
+                ),
+                pad_multiple=pad_multiple,
+            )
+        )
+    return tuple(sorted(signatures, key=lambda signature: signature.module_fqn))

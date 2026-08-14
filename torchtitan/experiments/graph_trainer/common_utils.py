@@ -135,6 +135,8 @@ def ensure_boxed_graph_module(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
 
 
 _MODULE_FQN = "module_fqn"
+_QUANTIZATION_KIND = "quantization_kind"
+_QUANTIZATION_EMULATE = "quantization_emulate"
 _EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
 _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
@@ -205,14 +207,23 @@ def annotate_module_fqns(model: nn.Module) -> None:
     """Annotate all modules' forward with their fully-qualified names.
 
     Every named submodule (excluding the root) gets its forward method wrapped
-    with ``annotate_fn`` so that FX nodes carry ``module_fqn`` in
-    ``node.meta["custom"]``.
+    with ``annotate_fn`` so that FX nodes carry ``module_fqn`` and, for
+    quantized modules, ``quantization_kind`` in ``node.meta["custom"]``.
 
     Call once after model construction, before tracing/compilation.
     """
+    from torchtitan.components.quantization.utils import get_quantization_kind
+
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
-            submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+            metadata = {_MODULE_FQN: fqn}
+            quantization_kind = get_quantization_kind(submodule)
+            if quantization_kind is not None:
+                metadata[_QUANTIZATION_KIND] = quantization_kind
+                metadata[_QUANTIZATION_EMULATE] = bool(
+                    getattr(submodule, "_torchtitan_quantization_emulate", False)
+                )
+            submodule.forward = annotate_fn(metadata)(submodule.forward)
 
 
 def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:

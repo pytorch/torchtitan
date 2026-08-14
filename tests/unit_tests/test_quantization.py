@@ -10,7 +10,9 @@ import torch
 from torchtitan.components.quantization import Float8Linear
 from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.components.quantization.mx import _get_mxfp8_grouped_experts_cls
-from torchtitan.components.quantization.utils import has_quantization
+from torchtitan.components.quantization.utils import (
+    has_quantization,
+)
 from torchtitan.config import ConfigManager
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.linear import Linear
@@ -41,11 +43,15 @@ def test_float8_applied_by_model_registry():
     assert has_quantization(model_config)
     # Some Linear.Config instances should be swapped to Float8Linear
     converted = [
-        fqn
-        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
-        if isinstance(lc, Float8Linear.Config)
+        linear_config
+        for _fqn, linear_config, _parent, _attr in model_config.traverse(
+            Linear.Config
+        )
+        if isinstance(linear_config, Float8Linear.Config)
     ]
     assert len(converted) > 0
+    assert all(config._quantization_recipe_name == "rowwise" for config in converted)
+    assert all(config._quantization_emulate for config in converted)
 
 
 @pytest.mark.parametrize(

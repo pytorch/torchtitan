@@ -12,17 +12,23 @@ from torchtitan.components.quantization import (
 )
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.experiments.graph_trainer.configs import (
+    FP8GraphConfig,
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
     deepseek_v3_16b_minimal_async_ep,
     deepseek_v3_671b,
     deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_float8,
     deepseek_v3_debugmodel_minimal_async_ep,
+)
+from torchtitan.models.deepseek_v3.config_registry import (
+    deepseek_v3_671b_float8 as base_deepseek_v3_671b_float8,
 )
 
 from . import model_registry
@@ -51,7 +57,41 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
         ],
     )
     config = to_graph_trainer_config(base, model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        fp8=FP8GraphConfig(enabled=True),
+    )
+    return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_float8() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel_float8(model_compile_enabled=True),
+        model_registry,
+    )
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        fp8=FP8GraphConfig(enabled=True),
+    )
+    return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_float8_sdpa() -> GraphTrainer.Config:
+    """Float8 grouped-expert config using picklable test-only SDPA."""
+    config = graph_trainer_deepseek_v3_debugmodel_float8()
+    for layer in config.model_spec.model.layers:
+        layer.attention.inner_attention = ScaledDotProductAttention.Config()
+    return config
+
+
+def graph_trainer_deepseek_v3_671b_float8() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(
+        base_deepseek_v3_671b_float8(), model_registry
+    )
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        fp8=FP8GraphConfig(enabled=True),
+    )
     return config
 
 

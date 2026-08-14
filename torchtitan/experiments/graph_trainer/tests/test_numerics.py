@@ -22,6 +22,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.tools.utils import has_cuda_capability
 
 
 STEPS = 20
@@ -244,6 +245,29 @@ def _run_llama3_loss_compare(test_options_extra: str = "") -> bool:
     )
 
 
+def _run_llama3_fp8_loss_compare(
+    test_config: str,
+    test_options_extra: str = "",
+    *,
+    rtol: float | None = None,
+) -> bool:
+    """Compare Trainer FP8 with a GraphTrainer FP8 compilation mode."""
+    test_options = LLAMA3_PARALLELISM
+    if test_options_extra:
+        test_options += f" {test_options_extra}"
+    compare_fn = run_loss_compare if rtol is None else run_loss_compare_close
+    compare_kwargs = {} if rtol is None else {"rtol": rtol}
+    return compare_fn(
+        baseline_module="llama3",
+        baseline_config="llama3_debugmodel_float8",
+        test_module="graph_trainer.llama3",
+        test_config=test_config,
+        baseline_options=LLAMA3_PARALLELISM,
+        test_options=test_options,
+        **compare_kwargs,
+    )
+
+
 DSV3_PARALLELISM = (
     "--parallelism.data_parallel_shard_degree=4"
     " --parallelism.tensor_parallel_degree=2"
@@ -277,6 +301,11 @@ DSV3_EP_OVERLAP_GRAPH = " --compile.ep_overlap.strategy graph"
 DSV3_EP_OVERLAP_GRAPH_BITWISE = (
     DSV3_EP_OVERLAP_GRAPH + " --compile.ep_overlap.disable_early_grad_accumulation"
 )
+DSV3_FP8_GROUPED_EXPERTS_PARALLELISM = (
+    "--parallelism.data_parallel_shard_degree=2"
+    " --parallelism.tensor_parallel_degree=1"
+    " --parallelism.expert_parallel_degree=2"
+)
 
 
 def _run_deepseek_v3_loss_compare(
@@ -302,6 +331,20 @@ def _run_deepseek_v3_loss_compare(
         test_config=test_config,
         baseline_options=baseline_options,
         test_options=test_options,
+    )
+
+
+def _run_deepseek_v3_fp8_grouped_experts_loss_compare() -> bool:
+    """Compare Trainer and regional GraphTrainer Float8 grouped experts."""
+    return run_loss_compare(
+        baseline_module="deepseek_v3",
+        baseline_config="deepseek_v3_debugmodel_float8",
+        test_module="graph_trainer.deepseek_v3",
+        test_config="graph_trainer_deepseek_v3_debugmodel_float8",
+        baseline_options=DSV3_FP8_GROUPED_EXPERTS_PARALLELISM,
+        test_options=DSV3_FP8_GROUPED_EXPERTS_PARALLELISM,
+        baseline_ngpus=2,
+        test_ngpus=2,
     )
 
 
@@ -635,6 +678,34 @@ class TestGraphTrainerNumerics(unittest.TestCase):
                 test_options_extra="--compile.mode aot_fx_trace"
             ),
         )
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available()
+    and has_cuda_capability(9, 0)
+    and importlib.util.find_spec("torchao") is not None,
+    "FP8 numerics tests require TorchAO and an H100-class GPU",
+)
+class TestGraphTrainerFP8Numerics(unittest.TestCase):
+    """Hopper FP8 loss equivalence against the Trainer path."""
+
+    def test_dense_llama3_fp8_full_cudagraph_vs_trainer(self):
+        self.assertTrue(
+            _run_llama3_fp8_loss_compare(
+                "graph_trainer_llama3_debugmodel_float8",
+                rtol=1e-4,
+            )
+        )
+
+    def test_dense_llama3_fp8_regional_cudagraph_vs_trainer(self):
+        self.assertTrue(
+            _run_llama3_fp8_loss_compare(
+                "graph_trainer_llama3_debugmodel_float8_regional",
+            )
+        )
+
+    def test_deepseek_v3_fp8_grouped_experts_regional_vs_trainer(self):
+        self.assertTrue(_run_deepseek_v3_fp8_grouped_experts_loss_compare())
 
 
 @unittest.skipUnless(

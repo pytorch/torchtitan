@@ -11,7 +11,9 @@ import hashlib
 import os
 import pickle
 from dataclasses import dataclass
-from typing import NewType, TYPE_CHECKING
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+from typing import TYPE_CHECKING, NewType
 
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelDims
@@ -20,6 +22,7 @@ if TYPE_CHECKING:
 import torch
 import torch.utils._pytree as pytree
 
+from torchtitan.components.quantization.utils import get_quantization_signature
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     SubclassLayout,
     TracedResult,
@@ -46,6 +49,18 @@ def compute_config_fingerprint(
         h.update(f"param:{name}:{list(param.shape)}:{param.dtype}\n".encode())
     for name, buf in model.named_buffers():
         h.update(f"buffer:{name}:{list(buf.shape)}:{buf.dtype}\n".encode())
+    if compile_config.fp8.enabled:
+        for signature in get_quantization_signature(model):
+            h.update(
+                "quantization:"
+                f"{signature.module_fqn}:{signature.kind}:{signature.recipe_name}:"
+                f"{signature.emulate}:{signature.pad_multiple}\n".encode()
+            )
+        try:
+            torchao_version = package_version("torchao")
+        except PackageNotFoundError:
+            torchao_version = "not-installed"
+        h.update(f"torchao_version:{torchao_version}\n".encode())
 
     for f in dataclasses.fields(parallel_dims):
         if not f.name.startswith("_"):
@@ -54,6 +69,45 @@ def compute_config_fingerprint(
     h.update(f"compile:mode:{compile_config.mode}\n".encode())
     h.update(f"compile:backend:{compile_config.backend}\n".encode())
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
+    h.update(f"compile:enable_passes:{compile_config.enable_passes}\n".encode())
+    h.update(f"compile:pass_pipeline:{compile_config.pass_pipeline}\n".encode())
+    h.update(
+        f"compile:disable_passes:{sorted(compile_config.disable_passes)}\n".encode()
+    )
+    h.update(f"compile:inductor:{compile_config.inductor_compilation}\n".encode())
+    h.update(f"compile:memory_policy:{compile_config.memory_policy}\n".encode())
+    h.update(
+        "compile:numerics_changing_optim:"
+        f"{compile_config.numerics_changing_optim}\n".encode()
+    )
+    h.update(
+        "compile:enable_fsdp_ag_rs_overlap:"
+        f"{compile_config.enable_fsdp_ag_rs_overlap}\n".encode()
+    )
+    h.update(
+        "compile:enable_fsdp_dense_region_overlap:"
+        f"{compile_config.enable_fsdp_dense_region_overlap}\n".encode()
+    )
+    h.update(
+        "compile:cpu_offload_prefetch_n_layers:"
+        f"{compile_config.cpu_offload_prefetch_n_layers}\n".encode()
+    )
+    h.update(
+        "compile:cpu_offload_defer_n_layers:"
+        f"{compile_config.cpu_offload_defer_n_layers}\n".encode()
+    )
+    h.update(
+        "compile:cpu_offload_budget_gb:"
+        f"{compile_config.cpu_offload_budget_gb}\n".encode()
+    )
+    h.update(
+        f"compile:enable_autoparallel:{compile_config.enable_autoparallel}\n".encode()
+    )
+    h.update(f"compile:fp8:enabled:{compile_config.fp8.enabled}\n".encode())
+    h.update(
+        "compile:fp8:strict_validation:"
+        f"{compile_config.fp8.strict_validation}\n".encode()
+    )
     h.update(
         f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
     )
