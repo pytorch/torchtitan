@@ -23,6 +23,7 @@ Both classes here run in CI. Note there is no GPU unit-test job, so anything
 CUDA-guarded is developer-run only.
 """
 
+import contextlib
 import unittest
 from unittest.mock import patch
 
@@ -35,6 +36,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
@@ -44,6 +46,16 @@ from torchtitan.models.common.dist_gemm import (
 
 DIM = 256
 N_HEADS = 8
+
+
+@contextlib.contextmanager
+def spmd_types_backend():
+    """dist-GEMM only serves this backend; the sharding setup enforces it."""
+    set_spmd_backend("spmd_types")
+    try:
+        yield
+    finally:
+        set_spmd_backend("default")
 
 
 class TestDistGemmAttentionConfig(unittest.TestCase):
@@ -102,6 +114,27 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
                 tp_comm_overlap="dist_gemm",
             )
 
+    def test_dtensor_backend_is_rejected(self):
+        """dist-GEMM is spmd_types-only; the DTensor backends are deprecated."""
+        from torchtitan.models.llama3 import model_registry
+
+        attn = model_registry("debugmodel", tp_comm_overlap="dist_gemm")
+        attn = attn.model.layers[0].attention
+        # the default backend is active here, which is exactly what must be refused
+        with self.assertRaisesRegex(ValueError, "requires parallelism.spmd_backend"):
+            set_gqa_attention_sharding(attn, enable_sp=True)
+
+    def test_sequence_parallel_disabled_is_rejected(self):
+        """The fused GEMMs *are* the SP collectives, so SP off has nothing to fuse
+        and wo would reduce-scatter where it must all-reduce."""
+        from torchtitan.models.llama3 import model_registry
+
+        attn = model_registry("debugmodel", tp_comm_overlap="dist_gemm")
+        attn = attn.model.layers[0].attention
+        with spmd_types_backend():
+            with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
+                set_gqa_attention_sharding(attn, enable_sp=False)
+
     def test_sharding_setup_declares_the_fused_contracts(self):
         """set_gqa_attention_sharding declares different contracts for dist-GEMM.
 
@@ -119,8 +152,9 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
             .model.layers[0]
             .attention
         )
-        set_gqa_attention_sharding(stock, enable_sp=True)
-        set_gqa_attention_sharding(fused, enable_sp=True)
+        with spmd_types_backend():
+            set_gqa_attention_sharding(stock, enable_sp=True)
+            set_gqa_attention_sharding(fused, enable_sp=True)
 
         self.assertIsNotNone(stock.sharding_config)
         self.assertIsNone(fused.sharding_config)
@@ -173,7 +207,8 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
 
         parallel_dims = self._parallel_dims()
         attn_cfg = llama3_debugmodel_dist_gemm().model_spec.model.layers[0].attention
-        set_gqa_attention_sharding(attn_cfg, enable_sp=True)
+        with spmd_types_backend():
+            set_gqa_attention_sharding(attn_cfg, enable_sp=True)
 
         attn = attn_cfg.build().to(self.device_type)
         attn.parallelize(parallel_dims)

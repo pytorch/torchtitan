@@ -12,6 +12,7 @@ from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVL
 from torchtitan.models.common.dist_gemm import (
     AllGatherFusedFeedForward,
     RowParallelLinear,
+    validate_dist_gemm_preconditions,
 )
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
@@ -172,9 +173,11 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     )
     # The dist-GEMM attention block runs both TP collectives inside its own
     # GEMMs, so it declares different activation contracts from the stock block.
-    # SP and spmd_types are preconditions for dist-GEMM, enforced at config time in
-    # maybe_update_dist_gemm_config; this branch only declares the contracts.
+    # SP and spmd_types are preconditions for dist-GEMM, enforced in
+    # validate_dist_gemm_preconditions; this branch only declares the contracts.
     dist_gemm = isinstance(attention_cfg.wo, RowParallelLinear.Config)
+    if dist_gemm:
+        validate_dist_gemm_preconditions(enable_sp=enable_sp)
 
     attn_x_layout = (
         dense_sequence_parallel_placement()
@@ -277,6 +280,8 @@ def set_dense_ffn_sharding(
     # See set_gqa_attention_sharding; both branches collapse once redistribute
     # collectives move inside the modules.
     dist_gemm = isinstance(feed_forward_cfg, AllGatherFusedFeedForward.Config)
+    if dist_gemm:
+        validate_dist_gemm_preconditions(enable_sp=enable_sp)
     feed_forward_cfg.sharding_config = (
         None
         if dist_gemm

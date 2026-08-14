@@ -44,66 +44,6 @@ def ensure_symm_mem_ops():
     return symm_mem
 
 
-def dist_gemm_workspace_bytes(
-    *,
-    tokens_global: int,
-    features: int,
-    ranks: int,
-) -> int:
-    """Bytes of symmetric-memory workspace one layer's fused GEMMs can demand.
-
-    Kept a pure function so the arithmetic is testable: under-reserving is the
-    dangerous direction -- it puts workspace growth back inside CUDA graph capture,
-    and outside capture it silently breaks the "final size before any layer runs"
-    guarantee -- and the terms are not obvious.
-
-    Every symm_mem call these Functions make, in elements, with
-    ``tokens_local = tokens_global / ranks`` and ``features = max(K, N)``:
-
-        forward all-gather        tokens_local * K
-        dgrad reduce-scatter      2 * tokens_local * K   (double-buffered)
-        wgrad all-gather          tokens_local * K
-        forward reduce-scatter    2 * tokens_local * N   (double-buffered)
-        dgrad all-gather          tokens_local * N
-
-    so ``2 * tokens_local * features`` covers them all.
-
-    This bound holds only while every ``fused_all_gather_matmul`` call leaves
-    ``return_A`` at its default. Passing ``return_A=False`` lets the op select
-    ``_multimem_all_gather_matmul``, which reserves the *full gathered* buffer
-    (``A_shape.numel() * element_size``) rather than a shard -- for the wgrad call,
-    whose input is ``[K / ranks, tokens_global]``, that is ``K * tokens_global``,
-    i.e. ``ranks`` times more than the row above. Reintroducing ``return_A=False``
-    anywhere means adding a ``tokens_global * features`` term here.
-
-    Sized as float32 regardless of the layer's dtype: only under-reserving is
-    dangerous, the collectives run in ``training.mixed_precision_param``, and both
-    it and ``training.dtype`` are ``bfloat16 | float32``, so float32 is an upper
-    bound over every combination.
-    """
-    if ranks < 2:
-        return 0
-    fp32_bytes = 4
-    return 2 * (tokens_global // ranks) * features * fp32_bytes
-
-
-def reserve_symm_mem_workspace(group: dist.ProcessGroup, *, min_bytes: int) -> None:
-    """Grow the group's symmetric-memory workspace to at least ``min_bytes``.
-
-    There is one workspace per process group for the whole process, grown
-    monotonically to the largest size any caller has asked for, so the cost is a
-    max over layers rather than a sum and nothing is freed between layers. What
-    hurts is *when* it grows. Growth re-rendezvouses, which is a collective and
-    is rejected outright during CUDA graph capture. Worse, growth frees the old
-    buffer while its address stays baked into any graph already captured against
-    it, so a later growth turns an earlier graph into a use-after-free on replay.
-
-    Calling this for every layer before any of them runs is what makes that safe.
-    """
-    symm_mem = ensure_symm_mem_ops()
-    symm_mem.get_symm_mem_workspace(group.group_name, min_size=min_bytes)
-
-
 @spmd.register_autograd_function
 class AllGatherLinear(torch.autograd.Function):
     """All-gather the sequence shard, then apply a column-parallel linear.
@@ -222,17 +162,16 @@ class AllGatherLinear(torch.autograd.Function):
         # AG(X_k.T) @ dY produces dW.T. This mirrors the usual AG-linear wgrad
         # dual without depending on a higher-level distributed-linear package.
         #
-        # return_A is left at its default of True, and the returned tensor is
+        # return_A is left at its default of True and the returned tensor is
         # discarded. Passing False would let the op select
         # _multimem_all_gather_matmul, which reserves the *full* gathered buffer
-        # (K * tokens_global) rather than a shard of it, multiplying the workspace
-        # requirement by the TP degree -- see dist_gemm_workspace_bytes, whose
-        # bound assumes no caller opts into that schedule. Note the op's multimem
-        # heuristic is `local_M * group_size <= 2048`, which for this call
-        # evaluates to `K <= 2048`: it was tuned for a gathered token dim, not a
-        # gathered K, so it fires here on a dimension it was not designed around.
-        # Keeping both directions on the decomposed schedule also makes forward
-        # and backward performance consistent.
+        # (K * tokens_global) rather than a shard of it -- ranks times more
+        # symmetric memory for this one call. Its heuristic is
+        # `local_M * group_size <= 2048`, which for this call evaluates to
+        # `K <= 2048`: tuned for a gathered token dim, not a gathered K, so it
+        # would fire here on a dimension it was not designed around. Keeping both
+        # directions on the decomposed schedule also makes forward and backward
+        # performance consistent.
         _, grad_w_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
             x_shard_k.T.contiguous(),
             [grad_y_shard_n],
