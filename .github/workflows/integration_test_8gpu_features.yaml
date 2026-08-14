@@ -1,4 +1,4 @@
-name: 8 GPU Feature Tests
+name: 8 GPU Feature Tests (CUDA)
 
 on:
   push:
