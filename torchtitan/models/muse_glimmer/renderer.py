@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Muse Glimmer renderer: chat messages <-> tokens for TorchTitan RL.
 
 RL needs two directions. ``render_ids`` turns messages + tool definitions into token
@@ -69,6 +75,7 @@ class MuseGlimmerRendererConfig(BaseRendererConfig):
     empty ``content`` is unscoreable and the answer is often the final reasoning line.
     """
 
+
 # Muse Glimmer special-token ids (from the GGUF metadata)
 START_ID = 200022  # <|start|> begins a harmony message header
 MESSAGE_ID = 200023  # <|message|> ends the header, body follows
@@ -91,7 +98,11 @@ def _strip_reasoning_history(messages):
     """Drop ``reasoning_content`` from assistant messages (see the config field)."""
     out = []
     for m in messages:
-        if isinstance(m, dict) and m.get("role") == "assistant" and m.get("reasoning_content"):
+        if (
+            isinstance(m, dict)
+            and m.get("role") == "assistant"
+            and m.get("reasoning_content")
+        ):
             m = {k: v for k, v in m.items() if k != "reasoning_content"}
         out.append(m)
     return out
@@ -114,10 +125,13 @@ def _normalize_tool_calls(messages):
                 continue
             name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
             args = (
-                tc.get("arguments") if isinstance(tc, dict)
+                tc.get("arguments")
+                if isinstance(tc, dict)
                 else getattr(tc, "arguments", None)
             )
-            norm.append({"type": "function", "function": {"name": name, "arguments": args}})
+            norm.append(
+                {"type": "function", "function": {"name": name, "arguments": args}}
+            )
         out.append({**m, "tool_calls": norm})
     return out
 
@@ -297,7 +311,7 @@ class MuseGlimmerRenderer:
             full = self._encode_template(
                 messages, tools=tools, add_generation_prompt=True
             )
-            for tok_id in full[len(prev):]:
+            for tok_id in full[len(prev) :]:
                 token_ids.append(tok_id)
                 message_indices.append(len(messages) - 1 if messages else 0)
                 sampled_mask.append(False)  # generation prompt is not sampled/content
@@ -358,6 +372,8 @@ def register() -> None:
     # suppress every built-in renderer.
     renderers_base._populate_registry()
 
-    renderers_configs._CONFIG_BY_NAME.setdefault(RENDERER_NAME, MuseGlimmerRendererConfig)
+    renderers_configs._CONFIG_BY_NAME.setdefault(
+        RENDERER_NAME, MuseGlimmerRendererConfig
+    )
     renderers_base.RENDERER_REGISTRY[RENDERER_NAME] = MuseGlimmerRenderer
     _RENDERER_BY_MODEL["muse_glimmer"] = RENDERER_NAME
