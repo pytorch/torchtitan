@@ -51,8 +51,10 @@ _COUNTS_READY_CHANNEL = 0
 class _DispatchMetadataOutputs(NamedTuple):
     dispatch_dst_ranks: torch.Tensor
     dispatch_dst_rows: torch.Tensor
+    dispatch_peer_segments: torch.Tensor
     combine_dst_ranks: torch.Tensor
     combine_dst_rows: torch.Tensor
+    combine_peer_segments: torch.Tensor
     combine_num_valid_rows: torch.Tensor
     tokens_per_expert: torch.Tensor
 
@@ -225,7 +227,9 @@ class MinimalAsyncEPDispatchMetadata:
 
     Field shapes:
         dispatch_dst_ranks, dispatch_dst_rows: ``(N,)``.
+        dispatch_peer_segments: ``(E, 3)``.
         combine_dst_ranks, combine_dst_rows: ``(R_max,)``.
+        combine_peer_segments: ``(E, 3)``.
         combine_num_valid_rows: ``(1,)`` active receive rows, where
             ``combine_num_valid_rows[0] == R``.
         E_row_to_T_row,
@@ -237,8 +241,10 @@ class MinimalAsyncEPDispatchMetadata:
 
     dispatch_dst_ranks: torch.Tensor
     dispatch_dst_rows: torch.Tensor
+    dispatch_peer_segments: torch.Tensor
     combine_dst_ranks: torch.Tensor
     combine_dst_rows: torch.Tensor
+    combine_peer_segments: torch.Tensor
     combine_num_valid_rows: torch.Tensor
     E_row_to_T_row: torch.Tensor  # noqa: N815
     T_row_to_E_row: torch.Tensor  # noqa: N815
@@ -494,6 +500,7 @@ def _copy_rows_to_peers_async_cuda(
     src_rows: torch.Tensor | None = None,
     src_row_divisor: int = 1,
     num_valid_rows: torch.Tensor | None = None,
+    segments: torch.Tensor | None = None,
     retained: tuple[torch.Tensor, ...] = (),
 ) -> torch.Tensor:
     """Launch a row copy through symmetric memory on the EP copy stream."""
@@ -540,6 +547,8 @@ def _copy_rows_to_peers_async_cuda(
             dst_ptrs=hidden_recv_peer_ptrs,
             num_valid_rows=num_valid_rows,
             num_ctas=_buffer_state.num_row_copy_ctas,
+            segments=segments,
+            rank=_buffer_state.group.rank(),
         )
         source_event = torch.cuda.Event()
         source_event.record(copy_stream)
@@ -605,8 +614,10 @@ def _allocate_direct_metadata(
     outputs = _DispatchMetadataOutputs(
         new_empty(num_routed_rows),
         new_empty(num_routed_rows),
+        new_empty(num_experts, 3),
         new_empty(receive_capacity),
         new_empty(receive_capacity),
+        new_empty(num_experts, 3),
         new_empty(1),
         total_de[rank],
     )
@@ -689,6 +700,7 @@ def _compute_direct_metadata(
         max_tokens_per_segment=_buffer_state.num_max_tokens_per_rank,
         dst_ranks=outputs.dispatch_dst_ranks,
         dst_rows=outputs.dispatch_dst_rows,
+        segments=outputs.dispatch_peer_segments,
     )
 
     scratch.segment_lens.view(num_local_experts, ep_size).copy_(
@@ -722,6 +734,7 @@ def _compute_direct_metadata(
         dst_ranks=outputs.combine_dst_ranks,
         dst_rows=outputs.combine_dst_rows,
         num_valid_rows=outputs.combine_num_valid_rows,
+        segments=outputs.combine_peer_segments,
     )
 
     return outputs
@@ -795,6 +808,8 @@ def dispatch_op(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
     """Build MinimalAsyncEP metadata and dispatch rows to expert-owner ranks.
 
@@ -838,8 +853,10 @@ def dispatch_op(
         (
             dispatch_dst_ranks,
             dispatch_dst_rows,
+            dispatch_peer_segments,
             combine_dst_ranks,
             combine_dst_rows,
+            combine_peer_segments,
             combine_num_valid_rows,
             num_tokens_per_local_expert_e,
         ) = _dispatch_metadata(
@@ -870,6 +887,7 @@ def dispatch_op(
             num_warps=8,
             src_rows=E_row_to_T_row_N,
             src_row_divisor=top_k,
+            segments=dispatch_peer_segments,
             retained=scratch,
         )
     return (
@@ -882,6 +900,8 @@ def dispatch_op(
         E_row_to_T_row_N,
         T_row_to_E_row_N,
         num_tokens_per_local_expert_e,
+        dispatch_peer_segments,
+        combine_peer_segments,
     )
 
 
@@ -893,6 +913,8 @@ def dispatch_op_fake(
     receive_capacity: int,
     ep_size: int,
 ) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -916,6 +938,16 @@ def dispatch_op_fake(
         topk_expert_ids_TK.new_empty(num_routed_rows, dtype=torch.int64),
         num_local_tokens_per_expert_E.new_empty(
             num_local_experts,
+            dtype=torch.int64,
+        ),
+        num_local_tokens_per_expert_E.new_empty(
+            num_local_tokens_per_expert_E.numel(),
+            3,
+            dtype=torch.int64,
+        ),
+        num_local_tokens_per_expert_E.new_empty(
+            num_local_tokens_per_expert_E.numel(),
+            3,
             dtype=torch.int64,
         ),
     )
@@ -1127,6 +1159,7 @@ def dispatch_data_op(
     x_ND: torch.Tensor,  # noqa: N803
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
+    dispatch_peer_segments: torch.Tensor,
     receive_capacity: int,
     num_routed_rows: int,
 ) -> torch.Tensor:
@@ -1140,6 +1173,7 @@ def dispatch_data_op(
         exchange="dispatch",
         block_m=4,
         num_warps=8,
+        segments=dispatch_peer_segments,
     )
 
 
@@ -1148,10 +1182,12 @@ def dispatch_data_op_fake(
     x_ND: torch.Tensor,  # noqa: N803
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
+    dispatch_peer_segments: torch.Tensor,
     receive_capacity: int,
     num_routed_rows: int,
 ) -> torch.Tensor:
-    del dispatch_dst_ranks, dispatch_dst_rows, num_routed_rows
+    del dispatch_dst_ranks, dispatch_dst_rows, dispatch_peer_segments
+    del num_routed_rows
     return x_ND.new_empty(receive_capacity, x_ND.shape[1])
 
 
@@ -1159,6 +1195,7 @@ def dispatch_data(
     x_ND: torch.Tensor,  # noqa: N803
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
+    dispatch_peer_segments: torch.Tensor,
     receive_capacity: int,
     num_routed_rows: int,
 ) -> torch.Tensor:
@@ -1167,12 +1204,13 @@ def dispatch_data(
         x_ND,
         dispatch_dst_ranks,
         dispatch_dst_rows,
+        dispatch_peer_segments,
         receive_capacity,
         num_routed_rows,
     )
     return _wait_dispatch_data_op(
         hidden_states,
-        [x_ND, dispatch_dst_ranks, dispatch_dst_rows],
+        [x_ND, dispatch_dst_ranks, dispatch_dst_rows, dispatch_peer_segments],
     )
 
 
@@ -1185,8 +1223,10 @@ def combine_op(
     x: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
+    dispatch_peer_segments: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
+    combine_peer_segments: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
 ) -> torch.Tensor:
@@ -1195,16 +1235,19 @@ def combine_op(
     Args:
         x: ``(R_max, D)`` local expert output rows.
         dispatch_dst_ranks, dispatch_dst_rows: ``(N,)`` forward dispatch
-            destinations, saved for backward.
+            destinations, saved for the unbounded backward path.
+        dispatch_peer_segments: compact forward dispatch segments saved for the
+            bounded backward path.
         combine_dst_ranks, combine_dst_rows: ``(R_max,)`` origin rank and
             origin E-major row for each active received row.
+        combine_peer_segments: compact combine segments for the bounded copy.
         combine_num_valid_rows: ``(1,)`` device scalar active row count ``R``.
         num_routed_rows: ``N`` local E-major routed rows.
     Returns:
         ``routed_output_ND``: pending ``(N, D)`` origin-rank E-major routed
         rows. The tensor is not readable until ``wait_combine``.
     """
-    del dispatch_dst_ranks, dispatch_dst_rows
+    del dispatch_dst_ranks, dispatch_dst_rows, dispatch_peer_segments
     origin_recv_buffer = _copy_rows_to_peers_async_cuda(
         x,
         combine_dst_ranks,
@@ -1214,6 +1257,7 @@ def combine_op(
         exchange="combine",
         block_m=4,
         num_valid_rows=combine_num_valid_rows,
+        segments=combine_peer_segments,
     )
     return origin_recv_buffer.narrow(0, 0, num_routed_rows).narrow(1, 0, x.shape[1])
 
@@ -1223,15 +1267,19 @@ def combine_op_fake(
     x: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
+    dispatch_peer_segments: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
+    combine_peer_segments: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
 ) -> torch.Tensor:
     del dispatch_dst_ranks
     del dispatch_dst_rows
+    del dispatch_peer_segments
     del combine_dst_ranks
     del combine_dst_rows
+    del combine_peer_segments
     del combine_num_valid_rows
     return x.new_empty(num_routed_rows, x.shape[1])
 
@@ -1245,6 +1293,7 @@ def combine_data_op(
     x: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
+    combine_peer_segments: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
 ) -> torch.Tensor:
@@ -1258,6 +1307,7 @@ def combine_data_op(
         exchange="combine",
         block_m=4,
         num_valid_rows=combine_num_valid_rows,
+        segments=combine_peer_segments,
     )
     return origin_recv_buffer.narrow(0, 0, num_routed_rows).narrow(1, 0, x.shape[1])
 
@@ -1267,10 +1317,12 @@ def combine_data_op_fake(
     x: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
+    combine_peer_segments: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
 ) -> torch.Tensor:
-    del combine_dst_ranks, combine_dst_rows, combine_num_valid_rows
+    del combine_dst_ranks, combine_dst_rows, combine_peer_segments
+    del combine_num_valid_rows
     return x.new_empty(num_routed_rows, x.shape[1])
 
 
@@ -1278,6 +1330,7 @@ def combine_data(
     x: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
+    combine_peer_segments: torch.Tensor,
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
 ) -> torch.Tensor:
@@ -1286,12 +1339,19 @@ def combine_data(
         x,
         combine_dst_ranks,
         combine_dst_rows,
+        combine_peer_segments,
         combine_num_valid_rows,
         num_routed_rows,
     )
     return wait_combine(
         routed_output,
-        [x, combine_dst_ranks, combine_dst_rows, combine_num_valid_rows],
+        [
+            x,
+            combine_dst_ranks,
+            combine_dst_rows,
+            combine_peer_segments,
+            combine_num_valid_rows,
+        ],
     )
 
 
@@ -1503,6 +1563,8 @@ def dispatch_setup_context(ctx, inputs, output):
         _E_row_to_T_row_N,
         T_row_to_E_row_N,
         _num_tokens_per_local_expert_e,
+        _dispatch_peer_segments,
+        combine_peer_segments,
     ) = output
     ctx.num_routed_rows = topk_expert_ids_TK.numel()
     ctx.num_tokens = dispatch_input.shape[0]
@@ -1510,6 +1572,7 @@ def dispatch_setup_context(ctx, inputs, output):
     ctx.save_for_backward(
         combine_dst_ranks,
         combine_dst_rows,
+        combine_peer_segments,
         combine_num_valid_rows,
         T_row_to_E_row_N,
     )
@@ -1520,6 +1583,7 @@ def dispatch_autograd_backward(ctx, grad_hidden, *unused_grads):
     (
         combine_dst_ranks,
         combine_dst_rows,
+        combine_peer_segments,
         combine_num_valid_rows,
         T_row_to_E_row_N,
     ) = ctx.saved_tensors
@@ -1528,6 +1592,7 @@ def dispatch_autograd_backward(ctx, grad_hidden, *unused_grads):
         grad_hidden,
         combine_dst_ranks,
         combine_dst_rows,
+        combine_peer_segments,
         combine_num_valid_rows,
         ctx.num_routed_rows,
     )
@@ -1547,8 +1612,10 @@ def combine_setup_context(ctx, inputs, output):
         hidden_states,
         dispatch_dst_ranks,
         dispatch_dst_rows,
+        dispatch_peer_segments,
         _combine_dst_ranks,
         _combine_dst_rows,
+        _combine_peer_segments,
         _combine_num_valid_rows,
         num_routed_rows,
     ) = inputs
@@ -1558,6 +1625,7 @@ def combine_setup_context(ctx, inputs, output):
     ctx.save_for_backward(
         dispatch_dst_ranks,
         dispatch_dst_rows,
+        dispatch_peer_segments,
     )
 
 
@@ -1565,11 +1633,13 @@ def combine_autograd_backward(ctx, grad_routed_output):
     (
         dispatch_dst_ranks,
         dispatch_dst_rows,
+        dispatch_peer_segments,
     ) = ctx.saved_tensors
     grad_x = dispatch_data(
         grad_routed_output,
         dispatch_dst_ranks,
         dispatch_dst_rows,
+        dispatch_peer_segments,
         ctx.receive_capacity,
         ctx.num_routed_rows,
     )
@@ -1577,6 +1647,8 @@ def combine_autograd_backward(ctx, grad_routed_output):
     # Grads for x, dispatch/combine metadata, and num_routed_rows.
     return (
         grad_x,
+        None,
+        None,
         None,
         None,
         None,
