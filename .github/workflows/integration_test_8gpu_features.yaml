@@ -144,8 +144,8 @@ jobs:
         # whose CPU synchronization is incompatible with CUDA graph capture.
         python3 scripts/loss_compare.py . . \
           --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
-          --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --training.disable_cuda_graphs" \
-          --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --training.disable_cuda_graphs" \
+          --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --parallelism.spmd_backend spmd_types --training.disable_cuda_graphs" \
+          --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --parallelism.spmd_backend spmd_types --training.disable_cuda_graphs" \
           --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
           --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
