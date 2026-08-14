@@ -280,17 +280,14 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     # FSDP+TP+EP+PP test into one supported FSDP+EP path. Kimi
                     # DistributedMuon rejects TP because it produces _StridedShard
                     # storage. PP support follows in the next stack change.
-                    # Do not enable --debug.spmd_typechecking: multimodal pixel
-                    # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--parallelism.spmd_backend spmd_types",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--training.steps 1",
                 ],
             ],
-            "Kimi K2.7 DistributedMuon spmd_types FSDP+EP",
-            "kimi_k2_5_muon_fsdp+ep_spmd_types",
+            "Kimi K2.7 DistributedMuon FSDP+EP",
+            "kimi_k2_5_muon_fsdp+ep",
             ngpu=4,
         ),
         # Integration Test Cases for Muse Glimmer

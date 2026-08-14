@@ -327,9 +327,10 @@ class BaseLoss(ABC, Configurable):
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
+            is_type_checking = spmd.is_type_checking()
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":
+                if is_type_checking:
                     spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 
@@ -358,9 +359,10 @@ class CrossEntropyLoss(BaseLoss):
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
+            is_type_checking = spmd.is_type_checking()
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
-                if spmd.is_type_checking():
+                if is_type_checking:
                     spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 
