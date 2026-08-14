@@ -4151,11 +4151,12 @@ class TestChunkPasses(TestCase):
     def test_ep_overlap_finds_ready_wait_in_production_combine_graph(self):
         from torchtitan.distributed.minimal_async_ep import api
 
-        def combine(x, dst_ranks, dst_rows, num_valid_rows):
+        def combine(x, dst_ranks, dst_rows, segments, num_valid_rows):
             return api.combine_data(
                 x,
                 dst_ranks,
                 dst_rows,
+                segments,
                 num_valid_rows,
                 num_routed_rows=4,
             )
@@ -4164,6 +4165,7 @@ class TestChunkPasses(TestCase):
             torch.empty(4, 8),
             torch.empty(4, dtype=torch.int64),
             torch.empty(4, dtype=torch.int64),
+            torch.empty(4, 3, dtype=torch.int64),
             torch.empty(1, dtype=torch.int64),
         )
         launch = next(
@@ -4201,7 +4203,13 @@ class TestChunkPasses(TestCase):
                 expert_output = torch.sin(hidden)
                 combined = api.combine_op(
                     expert_output,
-                    *dispatched[1:6],
+                    dispatched[1],
+                    dispatched[2],
+                    dispatched[9],
+                    dispatched[3],
+                    dispatched[4],
+                    dispatched[10],
+                    dispatched[5],
                     8,
                     buffer_set,
                 )
