@@ -18,7 +18,6 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.flex_shard import (
-    AttentionPerHeadComputeView,
     BucketConfig,
     ComputeLayout,
     MuonComputeShardingConfig,
@@ -221,9 +220,7 @@ def _distributed_muon_optimizer(
         compute_layout=ComputeLayout(
             shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
         ),
-        compute_view=AttentionPerHeadComputeView(
-            num_heads=attention.n_heads,
-        ),
+        num_matrices=attention.n_heads,
     )
     per_expert = MuonComputeShardingConfig(
         compute_layout=ComputeLayout(

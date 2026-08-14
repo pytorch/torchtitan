@@ -19,17 +19,105 @@ from torchtitan.components.checkpoint_utils import (
     load_flat_optim_state_dict,
 )
 from torchtitan.distributed.flex_shard import (
-    AttentionPerHeadComputeView,
     BucketConfig,
     build_distributed_muon,
     ComputeLayout,
     MuonComputeShardingConfig,
     Owned,
 )
+from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import _TensorRegion
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
+    _build_batched_matrix_redistribution_plan,
+    _ResolvedBatchedMatrixView,
     DistributedMuon,
 )
+
+
+def _build_single_parameter_muon(
+    parameter, shardings_by_mesh_axis, *, num_matrices=None, **kwargs
+):
+    fqn = "layers.0.attention.wq.weight"
+    return build_distributed_muon(
+        [{"params": [parameter], "param_names": [fqn]}],
+        compute_sharding_by_fqn={
+            fqn: MuonComputeShardingConfig(
+                compute_layout=ComputeLayout(
+                    shardings_by_mesh_axis=shardings_by_mesh_axis,
+                ),
+                num_matrices=num_matrices,
+            )
+        },
+        bucket_configs=[BucketConfig(patterns=(fqn,))],
+        **kwargs,
+    )
+
+
+class TestBatchedMatrixComputeInput(unittest.TestCase):
+    def test_num_matrices_must_be_positive(self):
+        for num_matrices in (True, 0, -1, 1.5):
+            with self.subTest(num_matrices=num_matrices):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "num_matrices must be a positive integer or None",
+                ):
+                    MuonComputeShardingConfig(
+                        compute_layout=ComputeLayout(
+                            shardings_by_mesh_axis={"dp_shard": Shard(0)},
+                        ),
+                        num_matrices=num_matrices,
+                    )
+
+    def test_compute_input_view_is_zero_copy(self):
+        matrix_rows = 3
+        matrix_columns = 2
+        resolved_compute_view = _ResolvedBatchedMatrixView(
+            matrix_rows=matrix_rows,
+            matrix_columns=matrix_columns,
+        )
+
+        for num_matrices in (0, 2):
+            with self.subTest(num_matrices=num_matrices):
+                compute_input = torch.arange(
+                    num_matrices * matrix_rows * matrix_columns,
+                    dtype=torch.float32,
+                ).reshape(num_matrices * matrix_rows, matrix_columns)
+                compute = resolved_compute_view.view_compute_input(compute_input)
+
+                self.assertEqual(
+                    compute.shape,
+                    (num_matrices, matrix_rows, matrix_columns),
+                )
+                self.assertEqual(
+                    compute.stride(),
+                    (matrix_rows * matrix_columns, matrix_columns, 1),
+                )
+                self.assertEqual(compute.data_ptr(), compute_input.data_ptr())
+                if compute.numel():
+                    compute[0, 0, 0] = -1
+                    self.assertEqual(compute_input[0, 0].item(), -1)
+
+    def test_redistribution_destinations_are_flat_compute_inputs(self):
+        plan = _build_batched_matrix_redistribution_plan(
+            (
+                ((0,), _TensorRegion(offsets=(0, 0), shape=(6, 2))),
+                ((1,), _TensorRegion(offsets=(6, 0), shape=(6, 2))),
+            ),
+            participants=(0, 1),
+            storage_shape=(12, 2),
+            compute_shape=(4, 3, 2),
+        )
+
+        self.assertEqual(
+            tuple(partition.tensor_shape for partition in plan.compute_partitions),
+            ((6, 2), (6, 2)),
+        )
+        self.assertTrue(
+            all(
+                len(route.destination.tensor_region.shape) == 2
+                for route in plan.storage_to_compute_routes
+            )
+        )
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -41,6 +129,77 @@ class TestDistributedMuon(DTensorTestBase):
     @property
     def device_type(self):
         return "cuda"
+
+    @with_comms
+    def test_aligned_storage_uses_flat_compute_input_and_local_view(self):
+        num_heads = 4
+        matrix_rows = 3
+        matrix_columns = 2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        value = torch.arange(
+            num_heads * matrix_rows * matrix_columns,
+            device=torch.device(self.device_type, self.rank),
+            dtype=torch.float32,
+        ).reshape(num_heads * matrix_rows, matrix_columns)
+        parameter = torch.nn.Parameter(distribute_tensor(value, mesh, (Shard(0),)))
+
+        optimizer = _build_single_parameter_muon(
+            parameter,
+            {"dp_shard": Shard(0)},
+            num_matrices=num_heads,
+        )
+
+        compute_layout = optimizer._parameter_compute_layouts[0]
+        self.assertTrue(compute_layout.storage_is_compute_ready)
+        local_compute_input = compute_layout.local_compute_input
+        self.assertIsNotNone(local_compute_input)
+        self.assertEqual(
+            local_compute_input.shape,
+            (num_heads // self.world_size * matrix_rows, matrix_columns),
+        )
+        self.assertEqual(
+            local_compute_input.data_ptr(),
+            parameter.to_local().data_ptr(),
+        )
+        resolved_compute_view = compute_layout.resolved_compute_view
+        self.assertIsNotNone(resolved_compute_view)
+        compute = resolved_compute_view.view_compute_input(local_compute_input)
+        self.assertEqual(
+            compute.shape,
+            (num_heads // self.world_size, matrix_rows, matrix_columns),
+        )
+        self.assertEqual(compute.data_ptr(), local_compute_input.data_ptr())
+
+    @with_comms
+    def test_rejects_oversharded_batched_matrix_storage(self):
+        num_heads = 3
+        matrix_rows = 4
+        matrix_columns = 2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        value = torch.arange(
+            num_heads * matrix_rows * matrix_columns,
+            device=torch.device(self.device_type, self.rank),
+            dtype=torch.float32,
+        ).reshape(num_heads * matrix_rows, matrix_columns)
+        parameter = torch.nn.Parameter(distribute_tensor(value, mesh, (Shard(0),)))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "storage shards are not aligned to matrix rows of size 4",
+        ):
+            _build_single_parameter_muon(
+                parameter,
+                {"dp_shard": Shard(0)},
+                num_matrices=num_heads,
+            )
 
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
@@ -84,9 +243,7 @@ class TestDistributedMuon(DTensorTestBase):
                         compute_layout=ComputeLayout(
                             shardings_by_mesh_axis={"dp_shard": Shard(0)},
                         ),
-                        compute_view=AttentionPerHeadComputeView(
-                            num_heads=self.world_size,
-                        ),
+                        num_matrices=self.world_size,
                     ),
                 },
                 bucket_configs=[

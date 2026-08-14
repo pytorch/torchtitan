@@ -16,9 +16,8 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
 - `MuonComputeShardingConfig` associates a parameter with its `ComputeLayout`
-  and an optional logical compute view.
-- `AttentionPerHeadComputeView` treats a flattened attention projection as a
-  batch of independent per-head matrices for Muon.
+  and optionally tells Muon how many matrices are stored in a flattened 2D
+  parameter.
 - `build_distributed_muon` validates named DTensor parameters, plans their
   storage-to-compute transitions, and constructs the optimizer.
 
