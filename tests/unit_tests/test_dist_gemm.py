@@ -40,6 +40,7 @@ from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
+    AllGatherFusedFeedForward,
     AllGatherFusedQKVLinear,
     RowParallelLinear,
 )
@@ -134,6 +135,23 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         with spmd_types_backend():
             with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
                 set_gqa_attention_sharding(attn, enable_sp=False)
+
+    def test_bias_on_w1_w3_is_rejected(self):
+        """A bias must fail at config time, not silently fall back to stock.
+
+        The fused all-gather takes no per-weight bias. Accepting the config and
+        quietly running the unfused FFN would look exactly like the feature
+        working.
+        """
+        from torchtitan.models.common.linear import Linear
+
+        kw = {"in_features": DIM, "out_features": 4 * DIM}
+        with self.assertRaisesRegex(ValueError, "does not support a bias"):
+            AllGatherFusedFeedForward.Config(
+                w1=Linear.Config(**kw, bias=True),
+                w2=Linear.Config(in_features=4 * DIM, out_features=DIM),
+                w3=Linear.Config(**kw),
+            )
 
     def test_sharding_setup_declares_the_fused_contracts(self):
         """set_gqa_attention_sharding declares different contracts for dist-GEMM.

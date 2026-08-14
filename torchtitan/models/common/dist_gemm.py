@@ -44,6 +44,27 @@ from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.tools.logging import logger
+
+
+_WARNED_NO_TP = False
+
+
+def _warn_once_unfused() -> None:
+    """Say so when the fused modules were selected but TP is not on.
+
+    Otherwise the fallback is indistinguishable from the feature working: the run
+    succeeds, the loss looks fine, and nothing ran fused. The preconditions cover
+    the wrong-backend and SP-disabled cases with hard errors, but TP=1 has to stay
+    runnable, so it warns instead.
+    """
+    global _WARNED_NO_TP
+    if not _WARNED_NO_TP:
+        _WARNED_NO_TP = True
+        logger.warning(
+            "tp_comm_overlap='dist_gemm' selected but tensor parallelism is not "
+            "active; running the stock projections. Nothing is fused."
+        )
 
 
 def _tp_group_from_context() -> dist.ProcessGroup | None:
@@ -103,6 +124,7 @@ class AllGatherFusedQKVLinear(FusedQKVLinear):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tp_group = _tp_group_from_context()
         if tp_group is None:
+            _warn_once_unfused()
             return super().forward(x)
 
         bsz, _, dim = x.shape
@@ -154,6 +176,7 @@ class RowParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = _tp_group_from_context()
         if tp_group is None:
+            _warn_once_unfused()
             return super().forward(input)
 
         bsz, seqlen, k_local = input.shape
@@ -192,9 +215,23 @@ class AllGatherFusedFeedForward(FeedForward):
         binds ``Config.build()`` to this module rather than the stock one, so it
         cannot be deleted as empty."""
 
+        def __post_init__(self) -> None:
+            # Rejected at config construction rather than falling back silently in
+            # forward: a silent fallback means asking for the fused FFN, getting
+            # the stock one, and having no way to tell. The multi-weight gather
+            # takes no per-weight bias, and torchtitan's dense FFN builds these
+            # with bias=False, so this is a misconfiguration rather than a gap.
+            if self.w1.bias or self.w3.bias:
+                raise ValueError(
+                    "AllGatherFusedFeedForward does not support a bias on w1/w3; "
+                    "the fused all-gather takes no per-weight bias. Use the stock "
+                    "FeedForward, or build w1/w3 with bias=False."
+                )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tp_group = _tp_group_from_context()
-        if tp_group is None or self.w1.bias is not None or self.w3.bias is not None:
+        if tp_group is None:
+            _warn_once_unfused()
             return super().forward(x)
 
         bsz, _, dim = x.shape
