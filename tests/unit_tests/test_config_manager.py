@@ -299,6 +299,40 @@ class TestConfigManager(unittest.TestCase):
         assert config.model_spec.name == "deepseek_v3"
         assert config.model_spec.flavor == "debugmodel"
 
+    def test_deepseek_671b_minimal_async_ep_configs(self):
+        import torch
+
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0):
+            self.skipTest("DeepSeek production configs require Hopper or Blackwell")
+
+        from torchtitan.models.common.token_dispatcher import (
+            MinimalAsyncEPTokenDispatcher,
+        )
+
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "graph_trainer.deepseek_v3",
+                "--config",
+                "graph_trainer_deepseek_v3_671b_bf16_minimal_async_ep",
+            ]
+        )
+        dispatchers = [
+            layer.moe.routed_experts.token_dispatcher
+            for layer in config.model_spec.model.layers
+            if layer.moe is not None
+        ]
+        assert config.model_spec.flavor == "671B"
+        assert dispatchers
+        assert all(
+            isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+            for dispatcher in dispatchers
+        )
+        assert {
+            "torchtitan.overrides.fused_swiglu.fused_swiglu",
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        } <= set(config.override.imports)
+
     def test_fqn_module_with_config_registry(self):
         """--module torchtitan.models.llama3.config_registry works."""
         config_manager = ConfigManager()

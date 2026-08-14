@@ -266,3 +266,14 @@ def deepseek_v3_671b_float8() -> Trainer.Config:
         ],
     )
     return config
+
+
+def deepseek_v3_671b_bf16_minimal_async_ep() -> Trainer.Config:
+    config = deepseek_v3_671b()
+    config.model_spec = model_registry(
+        "671B",
+        attn_backend="flex",
+        moe_comm_backend="minimal_async_ep",
+    )
+    enable_fused_swiglu(config)
+    return config
