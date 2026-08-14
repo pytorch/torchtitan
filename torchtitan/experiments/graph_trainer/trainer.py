@@ -8,6 +8,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import spmd_types as spmd
+
 import torch
 import torch.nn as nn
 
@@ -235,7 +237,7 @@ class GraphTrainer(Trainer):
                     passes,
                     compile_config=self.config.compile,
                 )
-        with self.train_context():
+        with self.train_context(), spmd.no_typecheck():
             outputs = run_traced(self._traced_step, module=model)(
                 inputs,
                 labels,

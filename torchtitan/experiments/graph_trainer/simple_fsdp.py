@@ -9,6 +9,8 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+import spmd_types as spmd
+
 import torch
 import torch.nn as nn
 
@@ -142,9 +144,12 @@ def _register_parametrization(
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
     get_model_state_dict func in torchtitan's torchtitan/components/checkpoint.py.
     """
+    object.__setattr__(module, "_simple_fsdp_parametrization", parametrization)
     param_name_to_property = {
         param_name: property(
-            lambda self, pn=param_name: parametrization(self._parameters[pn])
+            lambda self, pn=param_name: self._simple_fsdp_parametrization(
+                self._parameters[pn], pn
+            )
         )
         for param_name in param_names
     }
@@ -172,6 +177,8 @@ class ReplicateComputation(Module):
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
         full_dtensor: bool = False,
+        local_compute: bool = False,
+        compute_types: dict[str, tuple[dict, object | None]] | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -185,6 +192,8 @@ class ReplicateComputation(Module):
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
         self.full_dtensor = full_dtensor
+        self.local_compute = local_compute
+        self.compute_types = compute_types
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -225,8 +234,12 @@ class ReplicateComputation(Module):
             )
             non_dp_mesh = x._spec.mesh[non_dp_mesh_dim_names]
 
-            output = DTensor.from_local(
-                replicated_local_tensor, non_dp_mesh, non_dp_placements
+            output = (
+                replicated_local_tensor
+                if self.local_compute
+                else DTensor.from_local(
+                    replicated_local_tensor, non_dp_mesh, non_dp_placements
+                )
             )
         elif non_dp_mesh_dims == 0:
             output = x.redistribute(
@@ -244,7 +257,7 @@ class ReplicateComputation(Module):
 
         return output
 
-    def forward(self, x: DTensor) -> torch.Tensor:
+    def forward(self, x: DTensor, param_name: str) -> torch.Tensor:
         global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
@@ -254,7 +267,15 @@ class ReplicateComputation(Module):
         if not _active_parametrization:
             return x
 
-        output = self.replicate_compute(x)
+        if self.local_compute:
+            with spmd.no_typecheck():
+                output = self.replicate_compute(x)
+            if spmd.is_type_checking():
+                assert self.compute_types is not None
+                local_type, partition_spec = self.compute_types[param_name]
+                spmd.assert_type(output, local_type, partition_spec=partition_spec)
+        else:
+            output = self.replicate_compute(x)
         return output
 
 
@@ -265,6 +286,8 @@ def data_parallel(
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
     full_dtensor: bool = False,
+    local_compute: bool = False,
+    compute_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
@@ -289,16 +312,52 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
+        compute_types = (
+            {
+                p_name: (dict(spmd.get_local_type(p)), spmd.get_partition_spec(p))
+                for p_name, p in params_dict.items()
+                if p is not None and p.numel() > 0
+            }
+            if local_compute
+            else None
+        )
+
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
+                if (
+                    local_compute
+                    and compute_mesh is not None
+                    and compute_mesh["tp"].size() > 1
+                    and not isinstance(p, DTensor)
+                ):
+                    tp_mesh = compute_mesh["tp"]
+                    tp_axis = spmd.normalize_axis(tp_mesh.get_group())
+                    tp_type = spmd.get_axis_local_type(p, tp_axis)
+                    if tp_type is spmd.V:
+                        partition_spec = spmd.get_partition_spec(p)
+                        assert partition_spec is not None
+                        tp_type = next(
+                            spmd.S(dim)
+                            for dim, entry in enumerate(partition_spec)
+                            if tp_axis
+                            in (entry if isinstance(entry, tuple) else (entry,))
+                        )
+                    p = DTensor.from_local(
+                        p,
+                        tp_mesh,
+                        (spmd.spmd_type_to_dtensor_placement(tp_type),),
+                        run_check=False,
+                    )
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
+                distributed_param = distribute_tensor_func(
+                    p, device_mesh, param_sharding
+                )
+                registered_param = nn.Parameter(distributed_param)
                 mod.register_parameter(
                     p_name,
-                    nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
-                    ),
+                    registered_param,
                 )
 
                 # to be compatible with DCP, we use a customized _register_parametrization
@@ -324,6 +383,8 @@ def data_parallel(
                 mode,
                 mp_policy=mp_policy,
                 full_dtensor=full_dtensor,
+                local_compute=local_compute,
+                compute_types=compute_types,
             ),
         )
     return model

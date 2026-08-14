@@ -26,6 +26,8 @@ Contract:
 
 from typing import Any
 
+import spmd_types as spmd
+
 import torch
 from torch._subclasses import FakeTensorMode
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
@@ -183,6 +185,8 @@ def _fakeify_input(
         for name in _DYNAMO_SHAPE_ANNOTATION_NAMES:
             if hasattr(arg, name):
                 setattr(fake_arg, name, getattr(arg, name))
+        if spmd.has_local_type(arg) or spmd.get_partition_spec(arg) is not None:
+            spmd.assert_type_like(fake_arg, arg)
         return fake_arg
 
     symbolic_context = _symbolic_context_for_marked_dims(arg)

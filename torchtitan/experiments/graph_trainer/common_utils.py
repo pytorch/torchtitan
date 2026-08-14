@@ -419,15 +419,18 @@ def apply_simple_fsdp(
     (the routed-expert weights) are separately wrapped on the EDP mesh when expert
     parallelism is enabled.
     """
+    use_local_compute = parallel_dims.spmd_backend == "spmd_types"
+    compute_mesh = parallel_dims.spmd_dense_mesh() if use_local_compute else None
+    fsdp_axis = "dp_shard" if use_local_compute else "fsdp"
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-            dp_mesh_dim_names = ["dp_replicate", "fsdp"]
+            dp_mesh_dim_names = ["dp_replicate", fsdp_axis]
             dp_mode = "hybrid_shard"
         else:
             dp_mesh_dim_names = ["dp_replicate"]
             dp_mode = "replicate"
     else:
-        dp_mesh_dim_names = ["fsdp"]
+        dp_mesh_dim_names = [fsdp_axis]
         dp_mode = "fully_shard"
 
     dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
@@ -462,6 +465,8 @@ def apply_simple_fsdp(
                 dp_mode,
                 mp_policy=mp_policy,
                 shard_dim=experts_shard_dim,
+                local_compute=use_local_compute,
+                compute_mesh=compute_mesh,
             )
 
     model = data_parallel(
@@ -469,6 +474,8 @@ def apply_simple_fsdp(
         dp_mesh,
         dp_mode,
         mp_policy=mp_policy,
+        local_compute=use_local_compute,
+        compute_mesh=compute_mesh,
     )
     logger.info(
         "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
