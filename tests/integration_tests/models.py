@@ -10,24 +10,33 @@ import dataclasses
 from tests.integration_tests import OverrideDefinitions
 
 
-def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Use ``backend`` for every variant, or return an unsupported test unchanged."""
-    if backend == "spmd_types" and any(
+def _configure_spmd_backend_and_typecheck(
+    t: OverrideDefinitions,
+) -> OverrideDefinitions:
+    """Configure the SPMD backend and enable typechecking where supported."""
+    if any(
         "--module muse_glimmer" in arg for variant in t.override_args for arg in variant
     ):
-        return t
+        # Muse Glimmer does not support the spmd_types backend yet.
+        return dataclasses.replace(
+            t,
+            override_args=tuple(
+                ("--parallelism.spmd_backend partial_dtensor", *variant)
+                for variant in t.override_args
+            ),
+        )
 
-    test_name = f"{t.test_name}_{backend}"
+    # Compile, PP, and explicit AC modes are not compatible with SPMD
+    # typechecking yet; keep those as backend-only coverage.
+    test_name = f"{t.test_name}_spmd_types"
     new_args = []
     for variant in t.override_args:
         variant = tuple(
             arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
         )
-        prefix = [f"--parallelism.spmd_backend {backend}"]
+        prefix = []
         suffix = []
-        # Compile, PP, and explicit AC modes are not compatible with SPMD
-        # typechecking yet; keep those as backend-only coverage.
-        if backend == "spmd_types" and not any(
+        if not any(
             token in arg
             for arg in variant
             for token in (
@@ -300,4 +309,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
     ]
 
-    return [_enable_spmd_backend(t, "spmd_types") for t in model_tests]
+    return [
+        _configure_spmd_backend_and_typecheck(t) for t in model_tests
+    ]

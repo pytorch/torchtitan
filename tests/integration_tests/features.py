@@ -81,16 +81,11 @@ def _supports_spmd_typechecking(test_name: str, variant: tuple[str, ...]) -> boo
     )
 
 
-def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Inject ``--parallelism.spmd_backend {backend}`` into every variant and
-    suffix the test name with ``backend``.
-
-    PP-only variants (see ``_is_pp_only``) and CP + compile variants (upstream
-    symint limitation) skip the backend override. For ``spmd_types``,
-    ``--debug.spmd_typechecking`` is enabled where supported. Plain (no-backend)
-    coverage lives in models.py.
-    """
-    test_name = f"{t.test_name}_{backend}"
+def _configure_spmd_backend_and_typechecking(
+    t: OverrideDefinitions,
+) -> OverrideDefinitions:
+    """Configure the spmd_types backend and enable typechecking where supported."""
+    test_name = f"{t.test_name}_spmd_types"
     new_args = []
     for variant in t.override_args:
         prefix: list[str] = []
@@ -98,15 +93,14 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
         has_cp = any("context_parallel_degree" in arg for arg in variant)
         has_compile = any("compile.enable" in arg for arg in variant)
         has_ac_mode = any("activation-checkpoint:" in arg for arg in variant)
-        if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
-            prefix.append(f"--parallelism.spmd_backend {backend}")
-            if (
-                backend == "spmd_types"
-                and not has_ac_mode
-                and _supports_spmd_typechecking(test_name, variant)
-            ):
-                prefix.append("--debug.spmd_typechecking")
-                suffix.append("activation-checkpoint:none")
+        if (
+            not _is_pp_only(variant, t.ngpu)
+            and not (has_cp and has_compile)
+            and not has_ac_mode
+            and _supports_spmd_typechecking(test_name, variant)
+        ):
+            prefix.append("--debug.spmd_typechecking")
+            suffix.append("activation-checkpoint:none")
         variant = tuple(
             arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
         )
@@ -692,5 +686,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
     ]
 
     return [
-        *[_enable_spmd_backend(t, "spmd_types") for t in integration_tests_flavors],
+        *[
+            _configure_spmd_backend_and_typechecking(t)
+            for t in integration_tests_flavors
+        ],
     ]
