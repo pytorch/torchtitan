@@ -12,8 +12,6 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
-from torchtitan.hf_datasets.multimodal.utils.image import resize_to_pixel_budget
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.protocols.model_spec import ModelSpec
@@ -35,9 +33,7 @@ MUSE_GLIMMER_SPECIAL_TOKENS = {
 }
 
 
-def _muse_glimmer_mm_dataloader(
-    model_spec: ModelSpec, dataset: str
-) -> MMDataLoader.Config:
+def _muse_glimmer_mm_dataloader(model_spec: ModelSpec, dataset: str):
     """Build the shared multimodal dataloader config, taking the vision-patch
     geometry from the model's own vision encoder.
 
@@ -48,7 +44,19 @@ def _muse_glimmer_mm_dataloader(
     ``patch_order="raster"`` matches the encoder's raster patch layout (row-major
     grid); ``build_mrope_positions=False`` since Muse Glimmer uses 1D ComplexRoPE
     on the LLM side, not MRoPE.
+
+    NOTE: the multimodal dataloader imports (``MMDataLoader`` /
+    ``resize_to_pixel_budget``) are done lazily here because they pull in
+    ``torchvision`` (via ``torchtitan.hf_datasets.multimodal.utils.image``).
+    ``torchvision`` is an optional dependency (not in requirements.txt /
+    pyproject.toml), so importing it at module top level breaks the text-only
+    configs (``muse_glimmer_debugmodel`` / ``muse_glimmer_30b``) for users who
+    have not installed it. Keeping these imports inside the multimodal-only path
+    lets the text configs load without torchvision.
     """
+    from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
+    from torchtitan.hf_datasets.multimodal.utils.image import resize_to_pixel_budget
+
     model_config = model_spec.model
     assert isinstance(model_config, MuseGlimmerModel.Config)
     encoder = model_config.vision_encoder
@@ -143,6 +151,7 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
             local_batch_size=4,
             seq_len=512,
             steps=10,
+            disable_cuda_graphs=True,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -208,6 +217,7 @@ def muse_glimmer_30b_mm() -> Trainer.Config:
             local_batch_size=1,
             seq_len=8192,
             steps=1000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,

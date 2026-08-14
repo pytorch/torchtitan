@@ -55,6 +55,18 @@ class TrainingConfig:
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
     """
 
+    disable_cuda_graphs: bool = False
+    """
+    Disable CUDA graph capture and replay for the forward+backward step. CUDA
+    graphs require fixed-shape inputs and no CPU<->GPU synchronization during
+    the captured region. Expert parallelism is supported only with HybridEP
+    when ``non_blocking_capacity_factor`` is set, or with MinimalAsyncEP. Other
+    EP backends synchronize with the host during dispatch. Pipeline parallelism
+    is not supported yet. CUDA graphs are independent of
+    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
+    capture.
+    """
+
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will

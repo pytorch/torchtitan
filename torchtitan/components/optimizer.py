@@ -25,6 +25,7 @@ from torchtitan.components.checkpoint_utils import (
 )
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.flex_shard import build_distributed_muon
 from torchtitan.tools.logging import logger
 
 __all__ = [
@@ -44,13 +45,12 @@ class ParamGroupConfig:
     fully define the optimizer for matched parameters — no implicit inheritance.
 
     Patterns are checked in order; first match wins. Place specific patterns
-    before broad ones, and use ``r".*"`` as the last entry to catch all
-    remaining parameters. Example::
+    before a broad fallback pattern. Example::
 
         param_groups=[
-            ParamGroupConfig(pattern=r"\\.bias$", ...),   # specific: biases first
-            ParamGroupConfig(pattern=r"\\.router\\.", ...),  # specific: routers
-            ParamGroupConfig(pattern=r".*", ...),          # catch-all: everything else
+            ParamGroupConfig(pattern=r"\\.bias$", ...),
+            ParamGroupConfig(pattern=r"\\.router\\.", ...),
+            ParamGroupConfig(pattern=r".*", ...),
         ]
     """
 
@@ -123,18 +123,30 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
+        optimizer_factory_kwargs_by_name: dict[str, dict[str, Any]] = field(
+            default_factory=dict
+        )
+        """Arguments passed once per optimizer factory invocation, keyed by name.
+
+        Use this for instance-wide objects such as per-parameter compute
+        metadata and communication bucket specs. These arguments are not copied
+        into PyTorch parameter groups; group hyperparameters belong in
+        ``ParamGroupConfig.optimizer_kwargs``.
+        """
+
     optimizers: list[T]
     model_parts: list[nn.Module]
 
     @staticmethod
-    def _resolve_optimizer_cls(name: str) -> type:
-        optimizer_classes = {
+    def _resolve_optimizer_factory(name: str) -> Callable[..., Optimizer]:
+        optimizer_factories: dict[str, Callable[..., Optimizer]] = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
+            "DistributedMuon": build_distributed_muon,
         }
-        if name not in optimizer_classes:
+        if name not in optimizer_factories:
             raise NotImplementedError(f"Optimizer {name} not added.")
-        return optimizer_classes[name]
+        return optimizer_factories[name]
 
     @staticmethod
     def _build_impl_kwargs(config: Config) -> dict[str, Any]:
@@ -214,8 +226,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
-                optimizer = self._resolve_optimizer_cls(opt_name)(opt_param_groups)
-                self.optimizers.append(optimizer)
+                optimizer = self._resolve_optimizer_factory(opt_name)(
+                    opt_param_groups,
+                    **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
+                )
+                self.optimizers.append(cast(T, optimizer))
                 self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
