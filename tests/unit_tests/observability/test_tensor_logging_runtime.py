@@ -46,6 +46,7 @@ from torchtitan.observability.tensor_logging.runtime import (
 )
 from torchtitan.observability.tensor_logging.statistics import (
     accumulate_tensor_statistics,
+    StatisticBuffers,
 )
 
 
@@ -499,6 +500,54 @@ def test_finite_statistics_match_on_cpu_and_cuda(device: str) -> None:
         runtime.close()
 
 
+def test_statistic_buffers_group_fields_by_reduction_operation() -> None:
+    buffers = StatisticBuffers(3, device=torch.device("cpu"))
+
+    assert buffers.sum_statistics.shape == (3, 7)
+    assert buffers.sum_statistics.dtype == torch.float32
+    assert buffers.maxima.shape == (3,)
+    assert buffers.maxima.dtype == torch.float32
+    assert not hasattr(buffers, "counts")
+
+
+def test_reducer_issues_one_sum_then_one_max_collective(monkeypatch) -> None:
+    owner = nn.Module()
+    register(owner, ["value"])
+    runtime = init(owner)
+    calls = []
+
+    def record_all_reduce(tensor, *, op):
+        calls.append((op, tensor.dtype, tuple(tensor.shape)))
+
+    try:
+        monkeypatch.setattr(dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(dist, "all_reduce", record_all_reduce)
+        runtime._reduce_buffers()
+    finally:
+        runtime.close()
+
+    assert calls == [
+        (dist.ReduceOp.SUM, torch.float32, (1, 7)),
+        (dist.ReduceOp.MAX, torch.float32, (1,)),
+    ]
+
+
+def test_sum_slab_keeps_all_hand_computed_statistics() -> None:
+    owner = nn.Module()
+    register(owner, ["value"])
+    runtime = init(owner)
+    try:
+        with set_enabled(True):
+            log_stats(owner, value=torch.tensor([0.0, 1.0, -2.0, torch.nan]))
+
+        snapshot = runtime.snapshot_unreduced_statistics()["value"]
+        assert snapshot["counts"].tolist() == [4, 1, 1, 1]
+        assert snapshot["sums"].tolist() == [3.0, 5.0, 17.0]
+        assert snapshot["maximum"].item() == 2.0
+    finally:
+        runtime.close()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("layout", ["transpose", "permute", "strided"])
 def test_noncontiguous_cuda_statistics_match_values(layout: str) -> None:
@@ -655,16 +704,16 @@ def test_unregistered_emission_names_the_missing_key() -> None:
         runtime.close()
 
 
-def test_reduced_integer_counts_remain_exact_above_float32() -> None:
+def test_generic_counts_follow_float32_integer_precision() -> None:
     owner = nn.Module()
     register(owner, ["value"])
     runtime = init(owner)
     try:
-        runtime.buffers.counts[0].copy_(
-            torch.tensor([2**24 + 1, 0, 0, 1], dtype=torch.int64)
+        runtime.buffers.sum_statistics[0, :4].copy_(
+            torch.tensor([2**24 + 1, 0, 0, 1], dtype=torch.float32)
         )
         metrics = runtime.collect()
-        assert metrics["value.numel"] == 2**24 + 1
+        assert metrics["value.numel"] == 2**24
     finally:
         runtime.close()
 
