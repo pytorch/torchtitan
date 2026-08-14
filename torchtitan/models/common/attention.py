@@ -156,13 +156,15 @@ class VarlenAttention(Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        B, L, _, H = q_BLNH.shape
+        B, L, _, qk_head_dim = q_BLNH.shape
+        value_head_dim = v_BLNH.shape[-1]
         T = B * L
 
-        # varlen attention expects (T, N, H)
-        q_TNH = q_BLNH.reshape(T, -1, H)
-        k_TNH = k_BLNH.reshape(T, -1, H)
-        v_TNH = v_BLNH.reshape(T, -1, H)
+        # varlen attention expects (T, N, H). The value head dimension may
+        # differ from the query/key head dimension, as in MLA.
+        q_TNH = q_BLNH.reshape(T, -1, qk_head_dim)
+        k_TNH = k_BLNH.reshape(T, -1, qk_head_dim)
+        v_TNH = v_BLNH.reshape(T, -1, value_head_dim)
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support
@@ -219,7 +221,7 @@ class VarlenAttention(Module):
                 # rejected during q_TNH reshape propagation.
                 q_ps = get_partition_spec(q_TNH)
                 spmd.assert_type(result, q_local, q_ps)
-            out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
+            out_BLNH = result.view(B, L, -1, value_head_dim).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
@@ -231,7 +233,7 @@ class VarlenAttention(Module):
             lse_ps = None if q_ps is None else spmd.PartitionSpec(q_ps[1], q_ps[0])
             spmd.assert_type(lse_NT, q_local, lse_ps)
 
-        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
+        out_BLNH = out_TNH.view(B, L, -1, value_head_dim).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
         # out_transform can broadcast per (token, head).
         lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
