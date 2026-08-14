@@ -36,6 +36,8 @@ def run_loss_compare(
     test_options: str = "",
     baseline_ngpus: int = 8,
     test_ngpus: int = 8,
+    compare_grad_norm: bool = False,
+    use_seed_checkpoint: bool = True,
 ) -> bool:
     """Run loss_compare.py comparing a baseline module against a graph_trainer module.
 
@@ -48,10 +50,14 @@ def run_loss_compare(
         test_options: Additional CLI options for the test run.
         baseline_ngpus: Number of GPUs for the baseline run.
         test_ngpus: Number of GPUs for the test run.
+        compare_grad_norm: Also require exact gradient-norm equality.
+        use_seed_checkpoint: Initialize both runs from a generated checkpoint.
 
     Returns:
         True if the assertion passed, False otherwise.
     """
+    from scripts.loss_compare import extract_losses_from_tensorboard
+
     # Use a temp dump folder instead of loss_compare.py's default ("outputs"),
     # which is created relative to cwd and is not writable in CI containers.
     with tempfile.TemporaryDirectory() as job_dump_folder:
@@ -70,6 +76,8 @@ def run_loss_compare(
             f"--test-ngpus={test_ngpus}",
             f"--job-dump-folder={job_dump_folder}",
         ]
+        if not use_seed_checkpoint:
+            cmd.append("--no-seed-checkpoint")
         if baseline_options:
             cmd.append(f"--baseline-options={baseline_options}")
         if test_options:
@@ -79,7 +87,18 @@ def run_loss_compare(
         result = subprocess.run(cmd, text=True)
         if result.returncode != 0:
             print("loss_compare.py failed")
-        return result.returncode == 0
+            return False
+        if not compare_grad_norm:
+            return True
+        return _scalars_are_equal(
+            extract_losses_from_tensorboard(
+                job_dump_folder, "tb_baseline", scalar_tag="grad_norm"
+            ),
+            extract_losses_from_tensorboard(
+                job_dump_folder, "tb_test", scalar_tag="grad_norm"
+            ),
+            metric="grad_norm",
+        )
 
 
 def run_loss_compare_close(
@@ -167,23 +186,25 @@ def _log_rank(log_rank: int) -> Iterator[None]:
             os.environ["LOG_RANK"] = previous_log_rank
 
 
-def _losses_are_equal(
-    baseline_losses: dict[int, float],
-    test_losses: dict[int, float],
+def _scalars_are_equal(
+    baseline_values: dict[int, float],
+    test_values: dict[int, float],
+    *,
+    metric: str,
 ) -> bool:
-    if baseline_losses.keys() != test_losses.keys():
+    if baseline_values.keys() != test_values.keys():
         print(
             "Step mismatch: "
-            f"baseline={sorted(baseline_losses)} test={sorted(test_losses)}"
+            f"baseline={sorted(baseline_values)} test={sorted(test_values)}"
         )
         return False
 
-    for step in sorted(baseline_losses):
-        if baseline_losses[step] != test_losses[step]:
+    for step in sorted(baseline_values):
+        if baseline_values[step] != test_values[step]:
             print(
-                "Loss mismatch at "
-                f"step={step}: baseline={baseline_losses[step]!r} "
-                f"test={test_losses[step]!r}"
+                f"{metric} mismatch at step={step}: "
+                f"baseline={baseline_values[step]!r} "
+                f"test={test_values[step]!r}"
             )
             return False
     return True
@@ -254,6 +275,13 @@ DSV3_EP_OVERLAP_GRAPH_PARALLELISM = (
     " --parallelism.tensor_parallel_degree=1"
     " --parallelism.expert_parallel_degree=2"
 )
+DSV3_MINIMAL_ASYNC_EP_PARALLELISM = (
+    "--parallelism.data_parallel_shard_degree=2"
+    " --parallelism.expert_parallel_degree=2"
+    " --training.local_batch_size=4"
+    " --training.global_batch_size=8"
+    " --training.seq_len=128"
+)
 DSV3_EP_OVERLAP_OPTIONS = (
     "--compile.mode aot_fx_trace"
     " --compile.ep_overlap.enabled"
@@ -320,6 +348,36 @@ def _run_deepseek_v3_ep_overlap_loss_compare() -> bool:
         parallelism=DSV3_EP_OVERLAP_GRAPH_PARALLELISM,
         baseline_options_extra=DSV3_EP_OVERLAP_OPTIONS + DSV3_EP_OVERLAP_EAGER_BITWISE,
         test_options_extra=DSV3_EP_OVERLAP_OPTIONS + DSV3_EP_OVERLAP_GRAPH_BITWISE,
+    )
+
+
+def _run_minimal_async_ep_graph_chunk_loss_compare(
+    chunk_options: str = DSV3_EP_OVERLAP_OPTIONS,
+) -> bool:
+    """Compare MinimalAsyncEP graph chunking with eager chunking exactly."""
+    common_options = (
+        chunk_options
+        + " --compile.memory_policy full"
+        + " --compile.inductor_compilation regional"
+        + " --debug.moe_force_load_balance"
+    )
+    return run_loss_compare(
+        baseline_module="graph_trainer.deepseek_v3",
+        baseline_config="graph_trainer_deepseek_v3_debugmodel_minimal_async_ep",
+        test_module="graph_trainer.deepseek_v3",
+        test_config="graph_trainer_deepseek_v3_debugmodel_minimal_async_ep",
+        baseline_options=(
+            f"{DSV3_MINIMAL_ASYNC_EP_PARALLELISM} {common_options}"
+            f"{DSV3_EP_OVERLAP_EAGER_BITWISE}"
+        ),
+        test_options=(
+            f"{DSV3_MINIMAL_ASYNC_EP_PARALLELISM} {common_options}"
+            f"{DSV3_EP_OVERLAP_GRAPH_BITWISE}"
+        ),
+        baseline_ngpus=2,
+        test_ngpus=2,
+        compare_grad_norm=True,
+        use_seed_checkpoint=False,
     )
 
 
@@ -451,7 +509,7 @@ def _run_graph_pp_deepseek_v3_loss_compare(schedule: str) -> bool:
             test_loss_rank,
         )
 
-    return _losses_are_equal(baseline_losses, test_losses)
+    return _scalars_are_equal(baseline_losses, test_losses, metric="loss")
 
 
 QWEN3_PARALLELISM = (
@@ -613,6 +671,16 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_dsv3_ep_overlap_aot_fx_trace_vs_eager_chunked(self):
         self.assertTrue(_run_deepseek_v3_ep_overlap_loss_compare())
+
+    def test_moe_minimal_async_ep_graph_chunk_vs_eager_chunked(self):
+        self.assertTrue(_run_minimal_async_ep_graph_chunk_loss_compare())
+
+    def test_moe_minimal_async_ep_moe_seq_graph_chunk_vs_eager_chunked(self):
+        self.assertTrue(
+            _run_minimal_async_ep_graph_chunk_loss_compare(
+                DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS
+            )
+        )
 
     def test_moe_dsv3_ep_overlap_moe_seq_aot_fx_trace_vs_eager_chunked(self):
         self.assertTrue(_run_deepseek_v3_ep_overlap_moe_seq_loss_compare())

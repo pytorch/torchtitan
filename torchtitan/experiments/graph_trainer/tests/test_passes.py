@@ -2646,7 +2646,7 @@ class TestChunkPasses(TestCase):
                     module_pattern="layers.*.moe",
                     num_static_inputs=traced.num_static_inputs,
                     optimize_grad_live_out=False,
-                    require_all_to_all=False,
+                    require_token_exchange=False,
                 )
         target = (
             torch.ops._c10d_functional.all_reduce.default
@@ -2665,7 +2665,7 @@ class TestChunkPasses(TestCase):
         _schedule_ep_overlap_regions(
             gm,
             module_pattern=module_pattern,
-            require_all_to_all=True,
+            require_token_exchange=True,
             pair_first_token_exchange=pair_first_token_exchange,
         )
         return {node: idx for idx, node in enumerate(gm.graph.nodes)}
@@ -3629,6 +3629,10 @@ class TestChunkPasses(TestCase):
         )
         self.assertLess(
             post_chunk_dce,
+            names.index("assign_minimal_async_ep_buffer_sets_pass"),
+        )
+        self.assertLess(
+            names.index("assign_minimal_async_ep_buffer_sets_pass"),
             names.index("normalize_chunked_grad_collective_chains_pass"),
         )
         self.assertLess(
@@ -3667,6 +3671,10 @@ class TestChunkPasses(TestCase):
             disabled_post_chunk_dce,
             disabled_names.index("joint_transformer_block_bucketing_reordering_pass"),
         )
+
+        config.compile.ep_overlap.strategy = "eager"
+        eager_names = self._compile_pass_names(traced_result, config)
+        self.assertNotIn("assign_minimal_async_ep_buffer_sets_pass", eager_names)
 
     def test_ep_overlap_rejects_invalid_minimal_async_ep_copy_grid(self):
         with self.assertRaisesRegex(ValueError, "must be positive or None"):
@@ -4463,7 +4471,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_all_to_all=True,
+                require_token_exchange=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4474,7 +4482,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_all_to_all=True,
+                require_token_exchange=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4496,7 +4504,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_all_to_all=True,
+                require_token_exchange=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4514,7 +4522,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_all_to_all=True,
+                require_token_exchange=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4534,7 +4542,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_all_to_all=True,
+                require_token_exchange=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4558,7 +4566,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_all_to_all=True,
+                require_token_exchange=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4745,7 +4753,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_all_to_all=True,
+                require_token_exchange=True,
                 pair_first_token_exchange=True,
             )
 
@@ -5048,7 +5056,7 @@ class TestChunkPasses(TestCase):
         }
         self.assertEqual(chunked_roots, {"layers.1"})
 
-        with self.assertRaisesRegex(ValueError, "No EP all-to-all regions"):
+        with self.assertRaisesRegex(ValueError, "No EP token-exchange regions"):
             ep_overlap_chunk_pass(
                 self._build_linear_region_gm(fqn="layers.0"),
                 mode="batch",
@@ -5062,7 +5070,7 @@ class TestChunkPasses(TestCase):
             gm,
             mode="batch",
             module_pattern="layers.*",
-            require_all_to_all=False,
+            require_token_exchange=False,
         )
 
         chunked_roots = {
