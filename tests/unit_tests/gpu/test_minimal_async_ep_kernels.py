@@ -6,9 +6,11 @@
 
 import unittest
 
+import pytest
 import torch
-import triton.language as tl
 
+import torchtitan.distributed.minimal_async_ep.api as minimal_async_ep_api
+import triton.language as tl
 from torchtitan.distributed.minimal_async_ep.kernels import (
     _copy_rows_to_peer_ptrs_kernel,
     copy_full_counts_to_peers_kernel,
@@ -29,6 +31,103 @@ def assert_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
         raise AssertionError(f"dtype mismatch: {actual.dtype} != {expected.dtype}")
     if not torch.equal(actual, expected):
         raise AssertionError(f"tensor mismatch:\nactual={actual}\nexpected={expected}")
+
+
+def test_forced_load_balance_receive_capacity_matches_round_robin_routing():
+    cases = (
+        (4, 2, 4, 2),
+        (5, 3, 8, 4),
+        (17, 6, 64, 8),
+        (32_768, 8, 256, 64),
+    )
+    for num_tokens, top_k, num_experts, ep_size in cases:
+        assignments = torch.arange(num_tokens * top_k) % num_experts
+        num_local_experts = num_experts // ep_size
+        actual = max(
+            int(
+                (
+                    (assignments >= rank * num_local_experts)
+                    & (assignments < (rank + 1) * num_local_experts)
+                ).sum()
+            )
+            * ep_size
+            for rank in range(ep_size)
+        )
+        expected = minimal_async_ep_api._forced_load_balance_receive_capacity(
+            num_tokens,
+            top_k,
+            num_experts,
+            ep_size,
+        )
+        assert expected == actual
+
+
+def test_buffer_rows_use_configured_receive_capacity():
+    forced = minimal_async_ep_api._buffer_rows(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        force_load_balance=True,
+    )
+    worst_case = minimal_async_ep_api._buffer_rows(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        force_load_balance=False,
+    )
+    capacity_limited = minimal_async_ep_api._buffer_rows(
+        tokens_per_rank=32_768,
+        top_k=8,
+        num_local_experts=4,
+        ep_size=64,
+        force_load_balance=False,
+        receive_capacity_factor=2.0,
+    )
+
+    assert forced == (262_144, 262_144)
+    assert worst_case == (8_388_608, 262_144)
+    assert capacity_limited == (524_288, 262_144)
+
+
+def test_receive_capacity_propagates_through_runtime_config():
+    from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+        graph_trainer_deepseek_v3_debugmodel_minimal_async_ep,
+    )
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+
+    config = graph_trainer_deepseek_v3_debugmodel_minimal_async_ep()
+    config.parallelism.expert_parallel_degree = 2
+    config.compile.memory_policy = "full"
+    config.compile.ep_overlap.minimal_async_ep_receive_capacity_factor = 2.0
+    config.model_spec.model.update_from_config(config=config)
+
+    dispatchers = [
+        layer.moe.routed_experts.token_dispatcher
+        for layer in config.model_spec.model.layers
+        if layer.moe is not None
+    ]
+    assert dispatchers
+    expected = (
+        config.training.num_tokens_per_microbatch_per_dp_rank * dispatchers[0].top_k * 2
+    )
+    assert all(
+        isinstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+        and dispatcher.receive_capacity == expected
+        for dispatcher in dispatchers
+    )
+
+
+def test_receive_capacity_rejects_global_routing_overflow():
+    with pytest.raises(
+        RuntimeError,
+        match="routing exceeded the configured receive capacity",
+    ):
+        minimal_async_ep_api._assert_receive_capacity(
+            torch.tensor([[2, 1], [1, 0]]),
+            capacity=2,
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
