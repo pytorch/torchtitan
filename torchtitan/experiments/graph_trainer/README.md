@@ -157,6 +157,22 @@ Supported graph-chunking selections are:
 - `--compile.ep_overlap.chunk_dim seq --compile.ep_overlap.module_fqn layers.*.moe`
   for MoE-only sequence chunking.
 
+MinimalAsyncEP overlap bounds its persistent row-copy grid with
+`--compile.ep_overlap.minimal_async_ep_num_copy_ctas` so copies do not occupy
+every SM while expert GEMMs are runnable. A simple tuning center is:
+
+```text
+t_copy    = 2 * R * D * d / B
+t_compute = 3 * R * D * H / P
+num_copy_ctas = round_to_8(S * t_copy / (t_copy + t_compute))
+```
+
+Here `S` is the SM count, `B` measured NVLink bandwidth, `P` measured grouped
+GEMM throughput, `d` bytes per element, and `H` expert hidden width. `R` and
+`D` cancel in the ratio. The default 72 is the GB200/DeepSeek-v3 671B estimate
+(`S=152`, `H=2048`, `B=1.06 TB/s`, `P=1.44 PFLOP/s`); tune neighboring values
+for other hardware or expert shapes. `None` selects the unbounded control.
+
 Graph chunking intentionally couples the tracer and EP-overlap passes through
 the `ep_overlap` trace-input preparer: before `minimal_fx_tracer` fakeifies
 inputs, the preparer marks token-grid dimensions with Dynamo symbolic-shape
