@@ -21,7 +21,7 @@ import triton.language as tl
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from torchtitan.distributed.minimal_async_ep.kernels import (
-    _copy_rows_to_peer_ptrs_persistent_kernel,
+    _copy_peer_segments_persistent_kernel,
     copy_full_counts_to_peers_kernel,
     copy_rows_to_peers_kernel,
     expand_topk_grad_kernel,
@@ -114,7 +114,13 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
     assert wait_dispatch not in dispatch_ranks.users
     assert source_wait.args == (
         combine,
-        [combine.args[0], combine.args[3], combine.args[4], combine.args[5]],
+        [
+            combine.args[0],
+            combine.args[4],
+            combine.args[5],
+            combine.args[6],
+            combine.args[7],
+        ],
     )
     assert ready_wait.args[1] == []
     assert list(combine.users) == [source_wait]
@@ -329,6 +335,8 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                     expert_to_token,
                     token_to_expert,
                     tokens_per_expert,
+                    dispatch_peer_segments,
+                    combine_peer_segments,
                 ) = minimal_async_ep_api.dispatch_op(
                     chunk_x, chunk_ids, counts, 8, 2, buffer_set
                 )
@@ -342,15 +350,23 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                     expert_output,
                     dispatch_ranks,
                     dispatch_rows,
+                    dispatch_peer_segments,
                     combine_ranks,
                     combine_rows,
+                    combine_peer_segments,
                     num_valid,
                     4,
                     buffer_set,
                 )
                 routed = minimal_async_ep_api.wait_combine(
                     routed,
-                    [expert_output, combine_ranks, combine_rows, num_valid],
+                    [
+                        expert_output,
+                        combine_ranks,
+                        combine_rows,
+                        combine_peer_segments,
+                        num_valid,
+                    ],
                 )
                 outputs.append(
                     minimal_async_ep_api.reduce_topk_op(
@@ -386,9 +402,12 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
                 + rank * 100
             )
             scores = torch.linspace(0.1, 0.8, 8, device=device).view(4, 2)
-            token_ids = torch.arange(4, device=device)
-            expert_ids = torch.stack(
-                ((token_ids + rank) % 4, (token_ids + rank + 2) % 4), dim=1
+            expert_ids = torch.tensor(
+                (
+                    [[0, 1], [0, 2], [1, 3], [0, 1]],
+                    [[0, 3], [1, 2], [0, 2], [2, 3]],
+                )[rank],
+                device=device,
             )
 
             actual_x = x.clone().requires_grad_()
@@ -710,7 +729,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         self.assertFalse(counts.is_contiguous())
         self.assertFalse(local_dest_offsets.is_contiguous())
         self.assertFalse(local_count_starts.is_contiguous())
-        dst_ranks, dst_rows = fill_dispatch_metadata_kernel(
+        dst_ranks, dst_rows, dispatch_peer_segments = fill_dispatch_metadata_kernel(
             counts,
             local_dest_offsets,
             local_count_starts,
@@ -725,6 +744,14 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(
             dst_rows,
             torch.tensor([0, 1, 5, 9], device="cuda", dtype=torch.int64),
+        )
+        assert_equal(
+            dispatch_peer_segments,
+            torch.tensor(
+                [[0, 0, 2], [2, 0, 0], [2, 5, 1], [3, 9, 1]],
+                device="cuda",
+                dtype=torch.int64,
+            ),
         )
 
         segment_lens_storage = torch.tensor(
@@ -762,7 +789,12 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         self.assertFalse(segment_lens.is_contiguous())
         self.assertFalse(output_starts.is_contiguous())
         self.assertFalse(source_input_starts.is_contiguous())
-        combine_ranks, combine_rows, num_valid_rows = fill_combine_metadata_kernel(
+        (
+            combine_ranks,
+            combine_rows,
+            num_valid_rows,
+            combine_peer_segments,
+        ) = fill_combine_metadata_kernel(
             segment_lens,
             output_starts,
             source_input_starts,
@@ -783,6 +815,14 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(
             num_valid_rows,
             torch.tensor([4], device="cuda", dtype=torch.int64),
+        )
+        assert_equal(
+            combine_peer_segments,
+            torch.tensor(
+                [[0, 4, 2], [3, 6, 0], [2, 8, 1], [3, 10, 1]],
+                device="cuda",
+                dtype=torch.int64,
+            ),
         )
 
     def test_copy_kernels_handle_strides_and_active_row_masks(self):
@@ -859,6 +899,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             dst_ptrs=bounded_dst_ptrs,
             block_m=1,
             num_ctas=2,
+            segments=torch.tensor([[0, 0, 64]], device="cuda", dtype=torch.int64),
         )
         torch.cuda.synchronize()
         assert_equal(bounded_dst, bounded_src)
@@ -882,33 +923,28 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         src = src_storage[base_offset:]
         dst = torch.zeros(1, device="cuda", dtype=torch.uint8)
         dst_ptrs = torch.tensor([dst.data_ptr()], device="cuda", dtype=torch.int64)
-        dst_ranks = torch.full((metadata_numel,), -1, device="cuda", dtype=torch.int64)
-        dst_ranks[row] = 0
         dst_rows = torch.zeros(metadata_numel, device="cuda", dtype=torch.int64)
-        num_valid_rows = torch.tensor(
-            [metadata_numel], device="cuda", dtype=torch.int64
-        )
+        segments = torch.tensor([[row, 0, 1]], device="cuda", dtype=torch.int64)
 
         src_storage[0] = 17
         src_storage[base_offset + high_offset] = 93
         torch.cuda.synchronize()
 
-        _copy_rows_to_peer_ptrs_persistent_kernel[(20,)](
+        _copy_peer_segments_persistent_kernel[(20,)](
             src,
             dst_ptrs,
-            dst_ranks,
+            segments,
             dst_rows,
-            num_valid_rows,
-            dst_rows,
-            NUM_ROWS=metadata_numel,
+            0,
             NUM_COLS=1,
             SRC_ROW_STRIDE=stride,
             SRC_COL_STRIDE=1,
             DST_ROW_STRIDE=1,
             DST_DTYPE=tl.uint8,
-            HAS_NUM_VALID_ROWS=True,
             HAS_SRC_ROWS=False,
             SRC_ROW_DIVISOR=1,
+            EP_SIZE=1,
+            NUM_SEGMENTS_PER_PEER=1,
             BLOCK_M=1,
             BLOCK_N=1,
             NUM_COL_TILES=1,
