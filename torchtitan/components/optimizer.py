@@ -25,7 +25,7 @@ from torchtitan.components.checkpoint_utils import (
 )
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.flex_shard import build_distributed_muon
+from torchtitan.distributed.flex_shard import build_dist_muon
 from torchtitan.tools.logging import logger
 
 __all__ = [
@@ -142,7 +142,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         optimizer_factories: dict[str, Callable[..., Optimizer]] = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
-            "DistributedMuon": build_distributed_muon,
+            "DistMuon": build_dist_muon,
         }
         if name not in optimizer_factories:
             raise NotImplementedError(f"Optimizer {name} not added.")
