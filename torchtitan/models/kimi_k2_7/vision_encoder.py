@@ -90,9 +90,7 @@ def _compute_learned_pos_embeds(
     height, width, dim = pos_embed.shape
     pos = pos_embed.new_zeros(len(grids), max_num_patch, dim)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        pos = spmd.mutate_type(
-            pos, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
-        )
+        pos = spmd.mutate_type(pos, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
 
     # (dim, height, width) for F.interpolate; .float() for bicubic.
     grid_table = pos_embed.permute(2, 0, 1).unsqueeze(0).float()
@@ -164,9 +162,7 @@ def _compute_2d_rope_cache(
 
     angles = freq_table.new_zeros(len(grids), max_num_patch, head_dim // 2)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        angles = spmd.mutate_type(
-            angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
-        )
+        angles = spmd.mutate_type(angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
 
     # Group by (h, w) so the per-resolution angle grid is built once.
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
@@ -224,9 +220,7 @@ def _tpool_patch_merger(
     max_merged = max((h // kh) * (w // kw) for _, h, w in grids)
     merged = hidden_NPD.new_zeros(num_vision, max_merged, merged_dim)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        merged = spmd.mutate_type(
-            merged, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
-        )
+        merged = spmd.mutate_type(merged, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
 
     for i, (t, h, w) in enumerate(grids):
         seq = hidden_NPD[i, : t * h * w]
