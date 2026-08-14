@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Muse Glimmer ATEM tool-call parse/render (the novel core of the Muse Glimmer renderer).
 
 Muse Glimmer emits tool calls in Anthropic-style ATEM XML inside the harmony envelope:
