@@ -37,7 +37,7 @@ NGPU=8 MODULE=qwen3 CONFIG=qwen3_debugmodel ./run_train.sh \
 
 See the [observability README](../README.md) for TensorBoard and Weights & Biases setup.
 
-Tensor work runs only when both its requested cadence and ordinary `metrics.log_freq` select the step. For tensor cadence 15 and scalar cadence 10, tensor metrics publish at steps 30, 60, and so on. Tensor logging does not inherit ordinary metrics' special step-1 publication.
+Tensor work runs only when both its requested cadence and ordinary `metrics.log_freq` select the step. For tensor cadence 15 and scalar cadence 10, tensor metrics publish at steps 30, 60, and so on. Step 1 publishes tensor metrics only when their cadence is 1.
 
 The default tensor cadence is 5. The default publication filter keeps `numel`, `nonfinite_count`, `abs_mean`, `square_mean`, and `abs_max`.
 

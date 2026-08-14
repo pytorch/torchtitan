@@ -76,8 +76,8 @@ def register(owner: Owner, metric_names: Sequence[str]) -> None:
 
     Example:
 
-        register(router, ["entropy", "expert_load"])
-        log_stats(router, entropy=entropy, expert_load=load)
+        register(attention, ["xq"])
+        log_stats(attention, xq=xq)
     """
 
     registered_names = _registered_metric_names(owner)
@@ -577,15 +577,12 @@ def log_stats(owner: Owner, **named_tensors: torch.Tensor) -> None:
 
     Example:
 
-        log_stats(router, entropy=entropy, expert_load=expert_load)
+        log_stats(attention, xq=xq)
     """
 
     if _metric_side_effects_suppressed:
         return
-    if torch.compiler.is_compiling():
-        if _active_state is None:
-            return
-    elif not is_enabled() and not _recording_calls_included:
+    if not should_run_producers():
         return
     state = _state()
     for metric_name, value in named_tensors.items():
@@ -611,10 +608,7 @@ def log_fwd_bwd_stats(
         return
     if _metric_side_effects_suppressed:
         return
-    if torch.compiler.is_compiling():
-        if _active_state is None:
-            return
-    elif not is_enabled() and not _recording_calls_included:
+    if not should_run_producers():
         return
 
     state = _state()

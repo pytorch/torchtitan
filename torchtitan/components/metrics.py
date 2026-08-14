@@ -270,10 +270,15 @@ class TensorLoggingConfig(Configurable.Config):
     """Controls model-tensor statistics recorded with ordinary metrics."""
 
     enabled: bool = False
+    """Whether to record registered model-tensor statistics."""
+
     freq: int = 5
+    """Requested step interval; regular publication follows its LCM with `log_freq`."""
+
     publish_filter_regex: str = (
         r"\.(?:numel|nonfinite_count|abs_mean|square_mean|abs_max)$"
     )
+    """Regex selecting derived tensor-statistic keys sent to metrics sinks."""
 
     def __post_init__(self) -> None:
         if self.freq <= 0:
