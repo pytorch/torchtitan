@@ -32,7 +32,7 @@ class _DPRankHandle(RoutingCandidate):
 class IntraGeneratorRouter(Configurable):
     """Router that partitions requests across the DP ranks within one generator.
 
-    This is layer 2 of the two-layer routing design: the controller-side
+    This is layer 2 of the two-layer routing design: the router-actor-side
     ``InterGeneratorRouter`` routes a call across generators; this router
     then routes each request across the DP ranks within one generator.
 
