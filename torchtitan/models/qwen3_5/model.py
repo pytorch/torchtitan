@@ -695,8 +695,20 @@ class Qwen35Model(Decoder):
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
 
+            from torchtitan.trainer import Trainer
+
+            if (
+                isinstance(config, Trainer.Config)
+                and not config.training.disable_cuda_graphs
+            ):
+                raise NotImplementedError(
+                    "Qwen3.5 training does not support CUDA graphs because "
+                    "GatedDeltaNet requires dynamic host sequence offsets. Set "
+                    "--training.disable_cuda_graphs."
+                )
+
+            parallelism = config.parallelism
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 dn_cfg = next(

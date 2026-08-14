@@ -136,6 +136,28 @@ class TestConfigManager(unittest.TestCase):
         )
         assert not config.training.disable_cuda_graphs
 
+    def test_varlen_cuda_graphs_require_fixed_metadata_capacity(self):
+        from torchtitan.models.llama3.config_registry import (
+            llama3_debugmodel_varlen_attn,
+        )
+
+        config = llama3_debugmodel_varlen_attn()
+        config.training.max_packed_sequences_per_sample = None
+
+        with pytest.raises(
+            ValueError,
+            match="Varlen attention with CUDA graphs requires",
+        ):
+            config._validate_cuda_graphs()
+
+    def test_varlen_debugmodel_enables_cuda_graphs(self):
+        config = ConfigManager().parse_args(
+            ["--module", "llama3", "--config", "llama3_debugmodel_varlen_attn"]
+        )
+
+        assert not config.training.disable_cuda_graphs
+        assert config.training.max_packed_sequences_per_sample == 16
+
     def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
         config_manager = ConfigManager()
         with pytest.raises(ValueError, match="without CPU synchronization"):

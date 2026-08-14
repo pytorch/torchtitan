@@ -15,7 +15,6 @@ from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
-    create_varlen_metadata_for_document,
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
@@ -524,7 +523,7 @@ class MuseGlimmerModel(Decoder):
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
         if isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return self.create_varlen_metadata(positions)
         if not isinstance(inner_attn, FlexAttention.Config):
             raise TypeError(
                 "Muse Glimmer requires FlexAttention or VarlenAttention for "

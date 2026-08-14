@@ -67,6 +67,13 @@ class TrainingConfig:
     capture.
     """
 
+    max_packed_sequences_per_sample: int | None = None
+    """
+    Fixed varlen metadata capacity per packed sample. Unused entries represent
+    zero-length sequences. Set this when varlen attention is used with CUDA
+    graphs, whose input tensor shapes must remain constant across batches.
+    """
+
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will

@@ -21,6 +21,7 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     VarlenAttention,
+    VarlenMetadata,
 )
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
@@ -81,6 +82,7 @@ class Decoder(BaseModel):
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
+        varlen_metadata_max_sequences_per_sample: int | None = None
 
         @property
         def first_attention(self) -> BaseAttention.Config | None:
@@ -165,6 +167,9 @@ class Decoder(BaseModel):
             if isinstance(config, Trainer.Config):
                 debug = config.debug
                 seq_len = config.training.seq_len
+                self.varlen_metadata_max_sequences_per_sample = (
+                    config.training.max_packed_sequences_per_sample
+                )
                 max_seq_len = self.max_seq_len
                 if seq_len > max_seq_len:
                     raise ValueError(
@@ -289,6 +294,15 @@ class Decoder(BaseModel):
             ],
         )
 
+    def create_varlen_metadata(self, positions: torch.Tensor) -> VarlenMetadata:
+        """Build document metadata using the configured static capacity."""
+        return create_varlen_metadata_for_document(
+            positions,
+            max_sequences_per_sample=(
+                self.config.varlen_metadata_max_sequences_per_sample
+            ),
+        )
+
     def get_attention_masks(
         self,
         positions: torch.Tensor,
@@ -302,7 +316,7 @@ class Decoder(BaseModel):
         if isinstance(inner_attn, FlexAttention.Config):
             return self._create_flex_attention_mask_for_document(positions, attn_config)
         elif isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return self.create_varlen_metadata(positions)
         else:
             raise TypeError(
                 f"Only VarlenAttention and FlexAttention support attention masks, "

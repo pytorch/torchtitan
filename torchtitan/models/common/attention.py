@@ -631,22 +631,33 @@ def create_varlen_metadata_for_document(
     positions: torch.Tensor,
     *,
     include_host_offsets: bool = False,
+    max_sequences_per_sample: int | None = None,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
     Document boundaries are detected where ``positions`` resets to 0 (same
-    convention as :func:`get_document_mask_mod`).
+    convention as :func:`get_document_mask_mod`). When a sequence capacity is
+    provided, unused offsets repeat the final packed-token offset and therefore
+    describe zero-length sequences. This keeps metadata shapes static for CUDA
+    graph replay.
 
     Args:
         positions: Per-token position tensor with shape ``[b, s]``. Positions
             reset to 0 at each document start.
         include_host_offsets: Also materialize cumulative sequence offsets as
             host metadata for kernels that need it.
+        max_sequences_per_sample: Fixed metadata capacity for each batch sample.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
         and max_seq_len.
+
+    Raises:
+        ValueError: If the configured capacity is invalid or a sample exceeds it.
     """
+    if max_sequences_per_sample is not None and max_sequences_per_sample < 1:
+        raise ValueError("max_sequences_per_sample must be at least 1")
+
     batch_size, seq_len = positions.shape
     device = positions.device
     cu_seqlens_list, all_seq_lengths = [], []
@@ -654,6 +665,16 @@ def create_varlen_metadata_for_document(
 
     for b in range(batch_size):
         doc_starts = (positions[b] == 0).nonzero(as_tuple=True)[0].to(torch.int32)
+        num_sequences = doc_starts.numel()
+        if (
+            max_sequences_per_sample is not None
+            and num_sequences > max_sequences_per_sample
+        ):
+            raise ValueError(
+                f"Packed sample {b} contains {num_sequences} sequences, exceeding "
+                f"training.max_packed_sequences_per_sample="
+                f"{max_sequences_per_sample}. Increase the configured capacity."
+            )
         sample_cu_seqlens = torch.cat(
             [doc_starts, torch.tensor([seq_len], dtype=torch.int32, device=device)]
         )
@@ -669,17 +690,29 @@ def create_varlen_metadata_for_document(
     packed_cu_seqlens = torch.cat(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
+    if max_sequences_per_sample is not None:
+        capacity = batch_size * max_sequences_per_sample + 1
+        packed_cu_seqlens = torch.cat(
+            [
+                packed_cu_seqlens,
+                packed_cu_seqlens.new_full(
+                    (capacity - packed_cu_seqlens.numel(),), offset
+                ),
+            ]
+        )
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
 
-    max_seqlen: int
-    packed_cu_seqlens_host = None
-    if include_host_offsets:
-        packed_cu_seqlens_host = tuple(
-            int(offset) for offset in packed_cu_seqlens.tolist()
-        )
+    packed_cu_seqlens_host = (
+        tuple(int(offset) for offset in packed_cu_seqlens.tolist())
+        if include_host_offsets
+        else None
+    )
+    if max_sequences_per_sample is not None:
+        max_seqlen = seq_len
+    elif packed_cu_seqlens_host is not None:
         max_seqlen = max(
             (
                 end - start

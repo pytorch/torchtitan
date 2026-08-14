@@ -74,7 +74,7 @@ def llama3_debugmodel() -> Trainer.Config:
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="varlen")
-    config.training.disable_cuda_graphs = True
+    config.training.max_packed_sequences_per_sample = 16
     return config
 
 

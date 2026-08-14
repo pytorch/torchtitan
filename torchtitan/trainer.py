@@ -178,8 +178,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
         def _validate_cuda_graphs(self) -> None:
+            sequence_capacity = self.training.max_packed_sequences_per_sample
+            if sequence_capacity is not None and sequence_capacity < 1:
+                raise ValueError(
+                    "training.max_packed_sequences_per_sample must be at least 1."
+                )
+
             if self.training.disable_cuda_graphs:
                 return
+
+            if (
+                self.model_spec is not None
+                and any(self.model_spec.model.traverse(VarlenAttention.Config))
+                and sequence_capacity is None
+            ):
+                raise ValueError(
+                    "Varlen attention with CUDA graphs requires "
+                    "training.max_packed_sequences_per_sample to keep metadata "
+                    "shapes static. Set a capacity or disable CUDA graphs."
+                )
 
             if self.parallelism.pipeline_parallel_degree > 1:
                 raise ValueError(

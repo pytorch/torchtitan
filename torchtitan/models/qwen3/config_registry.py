@@ -481,6 +481,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             local_batch_size=1,
             seq_len=2048,
             steps=180,
+            max_packed_sequences_per_sample=16,
         ),
         dataloader=ChatDataLoader.Config(
             dataset_path="openai/gsm8k",
