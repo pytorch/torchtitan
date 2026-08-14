@@ -12,7 +12,7 @@
 #   H = head dimension (per-head dim),
 #   T = packed tokens (B*L, used by VarlenAttention)
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
@@ -64,6 +64,7 @@ __all__ = [
     "get_efficient_causal_mask_mod_for_packed_document",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
+    "local_head_split",
 ]
 
 
@@ -80,7 +81,29 @@ class VarlenMetadata(NamedTuple):
     cu_seq_q_host: tuple[int, ...] | None = None
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+# Mapping (not dict) lets covariant value types accept both BlockMask-only
+# dictionaries and mixed dictionaries. A None value marks an unused mask.
+AttentionMasksType = (
+    Mapping[str, BlockMask | VarlenMetadata | None] | BlockMask | VarlenMetadata
+)
+
+
+def local_head_split(
+    t: torch.Tensor,
+    head_dim: int,
+    *,
+    dp_shard_dim: int = 0,
+) -> torch.Tensor:
+    # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
+    use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
+    tensor_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(2)}
+    with spmd.local():
+        if use_spmd:
+            spmd.assert_type(t, tensor_type)
+        out = t.view(t.shape[0], t.shape[1], -1, head_dim)
+        if use_spmd:
+            spmd.assert_type(out, tensor_type)
+    return out
 
 
 class VarlenAttention(Module):
@@ -644,6 +667,10 @@ def create_varlen_metadata_for_document(
     packed_cu_seqlens = torch.cat(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        # Packed document boundaries are rank-local ragged metadata, so they
+        # vary across DP ranks even when construction initially infers R.
+        spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
 
     max_seqlen: int
     packed_cu_seqlens_host = None
