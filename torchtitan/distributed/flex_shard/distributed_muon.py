@@ -65,24 +65,9 @@ def build_distributed_muon(
     ``[M * R, C]`` as stacked matrices ``[M, R, C]`` for local Muon compute.
     An absent FQN retains ordinary 2D matrix compute.
     """
-    prepared_params = []
-    for param_group in params:
-        group = dict(param_group)
-        raw_params = group.get("params", ())
-        group_params = (
-            (raw_params,) if isinstance(raw_params, Tensor) else tuple(raw_params)
-        )
-        raw_param_names = group.get("param_names")
-        param_names = () if raw_param_names is None else tuple(raw_param_names)
-        if raw_param_names is None or len(group_params) != len(param_names):
-            raise ValueError("params and param_names must be aligned")
-        group["params"] = group_params
-        group["param_names"] = param_names
-
-        prepared_params.append(group)
-
+    normalized_param_groups = _normalize_param_groups(params)
     optimizer = DistributedMuon(
-        prepared_params,
+        normalized_param_groups,
         num_stacked_matrices_by_fqn=num_stacked_matrices_by_fqn,
         **kwargs,
     )
@@ -92,6 +77,32 @@ def build_distributed_muon(
         bucket_configs=bucket_configs,
     )
     return optimizer
+
+
+def _normalize_param_groups(
+    params: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Copy parameter groups and materialize their aligned values."""
+    normalized_param_groups = []
+    for param_group in params:
+        normalized_group = dict(param_group)
+        params_value = normalized_group.get("params", ())
+        normalized_params = (
+            (params_value,) if isinstance(params_value, Tensor) else tuple(params_value)
+        )
+        param_names_value = normalized_group.get("param_names")
+        normalized_param_names = (
+            () if param_names_value is None else tuple(param_names_value)
+        )
+        if param_names_value is None or len(normalized_params) != len(
+            normalized_param_names
+        ):
+            raise ValueError("params and param_names must be aligned")
+        normalized_group["params"] = normalized_params
+        normalized_group["param_names"] = normalized_param_names
+        normalized_param_groups.append(normalized_group)
+
+    return normalized_param_groups
 
 
 def _validate_compute_sharding_configuration(
