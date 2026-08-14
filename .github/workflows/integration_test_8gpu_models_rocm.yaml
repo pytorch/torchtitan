@@ -1,13 +1,10 @@
-name: 8 GPU Model Tests
+name: 8 GPU Model Tests (ROCm)
 
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - 'torchtitan/experiments/**'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [ main ]
+    tags:
+      - ciflow/rocm/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   schedule:
@@ -33,7 +30,7 @@ jobs:
     if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     uses: ./.github/workflows/set-matrix.yaml
     with:
-      gpu-arch: cuda
+      gpu-arch: rocm
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
@@ -57,9 +54,8 @@ jobs:
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
 
-        # Log CUDA driver version for debugging.
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
-        echo "CUDA driver version: ${DRIVER_VERSION}"
+        # Log ROCm device info for debugging.
+        rocm-smi || true
 
         pip config --user set global.progress_bar off
 
@@ -69,6 +65,9 @@ jobs:
         fi
         python -m pip install --force-reinstall --pre \
           "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
+
+        export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+        echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
