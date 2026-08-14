@@ -29,6 +29,7 @@ from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     MemoryBudgetAC,
     SelectiveAC,
+    validate_activation_checkpointing_compile,
 )
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -60,6 +61,12 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
 
         def __post_init__(self):
+            validate_activation_checkpointing_compile(
+                self.activation_checkpoint,
+                model_compile_enabled=(
+                    self.compile.enable and "model" in self.compile.components
+                ),
+            )
             if isinstance(self.activation_checkpoint, MemoryBudgetAC.Config) and not (
                 self.compile.enable and "model" in self.compile.components
             ):

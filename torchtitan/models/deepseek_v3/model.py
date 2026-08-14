@@ -20,6 +20,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.remat import maybe_recompute_needs, maybe_remat_region
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -32,6 +33,8 @@ class Attention(BaseAttention):
 
     This is DeepSeek V3-specific and NOT shared with other models.
     """
+
+    REMAT_REGIONS = ("wq", "wkv_a", "core", "wo")
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
@@ -101,9 +104,11 @@ class Attention(BaseAttention):
 
         # Query projection
         if self.q_lora_rank == 0:
-            q = self.wq(x)
+            q = maybe_remat_region(self.wq, "wq", owner=self)(x)
+            maybe_recompute_needs(self, q)
         else:
-            q = self.wq_a(x)
+            q = maybe_remat_region(self.wq_a, "wq", owner=self)(x)
+            maybe_recompute_needs(self, q)
             q = self.wq_b(self.q_norm(q))
 
         # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
@@ -120,7 +125,8 @@ class Attention(BaseAttention):
         )
 
         # Key-value projection
-        kv = self.wkv_a(x)
+        kv = maybe_remat_region(self.wkv_a, "wkv_a", owner=self)(x)
+        maybe_recompute_needs(self, kv)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(2), positions)
@@ -141,11 +147,15 @@ class Attention(BaseAttention):
                         {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
                     )
 
-        output = self.inner_attention(
+        output = maybe_remat_region(self.inner_attention, "core", owner=self)(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
-        ).contiguous()
+        )
+        maybe_recompute_needs(self, output)
+        output = output.contiguous()
         output = output.view(bsz, seqlen, -1)
-        return self.wo(output)
+        out_BLD = maybe_remat_region(self.wo, "wo", owner=self)(output)
+        maybe_recompute_needs(self, out_BLD)
+        return out_BLD
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

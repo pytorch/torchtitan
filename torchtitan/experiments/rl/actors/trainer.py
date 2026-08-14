@@ -32,6 +32,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     SelectiveAC,
+    validate_activation_checkpointing_compile,
 )
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
@@ -113,6 +114,12 @@ class PolicyTrainer(Actor, Configurable):
 
         self.config = config
         self.compile_config = compile_config
+        validate_activation_checkpointing_compile(
+            config.ac_config,
+            model_compile_enabled=(
+                compile_config.enable and "model" in compile_config.components
+            ),
+        )
         self.loss_fn = config.loss.build()
         # TODO: add support to compile the loss.
 
