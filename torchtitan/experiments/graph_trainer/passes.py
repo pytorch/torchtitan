@@ -84,9 +84,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
 )
-from torchtitan.experiments.graph_trainer.minimal_async_ep_buffer_pass import (
-    assign_minimal_async_ep_buffer_sets_pass,
-)
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
@@ -254,7 +251,7 @@ def compile_time_passes(
                         module_pattern=ep_overlap_module_fqn,
                         num_static_inputs=traced_result.num_static_inputs,
                         optimize_grad_live_out=False,
-                        require_token_exchange=(
+                        require_all_to_all=(
                             getattr(config.parallelism, "expert_parallel_degree", 1) > 1
                         ),
                     ),
@@ -279,8 +276,6 @@ def compile_time_passes(
         passes.extend(ep_overlap_chunk_passes)
         passes.append(isolate_ep_process_group_pass)
         passes.append(eliminate_dead_code_pass)
-        if ep_overlap_chunk_strategy == "graph":
-            passes.append(assign_minimal_async_ep_buffer_sets_pass)
         if not disable_early_grad_accumulation:
             passes.append(normalize_chunked_grad_collective_chains_pass)
 
@@ -304,7 +299,7 @@ def compile_time_passes(
             functools.partial(
                 ep_overlap_schedule_pass,
                 module_pattern=ep_overlap_module_fqn,
-                require_token_exchange=(
+                require_all_to_all=(
                     getattr(config.parallelism, "expert_parallel_degree", 1) > 1
                 ),
                 pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,
@@ -347,7 +342,7 @@ def compile_time_passes(
             )
         )
 
-    if config.parallelism.enable_async_tensor_parallel:
+    if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
     if not include_inductor:

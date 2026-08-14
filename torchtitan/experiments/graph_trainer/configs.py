@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
@@ -51,24 +50,6 @@ class EpOverlapConfig:
     v1 supports all transformer blocks (``layers.*``) or all MoE blocks
     (``layers.*.moe``). The overlap scheduler consumes the common chunk metadata
     produced by either eager or graph chunking.
-    """
-
-    minimal_async_ep_receive_capacity_factor: float | None = None
-    """Bound receive rows relative to balanced routing for MinimalAsyncEP.
-
-    ``None`` preserves the lossless worst-case allocation. A finite factor is
-    useful when that allocation cannot fit; execution fails if routing exceeds
-    the configured capacity instead of dropping tokens.
-    """
-
-    minimal_async_ep_num_copy_ctas: int | None = 72
-    """Persistent row-copy grid size used by MinimalAsyncEP during overlap.
-
-    The default follows ``round_to_8(S * t_copy / (t_copy + t_compute))``, with
-    ``t_copy = 2*R*D*d/B`` and ``t_compute = 3*R*D*H/P``. GB200 measurements
-    use ``S=152``, ``H=2048``, ``B=1.06 TB/s``, and ``P=1.44 PFLOP/s``, which
-    predict 71 CTAs and round to 72. ``None`` leaves the copy kernel unbounded.
-    This setting has no effect on other EP backends or without EP overlap.
     """
 
     disable_early_grad_accumulation: bool = False
@@ -224,22 +205,6 @@ def validate_ep_overlap_config(
         raise ValueError(
             "--compile.ep_overlap.chunk_dim seq is only supported with "
             "--compile.ep_overlap.module_fqn layers.*.moe"
-        )
-
-    capacity_factor = ep_overlap_config.minimal_async_ep_receive_capacity_factor
-    if capacity_factor is not None and (
-        not math.isfinite(capacity_factor) or capacity_factor < 1.0
-    ):
-        raise ValueError(
-            "--compile.ep_overlap.minimal_async_ep_receive_capacity_factor "
-            "must be finite and at least 1.0, or None"
-        )
-
-    num_copy_ctas = ep_overlap_config.minimal_async_ep_num_copy_ctas
-    if num_copy_ctas is not None and num_copy_ctas < 1:
-        raise ValueError(
-            "--compile.ep_overlap.minimal_async_ep_num_copy_ctas must be "
-            "positive or None"
         )
 
     return chunk_dim, chunk_strategy, module_fqn

@@ -39,7 +39,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
-    validate_ep_overlap_config,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
@@ -64,10 +63,8 @@ from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
 )
 from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     _apply_schedule,
-    _is_minimal_async_ep_wait,
     _schedule_ep_overlap_regions,
     _ScheduledRegion,
-    _token_exchange_wait_users,
 )
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     CHUNK_SYMBOL_HINTS_META,
@@ -143,7 +140,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
                 model_spec=SimpleNamespace(model=SimpleNamespace(layers=[0, 1])),
-                parallelism=SimpleNamespace(enable_async_tensor_parallel=False),
+                parallelism=SimpleNamespace(),
             )
 
         traced_result = SimpleNamespace(state_fqns=[])
@@ -2646,7 +2643,7 @@ class TestChunkPasses(TestCase):
                     module_pattern="layers.*.moe",
                     num_static_inputs=traced.num_static_inputs,
                     optimize_grad_live_out=False,
-                    require_token_exchange=False,
+                    require_all_to_all=False,
                 )
         target = (
             torch.ops._c10d_functional.all_reduce.default
@@ -2665,7 +2662,7 @@ class TestChunkPasses(TestCase):
         _schedule_ep_overlap_regions(
             gm,
             module_pattern=module_pattern,
-            require_token_exchange=True,
+            require_all_to_all=True,
             pair_first_token_exchange=pair_first_token_exchange,
         )
         return {node: idx for idx, node in enumerate(gm.graph.nodes)}
@@ -3557,7 +3554,6 @@ class TestChunkPasses(TestCase):
         config = SimpleNamespace(
             model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
             parallelism=SimpleNamespace(
-                enable_async_tensor_parallel=False,
                 expert_parallel_degree=1,
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,
@@ -3630,10 +3626,6 @@ class TestChunkPasses(TestCase):
         )
         self.assertLess(
             post_chunk_dce,
-            names.index("assign_minimal_async_ep_buffer_sets_pass"),
-        )
-        self.assertLess(
-            names.index("assign_minimal_async_ep_buffer_sets_pass"),
             names.index("normalize_chunked_grad_collective_chains_pass"),
         )
         self.assertLess(
@@ -3672,16 +3664,6 @@ class TestChunkPasses(TestCase):
             disabled_post_chunk_dce,
             disabled_names.index("joint_transformer_block_bucketing_reordering_pass"),
         )
-
-        config.compile.ep_overlap.strategy = "eager"
-        eager_names = self._compile_pass_names(traced_result, config)
-        self.assertNotIn("assign_minimal_async_ep_buffer_sets_pass", eager_names)
-
-    def test_ep_overlap_rejects_invalid_minimal_async_ep_copy_grid(self):
-        with self.assertRaisesRegex(ValueError, "must be positive or None"):
-            validate_ep_overlap_config(
-                EpOverlapConfig(enabled=True, minimal_async_ep_num_copy_ctas=0)
-            )
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
@@ -4157,103 +4139,6 @@ class TestChunkPasses(TestCase):
             ],
         )
 
-    def test_ep_overlap_finds_ready_wait_in_production_combine_graph(self):
-        from torchtitan.distributed.minimal_async_ep import api
-
-        def combine(x, dst_ranks, dst_rows, num_valid_rows):
-            return api.combine_data(
-                x,
-                dst_ranks,
-                dst_rows,
-                num_valid_rows,
-                num_routed_rows=4,
-            )
-
-        gm = make_fx(combine, tracing_mode="fake")(
-            torch.empty(4, 8),
-            torch.empty(4, dtype=torch.int64),
-            torch.empty(4, dtype=torch.int64),
-            torch.empty(1, dtype=torch.int64),
-        )
-        launch = next(
-            node
-            for node in gm.graph.nodes
-            if node.target is torch.ops.minimal_async_ep.combine_data.default
-        )
-        source_wait = next(
-            node
-            for node in gm.graph.nodes
-            if node.target is torch.ops.minimal_async_ep.wait_combine_source.default
-        )
-        ready_wait = next(
-            node
-            for node in gm.graph.nodes
-            if node.target is torch.ops.minimal_async_ep.wait_combine.default
-        )
-
-        self.assertTrue(_is_minimal_async_ep_wait(source_wait))
-        self.assertEqual(
-            _token_exchange_wait_users(launch, node_set=set(gm.graph.nodes)),
-            [ready_wait],
-        )
-
-    def test_ep_overlap_preserves_minimal_async_ep_dispatch_buffer_lifetime(self):
-        from torchtitan.distributed.minimal_async_ep import api
-
-        def exchanges(x, expert_ids, counts):
-            outputs = []
-            for buffer_set in (0, 1, 0, 1):
-                dispatched = api.dispatch_op(x, expert_ids, counts, 16, 2, buffer_set)
-                hidden, _ = api.wait_dispatch_op(
-                    dispatched[0], dispatched[8], [x, expert_ids, counts]
-                )
-                expert_output = torch.sin(hidden)
-                combined = api.combine_op(
-                    expert_output,
-                    *dispatched[1:6],
-                    8,
-                    buffer_set,
-                )
-                outputs.append(api.wait_combine(combined, [expert_output]))
-            return outputs
-
-        gm = make_fx(exchanges, tracing_mode="fake")(
-            torch.randn(4, 8),
-            torch.tensor([[0, 1], [1, 2], [2, 3], [3, 0]]),
-            torch.full((4,), 2, dtype=torch.int64),
-        )
-        blocks: list[list[torch.fx.Node]] = []
-        for node in gm.graph.nodes:
-            if node.target is torch.ops.minimal_async_ep.dispatch.default:
-                blocks.append([])
-            if blocks and node.op == "call_function":
-                blocks[-1].append(node)
-
-        dispatches, releases = [], []
-        for block_idx, block in enumerate(blocks):
-            chunk_id = block_idx % 2
-            fqn = f"layers.{block_idx // 2}.moe"
-            for node in block:
-                self._mark_chunk_body(node, fqn=fqn, chunk_id=chunk_id)
-            dispatch = next(
-                node
-                for node in block
-                if node.target is torch.ops.minimal_async_ep.dispatch.default
-            )
-            combine = next(
-                node
-                for node in block
-                if node.target is torch.ops.minimal_async_ep.combine.default
-            )
-            dispatches.append(dispatch)
-            releases.append(combine.args[0])
-
-        self._schedule_ep_overlap_and_order(gm)
-        self.assertNotIn("buffer_reuse_dependency", dispatches[0].kwargs)
-        self.assertNotIn("buffer_reuse_dependency", dispatches[1].kwargs)
-        self.assertIs(dispatches[2].kwargs["buffer_reuse_dependency"], releases[0])
-        self.assertIs(dispatches[3].kwargs["buffer_reuse_dependency"], releases[1])
-
     def test_ep_overlap_keeps_transformer_batch_first_marker_wait_gated(self):
         c10d = torch.ops._c10d_functional
 
@@ -4464,7 +4349,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_token_exchange=True,
+                require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4475,7 +4360,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_token_exchange=True,
+                require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4497,7 +4382,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_token_exchange=True,
+                require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4515,7 +4400,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_token_exchange=True,
+                require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4535,7 +4420,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_token_exchange=True,
+                require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4559,7 +4444,7 @@ class TestChunkPasses(TestCase):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_token_exchange=True,
+                require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
 
@@ -4729,7 +4614,7 @@ class TestChunkPasses(TestCase):
                 order[refs[chunk_id]["combine"]],
             )
 
-    def test_ep_overlap_rejects_mismatched_token_exchange_count(self):
+    def test_ep_overlap_rejects_mismatched_all_to_all_count(self):
         gm = self._build_ep_overlap_schedule_gm(backward=True)
         c10d = torch.ops._c10d_functional
         for node in gm.graph.nodes:
@@ -4742,11 +4627,11 @@ class TestChunkPasses(TestCase):
                 node.args = (node.args[0], "sum", "ep")
                 node.meta["custom"].pop(_EP_TOKEN_EXCHANGE, None)
                 break
-        with self.assertRaisesRegex(ValueError, "matching EP token-exchange counts"):
+        with self.assertRaisesRegex(ValueError, "matching EP all-to-all counts"):
             _schedule_ep_overlap_regions(
                 gm,
                 module_pattern="layers.*.moe",
-                require_token_exchange=True,
+                require_all_to_all=True,
                 pair_first_token_exchange=True,
             )
 
@@ -5049,7 +4934,7 @@ class TestChunkPasses(TestCase):
         }
         self.assertEqual(chunked_roots, {"layers.1"})
 
-        with self.assertRaisesRegex(ValueError, "No EP token-exchange regions"):
+        with self.assertRaisesRegex(ValueError, "No EP all-to-all regions"):
             ep_overlap_chunk_pass(
                 self._build_linear_region_gm(fqn="layers.0"),
                 mode="batch",
@@ -5063,7 +4948,7 @@ class TestChunkPasses(TestCase):
             gm,
             mode="batch",
             module_pattern="layers.*",
-            require_token_exchange=False,
+            require_all_to_all=False,
         )
 
         chunked_roots = {

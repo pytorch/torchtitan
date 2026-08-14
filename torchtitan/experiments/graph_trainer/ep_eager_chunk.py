@@ -316,8 +316,6 @@ class _EagerChunkedForward:
         else:
             split_args, split_kwargs = split_transformer_block_inputs()
 
-        from torchtitan.distributed.minimal_async_ep.api import _use_buffer_set
-
         outputs = []
         for chunk_id in (0, 1):
             body = annotate_fn(
@@ -327,16 +325,12 @@ class _EagerChunkedForward:
                     "chunked_region_role": "body",
                 }
             )(self.inner_forward)
-            with _use_buffer_set(chunk_id):
-                outputs.append(
-                    body(
-                        *(chunks[chunk_id] for chunks in split_args),
-                        **{
-                            key: chunks[chunk_id]
-                            for key, chunks in split_kwargs.items()
-                        },
-                    )
+            outputs.append(
+                body(
+                    *(chunks[chunk_id] for chunks in split_args),
+                    **{key: chunks[chunk_id] for key, chunks in split_kwargs.items()},
                 )
+            )
 
         materialize = annotate_fn(
             {
