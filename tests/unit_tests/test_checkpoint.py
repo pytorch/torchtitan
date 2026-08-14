@@ -309,6 +309,92 @@ class TestCheckpointManager(unittest.TestCase):
         torch.testing.assert_close(sd["optimizer"]["fake_param"], torch.tensor([1.0]))
         manager.close()
 
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
+    @mock.patch.object(dist_checkpoint, "load")
+    def test_purge_keeps_eval_checkpoints(self, _mock_load, mock_save, _mock_rank):
+        mock_save.side_effect = self.fake_save
+        self.trainer_config.checkpoint.eval_freq = 2
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        manager.register_eval_checkpoint_callback(mock.Mock())
+        manager.save(curr_step=1)
+        manager.save(curr_step=2)
+        manager.save(curr_step=3)
+
+        time.sleep(0.1)
+        self.assertEqual(
+            sorted(os.listdir(self.test_folder)),
+            ["step-2", "step-3"],
+        )
+
+        manager.close()
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        manager.register_eval_checkpoint_callback(mock.Mock())
+        manager.save(curr_step=4, last_step=True)
+        deadline = time.time() + 5.0
+        while True:
+            existing = sorted(os.listdir(self.test_folder))
+            if existing == ["step-2", "step-3", "step-4"]:
+                break
+            if time.time() > deadline:
+                self.fail(f"Purge timed out; found {existing}")
+            time.sleep(0.05)
+
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
+    @mock.patch.object(dist_checkpoint, "load")
+    def test_purge_can_remove_eval_checkpoints(self, _mock_load, mock_save, _mock_rank):
+        mock_save.side_effect = self.fake_save
+        self.trainer_config.checkpoint.eval_freq = 2
+        self.trainer_config.checkpoint.keep_eval_checkpoints = False
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        manager.register_eval_checkpoint_callback(mock.Mock())
+        for step in range(1, 5):
+            manager.save(curr_step=step)
+
+        deadline = time.time() + 5.0
+        while True:
+            existing = sorted(os.listdir(self.test_folder))
+            if existing == ["step-3", "step-4"]:
+                break
+            if time.time() > deadline:
+                self.fail(f"Purge timed out; found {existing}")
+            time.sleep(0.05)
+
+        manager.close()
+
     @mock.patch("torch.distributed.get_rank", return_value=1)
     @mock.patch.object(dist_checkpoint, "save")
     @mock.patch.object(dist_checkpoint, "load")
@@ -500,13 +586,15 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
     @mock.patch.object(dist_checkpoint, "load")
-    def test_interval_respects_interval(self, mock_load, mock_save, mock_rank):
+    def test_save_schedule_includes_eval_checkpoints(
+        self, mock_load, mock_save, mock_rank
+    ):
         """
-        Test that save() only triggers on step 1 and multiples of interval, skipping others,
-        but respects force flag to override interval.
+        Test regular, eval, and last-step checkpoint scheduling.
         """
         cfg = self.trainer_config.checkpoint
         cfg.interval = 3
+        cfg.eval_freq = 2
         cfg.keep_latest_k = 0
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
@@ -519,18 +607,32 @@ class TestCheckpointManager(unittest.TestCase):
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
+        callback = mock.Mock()
+        manager.register_eval_checkpoint_callback(callback)
+
         manager.save(curr_step=1)
         self.assertEqual(mock_save.call_count, 0)
+        callback.assert_not_called()
         manager.save(curr_step=2)
-        self.assertEqual(mock_save.call_count, 0)
-        manager.save(curr_step=2, last_step=True)
         self.assertEqual(mock_save.call_count, 1)
+        callback.assert_called_once_with(
+            2,
+            os.path.join(manager.folder, "step-2"),
+        )
+        callback.reset_mock()
         manager.save(curr_step=3)
         self.assertEqual(mock_save.call_count, 2)
+        callback.assert_not_called()
         manager.save(curr_step=4)
-        self.assertEqual(mock_save.call_count, 2)
-        manager.save(curr_step=4, last_step=True)
         self.assertEqual(mock_save.call_count, 3)
+        callback.assert_called_once_with(
+            4,
+            os.path.join(manager.folder, "step-4"),
+        )
+        callback.reset_mock()
+        manager.save(curr_step=5, last_step=True)
+        self.assertEqual(mock_save.call_count, 4)
+        callback.assert_not_called()
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
@@ -694,6 +796,46 @@ class TestCheckpointManager(unittest.TestCase):
         # New future created
         new_future = manager.save_future
         new_future.result.assert_not_called()
+
+    @mock.patch("torchtitan.components.checkpointer.dcp.dist.new_group")
+    @mock.patch.object(
+        dist_checkpoint,
+        "async_save",
+        side_effect=fake_async_save,
+    )
+    def test_eval_checkpoint_callback_waits_for_async_upload(
+        self, _mock_async_save, _mock_new_group
+    ):
+        trainer_config = DummyTrainerConfig(dump_folder=self.trainer_config.dump_folder)
+        trainer_config.checkpoint.async_mode = "async"
+        trainer_config.checkpoint.interval = 100
+        trainer_config.checkpoint.eval_freq = 10
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states={"trainer": torch.tensor([0])},
+            config=trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        callback = mock.Mock()
+        manager.register_eval_checkpoint_callback(callback)
+
+        manager.save(curr_step=10)
+        callback.assert_not_called()
+
+        assert manager.save_future is not None
+        manager.save_future.finished = True
+        manager.save(curr_step=11)
+
+        callback.assert_called_once_with(
+            10,
+            os.path.join(self.trainer_config.dump_folder, "test_folder", "step-10"),
+        )
+        self.assertIsNone(manager.save_future)
+        manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
@@ -961,6 +1103,9 @@ class TestConfigPostInit(unittest.TestCase):
         # Interval must be >= 1
         with self.assertRaisesRegex(ValueError, "interval.*at least 1"):
             CheckpointManager.Config(interval=0)
+
+        with self.assertRaisesRegex(ValueError, "frequency.*at least 1"):
+            CheckpointManager.Config(eval_freq=0)
 
         # keep_latest_k range checks
         with self.assertRaisesRegex(ValueError, "cannot be negative"):

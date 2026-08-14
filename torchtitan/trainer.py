@@ -20,6 +20,7 @@ import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
+from torchtitan.components.async_eval import AsyncEval
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
@@ -111,6 +112,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
+        async_eval: AsyncEval.Config = field(default_factory=AsyncEval.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
@@ -266,6 +268,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
+    async_eval: AsyncEval
     metrics_processor: MetricsProcessor
     checkpointer: BaseCheckpointManager
 
@@ -594,6 +597,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             ),
             base_folder=config.dump_folder,
         )
+
+        # A disabled config builds a lightweight no-op coordinator, keeping the
+        # training loop and shutdown path branch-free.
+        self.async_eval = config.async_eval.build(
+            dump_folder=config.dump_folder,
+            metrics_config=config.metrics,
+        )
+        self.async_eval.register_checkpoint_callback(self.checkpointer)
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
@@ -1045,6 +1056,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     ):
                         self.validator.validate(self.model_parts, self.step)
 
+                    # Launch async evals for completed checkpoints and collect
+                    # results from jobs that have finished.
+                    self.async_eval.collect()
+
                     # signal the profiler that the next profiling step has started
                     profiler.step()
 
@@ -1082,5 +1097,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
+        if hasattr(self, "async_eval") and self.async_eval:
+            self.async_eval.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()

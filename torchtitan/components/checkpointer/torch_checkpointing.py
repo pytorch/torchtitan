@@ -115,6 +115,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         )
 
         self.load_only = config.load_only
+        self.eval_freq = config.eval_freq
+        self.keep_eval_checkpoints = config.keep_eval_checkpoints
+        self._eval_checkpoint_callback = None
         self.exclude_from_loading = config.exclude_from_loading
         self.initial_load_path = config.initial_load_path
         self.initial_load_model_only = config.initial_load_model_only
