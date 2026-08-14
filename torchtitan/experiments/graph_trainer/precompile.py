@@ -11,7 +11,9 @@ import hashlib
 import os
 import pickle
 from dataclasses import dataclass
-from typing import NewType, TYPE_CHECKING
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+from typing import TYPE_CHECKING, NewType
 
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelDims
@@ -52,8 +54,13 @@ def compute_config_fingerprint(
             h.update(
                 "quantization:"
                 f"{signature.module_fqn}:{signature.kind}:{signature.recipe_name}:"
-                f"{signature.emulate}\n".encode()
+                f"{signature.emulate}:{signature.pad_multiple}\n".encode()
             )
+        try:
+            torchao_version = package_version("torchao")
+        except PackageNotFoundError:
+            torchao_version = "not-installed"
+        h.update(f"torchao_version:{torchao_version}\n".encode())
 
     for f in dataclasses.fields(parallel_dims):
         if not f.name.startswith("_"):

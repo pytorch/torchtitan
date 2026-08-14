@@ -205,6 +205,9 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
             from torchao.prototype.moe_training.config import Float8TrainingOpConfig
             from torchao.quantization.quant_api import quantize_
 
+            self._torchtitan_quantization_recipe_name = "rowwise"
+            self._torchtitan_quantization_emulate = False
+            self._torchtitan_quantization_pad_multiple = 16
             quantize_(
                 self,
                 config=Float8TrainingOpConfig(),

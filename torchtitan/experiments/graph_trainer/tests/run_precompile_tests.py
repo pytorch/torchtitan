@@ -46,6 +46,7 @@ def _run_cmd(cmd):
 def _build_precompile_tests() -> list[PrecompileTestDefinition]:
     fx_trace_precompile_dir = tempfile.mkdtemp(prefix="fx_trace_precompile_")
     dsv3_fx_trace_precompile_dir = tempfile.mkdtemp(prefix="dsv3_fx_trace_precompile_")
+    dsv3_fp8_precompile_dir = tempfile.mkdtemp(prefix="dsv3_fp8_precompile_")
     return [
         # Uses the SDPA backend: the default FlexAttention backend bakes a
         # BlockMask into the precompiled artifact, whose mask_mod closures are
@@ -55,6 +56,10 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
         # TODO: re-test on FlexAttention once BlockMask is excluded/rebuilt at
         # load time (or becomes picklable).
         PrecompileTestDefinition(
+            # The grouped-expert fingerprint is covered by unit tests. Keep the
+            # end-to-end case until CooR supports the data-dependent routed-token
+            # shape; today tracing fails on an unbacked SymInt before artifact
+            # serialization. SDPA avoids the separate BlockMask pickle issue.
             precompile_command=(
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"
                 " --module graph_trainer.llama3"
@@ -103,6 +108,34 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_descr="aot_fx_trace deepseek_v3 precompile FSDP+TP+EP",
             test_name="aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep",
             ngpu=8,
+            disabled=True,
+        ),
+        PrecompileTestDefinition(
+            precompile_command=(
+                "python -m torchtitan.experiments.graph_trainer.precompile_main"
+                " --module graph_trainer.deepseek_v3"
+                " --config graph_trainer_deepseek_v3_debugmodel_float8_sdpa"
+                " --compile.mode aot_fx_trace"
+                " --compile.inductor_compilation regional"
+                f" --compile.precompile_artifact_dir {dsv3_fp8_precompile_dir}"
+                " --parallelism.data_parallel_shard_degree 2"
+                " --parallelism.tensor_parallel_degree 1"
+                " --parallelism.expert_parallel_degree 2"
+            ),
+            override_args=[
+                "--module graph_trainer.deepseek_v3",
+                "--config graph_trainer_deepseek_v3_debugmodel_float8_sdpa",
+                "--compile.mode aot_fx_trace",
+                "--compile.inductor_compilation regional",
+                f"--compile.precompile_artifact_dir {dsv3_fp8_precompile_dir}",
+                "--parallelism.data_parallel_shard_degree 2",
+                "--parallelism.tensor_parallel_degree 1",
+                "--parallelism.expert_parallel_degree 2",
+                "--training.steps 10",
+            ],
+            test_descr="aot_fx_trace Float8 grouped-expert precompile FSDP+EP",
+            test_name="aot_fx_trace_dsv3_fp8_grouped_experts_precompile",
+            ngpu=2,
             disabled=True,
         ),
     ]

@@ -126,32 +126,34 @@ class QuantizationSignature:
     kind: str
     recipe_name: str
     emulate: bool
+    pad_multiple: int | None = None
 
 
 def get_quantization_signature(
     model: nn.Module,
 ) -> tuple[QuantizationSignature, ...]:
-    """Return sorted stable signatures for quantized runtime modules.
-
-    Grouped-expert modules are rejected because their regional compilation
-    path does not yet have a complete precompile artifact signature.
-    """
+    """Return sorted stable signatures for quantized runtime modules."""
     signatures = []
     for module_fqn, module in model.named_modules():
         kind = get_quantization_kind(module)
         if kind is None:
             continue
-        if kind.endswith("grouped_experts"):
-            raise ValueError(
-                "FP8 precompile does not support grouped experts. "
-                "Use dense FP8 modules for precompiled graphs."
-            )
         recipe_name = getattr(module, "_torchtitan_quantization_recipe_name", "")
         if not recipe_name:
             raise ValueError(
                 "Quantized module is missing stable recipe metadata: "
                 f"{module_fqn} ({kind})."
             )
+        pad_multiple = None
+        if kind.endswith("grouped_experts"):
+            pad_multiple = getattr(
+                module, "_torchtitan_quantization_pad_multiple", None
+            )
+            if not isinstance(pad_multiple, int):
+                raise ValueError(
+                    "Quantized grouped-expert module is missing stable padding "
+                    f"metadata: {module_fqn} ({kind})."
+                )
         signatures.append(
             QuantizationSignature(
                 module_fqn=module_fqn,
@@ -160,6 +162,7 @@ def get_quantization_signature(
                 emulate=bool(
                     getattr(module, "_torchtitan_quantization_emulate", False)
                 ),
+                pad_multiple=pad_multiple,
             )
         )
     return tuple(sorted(signatures, key=lambda signature: signature.module_fqn))

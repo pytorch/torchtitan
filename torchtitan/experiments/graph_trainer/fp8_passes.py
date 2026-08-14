@@ -23,17 +23,14 @@ from torchtitan.tools.logging import logger
 _FP8_META = "fp8"
 
 
-def _available_scaled_mm_targets() -> frozenset[object]:
-    targets = []
-    for op_name in ("_scaled_mm", "_scaled_grouped_mm"):
-        op = getattr(torch.ops.aten, op_name, None)
-        target = getattr(op, "default", None)
-        if target is not None:
-            targets.append(target)
-    return frozenset(targets)
+def _available_aten_targets(op_name: str) -> frozenset[object]:
+    op = getattr(torch.ops.aten, op_name, None)
+    target = getattr(op, "default", None)
+    return frozenset((target,)) if target is not None else frozenset()
 
 
-_SCALED_MM_TARGETS = _available_scaled_mm_targets()
+_SCALED_MM_TARGETS = _available_aten_targets("_scaled_mm")
+_SCALED_GROUPED_MM_TARGETS = _available_aten_targets("_scaled_grouped_mm")
 _FP8_DATA_DTYPES = frozenset(
     dtype
     for dtype in (
@@ -51,8 +48,8 @@ _FP8_DATA_DTYPES = frozenset(
 FP8_COMPUTE_TARGETS: dict[str, frozenset[object]] = {
     "float8_linear": _SCALED_MM_TARGETS,
     "mxfp8_linear": _SCALED_MM_TARGETS,
-    "float8_grouped_experts": _SCALED_MM_TARGETS,
-    "mxfp8_grouped_experts": _SCALED_MM_TARGETS,
+    "float8_grouped_experts": _SCALED_GROUPED_MM_TARGETS,
+    "mxfp8_grouped_experts": _SCALED_GROUPED_MM_TARGETS,
 }
 
 
@@ -201,7 +198,7 @@ def _is_regional_fp8_compute_node(
 def _identify_fp8_regional_components(
     gm: torch.fx.GraphModule,
 ) -> torch.fx.GraphModule:
-    """Identify maximal dense FP8 compute components for regional Inductor.
+    """Identify maximal FP8 compute components for regional Inductor.
 
     Each component is seeded by a supported FP8 compute operation and expands
     only through CUDA aten nodes with the same module and quantization
@@ -209,7 +206,6 @@ def _identify_fp8_regional_components(
     GraphPP passes shared grad-output quantization from bw_di to bw_dw; they
     prove the compute operand dtype but are not compiled as part of the local
     region. Communication and host work remain outside these regions.
-    Grouped-expert FP8 is not supported by regional Inductor compilation.
     """
     candidate_nodes: set[torch.fx.Node] = set()
     seeds: list[torch.fx.Node] = []
@@ -223,11 +219,6 @@ def _identify_fp8_regional_components(
         module_fqn = custom.get(_MODULE_FQN, "")
         if quantization_kind is None:
             continue
-        if quantization_kind.endswith("grouped_experts"):
-            raise ValueError(
-                "FP8 regional compilation does not support grouped experts. "
-                "Use full Inductor for grouped-expert FP8 graphs."
-            )
         if _is_regional_fp8_compute_node(
             node,
             module_fqn=module_fqn,
@@ -378,7 +369,7 @@ def annotate_fp8_regions_for_regional_inductor_pass(
     *,
     strict: bool,
 ) -> torch.fx.GraphModule:
-    """Validate FP8 lowering and identify dense regions for regional Inductor."""
+    """Validate FP8 lowering and identify regions for regional Inductor."""
     del example_inputs
     gm = _inspect_fp8_regions(
         gm,

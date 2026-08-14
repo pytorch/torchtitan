@@ -301,6 +301,11 @@ DSV3_EP_OVERLAP_GRAPH = " --compile.ep_overlap.strategy graph"
 DSV3_EP_OVERLAP_GRAPH_BITWISE = (
     DSV3_EP_OVERLAP_GRAPH + " --compile.ep_overlap.disable_early_grad_accumulation"
 )
+DSV3_FP8_GROUPED_EXPERTS_PARALLELISM = (
+    "--parallelism.data_parallel_shard_degree=2"
+    " --parallelism.tensor_parallel_degree=1"
+    " --parallelism.expert_parallel_degree=2"
+)
 
 
 def _run_deepseek_v3_loss_compare(
@@ -326,6 +331,20 @@ def _run_deepseek_v3_loss_compare(
         test_config=test_config,
         baseline_options=baseline_options,
         test_options=test_options,
+    )
+
+
+def _run_deepseek_v3_fp8_grouped_experts_loss_compare() -> bool:
+    """Compare Trainer and regional GraphTrainer Float8 grouped experts."""
+    return run_loss_compare(
+        baseline_module="deepseek_v3",
+        baseline_config="deepseek_v3_debugmodel_float8",
+        test_module="graph_trainer.deepseek_v3",
+        test_config="graph_trainer_deepseek_v3_debugmodel_float8",
+        baseline_options=DSV3_FP8_GROUPED_EXPERTS_PARALLELISM,
+        test_options=DSV3_FP8_GROUPED_EXPERTS_PARALLELISM,
+        baseline_ngpus=2,
+        test_ngpus=2,
     )
 
 
@@ -668,7 +687,7 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     "FP8 numerics tests require TorchAO and an H100-class GPU",
 )
 class TestGraphTrainerFP8Numerics(unittest.TestCase):
-    """H100-only dense FP8 loss equivalence against the Trainer path."""
+    """Hopper FP8 loss equivalence against the Trainer path."""
 
     def test_dense_llama3_fp8_full_cudagraph_vs_trainer(self):
         self.assertTrue(
@@ -684,6 +703,9 @@ class TestGraphTrainerFP8Numerics(unittest.TestCase):
                 "graph_trainer_llama3_debugmodel_float8_regional",
             )
         )
+
+    def test_deepseek_v3_fp8_grouped_experts_regional_vs_trainer(self):
+        self.assertTrue(_run_deepseek_v3_fp8_grouped_experts_loss_compare())
 
 
 @unittest.skipUnless(

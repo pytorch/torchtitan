@@ -97,6 +97,25 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_float8(
+    model_compile_enabled: bool = False,
+) -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            Float8LinearConverter.Config(
+                filter_fqns=["lm_head", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+            Float8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled
+            ),
+        ],
+    )
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry(

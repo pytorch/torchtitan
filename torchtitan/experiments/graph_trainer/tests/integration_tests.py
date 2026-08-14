@@ -707,7 +707,7 @@ def _build_autoparallel_h100_tests() -> list[OverrideDefinitions]:
 
 
 def _build_fp8_h100_tests() -> list[OverrideDefinitions]:
-    """Dense FP8 compile and CUDA Graph coverage for H100 runners."""
+    """FP8 compile coverage for Hopper-class runners."""
     return [
         OverrideDefinitions(
             [
@@ -747,6 +747,40 @@ def _build_fp8_h100_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace llama3 FP8 regional Inductor with CUDA Graph",
             "aot_fx_trace_llama3_fp8_regional_cudagraph",
             ngpu=1,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_float8",
+                    "--compile.inductor_compilation regional",
+                    "--compile.disable_passes cudagraph_pass",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--parallelism.expert_parallel_degree 1",
+                    "--training.steps 10",
+                ],
+            ],
+            "aot_fx_trace DeepSeek-v3 Float8 grouped experts regional Inductor",
+            "aot_fx_trace_dsv3_fp8_grouped_experts_regional",
+            ngpu=1,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_float8",
+                    "--compile.inductor_compilation regional",
+                    "--compile.disable_passes cudagraph_pass",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--training.steps 10",
+                ],
+            ],
+            "aot_fx_trace DeepSeek-v3 Float8 grouped experts FSDP+EP",
+            "aot_fx_trace_dsv3_fp8_grouped_experts_fsdp_ep",
+            ngpu=2,
             skip_rocm_test=True,
         ),
     ]
