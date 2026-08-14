@@ -105,6 +105,8 @@ _save_forward_side_effects()
             pass
 
     def test_compiled_full_ac_without_tensor_logging_does_not_save_statistics(self):
+        policies = []
+        contexts = object()
         with (
             patch("torch.compiler.is_compiling", return_value=True),
             patch(
@@ -113,14 +115,20 @@ _save_forward_side_effects()
             ),
             patch(
                 "torchtitan.distributed.activation_checkpoint."
-                "create_selective_checkpoint_contexts"
+                "create_selective_checkpoint_contexts",
+                side_effect=lambda policy: policies.append(policy) or contexts,
             ) as create_contexts,
         ):
-            forward_context, recompute_context = _full_ac_contexts()
+            self.assertIs(_full_ac_contexts(), contexts)
 
-        create_contexts.assert_not_called()
-        with forward_context, recompute_context:
-            pass
+        create_contexts.assert_called_once()
+        self.assertIs(
+            policies[0](
+                None,
+                torch.ops.torchtitan.accumulate_tensor_statistics.default,
+            ),
+            CheckpointPolicy.PREFER_RECOMPUTE,
+        )
 
     def test_flops(self):
         def get_bw_flops(model_fn):

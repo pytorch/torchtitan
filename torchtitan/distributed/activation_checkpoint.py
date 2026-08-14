@@ -80,8 +80,14 @@ def _full_ac_contexts():
     # Full-graph compile needs mutation ops preserved in its selective cache.
     from torchtitan.observability.tensor_logging.runtime import _is_installed
 
-    if torch.compiler.is_compiling() and _is_installed():
-        return _save_forward_side_effects()
+    if torch.compiler.is_compiling():
+        if _is_installed():
+            return _save_forward_side_effects()
+        # A compiled checkpoint context must return TorchDispatchModes even
+        # when tensor logging is disabled. This policy is the no-save form.
+        return create_selective_checkpoint_contexts(
+            lambda _context, _op, *args, **kwargs: CheckpointPolicy.PREFER_RECOMPUTE
+        )
 
     # Eager FullAC can suppress replay directly. Keeping this a plain context is
     # important for CP, whose FlexAttention operator is itself compiled and
