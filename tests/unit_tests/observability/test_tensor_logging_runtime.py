@@ -44,6 +44,9 @@ from torchtitan.observability.tensor_logging.runtime import (
     _include_recording_calls,
     should_run_producers,
 )
+from torchtitan.observability.tensor_logging.statistics import (
+    accumulate_tensor_statistics,
+)
 
 
 @pytest.fixture
@@ -523,6 +526,28 @@ def test_noncontiguous_cuda_statistics_match_values(layout: str) -> None:
         assert snapshot["maximum"].item() == 8.0
     finally:
         runtime.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_statistics_support_64_bit_indexing(monkeypatch) -> None:
+    from torchtitan.observability.tensor_logging import statistics_triton
+
+    # Exercise the large-tensor loop and its 64-bit indexing without a 4 GiB fixture.
+    monkeypatch.setattr(statistics_triton, "_MAX_PROGRAMS", 1)
+    monkeypatch.setattr(statistics_triton, "_MAX_INT32_INDEXED_ELEMENTS", -1)
+    value = torch.zeros(4097, dtype=torch.bfloat16, device="cuda")
+    value[0] = 2
+    value[-1] = 3
+    counts = torch.zeros(4, dtype=torch.int64, device="cuda")
+    sums = torch.zeros(3, dtype=torch.float32, device="cuda")
+    maximum = torch.full((), -torch.inf, dtype=torch.float32, device="cuda")
+    enabled = torch.ones((), dtype=torch.int32, device="cuda")
+
+    accumulate_tensor_statistics(value, counts, sums, maximum, enabled)
+
+    assert counts.tolist() == [4097, 0, 4095, 1]
+    assert sums.tolist() == [5.0, 13.0, 97.0]
+    assert maximum.item() == 3.0
 
 
 def test_metrics_filter_matches_name_and_statistic() -> None:

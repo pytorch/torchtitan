@@ -11,6 +11,7 @@ import triton.language as tl
 
 _MAX_PROGRAMS = 1024
 _BLOCK_SIZE = 4096
+_MAX_INT32_INDEXED_ELEMENTS = 2**31 - _MAX_PROGRAMS * _BLOCK_SIZE
 
 
 @triton.jit
@@ -23,6 +24,7 @@ def _accumulate_tensor_statistics_triton(
     value_count,
     BLOCK_SIZE: tl.constexpr,
     NEEDS_LOOP: tl.constexpr,
+    USE_INT64_INDEX: tl.constexpr,
 ):
     if tl.load(enabled_ptr) == 0:
         return
@@ -34,18 +36,26 @@ def _accumulate_tensor_statistics_triton(
     fourth_moment_sum = tl.zeros((), dtype=tl.float32)
     absolute_maximum = tl.full((), -float("inf"), dtype=tl.float32)
 
-    program_start = tl.program_id(0) * BLOCK_SIZE
+    program_id = tl.program_id(0)
+    indexed_value_count = value_count
+    if USE_INT64_INDEX:
+        program_id = program_id.to(tl.int64)
+        indexed_value_count = value_count.to(tl.int64)
+    program_start = program_id * BLOCK_SIZE
     if NEEDS_LOOP:
         # The bounded grid loops over additional blocks for large tensors.
-        program_stride = tl.num_programs(0) * BLOCK_SIZE
+        program_count = tl.num_programs(0)
+        if USE_INT64_INDEX:
+            program_count = program_count.to(tl.int64)
+        program_stride = program_count * BLOCK_SIZE
         for block_start in tl.range(
             program_start,
-            value_count,
+            indexed_value_count,
             program_stride,
             num_stages=3,
         ):
             offsets = block_start + tl.arange(0, BLOCK_SIZE)
-            present = offsets < value_count
+            present = offsets < indexed_value_count
             value = tl.load(value_ptr + offsets, mask=present, other=0.0).to(tl.float32)
             finite = (
                 present
@@ -74,7 +84,7 @@ def _accumulate_tensor_statistics_triton(
             )
     else:
         offsets = program_start + tl.arange(0, BLOCK_SIZE)
-        present = offsets < value_count
+        present = offsets < indexed_value_count
         value = tl.load(value_ptr + offsets, mask=present, other=0.0).to(tl.float32)
         finite = (
             present
@@ -101,7 +111,7 @@ def _accumulate_tensor_statistics_triton(
     tl.atomic_add(counts_ptr + 1, tl.cast(nonfinite_count, tl.int64))
     tl.atomic_add(counts_ptr + 2, tl.cast(zero_count, tl.int64))
     if tl.program_id(0) == 0:
-        tl.atomic_add(counts_ptr, value_count)
+        tl.atomic_add(counts_ptr, tl.cast(value_count, tl.int64))
         tl.atomic_add(counts_ptr + 3, 1)
     tl.atomic_add(sums_ptr, absolute_sum)
     tl.atomic_add(sums_ptr + 1, square_sum)
@@ -133,4 +143,5 @@ def accumulate_contiguous_tensor_statistics(
         value.numel(),
         BLOCK_SIZE=_BLOCK_SIZE,  # pyrefly: ignore[bad-argument-type]
         NEEDS_LOOP=needs_loop,  # pyrefly: ignore[bad-argument-type]
+        USE_INT64_INDEX=value.numel() > _MAX_INT32_INDEXED_ELEMENTS,
     )
