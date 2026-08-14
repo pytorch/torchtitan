@@ -63,12 +63,24 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import derive, override
+from torchtitan.distributed.linear import AllGatherLinear, LinearReduceScatter
 from torchtitan.models.common.decoder_sharding import dense_param_placement
+
+# The group lookup and the unfused-fallback warning are the dist-GEMM modules'
+# own plumbing, shared here so the overlapping variant behaves identically when
+# TP is off. Private because nothing outside the dist-GEMM path should resolve
+# the group per forward.
+from torchtitan.models.common.dist_gemm import (
+    _tp_group_from_context,
+    _warn_once_unfused,
+    AllGatherFusedFeedForward,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.sharding import ShardingConfig
 
 __all__ = [
+    "AllGatherFusedSwiGLU",
     "FusedGroupedExperts",
     "FusedSwiGLU",
     "fused_grouped_experts",
@@ -483,18 +495,89 @@ class FusedSwiGLU(FeedForward):
             )
 
 
+class AllGatherFusedSwiGLU(FusedSwiGLU):
+    """:class:`FusedSwiGLU` with the TP collectives also folded into its GEMMs.
+
+    The composition of both FFN optimizations: the fused ``w13`` gate+up GEMM
+    consumes an all-gather of the sequence shard, and ``w2`` reduce-scatters back
+    to a shard, over the autograd Functions in ``torchtitan/distributed/linear.py``.
+    Selected by stacking this override on ``tp_gemm_backend="dist_gemm"``; with TP
+    off it falls back to the inherited (fused but unoverlapped) forward.
+
+    Only the schedule differs from the parent -- the ``w13`` parameter, its
+    state_dict hooks, and the Triton activation are all inherited. Because ``w13``
+    is a single weight this needs plain :class:`AllGatherLinear`, where the
+    unfused ``AllGatherFusedFeedForward`` needs ``AllGatherLinearMulti``. That
+    saves no collective (the multi version already gathers once for both halves),
+    only the pair of ``torch.cat`` calls it does in dgrad.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FusedSwiGLU.Config):
+        """Binds ``Config.build()`` to this module rather than the parent, so it
+        cannot be deleted as empty."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        tp_group = _tp_group_from_context()
+        if tp_group is None:
+            _warn_once_unfused()
+            return super().forward(x)
+
+        bsz, _, dim = x.shape
+        # Sequence outermost before flattening, so the gathered rows really are
+        # (rank, batch, seq_local) row-major. See AllGatherFusedQKVLinear.
+        x_seq_major = x.transpose(0, 1).reshape(-1, dim).contiguous()
+        # w13 is (hidden/R, 2, dim) per rank; the GEMM wants a 2D [out, in]
+        # weight, and folding the leading two axes gives one whose rows alternate
+        # gate, up per hidden unit. Free view -- those axes are already adjacent.
+        h = AllGatherLinear.apply(
+            x_seq_major,
+            self.w13.reshape(-1, dim),
+            None,
+            tp_group,
+            tp_group.group_name,
+        )
+        # The output columns carry that same alternation, so splitting the
+        # trailing axis into (hidden/R, 2) recovers the halves. They come out as
+        # strided views, which need no contiguous() here: the kernel is passed
+        # each input's strides. silu_and_mul_op is called directly rather than via
+        # _fused_silu_and_mul because these are already plain local 2D tensors --
+        # there is no DTensor to local_map over, and that helper declares the 3D
+        # (batch, seq, features) layout.
+        gate, up = h.view(h.shape[0], -1, 2).unbind(-1)
+        y_flat = LinearReduceScatter.apply(
+            silu_and_mul_op(gate, up),
+            self.w2.weight,
+            self.w2.bias,
+            tp_group,
+            tp_group.group_name,
+        )
+        # Shape from y_flat rather than x: the collectives change the row count.
+        return y_flat.view(-1, bsz, y_flat.shape[-1]).transpose(0, 1).contiguous()
+
+
 @override(
     target=FeedForward.Config,
     description="Fuse SwiGLU gate+up into one weight (FSDP + TP).",
 )
 def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
+    # Preserve TP overlap when stacked on tp_gemm_backend="dist_gemm". This
+    # override targets FeedForward.Config without exact=True, so it also claims
+    # the dist-GEMM FFN config; without the dispatch the derive() below would
+    # rewrite it to the non-overlapping FusedSwiGLU.Config and the job would
+    # silently train with the collectives back outside the GEMMs.
+    target = (
+        AllGatherFusedSwiGLU.Config
+        if isinstance(cfg, AllGatherFusedFeedForward.Config)
+        else FusedSwiGLU.Config
+    )
     w1_init = (cfg.w1.param_init or {}).get("weight")
     w3_init = (cfg.w3.param_init or {}).get("weight")
     param_init = None
     if w1_init is not None and w3_init is not None:
         param_init = {"w13": _make_fused_gate_up_init(w1_init, w3_init, gate_up_axis=1)}
 
-    fused = derive(cfg, FusedSwiGLU.Config, param_init=param_init)
+    fused = derive(cfg, target, param_init=param_init)
 
     base = cfg.sharding_config
     fused.sharding_config = ShardingConfig(
