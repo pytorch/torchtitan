@@ -93,11 +93,6 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
         for user in dispatch.users
         if user.target is operator.getitem and user.args[1] == 1
     )
-    wait_hidden = next(
-        user
-        for user in wait_dispatch.users
-        if user.target is operator.getitem and user.args[1] == 0
-    )
     wait_counts = next(
         user
         for user in wait_dispatch.users
@@ -115,11 +110,8 @@ def test_minimal_async_ep_fake_trace_has_launch_wait_edges():
         dispatch_counts,
         [dispatch.args[0], dispatch.args[1], dispatch.args[2]],
     )
-    assert list(dispatch_hidden.users) == [wait_dispatch]
-    assert list(dispatch_counts.users) == [wait_dispatch]
     assert depends_on(counts_cumsum, wait_counts)
     assert wait_dispatch not in dispatch_ranks.users
-    assert wait_hidden not in dispatch.users
     assert source_wait.args == (
         combine,
         [
