@@ -35,6 +35,7 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
 from .base import (
+    AsyncEvalCheckpointCallback,
     BaseCheckpointManager,
     DATALOADER,
     LR_SCHEDULER,
@@ -46,7 +47,6 @@ from .base import (
 
 if TYPE_CHECKING:
     import torch.nn as nn
-
     from torchtitan.components.data.loader import BaseDataLoader
     from torchtitan.components.optimizer import (
         LRSchedulersContainer,
@@ -138,11 +138,25 @@ class CheckpointManager(BaseCheckpointManager):
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
+        async_eval_checkpoint_callback: AsyncEvalCheckpointCallback | None = None,
     ) -> None:
 
         self.enable = config.enable
         if not self.enable:
             return
+
+        if async_eval_checkpoint_callback is not None:
+            if not config.enable:
+                raise ValueError(
+                    "async_eval requires checkpoint.enable=True so evaluation steps "
+                    "produce checkpoints."
+                )
+            if config.load_only:
+                raise ValueError(
+                    "async_eval requires checkpoint.load_only=False because it runs "
+                    "only after a training checkpoint is saved."
+                )
+        self._async_eval_checkpoint_callback = async_eval_checkpoint_callback
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
@@ -159,6 +173,8 @@ class CheckpointManager(BaseCheckpointManager):
 
         # Loading & Saving Policy
         self.load_only = config.load_only
+        self.async_eval_frequency = config.async_eval_frequency
+        self.keep_async_eval_checkpoints = config.keep_async_eval_checkpoints
         self.exclude_from_loading = config.exclude_from_loading
         self.initial_load_path = config.initial_load_path
         self.initial_load_model_only = config.initial_load_model_only
@@ -412,6 +428,9 @@ class CheckpointManager(BaseCheckpointManager):
 
         if last_step:
             self._save_last_step(curr_step)
+            self._track_save_completion(
+                curr_step, self._create_checkpoint_id(curr_step)
+            )
             logger.info(
                 f"Last step checkpoint completed in {time.monotonic() - begin:.2f}s"
             )
@@ -463,7 +482,7 @@ class CheckpointManager(BaseCheckpointManager):
                 enable_garbage_collection=True,
             )
 
-        self._purge_stale_checkpoints()
+        self._track_save_completion(curr_step, checkpoint_id)
 
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in "
@@ -640,6 +659,11 @@ class CheckpointManager(BaseCheckpointManager):
         self.save_future.result()
         self.save_future = None
 
+    def _complete_pending_save(self) -> None:
+        if getattr(self, "_pending_save", None) is not None:
+            self._purge_stale_checkpoints()
+        super()._complete_pending_save()
+
     def _find_load_step(self, folder: str = "") -> int:
         """Identify the highest available checkpoint step in the specified directory.
 
@@ -810,6 +834,9 @@ class CheckpointManager(BaseCheckpointManager):
         if curr_step % self.interval == 0:
             return True
 
+        if self._is_async_eval_step(curr_step):
+            return True
+
         return False
 
     def _should_purge(self) -> bool:
@@ -839,6 +866,13 @@ class CheckpointManager(BaseCheckpointManager):
             discovered_checkpoints.sort()
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
 
-            for _, path in to_delete:
+            for step, path in to_delete:
+                if self.keep_async_eval_checkpoints and self._is_async_eval_step(step):
+                    logger.info(
+                        "Checkpointer is preserving eval checkpoint %s outside "
+                        "keep_latest_k.",
+                        path,
+                    )
+                    continue
                 assert self.purge_thread is not None
                 self.purge_queue.put(path)

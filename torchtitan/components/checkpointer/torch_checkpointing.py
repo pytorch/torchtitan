@@ -27,6 +27,7 @@ from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 
 from .base import (
+    AsyncEvalCheckpointCallback,
     BaseCheckpointManager,
     DATALOADER,
     LR_SCHEDULER,
@@ -96,10 +97,25 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
+        async_eval_checkpoint_callback: AsyncEvalCheckpointCallback | None = None,
     ) -> None:
         self.enable = config.enable
         if not self.enable:
             return
+
+        if async_eval_checkpoint_callback is not None:
+            if not config.enable:
+                raise ValueError(
+                    "async_eval requires checkpoint.enable=True so evaluation steps "
+                    "produce checkpoints."
+                )
+            if config.load_only:
+                raise ValueError(
+                    "async_eval requires checkpoint.load_only=False because it runs "
+                    "only after a training checkpoint is saved."
+                )
+
+        self._async_eval_checkpoint_callback = async_eval_checkpoint_callback
         self.save_future = None
 
         self.folder = filesystem.join(base_folder, config.folder)
@@ -116,6 +132,8 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
         self.load_only = config.load_only
         self.exclude_from_loading = config.exclude_from_loading
+        self.async_eval_frequency = config.async_eval_frequency
+        self.keep_async_eval_checkpoints = config.keep_async_eval_checkpoints
         self.initial_load_path = config.initial_load_path
         self.initial_load_model_only = config.initial_load_model_only
         self.initial_load_in_hf = config.initial_load_in_hf
