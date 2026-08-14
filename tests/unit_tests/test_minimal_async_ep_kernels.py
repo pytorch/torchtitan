@@ -379,7 +379,7 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             minimal_async_ep_api.init_buffer(
                 dist.group.WORLD,
                 hidden_dim=4,
-                tokens_per_rank=4,
+                num_max_tokens_per_rank=4,
                 num_local_experts=2,
                 top_k=2,
                 dtype=torch.float32,
