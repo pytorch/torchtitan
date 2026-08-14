@@ -7,6 +7,7 @@
 import inspect
 import operator
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,7 +20,7 @@ from torch._inductor.fx_passes.bucketing import (
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
-from torch.fx.traceback import preserve_node_meta
+from torch.fx.traceback import annotate_fn, preserve_node_meta
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
@@ -82,6 +83,9 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
+from torchtitan.experiments.graph_trainer.grad_chain_pass import (
+    normalize_chunked_grad_collective_chains_pass,
+)
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
@@ -106,7 +110,10 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_identity_slice_pass,
     remove_identity_view_pass,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    data_parallel,
+    MixedPrecisionPolicy,
+)
 from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
     TestCpuOffloadPass,
 )
@@ -2221,6 +2228,19 @@ class TestChunkPasses(TestCase):
             n for n in gm.graph.nodes if n.op == "call_function" and n.target is target
         ]
 
+    def _node_depends_on(self, node, ancestor):
+        seen = set()
+        work = [node]
+        while work:
+            current = work.pop()
+            if current is ancestor:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            work.extend(current.all_input_nodes)
+        return False
+
     def _assert_no_raw_selected_symbol_args(self, gm, symbol_hints):
         from torch.fx.experimental.symbolic_shapes import free_symbols
         from torch.utils._pytree import tree_leaves
@@ -2475,6 +2495,114 @@ class TestChunkPasses(TestCase):
 
         graph.output(tuple(outputs))
         return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    @contextmanager
+    def _fake_dp_mesh(self):
+        import torch.distributed as dist
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.testing._internal.distributed.fake_pg import FakeStore
+
+        already_initialized = dist.is_initialized()
+        if not already_initialized:
+            dist.init_process_group("fake", rank=0, world_size=2, store=FakeStore())
+        try:
+            yield init_device_mesh("cpu", (2,), mesh_dim_names=("dp",))
+        finally:
+            if not already_initialized and dist.is_initialized():
+                dist.destroy_process_group()
+
+    def _trace_simple_fsdp_moe_grad_collective(
+        self,
+        *,
+        chunk_strategy: str,
+        fsdp_mode: str,
+        mixed_precision: bool = False,
+    ):
+        class Linear(torch.nn.Linear):
+            pass
+
+        class Moe(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = Linear(4, 4, bias=False)
+
+            def forward(self, x):
+                compute = annotate_fn({"EP": "compute"})(self.linear)
+                return torch.relu(compute(x))
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x):
+                return self.layers[0].moe(x)
+
+        if chunk_strategy not in {"eager", "graph"}:
+            raise AssertionError(f"unknown chunk_strategy {chunk_strategy}")
+
+        with self._fake_dp_mesh() as dp_mesh:
+            model = Model()
+            annotate_module_fqns(model)
+            mp_policy = (
+                MixedPrecisionPolicy(
+                    reduce_dtype=torch.bfloat16,
+                )
+                if mixed_precision
+                else None
+            )
+            model = data_parallel(
+                model,
+                device_mesh=dp_mesh,
+                mode=fsdp_mode,
+                mp_policy=mp_policy,
+            )
+            x = torch.randn(4, 2, 4)
+            mark_chunk_dynamic_dims(x, mode="batch")
+
+            if chunk_strategy == "eager":
+                maybe_apply_ep_overlap_eager_chunking(
+                    model,
+                    GraphTrainerCompileConfig(
+                        enable=True,
+                        ep_overlap=EpOverlapConfig(
+                            enabled=True,
+                            strategy="eager",
+                            chunk_dim="batch",
+                            module_fqn="layers.*.moe",
+                        ),
+                    ),
+                )
+
+            def step(inputs):
+                y = model(inputs)
+                loss = y.sum()
+                params = [p for p in model.parameters() if p.requires_grad]
+                return [loss] + list(torch.autograd.grad(loss, params))
+
+            traced = minimal_fx_tracer(step, module=model)(x)
+            gm = traced.gm
+            if chunk_strategy == "eager":
+                populate_eager_chunk_metadata_pass(gm)
+            else:
+                populate_chunk_dim_metadata_pass(
+                    gm, traced.example_inputs, mode="batch"
+                )
+                ep_overlap_chunk_pass(
+                    gm,
+                    mode="batch",
+                    module_pattern="layers.*.moe",
+                    num_static_inputs=traced.num_static_inputs,
+                    optimize_grad_live_out=False,
+                    require_all_to_all=False,
+                )
+        target = (
+            torch.ops._c10d_functional.all_reduce.default
+            if fsdp_mode == "replicate"
+            else torch.ops._c10d_functional.reduce_scatter_tensor.default
+        )
+        return gm, target
 
     def _schedule_ep_overlap_and_order(
         self,
@@ -3450,6 +3578,10 @@ class TestChunkPasses(TestCase):
         )
         self.assertLess(
             post_chunk_dce,
+            names.index("normalize_chunked_grad_collective_chains_pass"),
+        )
+        self.assertLess(
+            names.index("normalize_chunked_grad_collective_chains_pass"),
             names.index("joint_transformer_block_bucketing_reordering_pass"),
         )
         self.assertLess(
@@ -3463,6 +3595,26 @@ class TestChunkPasses(TestCase):
         self.assertLess(
             names.index("concretize_ep_chunk_symbolic_shapes_pass"),
             names.index("full_inductor_compilation_pass"),
+        )
+
+        config.compile.ep_overlap.disable_early_grad_accumulation = True
+        disabled_names = self._compile_pass_names(traced_result, config)
+        self.assertNotIn(
+            "normalize_chunked_grad_collective_chains_pass",
+            disabled_names,
+        )
+        disabled_chunk_pass_idx = disabled_names.index("ep_overlap_chunk_pass")
+        disabled_dead_code_indices = [
+            i
+            for i, name in enumerate(disabled_names)
+            if name == "eliminate_dead_code_pass"
+        ]
+        disabled_post_chunk_dce = min(
+            i for i in disabled_dead_code_indices if i > disabled_chunk_pass_idx
+        )
+        self.assertLess(
+            disabled_post_chunk_dce,
+            disabled_names.index("joint_transformer_block_bucketing_reordering_pass"),
         )
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
@@ -5153,6 +5305,42 @@ class TestChunkPasses(TestCase):
         self.assertEqual(len(rs_nodes), 1)
         self.assertIs(rs_nodes[0].args[0], sum_nodes[0])
         self.assertEqual(sum_nodes[0].meta["val"].dtype, torch.float32)
+
+    def test_normalize_chunked_grad_collective_chains_on_real_fsdp_traces(self):
+        cases = (
+            ("eager", "replicate", False, 2),
+            ("eager", "fully_shard", False, 2),
+            ("graph", "replicate", False, 1),
+            ("graph", "fully_shard", False, 1),
+            ("eager", "fully_shard", True, 2),
+            ("graph", "fully_shard", True, 2),
+        )
+        for producer, fsdp_mode, mixed_precision, before in cases:
+            with self.subTest(
+                producer=producer,
+                fsdp_mode=fsdp_mode,
+                mixed_precision=mixed_precision,
+            ):
+                gm, target = self._trace_simple_fsdp_moe_grad_collective(
+                    chunk_strategy=producer,
+                    fsdp_mode=fsdp_mode,
+                    mixed_precision=mixed_precision,
+                )
+                self.assertEqual(len(self._nodes_by_target(gm, target)), before)
+
+                normalize_chunked_grad_collective_chains_pass(gm)
+
+                collectives = self._nodes_by_target(gm, target)
+                sums = self._nodes_by_target(gm, torch.ops.aten.add.Tensor)
+                self.assertEqual(len(collectives), 1)
+                self.assertEqual(len(sums), 1)
+                self.assertTrue(self._node_depends_on(collectives[0].args[0], sums[0]))
+                self.assertNotIn("chunk_id", sums[0].meta)
+                self.assertNotIn("chunk_id", sums[0].meta.get("custom", {}))
+                if mixed_precision:
+                    self.assertTrue(
+                        self._nodes_by_target(gm, torch.ops.aten._to_copy.default)
+                    )
 
     def test_chunk_batch_backward_keeps_same_fqn_grad_plumbing_chunked(self):
         x_real = torch.randn(4, 3)
