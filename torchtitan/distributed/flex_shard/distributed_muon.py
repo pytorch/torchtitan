@@ -65,12 +65,6 @@ def build_distributed_muon(
     ``[M * R, C]`` as stacked matrices ``[M, R, C]`` for local Muon compute.
     An absent FQN retains ordinary 2D matrix compute.
     """
-    for fqn, compute_layout in compute_layout_by_fqn.items():
-        if not isinstance(fqn, str):
-            raise ValueError("compute_layout_by_fqn keys must be strings")
-        if type(compute_layout) is not ComputeLayout:
-            raise ValueError("compute_layout_by_fqn values must be ComputeLayout")
-
     prepared_params = []
     for param_group in params:
         group = dict(param_group)
@@ -92,6 +86,26 @@ def build_distributed_muon(
         num_stacked_matrices_by_fqn=num_stacked_matrices_by_fqn,
         **kwargs,
     )
+    _configure_distributed_muon(
+        optimizer,
+        compute_layout_by_fqn=compute_layout_by_fqn,
+        bucket_configs=bucket_configs,
+    )
+    return optimizer
+
+
+def _validate_compute_layout_configuration(
+    optimizer: DistributedMuon,
+    *,
+    compute_layout_by_fqn: Mapping[str, ComputeLayout],
+) -> None:
+    """Validate per-parameter compute layout configuration."""
+    for fqn, compute_layout in compute_layout_by_fqn.items():
+        if not isinstance(fqn, str):
+            raise ValueError("compute_layout_by_fqn keys must be strings")
+        if type(compute_layout) is not ComputeLayout:
+            raise ValueError("compute_layout_by_fqn values must be ComputeLayout")
+
     missing_compute_layouts = set(optimizer._num_stacked_matrices_by_fqn).difference(
         compute_layout_by_fqn
     )
@@ -100,12 +114,6 @@ def build_distributed_muon(
             "num_stacked_matrices_by_fqn entries must also have compute layouts: "
             f"{sorted(missing_compute_layouts)}"
         )
-    _configure_distributed_muon(
-        optimizer,
-        compute_layout_by_fqn=compute_layout_by_fqn,
-        bucket_configs=bucket_configs,
-    )
-    return optimizer
 
 
 def _configure_distributed_muon(
@@ -123,6 +131,10 @@ def _configure_distributed_muon(
     compute layouts, and bucket configuration are frozen because optimizer
     state and collectives depend on them.
     """
+    _validate_compute_layout_configuration(
+        optimizer,
+        compute_layout_by_fqn=compute_layout_by_fqn,
+    )
     optimizer._validate_groups()
 
     parameters_to_prepare = []
