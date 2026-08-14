@@ -6,15 +6,21 @@
 
 """Overlap the trainer->generator weight handoff with the next training step."""
 
+from __future__ import annotations
+
 import asyncio
 import time
+from typing import TYPE_CHECKING
 
 from torchtitan.experiments.rl.components.work_buffer import RolloutGroupWorkBuffer
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.routing.inter_generator_router import (
-    InterGeneratorRouter,
-)
 from torchtitan.observability import structured_logger as sl
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+    from torchtitan.experiments.rl.routing.inter_generator_router import (
+        InterGeneratorRouter,
+    )
 
 # dummy no-op for step 0, used in WeightSyncManager
 async def _noop() -> None:
@@ -47,7 +53,7 @@ class WeightSyncManager:
     def __init__(
         self,
         *,
-        trainer,  # PolicyTrainer actor handle
+        trainer: PolicyTrainer,
         generator_router: InterGeneratorRouter,
         group_buffer: RolloutGroupWorkBuffer,
         num_prompts_per_train_step: int,
@@ -112,7 +118,7 @@ class WeightSyncManager:
         await push_task
         with sl.log_trace_span("generator_pull_model_state_dict"):
             start = time.perf_counter()
-            await self._generator_router.pull_model_state_dict(policy_version=version)
+            await self._generator_router.pull_model_state_dict.call_one(version)
             self._last_pull_s = time.perf_counter() - start
         # TODO(perf): pull_model_state_dict awaits ALL generators before we release any buffer slots,
         #   so a generator that finishes its pull early idles until the slowest one. Investigate
