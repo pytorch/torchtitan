@@ -277,3 +277,35 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         assert up.grad is not None
         torch.testing.assert_close(grad_gate[:2], gate.grad[:2])
         torch.testing.assert_close(grad_up[:2], up.grad[:2])
+
+    def test_silu_and_mul_uses_int64_row_stride_arithmetic(self):
+        row = 524_288
+        row_stride = 4096
+        storage_numel = row * row_stride + 2
+        required_bytes = storage_numel * 2 + 512 * 1024**2
+        free_bytes, _ = torch.cuda.mem_get_info()
+        if free_bytes < required_bytes:
+            self.skipTest(
+                f"need at least {required_bytes} free CUDA bytes, got {free_bytes}"
+            )
+
+        storage = torch.empty(storage_numel, device="cuda", dtype=torch.bfloat16)
+        gate = torch.as_strided(storage, (row + 1, 1), (row_stride, 1))
+        up = torch.as_strided(storage, (row + 1, 1), (row_stride, 1), 1)
+        gate[row] = 1.0
+        up[row] = 2.0
+        offsets = torch.tensor([row + 1], device="cuda", dtype=torch.int32)
+
+        out = silu_and_mul_forward_kernel(gate, up, offsets)
+        grad_out = torch.empty_like(out)
+        grad_out[row] = 3.0
+        grad_gate, grad_up = silu_and_mul_backward_kernel(grad_out, gate, up, offsets)
+        torch.cuda.synchronize()
+
+        ref_gate = torch.tensor([1.0], device="cuda", requires_grad=True)
+        ref_up = torch.tensor([2.0], device="cuda", requires_grad=True)
+        expected = torch.nn.functional.silu(ref_gate) * ref_up
+        expected.backward(torch.tensor([3.0], device="cuda"))
+        torch.testing.assert_close(out[row], expected.detach().bfloat16())
+        torch.testing.assert_close(grad_gate[row], ref_gate.grad.bfloat16())
+        torch.testing.assert_close(grad_up[row], ref_up.grad.bfloat16())
