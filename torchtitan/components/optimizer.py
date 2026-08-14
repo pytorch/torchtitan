@@ -26,6 +26,7 @@ from torchtitan.components.checkpoint_utils import (
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.flex_shard import build_distributed_muon
+from torchtitan.distributed.spmd_types import spmd_dense_mesh
 from torchtitan.tools.logging import logger
 
 __all__ = [
@@ -480,16 +481,22 @@ def register_moe_load_balancing_hook(
                 placements=[Replicate()] * dtensor_mesh.ndim
             )
         else:
-            # non-full_dtensor: DTensor mesh only has TP/EP (if enabled).
-            # full_tensor() reduces on TP/EP, then all-reduce on loss_mesh
-            # covers DP/CP separately.
+            # non-full_dtensor: reduce TP in-band, then DP/CP on loss_mesh.
             is_dtensor = isinstance(
                 tokens_per_expert_E_by_layer, torch.distributed.tensor.DTensor
             )
             if is_dtensor:
                 dtensor_mesh = tokens_per_expert_E_by_layer.device_mesh
-                tokens_per_expert_E_by_layer = (
-                    tokens_per_expert_E_by_layer.full_tensor()
+                tokens_per_expert_E_by_layer = tokens_per_expert_E_by_layer.to_local()
+                tp_group = dtensor_mesh.get_group("tp")
+            elif parallel_dims.tp > 1:
+                tp_group = spmd_dense_mesh()["tp"].get_group()
+            else:
+                tp_group = None
+            if tp_group is not None:
+                torch.distributed.all_reduce(
+                    tokens_per_expert_E_by_layer,
+                    group=tp_group,
                 )
             if loss_mesh is not None:
                 torch.distributed.all_reduce(
