@@ -377,14 +377,13 @@ def _kimi_k3_config(
 ) -> KimiK3Model.Config:
     """Assemble a Kimi K3 config from the released topology's free parameters.
 
-    ``full_attention_layers`` holds 1-based layer indices, matching the
-    released ``linear_attn_config.full_attn_layers``. Every other layer is KDA.
-    Layer 0 is the single dense FFN layer (released
+    ``full_attention_layers`` holds zero-based layer indices. Every other layer
+    is KDA. Layer 0 is the single dense FFN layer (released
     ``first_k_dense_replace=1``); the rest are LatentMoE.
     """
     layers = []
     for layer_idx in range(num_layers):
-        is_full_attention = (layer_idx + 1) in full_attention_layers
+        is_full_attention = layer_idx in full_attention_layers
         layers.append(
             KimiK3TransformerBlock.Config(
                 layer_id=layer_idx,
@@ -466,8 +465,8 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
     The depth is one past a multiple of both the full-attention period and the
     attention-residual block size, so the last layer is a full-attention layer
     directly after a scheduled one and the trailing residual block is short.
-    Both are properties of the released 93-layer stack, whose
-    ``full_attn_layers`` ends ``..., 88, 92, 93``.
+    Both are properties of the released 93-layer stack, whose zero-based MLA
+    layer indices end ``..., 87, 91, 92``.
     """
     if attn_backend != "eager":
         raise ValueError("Kimi K3 v1 only provides the 'eager' backend.")
@@ -477,7 +476,7 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
         dim=dim,
         vocab_size=163840,
         num_layers=13,
-        full_attention_layers={4, 8, 12, 13},
+        full_attention_layers={3, 7, 11, 12},
         attn_res_block_size=12,
         num_heads=4,
         q_lora_rank=128,

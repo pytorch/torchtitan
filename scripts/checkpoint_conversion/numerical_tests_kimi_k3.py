@@ -57,12 +57,12 @@ _PROMPT = (
 def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     """Reduce the released HuggingFace config to the TorchTitan debug model."""
     text_config = hf_config.text_config
-    full_attention_layers = [
+    hf_full_attention_layers = [
         layer_idx + 1
         for layer_idx, layer in enumerate(tt_config.layers)
         if layer.attention is not None
     ]
-    kda_layers = [
+    hf_kda_layers = [
         layer_idx + 1
         for layer_idx, layer in enumerate(tt_config.layers)
         if layer.delta_attention is not None
@@ -105,8 +105,8 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         ),
         "attn_res_block_size": tt_config.layers[0].attn_res_block_size,
         "linear_attn_config": {
-            "full_attn_layers": full_attention_layers,
-            "kda_layers": kda_layers,
+            "full_attn_layers": hf_full_attention_layers,
+            "kda_layers": hf_kda_layers,
             "head_dim": kda.head_dim,
             "num_heads": kda.num_heads,
             "short_conv_kernel_size": kda.conv_kernel_size,
