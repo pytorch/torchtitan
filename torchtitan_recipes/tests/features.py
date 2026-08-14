@@ -393,7 +393,6 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     _use_spmd_types(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
-    config.training.disable_cuda_graphs = True
     return config
 
 

@@ -33,7 +33,11 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
                 )
             ],
             parallel_dims=SimpleNamespace(pp_enabled=True),
-            config=SimpleNamespace(parallelism="PARA"),
+            dataloader=SimpleNamespace(max_num_documents=None),
+            config=SimpleNamespace(
+                parallelism="PARA",
+                dataloader=SimpleNamespace(max_num_documents=None),
+            ),
             ntokens_seen=0,
             device=torch.device("cpu"),
         ),
@@ -63,8 +67,13 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
 
     fake = SimpleNamespace(
         model_parts=[_FakeModel()],
+        dataloader=SimpleNamespace(max_num_documents=4),
         parallel_dims=SimpleNamespace(pp_enabled=False),
-        config=SimpleNamespace(parallelism="PARA"),
+        config=SimpleNamespace(
+            parallelism="PARA",
+            dataloader=SimpleNamespace(max_num_documents=4),
+            training=SimpleNamespace(disable_cuda_graphs=True),
+        ),
         ntokens_seen=100,
         fwd_bwd_fn=fwd_bwd_fn,
     )
@@ -84,6 +93,7 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
     assert captured["preprocess_kwargs"] == {
         "parallel_dims": fake.parallel_dims,
         "parallelism": "PARA",
+        "max_num_documents": 4,
     }
 
 

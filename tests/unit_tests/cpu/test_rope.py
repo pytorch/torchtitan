@@ -352,9 +352,11 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
 
     def _make_trainer_config(self, seq_len):
         from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+        from torchtitan.models.llama3 import model_registry
         from torchtitan.trainer import Trainer
 
         return Trainer.Config(
+            model_spec=model_registry("debugmodel"),
             training=dataclasses.replace(
                 TrainingConfig(),
                 num_tokens_per_microbatch_per_dp_rank=seq_len,

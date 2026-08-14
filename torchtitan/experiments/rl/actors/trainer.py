@@ -53,6 +53,7 @@ class PolicyTrainer(Actor, Configurable):
     Args:
         config: PolicyTrainer.Config with all model/optimizer/parallelism settings.
         model_spec: TorchTitan model specification.
+        max_num_documents: Fixed varlen metadata capacity configured by the batcher.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
         generator_dtype: Generator dtype (e.g. "bfloat16"). Needed to cast weights to generator dtype
@@ -93,6 +94,7 @@ class PolicyTrainer(Actor, Configurable):
         *,
         model_spec: ModelSpec,
         compile_config: CompileConfig,
+        max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",
         output_dir: str,
@@ -112,6 +114,7 @@ class PolicyTrainer(Actor, Configurable):
 
         self.config = config
         self.compile_config = compile_config
+        self.max_num_documents = max_num_documents
         self.loss_fn = config.loss.build()
         # TODO: add support to compile the loss.
 
@@ -391,11 +394,16 @@ class PolicyTrainer(Actor, Configurable):
         token_ids = local_batch.token_ids.to(device)
         labels = local_batch.labels.to(device)
         positions = local_batch.positions.to(device)
+        padding_mask = local_batch.padding_mask.to(device)
         loss_mask = local_batch.loss_mask.to(device)
         generator_logprobs = local_batch.generator_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
-        attention_masks = model.get_attention_masks(positions)
+        attention_masks = model.get_attention_masks(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=self.max_num_documents,
+        )
 
         with self.train_context():
             with sl.log_trace_span("model_forward"):
