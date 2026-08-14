@@ -188,6 +188,45 @@ class TestFusedMLANumerics(unittest.TestCase):
         self.assert_dtype_close(fused_grad, reference_grad, dtype)
 
     @parametrize("dtype", [torch.bfloat16, torch.float32])
+    def test_q_sum_backward_matches_eager(self, dtype: torch.dtype):
+        q_source = torch.randn(
+            self.batch,
+            self.seq_len,
+            self.n_heads,
+            self.q_nope_dim + self.rope_dim,
+            device=self.positions.device,
+            dtype=dtype,
+            requires_grad=True,
+        )
+        fused_q = fused_mla_q(
+            q_source.clone(),
+            self.rope.cache,
+            self.positions,
+            self.q_nope_dim,
+        )
+
+        q_reference_source = q_source.detach().clone().requires_grad_()
+        q_nope, q_pos = torch.split(
+            q_reference_source,
+            [self.q_nope_dim, self.rope_dim],
+            dim=-1,
+        )
+        cache = self.rope._reshape_cache(q_pos, self.positions)
+        q_pos, _ = self.rope.apply_rotary_emb(
+            q_pos,
+            q_pos[:, :, :1],
+            cache,
+        )
+        reference_q = torch.cat([q_nope, q_pos], dim=-1)
+
+        (fused_grad,) = torch.autograd.grad(fused_q.sum(), q_source)
+        (reference_grad,) = torch.autograd.grad(
+            reference_q.sum(),
+            q_reference_source,
+        )
+        self.assert_dtype_close(fused_grad, reference_grad, dtype)
+
+    @parametrize("dtype", [torch.bfloat16, torch.float32])
     def test_singleton_positions_broadcast_matches_eager(self, dtype: torch.dtype):
         self._check_singleton_positions_broadcast(dtype)
 

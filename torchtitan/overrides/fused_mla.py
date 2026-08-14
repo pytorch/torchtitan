@@ -609,7 +609,24 @@ def _fused_mla_kv_backward_op_fake(
     )
 
 
+@spmd.register_autograd_function
 class _FusedMLAQ(torch.autograd.Function):
+    @staticmethod
+    def typecheck_forward(
+        q: torch.Tensor,
+        rope_cache_real: torch.Tensor,
+        positions: torch.Tensor,
+        q_nope_dim: int,
+    ) -> torch.Tensor:
+        q_type = {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)}
+        positions_type = {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R}
+        spmd.assert_type(q, q_type)
+        spmd.assert_type(rope_cache_real, spmd.R)
+        spmd.assert_type(positions, positions_type)
+        output = _FusedMLAQ.apply(q, rope_cache_real, positions, q_nope_dim)
+        spmd.assert_type(output, q_type)
+        return output
+
     @staticmethod
     def forward(
         ctx,
@@ -621,14 +638,27 @@ class _FusedMLAQ(torch.autograd.Function):
         ctx.q_nope_dim = q_nope_dim
         ctx.save_for_backward(rope_cache_real, positions)
         ctx.mark_dirty(q)
-        return _fused_mla_q_rope_op(q, rope_cache_real, positions, q_nope_dim, False)
+        q_local = _to_local_for_mutation(q)
+        _fused_mla_q_rope_op(
+            q_local,
+            rope_cache_real,
+            positions,
+            q_nope_dim,
+            False,
+        )
+        return q
 
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_q: torch.Tensor):
         rope_cache_real, positions = ctx.saved_tensors
-        grad_q = _fused_mla_q_rope_op(
-            grad_q,
+        # grad_q may be an expanded tensor with zero strides (for example,
+        # from fused_mla_q(...).sum()). Match Megatron's fused MLA path by
+        # materializing only non-contiguous gradients before rotating in place.
+        grad_q = grad_q.contiguous()
+        grad_q_local = _to_local_for_mutation(grad_q)
+        _fused_mla_q_rope_op(
+            grad_q_local,
             rope_cache_real,
             positions,
             ctx.q_nope_dim,
@@ -637,7 +667,37 @@ class _FusedMLAQ(torch.autograd.Function):
         return grad_q, None, None, None
 
 
+@spmd.register_autograd_function
 class _FusedMLAKV(torch.autograd.Function):
+    @staticmethod
+    def typecheck_forward(
+        kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        rope_cache_real: torch.Tensor,
+        positions: torch.Tensor,
+        q_nope_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        kv_type = {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)}
+        replicated_head_type = {
+            "dp": spmd.S(0),
+            "cp": spmd.S(1),
+            "tp": spmd.R,
+        }
+        spmd.assert_type(kv, kv_type)
+        spmd.assert_type(k_pe, replicated_head_type)
+        spmd.assert_type(rope_cache_real, spmd.R)
+        spmd.assert_type(positions, replicated_head_type)
+        k, v = _FusedMLAKV.apply(
+            kv,
+            k_pe,
+            rope_cache_real,
+            positions,
+            q_nope_dim,
+        )
+        spmd.assert_type(k, kv_type)
+        spmd.assert_type(v, kv_type)
+        return k, v
+
     @staticmethod
     def forward(
         ctx,
@@ -722,12 +782,11 @@ def fused_mla_q(
     q_nope_dim: int,
 ) -> torch.Tensor:
     """Apply ComplexRoPE in place to Q's positional tail."""
-    q_local = _to_local_for_mutation(q)
+    q_local = _to_local(q)
     cache_local = _to_local(rope_cache)
     positions_local = _resolve_positions(positions, q_local)
     cache_real = torch.view_as_real(cache_local).contiguous()
-    q_out = _FusedMLAQ.apply(q_local, cache_real, positions_local, q_nope_dim)
-    return _from_local(q_out, q)
+    return _FusedMLAQ.apply(q, cache_real, positions_local, q_nope_dim)
 
 
 def fused_mla_kv(
