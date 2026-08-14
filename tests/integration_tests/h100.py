@@ -24,7 +24,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
                 [
                     "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
+                    "--compile.enable_async_tensor_parallel",
                 ],
             ],
             "2D async TP compile",
@@ -59,7 +59,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
+                    "--compile.enable_async_tensor_parallel",
                 ],
             ],
             "FSDP+async TP+PP+torch.compile+Float8",
