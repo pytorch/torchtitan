@@ -22,7 +22,7 @@ from .statistics import accumulate_tensor_statistics, StatisticBuffers
 
 
 Owner: TypeAlias = nn.Module | nn.Parameter
-ReducedBuffers: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+ReducedBuffers: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
 _REGISTERED_NAMES_ATTR = "_tensor_logging_registered_names"
 _METRIC_ROWS_ATTR = "_tensor_logging_metric_rows"
@@ -35,8 +35,7 @@ _metric_side_effects_suppressed = False
 class MetricRow(NamedTuple):
     """One registered metric's preallocated device storage."""
 
-    counts: torch.Tensor
-    sums: torch.Tensor
+    sum_statistics: torch.Tensor
     maximum: torch.Tensor
     row_index: torch.Tensor
 
@@ -258,7 +257,7 @@ def _gather_global_metric_names(local_names: set[str]) -> list[str]:
 def _add_metric_values(
     metrics: dict[str, int | float],
     metric_name: str,
-    counts: Sequence[int],
+    counts: Sequence[float],
     sums: Sequence[float],
     maximum: float,
 ) -> None:
@@ -275,7 +274,10 @@ def _add_metric_values(
         # square_mean=3.5, kurtosis=-1, and abs_max=3.
     """
 
-    numel, nonfinite_count, zero_count, observation_count = counts
+    numel = int(counts[0])
+    nonfinite_count = int(counts[1])
+    zero_count = int(counts[2])
+    observation_count = int(counts[3])
     if observation_count == 0:
         return
     finite_count = numel - nonfinite_count
@@ -390,8 +392,7 @@ class TensorLoggingState:
                 self._owners.append(owner)
             row_index = row_index_by_full_name[full_name]
             rows[metric_name] = MetricRow(
-                counts=self.buffers.counts[row_index],
-                sums=self.buffers.sums[row_index],
+                sum_statistics=self.buffers.sum_statistics[row_index],
                 maximum=self.buffers.maxima[row_index],
                 row_index=self._row_indices[row_index],
             )
@@ -405,8 +406,7 @@ class TensorLoggingState:
         with spmd.no_typecheck():
             accumulate_tensor_statistics(
                 _local_tensor(value),
-                row.counts,
-                row.sums,
+                row.sum_statistics,
                 row.maximum,
                 self.buffers.enabled,
             )
@@ -424,24 +424,22 @@ class TensorLoggingState:
 
         return {
             metric_name: {
-                "counts": self.buffers.counts[index].detach().cpu().clone(),
-                "sums": self.buffers.sums[index].detach().cpu().clone(),
+                "counts": self.buffers.sum_statistics[index, :4].detach().cpu().clone(),
+                "sums": self.buffers.sum_statistics[index, 4:].detach().cpu().clone(),
                 "maximum": self.buffers.maxima[index].detach().cpu().clone(),
             }
             for index, metric_name in enumerate(self.metric_names)
         }
 
     def _reduce_buffers(self) -> ReducedBuffers:
-        """Clone and reduce every registered key in three packed WORLD slabs."""
+        """Clone and reduce every registered key in two packed WORLD slabs."""
 
-        counts = self.buffers.counts.clone()
-        sums = self.buffers.sums.clone()
+        sum_statistics = self.buffers.sum_statistics.clone()
         maxima = self.buffers.maxima.clone()
         if dist.is_initialized():
-            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
-            dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+            dist.all_reduce(sum_statistics, op=dist.ReduceOp.SUM)
             dist.all_reduce(maxima, op=dist.ReduceOp.MAX)
-        return counts, sums, maxima
+        return sum_statistics, maxima
 
     def _buffers_to_metrics(
         self,
@@ -450,17 +448,16 @@ class TensorLoggingState:
         """Derive, aggregate, and filter values from reduced buffers."""
 
         # One device-to-host copy per buffer avoids synchronizing per metric.
-        counts, sums, maxima = (buffer.detach().cpu() for buffer in reduced_buffers)
-        count_rows = cast(list[list[int]], counts.tolist())
-        sum_rows = cast(list[list[float]], sums.tolist())
+        sum_statistics, maxima = (buffer.detach().cpu() for buffer in reduced_buffers)
+        statistic_rows = cast(list[list[float]], sum_statistics.tolist())
         maximum_rows = cast(list[float], maxima.tolist())
         metrics: dict[str, int | float] = {}
         for index, metric_name in enumerate(self.metric_names):
             _add_metric_values(
                 metrics,
                 metric_name,
-                count_rows[index],
-                sum_rows[index],
+                statistic_rows[index][:4],
+                statistic_rows[index][4:],
                 maximum_rows[index],
             )
         # Filtering controls sink volume, not GPU collection.
@@ -549,8 +546,7 @@ def _record_tensor_statistics_cotangent(
     state = _state()
     index = int(row_index.item())
     buffers = (
-        state.buffers.counts[index],
-        state.buffers.sums[index],
+        state.buffers.sum_statistics[index],
         state.buffers.maxima[index],
         state.buffers.enabled,
     )

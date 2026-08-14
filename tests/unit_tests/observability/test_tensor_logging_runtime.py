@@ -508,6 +508,7 @@ def test_statistic_buffers_group_fields_by_reduction_operation() -> None:
     assert buffers.maxima.shape == (3,)
     assert buffers.maxima.dtype == torch.float32
     assert not hasattr(buffers, "counts")
+    assert not hasattr(buffers, "sums")
 
 
 def test_reducer_issues_one_sum_then_one_max_collective(monkeypatch) -> None:
@@ -587,15 +588,13 @@ def test_cuda_statistics_support_64_bit_indexing(monkeypatch) -> None:
     value = torch.zeros(4097, dtype=torch.bfloat16, device="cuda")
     value[0] = 2
     value[-1] = 3
-    counts = torch.zeros(4, dtype=torch.int64, device="cuda")
-    sums = torch.zeros(3, dtype=torch.float32, device="cuda")
+    sum_statistics = torch.zeros(7, dtype=torch.float32, device="cuda")
     maximum = torch.full((), -torch.inf, dtype=torch.float32, device="cuda")
     enabled = torch.ones((), dtype=torch.int32, device="cuda")
 
-    accumulate_tensor_statistics(value, counts, sums, maximum, enabled)
+    accumulate_tensor_statistics(value, sum_statistics, maximum, enabled)
 
-    assert counts.tolist() == [4097, 0, 4095, 1]
-    assert sums.tolist() == [5.0, 13.0, 97.0]
+    assert sum_statistics.tolist() == [4097, 0, 4095, 1, 5.0, 13.0, 97.0]
     assert maximum.item() == 3.0
 
 
@@ -714,6 +713,7 @@ def test_generic_counts_follow_float32_integer_precision() -> None:
         )
         metrics = runtime.collect()
         assert metrics["value.numel"] == 2**24
+        assert isinstance(metrics["value.numel"], int)
     finally:
         runtime.close()
 

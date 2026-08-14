@@ -17,8 +17,7 @@ _MAX_INT32_INDEXED_ELEMENTS = 2**31 - _MAX_PROGRAMS * _BLOCK_SIZE
 @triton.jit
 def _accumulate_tensor_statistics_triton(
     value_ptr,
-    counts_ptr,
-    sums_ptr,
+    sum_statistics_ptr,
     maximum_ptr,
     enabled_ptr,
     value_count,
@@ -107,22 +106,21 @@ def _accumulate_tensor_statistics_triton(
         fourth_moment_sum = tl.sum(square * square)
         absolute_maximum = tl.max(tl.where(finite, absolute, -float("inf")))
 
-    # Programs summarize disjoint slices; atomics merge the three output groups.
-    tl.atomic_add(counts_ptr + 1, tl.cast(nonfinite_count, tl.int64))
-    tl.atomic_add(counts_ptr + 2, tl.cast(zero_count, tl.int64))
+    # Programs summarize disjoint slices; atomics merge the two output groups.
+    tl.atomic_add(sum_statistics_ptr + 1, tl.cast(nonfinite_count, tl.float32))
+    tl.atomic_add(sum_statistics_ptr + 2, tl.cast(zero_count, tl.float32))
     if tl.program_id(0) == 0:
-        tl.atomic_add(counts_ptr, tl.cast(value_count, tl.int64))
-        tl.atomic_add(counts_ptr + 3, 1)
-    tl.atomic_add(sums_ptr, absolute_sum)
-    tl.atomic_add(sums_ptr + 1, square_sum)
-    tl.atomic_add(sums_ptr + 2, fourth_moment_sum)
+        tl.atomic_add(sum_statistics_ptr, tl.cast(value_count, tl.float32))
+        tl.atomic_add(sum_statistics_ptr + 3, 1.0)
+    tl.atomic_add(sum_statistics_ptr + 4, absolute_sum)
+    tl.atomic_add(sum_statistics_ptr + 5, square_sum)
+    tl.atomic_add(sum_statistics_ptr + 6, fourth_moment_sum)
     tl.atomic_max(maximum_ptr, absolute_maximum)
 
 
 def accumulate_contiguous_tensor_statistics(
     value: torch.Tensor,
-    counts: torch.Tensor,
-    sums: torch.Tensor,
+    sum_statistics: torch.Tensor,
     maximum: torch.Tensor,
     enabled: torch.Tensor,
 ) -> None:
@@ -136,8 +134,7 @@ def accumulate_contiguous_tensor_statistics(
     needs_loop = ideal_program_count > program_count
     _accumulate_tensor_statistics_triton[(program_count,)](
         value,
-        counts,
-        sums,
+        sum_statistics,
         maximum,
         enabled,
         value.numel(),

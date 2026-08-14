@@ -12,12 +12,11 @@ NUMEL = 0
 NONFINITE_COUNT = 1
 ZERO_COUNT = 2
 OBSERVATION_COUNT = 3
-COUNT_FIELD_COUNT = 4
 
-ABS_SUM = 0
-SQUARE_SUM = 1
-FOURTH_MOMENT_SUM = 2
-SUM_FIELD_COUNT = 3
+ABS_SUM = 4
+SQUARE_SUM = 5
+FOURTH_MOMENT_SUM = 6
+SUM_STATISTIC_FIELD_COUNT = 7
 
 
 class StatisticBuffers(nn.Module):
@@ -25,13 +24,19 @@ class StatisticBuffers(nn.Module):
 
     Example:
 
-        counts[metric] = [numel, nonfinite_count, zero_count, observation_count]
-        sums[metric] = [abs_sum, square_sum, fourth_moment_sum]
+        sum_statistics[metric] = [
+            numel,
+            nonfinite_count,
+            zero_count,
+            observation_count,
+            abs_sum,
+            square_sum,
+            fourth_moment_sum,
+        ]
         maxima[metric] = abs_max
     """
 
-    counts: torch.Tensor
-    sums: torch.Tensor
+    sum_statistics: torch.Tensor
     maxima: torch.Tensor
     enabled: torch.Tensor
 
@@ -43,16 +48,11 @@ class StatisticBuffers(nn.Module):
     ) -> None:
         super().__init__()
         self.register_buffer(
-            "counts",
+            "sum_statistics",
             torch.zeros(
-                (metric_count, COUNT_FIELD_COUNT), dtype=torch.int64, device=device
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
-            "sums",
-            torch.zeros(
-                (metric_count, SUM_FIELD_COUNT), dtype=torch.float32, device=device
+                (metric_count, SUM_STATISTIC_FIELD_COUNT),
+                dtype=torch.float32,
+                device=device,
             ),
             persistent=False,
         )
@@ -73,8 +73,7 @@ class StatisticBuffers(nn.Module):
         )
 
     def clear(self) -> None:
-        self.counts.zero_()
-        self.sums.zero_()
+        self.sum_statistics.zero_()
         self.maxima.fill_(-torch.inf)
 
 
@@ -136,12 +135,11 @@ def _normalize_tensor_layout(value: torch.Tensor) -> torch.Tensor:
 
 @torch.library.custom_op(
     "torchtitan::accumulate_tensor_statistics",
-    mutates_args={"counts", "sums", "maximum"},
+    mutates_args={"sum_statistics", "maximum"},
 )
 def accumulate_tensor_statistics(
     value: torch.Tensor,
-    counts: torch.Tensor,
-    sums: torch.Tensor,
+    sum_statistics: torch.Tensor,
     maximum: torch.Tensor,
     enabled: torch.Tensor,
 ) -> None:
@@ -150,7 +148,7 @@ def accumulate_tensor_statistics(
     Example:
 
         # The output tensors are one preallocated metric row.
-        accumulate_tensor_statistics(value, counts, sums, maximum, enabled)
+        accumulate_tensor_statistics(value, sum_statistics, maximum, enabled)
     """
 
     if value.is_cuda:
@@ -161,8 +159,7 @@ def accumulate_tensor_statistics(
             value = value.contiguous()
         accumulate_contiguous_tensor_statistics(
             value,
-            counts,
-            sums,
+            sum_statistics,
             maximum,
             enabled,
         )
@@ -173,7 +170,7 @@ def accumulate_tensor_statistics(
         if not bool(enabled):
             return
         value = value.detach()
-        counts[OBSERVATION_COUNT].add_(1)
+        sum_statistics[OBSERVATION_COUNT].add_(1)
         if value.numel() == 0:
             return
 
@@ -183,13 +180,13 @@ def accumulate_tensor_statistics(
         absolute = finite_value.abs()
         square = finite_value.square()
 
-        counts[NUMEL].add_(value.numel())
-        counts[NONFINITE_COUNT].add_(torch.count_nonzero(~finite))
-        counts[ZERO_COUNT].add_(torch.count_nonzero(finite & (value == 0)))
+        sum_statistics[NUMEL].add_(value.numel())
+        sum_statistics[NONFINITE_COUNT].add_(torch.count_nonzero(~finite))
+        sum_statistics[ZERO_COUNT].add_(torch.count_nonzero(finite & (value == 0)))
 
-        sums[ABS_SUM].add_(absolute.sum())
-        sums[SQUARE_SUM].add_(square.sum())
-        sums[FOURTH_MOMENT_SUM].add_(square.square().sum())
+        sum_statistics[ABS_SUM].add_(absolute.sum())
+        sum_statistics[SQUARE_SUM].add_(square.sum())
+        sum_statistics[FOURTH_MOMENT_SUM].add_(square.square().sum())
 
         finite_absolute = torch.where(finite, value_fp32.abs(), -torch.inf)
         updated_maximum = torch.maximum(maximum, finite_absolute.amax())
@@ -199,8 +196,7 @@ def accumulate_tensor_statistics(
 @accumulate_tensor_statistics.register_fake
 def _(
     value: torch.Tensor,
-    counts: torch.Tensor,
-    sums: torch.Tensor,
+    sum_statistics: torch.Tensor,
     maximum: torch.Tensor,
     enabled: torch.Tensor,
 ) -> None:

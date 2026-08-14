@@ -106,9 +106,9 @@ tensor_logging.log_fwd_bwd_stats(attention, xq=xq)
 Each observation contributes mergeable sufficient statistics:
 
 ```text
-counts = [numel, nonfinite_count, zero_count, observation_count]
-sums   = [abs_sum, square_sum, fourth_moment_sum]
-maxima = [abs_max]
+sum_statistics = [numel, nonfinite_count, zero_count, observation_count,
+                  abs_sum, square_sum, fourth_moment_sum]
+maxima         = [abs_max]
 ```
 
 For finite values, these rows derive `zero_frac`, `abs_mean`, `square_mean`, RMS, `abs_max`, and excess kurtosis. For `[0, 1, -2, 3]` recorded once:
@@ -122,12 +122,11 @@ abs_max=3
 kurtosis=(0+1+16+81)/4/3.5^2 - 3 = -1
 ```
 
-Adding another ordinary metric does not add another collective. All rows share three packed buffers on a selected step:
+Adding another ordinary metric does not add another collective. On a selected step, all rows share two packed buffers and run SUM then MAX sequentially:
 
 ```text
-int64 counts   --SUM--> exact counts above float32's integer range
-float32 sums   --SUM--> moments and means
-float32 maxima --MAX--> absolute maxima
+float32 sum_statistics --SUM--> counts (at FP32 integer precision) and moments
+float32 maxima         --MAX--> absolute maxima
 ```
 
 Every rank allocates the same row order. Under PP, ranks that do not own a metric contribute identity values for its row.
