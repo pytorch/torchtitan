@@ -859,6 +859,52 @@ class TestFsdpDenseSchedulerPass(TestCase):
         self.assertLess(order[ag1], order[dense0])
         self.assertLess(order[dense0], order[ag1_wait])
 
+    def test_fsdp_dense_scheduler_moves_padded_all_gather_chain(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.0.attention",
+        )
+        padded = graph.call_function(
+            torch.ops.aten.constant_pad_nd.default, args=(x, [0, 1], 0.0)
+        )
+        bucket = graph.call_function(
+            torch.ops.bucketing._pre_bucket_all_gather.default,
+            args=([padded], 2, torch.float32, [0], 0),
+        )
+        shard = graph.call_function(torch.ops.aten.slice.Tensor, args=(bucket, 0, 0, 1))
+        ag1 = self._tag_fsdp_bucket(
+            graph.call_function(
+                torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+                args=(shard, 2, "pg"),
+                kwargs={"out": bucket},
+            ),
+            ["layers.1"],
+            "fwd",
+        )
+        ag1_wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, args=(ag1,)
+        )
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(ag1_wait,)),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm, moe_layer_ids=frozenset(), n_layers=2, strict=True
+        )
+
+        order = self._node_order(gm)
+        self.assertLess(order[padded], order[bucket])
+        self.assertLess(order[bucket], order[shard])
+        self.assertLess(order[shard], order[ag1])
+        self.assertLess(order[ag1], order[dense0])
+        self.assertLess(order[dense0], order[ag1_wait])
+
     def test_fsdp_dense_scheduler_treats_recomputed_ag_use_as_backward(self):
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
@@ -1038,8 +1084,9 @@ class TestFsdpDenseSchedulerPass(TestCase):
             backward=True,
         )
         rs2_wait = graph.call_function(c10d.wait_tensor.default, args=(rs2,))
+        alias = graph.call_function(torch.ops.aten.alias.default, args=(rs2_wait,))
         split = graph.call_function(
-            torch.ops.aten.split_with_sizes.default, args=(rs2_wait, [1])
+            torch.ops.aten.split_with_sizes.default, args=(alias, [1])
         )
         shard = graph.call_function(operator.getitem, args=(split, 0))
         dense1 = self._tag_fsdp_schedule_node(
@@ -1062,6 +1109,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
         order = self._node_order(gm)
         self.assertLess(order[rs2], order[dense1])
         self.assertGreater(order[rs2_wait], order[dense0])
+        self.assertGreater(order[alias], order[dense0])
         self.assertGreater(order[split], order[dense0])
         self.assertGreater(order[shard], order[dense0])
 
