@@ -318,6 +318,76 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         )
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "the fused silu_and_mul is CUDA-only")
+class TestFusedSwigluOverlapNumerics(DTensorTestBase):
+    """The fused-``w13`` FFN with TP overlap must match the stock FFN under TP+SP.
+
+    Same argument as TestFusedFeedForwardNumerics: the weights are sharded per
+    rank, so a silent fallback to an unfused path could not consume them. Lives
+    here rather than in test_fused_swiglu.py, which is CPU-only by design.
+    """
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @with_comms
+    def test_matches_stock_feed_forward(self):
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.models.common.config_utils import make_ffn_config
+        from torchtitan.overrides.fused_swiglu import AllGatherFusedSwiGLU, fused_swiglu
+
+        R = self.world_size
+        dev = self.device_type
+        dim, hidden, bsz, seq = 64, 128, 2, 8 * R
+        init = {"weight": torch.nn.init.zeros_}
+
+        def make(**kwargs):
+            return make_ffn_config(
+                dim=dim,
+                hidden_dim=hidden,
+                w1_param_init=init,
+                w2w3_param_init=init,
+                **kwargs,
+            )
+
+        torch.manual_seed(0)
+        stock = make().build().to(dev)
+        fused = fused_swiglu(make(tp_gemm_backend="dist_gemm")).build().to(dev)
+        self.assertIsInstance(fused, AllGatherFusedSwiGLU)
+
+        with torch.no_grad():
+            for w in (stock.w1.weight, stock.w2.weight, stock.w3.weight):
+                torch.manual_seed(hash(tuple(w.shape)) % 2**31)
+                w.copy_(torch.randn_like(w) * 0.1)
+
+        x = torch.randn(bsz, seq, dim, device=dev)
+        ref = stock(x)
+
+        # w13 is (hidden/R, 2, dim): this rank's colwise slice of both halves.
+        with torch.no_grad():
+            fused.w13 = torch.nn.Parameter(
+                torch.stack(
+                    [
+                        stock.w1.weight.chunk(R, 0)[self.rank],
+                        stock.w3.weight.chunk(R, 0)[self.rank],
+                    ],
+                    dim=1,
+                ).contiguous()
+            )
+            fused.w2.weight = torch.nn.Parameter(
+                stock.w2.weight.chunk(R, 1)[self.rank].contiguous()
+            )
+
+        mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
+        with spmd_types_backend(), set_current_spmd_mesh(mesh):
+            out_shard = fused(x.chunk(R, 1)[self.rank].contiguous())
+
+        torch.testing.assert_close(
+            out_shard, ref.chunk(R, 1)[self.rank], atol=2e-3, rtol=2e-3
+        )
+
+
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
 
