@@ -121,6 +121,10 @@ class ComputeLayout:
             _FrozenShardingsByMeshAxis(normalized_shardings_by_mesh_axis),
         )
 
+    def to_dict(self) -> dict:
+        """Serialize for JSON logging."""
+        return {"repr": repr(self)}
+
 
 @dataclass(frozen=True, slots=True)
 class BucketConfig:

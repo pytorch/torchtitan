@@ -20,7 +20,7 @@ from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.flex_shard import (
     BucketConfig,
     ComputeLayout,
-    MuonComputeShardingConfig,
+    MuonMatrixBatch,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -209,29 +209,22 @@ def _distributed_muon_optimizer(
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
-    owned = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Owned(),
-            },
-        )
+    owned = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Owned(),
+        },
     )
-    per_head = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
-        ),
-        num_matrices=attention.n_heads,
+    per_head = ComputeLayout(
+        shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
     )
-    per_expert = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
-                MeshAxisName.EFSDP.value: Shard(0),
-                MeshAxisName.EP.value: Shard(0),
-            },
-        )
+    per_expert = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Shard(0),
+            MeshAxisName.EFSDP.value: Shard(0),
+            MeshAxisName.EP.value: Shard(0),
+        },
     )
-    query_shardings: dict[str, MuonComputeShardingConfig] = (
+    query_compute_layouts: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
             "wq_b": per_head,
@@ -239,12 +232,16 @@ def _distributed_muon_optimizer(
         if attention.q_lora_rank
         else {"wq": per_head}
     )
-    attention_shardings = {
-        **query_shardings,
+    attention_compute_layouts = {
+        **query_compute_layouts,
         "wkv_a": owned,
         "wkv_b": per_head,
         "wo": owned,
     }
+    per_head_attention_projections = (
+        ("wq_b", "wkv_b") if attention.q_lora_rank else ("wq", "wkv_b")
+    )
+    matrix_batch = MuonMatrixBatch(num_matrices=attention.n_heads)
     num_layers = len(model_config.layers)
     muon_kwargs = {
         "lr": lr,
@@ -263,48 +260,53 @@ def _distributed_muon_optimizer(
     }
     expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
 
-    def compute_shardings_for_layer(
+    def compute_layouts_for_layer(
         layer_id: int,
-    ) -> dict[str, MuonComputeShardingConfig]:
+    ) -> dict[str, ComputeLayout]:
         prefix = f"layers.{layer_id}"
-        shardings = {
-            f"{prefix}.attention.{projection}.weight": compute_sharding
-            for projection, compute_sharding in attention_shardings.items()
+        compute_layouts = {
+            f"{prefix}.attention.{projection}.weight": compute_layout
+            for projection, compute_layout in attention_compute_layouts.items()
         }
         if not layer_id:
-            shardings.update(
+            compute_layouts.update(
                 {
                     f"{prefix}.feed_forward.{projection}.weight": owned
                     for projection in ("w1", "w2", "w3")
                 }
             )
         else:
-            shardings.update(
+            compute_layouts.update(
                 {
                     f"{prefix}.moe.routed_experts.inner_experts.{projection}": per_expert
                     for projection in expert_projections
                 }
             )
-            shardings[f"{prefix}.moe.router.gate.weight"] = owned
-            shardings.update(
+            compute_layouts[f"{prefix}.moe.router.gate.weight"] = owned
+            compute_layouts.update(
                 {
                     f"{prefix}.moe.shared_experts.{projection}.weight": owned
                     for projection in ("w1", "w2", "w3")
                 }
             )
-        return shardings
+        return compute_layouts
 
-    compute_sharding_by_fqn_per_layer = tuple(
-        compute_shardings_for_layer(layer_id) for layer_id in range(num_layers)
+    compute_layout_by_fqn_per_layer = tuple(
+        compute_layouts_for_layer(layer_id) for layer_id in range(num_layers)
     )
-    compute_sharding_by_fqn = {
-        fqn: compute_sharding
-        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
-        for fqn, compute_sharding in layer_compute_sharding_by_fqn.items()
+    compute_layout_by_fqn = {
+        fqn: compute_layout
+        for layer_compute_layout_by_fqn in compute_layout_by_fqn_per_layer
+        for fqn, compute_layout in layer_compute_layout_by_fqn.items()
+    }
+    matrix_batch_by_fqn = {
+        f"layers.{layer_id}.attention.{projection}.weight": matrix_batch
+        for layer_id in range(num_layers)
+        for projection in per_head_attention_projections
     }
     layer_bucket_fqns = tuple(
-        tuple(layer_compute_sharding_by_fqn)
-        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
+        tuple(layer_compute_layout_by_fqn)
+        for layer_compute_layout_by_fqn in compute_layout_by_fqn_per_layer
     )
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
     # collective launch overhead across pairs of MoE layers.
@@ -333,7 +335,7 @@ def _distributed_muon_optimizer(
     # https://arxiv.org/abs/2502.16982
     muon_pattern = (
         r"(?:"
-        rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
+        rf"attention\.(?:{'|'.join(attention_compute_layouts)})\.weight|"
         rf"routed_experts\.inner_experts\.(?:{'|'.join(expert_projections)})|"
         r"feed_forward\.w[123]\.weight|"
         # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
@@ -361,7 +363,8 @@ def _distributed_muon_optimizer(
         optimizer_factory_kwargs_by_name={
             "DistributedMuon": {
                 "bucket_configs": bucket_configs,
-                "compute_sharding_by_fqn": compute_sharding_by_fqn,
+                "compute_layout_by_fqn": compute_layout_by_fqn,
+                "matrix_batch_by_fqn": matrix_batch_by_fqn,
             }
         },
     )

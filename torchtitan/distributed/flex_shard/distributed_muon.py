@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
+from types import MappingProxyType
 from typing import Any, cast, NoReturn, overload
 
 import torch
@@ -47,62 +48,49 @@ from .optimizer_reshard import _BucketSpec, BucketConfig, ComputeLayout, Owned
 
 __all__ = [
     "build_distributed_muon",
-    "MuonComputeShardingConfig",
+    "MuonMatrixBatch",
 ]
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class MuonComputeShardingConfig:
-    """Define Muon's logical tensor and temporary named-axis compute layout.
+class MuonMatrixBatch:
+    """Interpret storage ``[B * R, C]`` as Muon matrices ``[B, R, C]``.
 
-    ``Owned`` balances complete subgroup-local 2D matrices across dynamically
-    selected owner ranks; multiple such axes form one joint Cartesian group.
-    ``Shard(0)`` on a named axis partitions a 3D batch-first tensor
-    ``[B, R, C]`` along its matrix batch. Omitted axes preserve their storage
-    placement. Redistribution inputs remain flattened, and the compute view is
-    applied locally only after the input reaches its compute sharding. The
-    layout may represent transitions that FlexShard does not execute yet;
-    those fail while the optimizer plan is constructed. In this initial
-    implementation, redistributing one storage mesh axis requires every other
-    active storage mesh axis to be replicated.
-
-    ``num_matrices`` optionally interprets global 2D parameter storage
-    ``[num_matrices * R, C]`` as a batch of independent Muon matrices
-    ``[num_matrices, R, C]``. It is Muon metadata; FlexShard communication
-    continues to operate on flattened compute inputs.
+    The matrix batch is immutable per-parameter optimizer metadata. FlexShard
+    continues to communicate flattened 2D compute inputs and applies the local
+    matrix view only at the DistributedMuon compute boundary.
     """
 
-    compute_layout: ComputeLayout
-
-    # A value defines a logical [num_matrices, rows, columns] Muon input over
-    # flattened [num_matrices * rows, columns] parameter storage.
-    num_matrices: int | None = None
+    num_matrices: int
 
     def __post_init__(self) -> None:
-        if type(self.compute_layout) is not ComputeLayout:
-            raise ValueError(
-                "MuonComputeShardingConfig.compute_layout must be ComputeLayout"
-            )
-        if self.num_matrices is not None and (
+        if (
             isinstance(self.num_matrices, bool)
             or not isinstance(self.num_matrices, int)
             or self.num_matrices <= 0
         ):
-            raise ValueError("num_matrices must be a positive integer or None")
+            raise ValueError("MuonMatrixBatch.num_matrices must be a positive integer")
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging."""
-        return {"repr": repr(self)}
+        return {"num_matrices": self.num_matrices}
 
 
 def build_distributed_muon(
     params: Iterable[dict[str, Any]],
     *,
-    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+    compute_layout_by_fqn: Mapping[str, ComputeLayout],
+    matrix_batch_by_fqn: Mapping[str, MuonMatrixBatch],
     bucket_configs: Sequence[BucketConfig],
     **kwargs: Any,
 ) -> DistributedMuon:
     """Construct a DistributedMuon optimizer with FlexShard redistribution."""
+    for fqn, compute_layout in compute_layout_by_fqn.items():
+        if not isinstance(fqn, str):
+            raise ValueError("compute_layout_by_fqn keys must be strings")
+        if type(compute_layout) is not ComputeLayout:
+            raise ValueError("compute_layout_by_fqn values must be ComputeLayout")
+
     prepared_params = []
     for param_group in params:
         group = dict(param_group)
@@ -119,10 +107,22 @@ def build_distributed_muon(
 
         prepared_params.append(group)
 
-    optimizer = DistributedMuon(prepared_params, **kwargs)
+    optimizer = DistributedMuon(
+        prepared_params,
+        matrix_batch_by_fqn=matrix_batch_by_fqn,
+        **kwargs,
+    )
+    missing_compute_layouts = set(optimizer._matrix_batch_by_fqn).difference(
+        compute_layout_by_fqn
+    )
+    if missing_compute_layouts:
+        raise ValueError(
+            "matrix_batch_by_fqn entries must also have compute layouts: "
+            f"{sorted(missing_compute_layouts)}"
+        )
     _configure_distributed_muon(
         optimizer,
-        compute_sharding_by_fqn=compute_sharding_by_fqn,
+        compute_layout_by_fqn=compute_layout_by_fqn,
         bucket_configs=bucket_configs,
     )
     return optimizer
@@ -131,17 +131,17 @@ def build_distributed_muon(
 def _configure_distributed_muon(
     optimizer: DistributedMuon,
     *,
-    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+    compute_layout_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
 ) -> None:
     """Configure one newly constructed DistributedMuon optimizer.
 
     Every group must provide aligned ``params`` and ``param_names``. Every
-    local parameter FQN must have one entry in ``compute_sharding_by_fqn``;
-    extra entries for parameters on other pipeline stages are ignored.
-    Parameter groups, compute sharding, bucket configuration, and layouts are
-    frozen after this call because optimizer state and collectives depend on
-    them.
+    local parameter FQN must have one entry in ``compute_layout_by_fqn``;
+    extra compute-layout and matrix-batch entries for parameters on other
+    pipeline stages are ignored. Parameter groups, matrix batches, compute
+    layouts, and bucket configuration are frozen because optimizer state and
+    collectives depend on them.
     """
     optimizer._validate_groups()
 
@@ -153,13 +153,15 @@ def _configure_distributed_muon(
         if raw_param_names is None or len(group_params) != len(param_names):
             raise ValueError("params and param_names must be aligned")
         for param, fqn in zip(group_params, param_names, strict=True):
-            if fqn not in compute_sharding_by_fqn:
-                raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
-            parameters_to_prepare.append((param, fqn, compute_sharding_by_fqn[fqn]))
+            if fqn not in compute_layout_by_fqn:
+                raise ValueError(f"missing compute layout for Muon parameter {fqn!r}")
+            compute_layout = compute_layout_by_fqn[fqn]
+            parameters_to_prepare.append((param, fqn, compute_layout))
 
     prepared_compute_layouts = {}
-    for param, fqn, compute_sharding in parameters_to_prepare:
-        num_matrices = compute_sharding.num_matrices
+    for param, fqn, compute_layout in parameters_to_prepare:
+        matrix_batch = optimizer._matrix_batch_by_fqn.get(fqn)
+        num_matrices = None if matrix_batch is None else matrix_batch.num_matrices
         global_storage_shape = torch.Size(param.shape)
         resolved_compute_view = None
         if (
@@ -209,7 +211,7 @@ def _configure_distributed_muon(
             )
         prepared_compute_layouts[fqn] = _PreparedParameterComputeLayout(
             compute_view_key=compute_view_key,
-            compute_layout=compute_sharding.compute_layout,
+            compute_layout=compute_layout,
             global_compute_shape=global_compute_shape,
             resolved_compute_view=resolved_compute_view,
         )
@@ -253,6 +255,7 @@ class DistributedMuon(Optimizer):
     """
 
     _prepared_compute_layouts: dict[str, _PreparedParameterComputeLayout]
+    _matrix_batch_by_fqn: Mapping[str, MuonMatrixBatch]
     _specs: tuple[_BucketSpec, ...]
     _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
     _param_groups_frozen: bool
@@ -261,6 +264,7 @@ class DistributedMuon(Optimizer):
         self,
         params: Iterable[dict[str, Any]],
         *,
+        matrix_batch_by_fqn: Mapping[str, MuonMatrixBatch],
         lr: float = 1e-3,
         weight_decay: float = 0.1,
         momentum: float = 0.95,
@@ -270,6 +274,15 @@ class DistributedMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
     ) -> None:
+        matrix_batches = {}
+        for fqn, matrix_batch in matrix_batch_by_fqn.items():
+            if not isinstance(fqn, str):
+                raise ValueError("matrix_batch_by_fqn keys must be strings")
+            if type(matrix_batch) is not MuonMatrixBatch:
+                raise ValueError("matrix_batch_by_fqn values must be MuonMatrixBatch")
+            matrix_batches[fqn] = matrix_batch
+        self._matrix_batch_by_fqn = MappingProxyType(matrix_batches)
+
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,

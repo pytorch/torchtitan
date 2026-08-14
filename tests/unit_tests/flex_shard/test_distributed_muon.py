@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from typing import Any, cast
 
 import torch
 from torch.distributed.device_mesh import init_device_mesh
@@ -22,7 +23,7 @@ from torchtitan.distributed.flex_shard import (
     BucketConfig,
     build_distributed_muon,
     ComputeLayout,
-    MuonComputeShardingConfig,
+    MuonMatrixBatch,
     Owned,
 )
 from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import _TensorRegion
@@ -40,14 +41,16 @@ def _build_single_parameter_muon(
     fqn = "layers.0.attention.wq.weight"
     return build_distributed_muon(
         [{"params": [parameter], "param_names": [fqn]}],
-        compute_sharding_by_fqn={
-            fqn: MuonComputeShardingConfig(
-                compute_layout=ComputeLayout(
-                    shardings_by_mesh_axis=shardings_by_mesh_axis,
-                ),
-                num_matrices=num_matrices,
+        compute_layout_by_fqn={
+            fqn: ComputeLayout(
+                shardings_by_mesh_axis=shardings_by_mesh_axis,
             )
         },
+        matrix_batch_by_fqn=(
+            {}
+            if num_matrices is None
+            else {fqn: MuonMatrixBatch(num_matrices=num_matrices)}
+        ),
         bucket_configs=[BucketConfig(patterns=(fqn,))],
         **kwargs,
     )
@@ -59,14 +62,50 @@ class TestBatchedMatrixComputeInput(unittest.TestCase):
             with self.subTest(num_matrices=num_matrices):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "num_matrices must be a positive integer or None",
+                    "MuonMatrixBatch.num_matrices must be a positive integer",
                 ):
-                    MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"dp_shard": Shard(0)},
-                        ),
-                        num_matrices=num_matrices,
-                    )
+                    MuonMatrixBatch(num_matrices=num_matrices)
+
+    def test_rejects_invalid_configuration_maps(self):
+        parameter = torch.nn.Parameter(torch.ones(2, 2))
+        fqn = "layers.0.attention.wq.weight"
+        params = [{"params": [parameter], "param_names": [fqn]}]
+        compute_layout = ComputeLayout(shardings_by_mesh_axis={"dp_shard": Shard(0)})
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "compute_layout_by_fqn values must be ComputeLayout",
+        ):
+            build_distributed_muon(
+                params,
+                compute_layout_by_fqn={fqn: cast(Any, object())},
+                matrix_batch_by_fqn={},
+                bucket_configs=[],
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "matrix_batch_by_fqn values must be MuonMatrixBatch",
+        ):
+            build_distributed_muon(
+                params,
+                compute_layout_by_fqn={fqn: compute_layout},
+                matrix_batch_by_fqn={fqn: cast(Any, object())},
+                bucket_configs=[],
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "matrix_batch_by_fqn entries must also have compute layouts",
+        ):
+            build_distributed_muon(
+                params,
+                compute_layout_by_fqn={},
+                matrix_batch_by_fqn={
+                    fqn: MuonMatrixBatch(num_matrices=2),
+                },
+                bucket_configs=[],
+            )
 
     def test_compute_input_view_is_zero_copy(self):
         matrix_rows = 3
@@ -231,20 +270,18 @@ class TestDistributedMuon(DTensorTestBase):
                         "param_names": [redistributed_fqn, local_blocks_fqn],
                     }
                 ],
-                compute_sharding_by_fqn={
-                    redistributed_fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={
-                                "dp_shard": Owned(),
-                            },
-                        )
+                compute_layout_by_fqn={
+                    redistributed_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "dp_shard": Owned(),
+                        },
                     ),
-                    local_blocks_fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"dp_shard": Shard(0)},
-                        ),
-                        num_matrices=self.world_size,
+                    local_blocks_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Shard(0)},
                     ),
+                },
+                matrix_batch_by_fqn={
+                    local_blocks_fqn: MuonMatrixBatch(num_matrices=self.world_size)
                 },
                 bucket_configs=[
                     BucketConfig(
@@ -418,16 +455,15 @@ class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
         ):
             build_distributed_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
-                compute_sharding_by_fqn={
-                    fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={
-                                "efsdp": Shard(0),
-                                "ep": Shard(0),
-                            },
-                        )
+                compute_layout_by_fqn={
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "efsdp": Shard(0),
+                            "ep": Shard(0),
+                        },
                     )
                 },
+                matrix_batch_by_fqn={},
                 bucket_configs=[BucketConfig(patterns=(fqn,))],
             )
 
