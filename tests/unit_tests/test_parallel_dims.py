@@ -506,6 +506,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            spmd_backend="partial_dtensor",
         )
 
         # Test mesh building
@@ -573,6 +574,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            spmd_backend="partial_dtensor",
         )
         parallel_dims.build_mesh()
 
@@ -699,6 +701,7 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                spmd_backend="partial_dtensor",
             )
             pd.build_mesh()
 
@@ -769,6 +772,7 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                spmd_backend="partial_dtensor",
             )
 
             # Test mesh building

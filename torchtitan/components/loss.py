@@ -360,7 +360,7 @@ class CrossEntropyLoss(BaseLoss):
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":
+                if spmd.is_type_checking():
                     spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 

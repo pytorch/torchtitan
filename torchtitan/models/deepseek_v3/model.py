@@ -11,7 +11,6 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -109,7 +108,7 @@ class Attention(BaseAttention):
         # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
         with spmd.local():
             q = q.view(bsz, seqlen, -1, self.qk_head_dim)
-            if get_spmd_backend() == "spmd_types":
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     q,
                     {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
@@ -134,7 +133,7 @@ class Attention(BaseAttention):
                 kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
             k = torch.cat([k_nope, k_pe.expand(-1, -1, k_nope.size(2), -1)], dim=-1)
-            if get_spmd_backend() == "spmd_types" and not torch.compiler.is_compiling():
+            if spmd.is_type_checking() and not torch.compiler.is_compiling():
                 for t in [k, v]:
                     spmd.assert_type(
                         t,
