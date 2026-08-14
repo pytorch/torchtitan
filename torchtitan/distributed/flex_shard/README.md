@@ -3,7 +3,7 @@
 FlexShard provides PyTorch-native building blocks for running optimizer compute
 with layouts that differ from persistent DTensor parameter storage layouts. It
 plans packed storage-to-compute redistribution and overlaps communication with
-optimizer work. DistributedMuon is its initial consumer.
+optimizer work. DistMuon is its initial consumer.
 
 ## Public API
 
@@ -15,7 +15,7 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `build_distributed_muon` combines optimizer-agnostic per-parameter
+- `build_dist_muon` combines optimizer-agnostic per-parameter
   `ComputeLayout` values in `compute_sharding_by_fqn` with optimizer-owned
   `num_stacked_matrices_by_fqn` counts. Each configured count interprets a 2D
   parameter `[M * R, C]` as `M` independent matrices `[M, R, C]`. The builder
@@ -34,7 +34,7 @@ The [Kimi configuration registry](../../models/kimi_k2_7/config_registry.py)
 is the first TorchTitan integration. Its shared optimizer configuration:
 
 - Selects matrix parameters from attention, dense MLPs, routed and shared
-  experts, and routers for DistributedMuon. Other parameters continue to use
+  experts, and routers for DistMuon. Other parameters continue to use
   AdamW.
 - Defines each selected parameter's compute sharding, including per-head Muon
   for compatible attention projections.
