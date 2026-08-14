@@ -137,9 +137,6 @@ class ParallelismConfig:
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
-    enable_async_tensor_parallel: bool = False
-    """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
-
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
@@ -269,10 +266,22 @@ class CompileConfig:
     enable: bool = False
     """Whether to apply torch.compile"""
 
+    enable_async_tensor_parallel: bool = False
+    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
+
     components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
 
     backend: str = "inductor"
+
+    def __post_init__(self) -> None:
+        if self.enable_async_tensor_parallel and not (
+            self.enable and "model" in self.components
+        ):
+            raise ValueError(
+                "Async TP requires 'model' in --compile.components and "
+                "--compile.enable"
+            )
 
 
 @dataclass(kw_only=True, slots=True)
