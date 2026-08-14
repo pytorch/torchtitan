@@ -151,21 +151,6 @@ cd {your_local_torchtitan_root_path}
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```
 
-**NOTE:** On a single-node box without InfiniBand, weight sync can hang right after
-`put_state_dict[model_state_dict]/cpu_staged` finishes, with the generator ranks
-spinning on CPU while NCCL logs `Found 0 InfiniBand device(s) but 1 required
-(NCCL_CTRAN_IB_DEVICES_PER_RANK)` and `RdmaTransport is not supported`. Select a
-non-RDMA backend before launching:
-```bash
-export NCCL_CTRAN_BACKENDS=nvl,socket
-export NCCL_IB_DISABLE=1
-```
-Export these in the launching shell (like `PYTHONPATH` above) so the Monarch-spawned
-trainer and generator processes inherit them. Setting them from inside the training
-script is too late: the collective is initialized in those child processes, which do
-not see a runtime mutation of the parent's `os.environ`. On MAST, put them in the
-role env instead.
-
 6. Follow the [DAPO Math setup](./examples/dapo_math#setup) to install Math-Verify and download the Qwen3-4B checkpoint.
 
 7. Run the DAPO Math reference experiment:
