@@ -23,20 +23,19 @@ from torchtitan.distributed.flex_shard import (
     BucketConfig,
     build_distributed_muon,
     ComputeLayout,
-    MuonMatrixBatch,
     Owned,
 )
 from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import _TensorRegion
 from torchtitan.distributed.flex_shard.distributed_muon import (
     _adjust_muon_learning_rate,
-    _build_batched_matrix_redistribution_plan,
+    _build_row_concatenated_matrix_redistribution_plan,
     _ResolvedBatchedMatrixView,
     DistributedMuon,
 )
 
 
 def _build_single_parameter_muon(
-    parameter, shardings_by_mesh_axis, *, num_matrices=None, **kwargs
+    parameter, shardings_by_mesh_axis, *, num_stacked_matrices=None, **kwargs
 ):
     fqn = "layers.0.attention.wq.weight"
     return build_distributed_muon(
@@ -46,25 +45,28 @@ def _build_single_parameter_muon(
                 shardings_by_mesh_axis=shardings_by_mesh_axis,
             )
         },
-        matrix_batch_by_fqn=(
-            {}
-            if num_matrices is None
-            else {fqn: MuonMatrixBatch(num_matrices=num_matrices)}
+        num_stacked_matrices_by_fqn=(
+            {} if num_stacked_matrices is None else {fqn: num_stacked_matrices}
         ),
         bucket_configs=[BucketConfig(patterns=(fqn,))],
         **kwargs,
     )
 
 
-class TestBatchedMatrixComputeInput(unittest.TestCase):
-    def test_num_matrices_must_be_positive(self):
-        for num_matrices in (True, 0, -1, 1.5):
-            with self.subTest(num_matrices=num_matrices):
+class TestStackedMatrixConfiguration(unittest.TestCase):
+    def test_num_stacked_matrices_must_be_positive(self):
+        parameter = torch.nn.Parameter(torch.ones(2, 2))
+        for num_stacked_matrices in (True, 0, -1, 1.5):
+            with self.subTest(num_stacked_matrices=num_stacked_matrices):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "MuonMatrixBatch.num_matrices must be a positive integer",
+                    "num_stacked_matrices_by_fqn.*must be a positive integer",
                 ):
-                    MuonMatrixBatch(num_matrices=num_matrices)
+                    _build_single_parameter_muon(
+                        parameter,
+                        {"dp_shard": Shard(0)},
+                        num_stacked_matrices=cast(Any, num_stacked_matrices),
+                    )
 
     def test_rejects_invalid_configuration_maps(self):
         parameter = torch.nn.Parameter(torch.ones(2, 2))
@@ -79,31 +81,29 @@ class TestBatchedMatrixComputeInput(unittest.TestCase):
             build_distributed_muon(
                 params,
                 compute_layout_by_fqn={fqn: cast(Any, object())},
-                matrix_batch_by_fqn={},
+                num_stacked_matrices_by_fqn={},
                 bucket_configs=[],
             )
 
         with self.assertRaisesRegex(
             ValueError,
-            "matrix_batch_by_fqn values must be MuonMatrixBatch",
+            "num_stacked_matrices_by_fqn.*must be a positive integer",
         ):
             build_distributed_muon(
                 params,
                 compute_layout_by_fqn={fqn: compute_layout},
-                matrix_batch_by_fqn={fqn: cast(Any, object())},
+                num_stacked_matrices_by_fqn={fqn: cast(Any, object())},
                 bucket_configs=[],
             )
 
         with self.assertRaisesRegex(
             ValueError,
-            "matrix_batch_by_fqn entries must also have compute layouts",
+            "num_stacked_matrices_by_fqn entries must also have compute layouts",
         ):
             build_distributed_muon(
                 params,
                 compute_layout_by_fqn={},
-                matrix_batch_by_fqn={
-                    fqn: MuonMatrixBatch(num_matrices=2),
-                },
+                num_stacked_matrices_by_fqn={fqn: 2},
                 bucket_configs=[],
             )
 
@@ -137,7 +137,7 @@ class TestBatchedMatrixComputeInput(unittest.TestCase):
                     self.assertEqual(compute_input[0, 0].item(), -1)
 
     def test_redistribution_destinations_are_flat_compute_inputs(self):
-        plan = _build_batched_matrix_redistribution_plan(
+        plan = _build_row_concatenated_matrix_redistribution_plan(
             (
                 ((0,), _TensorRegion(offsets=(0, 0), shape=(6, 2))),
                 ((1,), _TensorRegion(offsets=(6, 0), shape=(6, 2))),
@@ -189,7 +189,7 @@ class TestDistributedMuon(DTensorTestBase):
         optimizer = _build_single_parameter_muon(
             parameter,
             {"dp_shard": Shard(0)},
-            num_matrices=num_heads,
+            num_stacked_matrices=num_heads,
         )
 
         compute_layout = optimizer._parameter_compute_layouts[0]
@@ -214,7 +214,7 @@ class TestDistributedMuon(DTensorTestBase):
         self.assertEqual(compute.data_ptr(), local_compute_input.data_ptr())
 
     @with_comms
-    def test_rejects_oversharded_batched_matrix_storage(self):
+    def test_rejects_oversharded_row_concatenated_matrix_storage(self):
         num_heads = 3
         matrix_rows = 4
         matrix_columns = 2
@@ -232,12 +232,12 @@ class TestDistributedMuon(DTensorTestBase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "storage shards are not aligned to matrix rows of size 4",
+            "row-concatenated storage shards are not aligned to matrix rows of size 4",
         ):
             _build_single_parameter_muon(
                 parameter,
                 {"dp_shard": Shard(0)},
-                num_matrices=num_heads,
+                num_stacked_matrices=num_heads,
             )
 
     @with_comms
@@ -280,9 +280,7 @@ class TestDistributedMuon(DTensorTestBase):
                         shardings_by_mesh_axis={"dp_shard": Shard(0)},
                     ),
                 },
-                matrix_batch_by_fqn={
-                    local_blocks_fqn: MuonMatrixBatch(num_matrices=self.world_size)
-                },
+                num_stacked_matrices_by_fqn={local_blocks_fqn: self.world_size},
                 bucket_configs=[
                     BucketConfig(
                         patterns=("layers.0.*",),
@@ -463,7 +461,7 @@ class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
                         },
                     )
                 },
-                matrix_batch_by_fqn={},
+                num_stacked_matrices_by_fqn={},
                 bucket_configs=[BucketConfig(patterns=(fqn,))],
             )
 

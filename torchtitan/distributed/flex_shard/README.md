@@ -15,15 +15,18 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `MuonMatrixBatch` is immutable DistributedMuon metadata that interprets a
-  flattened 2D parameter as a batch of independent Muon matrices.
-- `build_distributed_muon` combines optimizer-owned matrix metadata with
-  optimizer-agnostic per-parameter `ComputeLayout` values, validates named
-  DTensor parameters, and plans their storage-to-compute transitions.
+- `build_distributed_muon` combines optimizer-agnostic per-parameter
+  `ComputeLayout` values with optimizer-owned `num_stacked_matrices_by_fqn`
+  counts. Each configured count interprets a 2D parameter `[M * R, C]` as `M`
+  independent matrices `[M, R, C]`. The builder validates named DTensor
+  parameters and plans their storage-to-compute transitions. An absent FQN uses
+  ordinary 2D Muon compute; an explicit count of one uses the stacked
+  `[1, R, C]` compute path.
 
-Compute layouts and matrix batches are reconstruction configuration. They are
-validated and frozen when the optimizer is built, but are not stored in its
-state dict; checkpoint restore must rebuild the optimizer with matching values.
+Compute layouts and stacked-matrix counts are reconstruction configuration.
+They are validated and frozen when the optimizer is built, but are not stored
+in its state dict; checkpoint restore must rebuild the optimizer with matching
+values.
 
 ## TorchTitan Kimi integration
 

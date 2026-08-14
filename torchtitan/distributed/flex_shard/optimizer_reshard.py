@@ -79,7 +79,7 @@ class ComputeLayout:
     must apply when the layout is resolved.
 
     Examples:
-        Shard a viewed matrix batch across the EFSDP and EP axes::
+        Shard a logical batch of matrices across the EFSDP and EP axes::
 
             ComputeLayout(
                 shardings_by_mesh_axis={

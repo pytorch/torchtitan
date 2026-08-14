@@ -17,12 +17,7 @@ from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfi
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.distributed.flex_shard import (
-    BucketConfig,
-    ComputeLayout,
-    MuonMatrixBatch,
-    Owned,
-)
+from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout, Owned
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
@@ -241,7 +236,6 @@ def _distributed_muon_optimizer(
     per_head_attention_projections = (
         ("wq_b", "wkv_b") if attention.q_lora_rank else ("wq", "wkv_b")
     )
-    matrix_batch = MuonMatrixBatch(num_matrices=attention.n_heads)
     num_layers = len(model_config.layers)
     muon_kwargs = {
         "lr": lr,
@@ -299,8 +293,8 @@ def _distributed_muon_optimizer(
         for layer_compute_layout_by_fqn in compute_layout_by_fqn_per_layer
         for fqn, compute_layout in layer_compute_layout_by_fqn.items()
     }
-    matrix_batch_by_fqn = {
-        f"layers.{layer_id}.attention.{projection}.weight": matrix_batch
+    num_stacked_matrices_by_fqn = {
+        f"layers.{layer_id}.attention.{projection}.weight": attention.n_heads
         for layer_id in range(num_layers)
         for projection in per_head_attention_projections
     }
@@ -364,7 +358,7 @@ def _distributed_muon_optimizer(
             "DistributedMuon": {
                 "bucket_configs": bucket_configs,
                 "compute_layout_by_fqn": compute_layout_by_fqn,
-                "matrix_batch_by_fqn": matrix_batch_by_fqn,
+                "num_stacked_matrices_by_fqn": num_stacked_matrices_by_fqn,
             }
         },
     )
