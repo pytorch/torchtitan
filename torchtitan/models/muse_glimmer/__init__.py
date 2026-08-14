@@ -35,6 +35,7 @@ from .model import (
 )
 from .parallelize import parallelize_muse_glimmer, pipeline_muse_glimmer
 from .sharding import set_muse_glimmer_vision_sharding_config
+from .state_dict_adapter import MuseGlimmerStateDictAdapter
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
 __all__ = [
@@ -507,5 +508,5 @@ def model_registry(
         parallelize_fn=parallelize_muse_glimmer,
         pipelining_fn=pipeline_muse_glimmer,
         post_optimizer_build_fn=None,
-        state_dict_adapter=None,
+        state_dict_adapter=MuseGlimmerStateDictAdapter,
     )
