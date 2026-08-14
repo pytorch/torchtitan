@@ -42,8 +42,9 @@ def cross_entropy_loss(
     if isinstance(pred, DTensor):
         assert get_spmd_backend() == "default"
         if pred.placements == (Shard(pred.ndim - 1),):
+            pred_local = pred.to_local()
             return _LossParallelCrossEntropy.apply(
-                pred.to_local().reshape(-1, pred.shape[-1]).float(),
+                pred_local.reshape(-1, pred_local.shape[-1]).float(),
                 labels.reshape(-1),
                 pred.device_mesh.get_group("tp"),
                 pred.shape[-1],
