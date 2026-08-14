@@ -619,6 +619,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 else None
             ),
         )
+
         # build checkpointer
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
