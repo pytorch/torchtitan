@@ -76,6 +76,7 @@ class FakeMoEModel(nn.Module):
 
 class FakeParallelDims:
     spmd_backend = "none"
+    tp = 1
 
     def get_optional_mesh(self, name):
         return None
