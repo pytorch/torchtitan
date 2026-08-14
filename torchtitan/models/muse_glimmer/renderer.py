@@ -53,8 +53,21 @@ class MuseGlimmerRendererConfig(BaseRendererConfig):
     # the kind of field the library's template-parity matrix is meant to cover.
     _template_fields: ClassVar[frozenset[str]] = frozenset({"reasoning_strength"})
     _internal_fields: ClassVar[frozenset[str]] = frozenset(
-        {"retain_reasoning_in_history", "answer_from_reasoning_fallback"}
+        {
+            "chat_template",
+            "retain_reasoning_in_history",
+            "answer_from_reasoning_fallback",
+        }
     )
+
+    chat_template: str | None = None
+    """Jinja chat template to render with: a path to a ``.jinja`` file, or the template
+    source inline. ``None`` (default) uses the template the tokenizer ships.
+
+    Required when the tokenizer has no template of its own. Not every Muse Glimmer
+    checkpoint carries one -- see ``MuseGlimmerRenderer.__init__`` for why this is a
+    hard error rather than a fallback.
+    """
 
     reasoning_strength: str | None = None
     """Passed through to the chat template to size the reasoning budget.
@@ -164,6 +177,42 @@ class MuseGlimmerRenderer:
         self._config = config or MuseGlimmerRendererConfig()
         # The controller reads renderer._tokenizer (e.g. for pad_id=eos_token_id).
         self._tokenizer = tokenizer
+        self._chat_template = self._resolve_chat_template()
+
+    def _resolve_chat_template(self) -> str | None:
+        """Return the template source to render with, or None to use the tokenizer's.
+
+        Raises when neither is available. Muse Glimmer checkpoints do not all ship a
+        chat template -- some carry it as a separate ``chat_template.jinja``, others
+        have none at all -- and without one ``apply_chat_template`` raises deep inside
+        the first rollout, which the rollout loop reports as a generic per-rollout
+        ERROR. Failing here instead turns "every rollout errors" into one actionable
+        message before training starts.
+        """
+        configured = self._config.chat_template
+        if configured is not None:
+            if configured.endswith(".jinja") or configured.endswith(".j2"):
+                with open(configured) as f:
+                    return f.read()
+            return configured
+        if getattr(self._tok, "chat_template", None):
+            return None  # tokenizer has one; let apply_chat_template find it
+        raise ValueError(
+            f"The tokenizer at {getattr(self._tok, 'name_or_path', '<unknown>')!r} has "
+            "no chat template, so the muse_glimmer renderer cannot render prompts. Not "
+            "every Muse Glimmer checkpoint ships one. Point the renderer at the "
+            "template for your checkpoint, e.g. "
+            "MuseGlimmerRendererConfig(chat_template='/path/to/chat_template.jinja'), "
+            "or use a checkpoint whose tokenizer carries a chat template."
+        )
+
+    def _template_arg(self) -> dict:
+        """``chat_template=`` kwarg, omitted when deferring to the tokenizer's."""
+        return (
+            {}
+            if self._chat_template is None
+            else {"chat_template": self._chat_template}
+        )
 
     def _prepare(self, messages):
         """Apply history policy, then the tool-call shape the template expects."""
@@ -191,6 +240,7 @@ class MuseGlimmerRenderer:
             tools=tools,
             add_generation_prompt=add_generation_prompt,
             tokenize=False,
+            **self._template_arg(),
             **self._template_kwargs(),
         )
         return self._tok.encode(text, add_special_tokens=False)
@@ -259,6 +309,7 @@ class MuseGlimmerRenderer:
             tools=tools,
             add_generation_prompt=add_generation_prompt,
             tokenize=False,
+            **self._template_arg(),
             **self._template_kwargs(),
         )
         return self._tok.encode(text, add_special_tokens=False)
