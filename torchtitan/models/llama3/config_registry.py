@@ -24,6 +24,7 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
 )
+from torchtitan.models.common.attention import VarlenAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
@@ -74,7 +75,12 @@ def llama3_debugmodel() -> Trainer.Config:
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="varlen")
-    config.training.disable_cuda_graphs = True
+    # c4_test packs at most 26 documents into this config's 8 x 2048 tokens
+    # (60-batch sample, test tokenizer), so 64 leaves ~2.5x headroom.
+    for _, attn_config, _, _ in config.model_spec.model.traverse(
+        VarlenAttention.Config
+    ):
+        cast(VarlenAttention.Config, attn_config).max_num_documents = 64
     return config
 
 

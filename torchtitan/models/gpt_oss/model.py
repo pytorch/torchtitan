@@ -238,7 +238,10 @@ class GptOssModel(Decoder):
         inner_attn = attn_cfg.inner_attention
 
         if isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return create_varlen_metadata_for_document(
+                positions,
+                max_num_documents=inner_attn.max_num_documents,
+            )
         elif isinstance(inner_attn, FlexAttention.Config):
             base_mask_mods = [
                 get_causal_mask_mod(),

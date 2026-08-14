@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import cast
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -13,14 +15,26 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.models.common.attention import VarlenAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 
 
+def _set_max_num_documents(model_spec: ModelSpec, bound: int) -> ModelSpec:
+    for _, attn_config, _, _ in model_spec.model.traverse(VarlenAttention.Config):
+        cast(VarlenAttention.Config, attn_config).max_num_documents = bound
+    return model_spec
+
+
 def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
-    model_spec = model_registry("debugmodel", attn_backend=attn_backend)
+    # c4_test packs at most 62 documents into 8 x 2048 tokens under the gpt-oss
+    # tokenizer (60-batch sample), so 128 leaves ~2x headroom.
+    model_spec = _set_max_num_documents(
+        model_registry("debugmodel", attn_backend=attn_backend), 128
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -69,7 +83,9 @@ def gpt_oss_debugmodel_flex() -> Trainer.Config:
 
 
 def gpt_oss_20b() -> Trainer.Config:
-    model_spec = model_registry("20b")
+    # c4_test packs at most 34 documents into 1 x 8192 tokens under the gpt-oss
+    # tokenizer (60-batch sample), so 64 leaves ~2x headroom.
+    model_spec = _set_max_num_documents(model_registry("20b"), 64)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -100,7 +116,9 @@ def gpt_oss_20b() -> Trainer.Config:
 
 
 def gpt_oss_120b() -> Trainer.Config:
-    model_spec = model_registry("120b")
+    # c4_test packs at most 34 documents into 1 x 8192 tokens under the gpt-oss
+    # tokenizer (60-batch sample), so 64 leaves ~2x headroom.
+    model_spec = _set_max_num_documents(model_registry("120b"), 64)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(

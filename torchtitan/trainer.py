@@ -139,7 +139,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     f"({pp_microbatch_size}) when pipeline parallelism is enabled."
                 )
 
-            self._validate_cuda_graphs()
+            self._validate_cuda_graphs(check_varlen_metadata=False)
 
             if (
                 self.parallelism.spmd_backend == "spmd_types"
@@ -177,7 +177,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "--compile.components."
                 )
 
-        def _validate_cuda_graphs(self) -> None:
+        def _validate_cuda_graphs(self, *, check_varlen_metadata: bool = True) -> None:
             if self.training.disable_cuda_graphs:
                 return
 
@@ -187,7 +187,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "Set --training.disable_cuda_graphs."
                 )
 
-            if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
+            if self.model_spec is None:
+                return
+
+            if check_varlen_metadata:
+                for fqn, attn_config, _, _ in self.model_spec.model.traverse(
+                    VarlenAttention.Config
+                ):
+                    assert isinstance(attn_config, VarlenAttention.Config)
+                    if attn_config.max_num_documents is None:
+                        raise ValueError(
+                            "CUDA graphs require fixed-shape varlen document "
+                            f"metadata, but {fqn}.max_num_documents is unset. Set "
+                            "it to an upper bound on documents per batch, or set "
+                            "--training.disable_cuda_graphs."
+                        )
+
+            if self.parallelism.expert_parallel_degree == 1:
                 return
 
             for _, dispatcher_config, _, _ in self.model_spec.model.traverse(

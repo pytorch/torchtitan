@@ -23,11 +23,19 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
 )
+from torchtitan.models.common.attention import VarlenAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 from .model import Qwen3Model
+
+
+def _set_max_num_documents(model_spec: ModelSpec, bound: int) -> ModelSpec:
+    for _, attn_config, _, _ in model_spec.model.traverse(VarlenAttention.Config):
+        cast(VarlenAttention.Config, attn_config).max_num_documents = bound
+    return model_spec
 
 
 def qwen3_debugmodel() -> Trainer.Config:
@@ -244,15 +252,19 @@ def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
         num_layers,
         _NVFP4_BF16_TAIL_FRACTION,
     )
-    config.model_spec = model_registry(
-        "8B",
-        attn_backend="varlen",
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-                model_compile_enabled=True,
-            ),
-        ],
+    # Same bound and caveat as sft_qwen3_8b_math above.
+    config.model_spec = _set_max_num_documents(
+        model_registry(
+            "8B",
+            attn_backend="varlen",
+            converters=[
+                NVFP4LinearConverter.Config(
+                    fqns=fqns,
+                    model_compile_enabled=True,
+                ),
+            ],
+        ),
+        32,
     )
     return config
 
@@ -461,7 +473,10 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             },
         ]
 
-    model_spec = model_registry("8B", attn_backend="varlen")
+    # TODO: 32 comes from a c4_test sample at 1 x 2048 tokens (max 12
+    # documents), not from GSM8K, whose shorter samples may pack more. Measure
+    # against ChatDataLoader before relying on CUDA graphs here.
+    model_spec = _set_max_num_documents(model_registry("8B", attn_backend="varlen"), 32)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(

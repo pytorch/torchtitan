@@ -302,7 +302,10 @@ class Decoder(BaseModel):
         if isinstance(inner_attn, FlexAttention.Config):
             return self._create_flex_attention_mask_for_document(positions, attn_config)
         elif isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return create_varlen_metadata_for_document(
+                positions,
+                max_num_documents=inner_attn.max_num_documents,
+            )
         else:
             raise TypeError(
                 f"Only VarlenAttention and FlexAttention support attention masks, "

@@ -769,6 +769,18 @@ class Qwen35Model(Decoder):
         """
         attn_config = self.config.first_attention
 
+        if (
+            attn_config is not None
+            and isinstance(attn_config.inner_attention, VarlenAttention.Config)
+            and attn_config.inner_attention.max_num_documents is not None
+        ):
+            raise ValueError(
+                "Qwen3.5 does not support VarlenAttention max_num_documents: "
+                "GatedDeltaNet requires data-dependent host offsets. Qwen3.5 "
+                "varlen cannot be CUDA graph captured; set "
+                "--training.disable_cuda_graphs."
+            )
+
         # Host offsets are a GatedDeltaNet-only need: the FLA varlen kernels
         # take cu_seqlens as a CPU tensor to size their launches, whereas
         # quadratic attention (torch.nn.attention.varlen) consumes the device
