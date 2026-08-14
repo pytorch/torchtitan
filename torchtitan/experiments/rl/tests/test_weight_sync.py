@@ -40,10 +40,16 @@ class _FakeRouter:
     def __init__(self, on_pull):
         self._on_pull = on_pull
         self.pulled_versions: list[int] = []
+        self.pull_model_state_dict = _PullEndpoint(self)
 
-    async def pull_model_state_dict(self, *, policy_version):
-        self.pulled_versions.append(policy_version)
-        await self._on_pull()
+
+class _PullEndpoint:
+    def __init__(self, router):
+        self._router = router
+
+    async def call_one(self, policy_version):
+        self._router.pulled_versions.append(policy_version)
+        await self._router._on_pull()
 
 
 class _FakeBuffer:

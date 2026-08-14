@@ -28,7 +28,7 @@ import torch
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexAttention, local_head_split
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.protocols.module import Module
 
@@ -122,9 +122,9 @@ class VisionAttention(Module):
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_NPHDh = self.wq(x).view(N, P, -1, self.head_dim)
-        k_NPHDh = self.wk(x).view(N, P, -1, self.head_dim)
-        v_NPHDh = self.wv(x).view(N, P, -1, self.head_dim)
+        q_NPHDh = local_head_split(self.wq(x), self.head_dim)
+        k_NPHDh = local_head_split(self.wk(x), self.head_dim)
+        v_NPHDh = local_head_split(self.wv(x), self.head_dim)
 
         q_NPHDh, k_NPHDh = rope_apply(q_NPHDh, k_NPHDh, rope_cache)
 
