@@ -143,5 +143,7 @@ def accumulate_contiguous_tensor_statistics(
         value.numel(),
         BLOCK_SIZE=_BLOCK_SIZE,  # pyrefly: ignore[bad-argument-type]
         NEEDS_LOOP=needs_loop,  # pyrefly: ignore[bad-argument-type]
+        # Triton launch metadata accepts a Python bool for a constexpr parameter.
+        # pyrefly: ignore [bad-argument-type]
         USE_INT64_INDEX=value.numel() > _MAX_INT32_INDEXED_ELEMENTS,
     )
