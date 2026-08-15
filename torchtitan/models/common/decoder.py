@@ -117,11 +117,11 @@ class Decoder(BaseModel):
             """Apply runtime config to model config.
 
             When *config* is a ``Trainer.Config``, validates
-            ``training.seq_len`` against each attention layer's intrinsic
-            RoPE max sequence length, resizes RoPE caches, and propagates
-            debug flags. Non-trainer callers may pass any config-like
-            object with a ``ParallelismConfig`` in its ``parallelism``
-            field; in that case the training/debug setup is skipped.
+            ``training.seq_len`` against the model's intrinsic RoPE max
+            sequence length, resizes RoPE caches when present, and propagates
+            debug flags. Non-trainer callers may pass any config-like object
+            with a ``ParallelismConfig`` in its ``parallelism`` field; in that
+            case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
             from torchtitan.trainer import Trainer
@@ -165,20 +165,24 @@ class Decoder(BaseModel):
             if isinstance(config, Trainer.Config):
                 debug = config.debug
                 seq_len = config.training.seq_len
-                max_seq_len = self.max_seq_len
-                if seq_len > max_seq_len:
-                    raise ValueError(
-                        f"Training sequence length {seq_len} exceeds "
-                        f"attention RoPE maximum supported sequence "
-                        f"length {max_seq_len}."
-                    )
+                rope_cfg = getattr(attention, "rope", None)
+                if rope_cfg is not None:
+                    max_seq_len = self.max_seq_len
+                    if seq_len > max_seq_len:
+                        raise ValueError(
+                            f"Training sequence length {seq_len} exceeds "
+                            f"attention RoPE maximum supported sequence "
+                            f"length {max_seq_len}."
+                        )
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
                     if attention_cfg is not None:
-                        attention_cfg.rope = dataclasses.replace(
-                            attention_cfg.rope, max_seq_len=seq_len
-                        )
+                        rope_cfg = getattr(attention_cfg, "rope", None)
+                        if rope_cfg is not None:
+                            attention_cfg.rope = dataclasses.replace(
+                                rope_cfg, max_seq_len=seq_len
+                            )
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance

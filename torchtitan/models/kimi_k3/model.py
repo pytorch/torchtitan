@@ -6,11 +6,9 @@
 
 """Kimi K3 language model components.
 
-Every operator outside the KDA recurrence is plain eager PyTorch, so the model
-mirrors the released HuggingFace math and stays directly inspectable. KDA runs
-on FLA's chunked Triton kernel, which is what makes the model trainable at
-speed; the pure-PyTorch recurrence it is checked against lives in
-``tests/unit_tests/test_kimi_k3.py`` and is far too slow for training.
+MLA delegates to TorchTitan's configured inner-attention backend. KDA runs on
+FLA's chunked Triton kernel; the pure-PyTorch recurrence used to check it lives
+in ``tests/unit_tests/test_kimi_k3.py`` and is far too slow for training.
 """
 
 from dataclasses import dataclass, field
@@ -26,17 +24,20 @@ from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    ScaledDotProductAttention,
+    FlexAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    RoutedExperts,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.kimi_k3.vision_encoder import KimiK3VisionEncoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -100,10 +101,7 @@ class KimiMLAAttention(BaseAttention):
     Unlike DeepSeek-V3 MLA, the released K3 configuration sets
     ``mla_use_nope=True``: the RoPE-sized query/key slices remain part of the
     projected head, but no rotary transform is applied, so this has no rope
-    config at all. Attention itself runs through ``ScaledDotProductAttention``
-    rather than a hand-written softmax: torchtitan's training path has no
-    need to match HF eager's bit-for-bit fp32 softmax, so it uses the same
-    SDPA inner attention the rest of the codebase relies on.
+    config at all. Attention delegates to the configured inner backend.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -121,9 +119,7 @@ class KimiMLAAttention(BaseAttention):
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
-        inner_attention: Module.Config = field(
-            default_factory=ScaledDotProductAttention.Config
-        )
+        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -152,10 +148,6 @@ class KimiMLAAttention(BaseAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
-        if attention_masks is not None:
-            raise NotImplementedError(
-                "Kimi K3 reference MLA does not support packed-document masks."
-            )
 
         B, L, _ = x_BLD.shape
         q_BLNH = self.wq_b(self.q_norm(self.wq_a(x_BLD))).view(
@@ -184,7 +176,13 @@ class KimiMLAAttention(BaseAttention):
         )
         k_BLNH = torch.cat((k_nope, k_rope), dim=-1)
 
-        out_BLNV = self.inner_attention(q_BLNH, k_BLNH, v_BLNH, scale=self.scale)
+        out_BLNV = self.inner_attention(
+            q_BLNH,
+            k_BLNH,
+            v_BLNH,
+            attention_masks=attention_masks,
+            scale=self.scale,
+        )
         out_BLD = out_BLNV.reshape(B, L, self.n_heads * self.v_head_dim)
         out_BLD = out_BLD * torch.sigmoid(self.gate(x_BLD))
         return self.wo(out_BLD)
@@ -352,9 +350,7 @@ class KimiGroupedExperts(GroupedExperts):
     Inherits its stacked-weight shape (``w1_EFD``/``w2_EDF``/``w3_EFD``) and
     parameter allocation; only ``forward`` differs, since the activation is
     baked into the ``torch._grouped_mm`` call sequence rather than being a
-    swappable argument. ``inner_experts`` returns ``self`` so the shared FSDP
-    wrapper's ``moe.routed_experts.inner_experts`` discovery path works
-    without a separate dispatch-composing wrapper class.
+    swappable argument.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -366,10 +362,6 @@ class KimiGroupedExperts(GroupedExperts):
         super().__init__(config)
         self.beta = config.beta
         self.linear_beta = config.linear_beta
-
-    @property
-    def inner_experts(self) -> "KimiGroupedExperts":
-        return self
 
     def forward(
         self,
@@ -417,8 +409,7 @@ class KimiLatentMoE(Module):
         num_experts: int
         router: TokenChoiceTopKRouter.Config
         routed_down: Linear.Config
-        routed_experts: KimiGroupedExperts.Config
-        token_dispatcher: LocalTokenDispatcher.Config
+        routed_experts: RoutedExperts.Config
         routed_norm: RMSNorm.Config
         routed_up: Linear.Config
         shared_experts: KimiFeedForward.Config
@@ -426,13 +417,14 @@ class KimiLatentMoE(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        if config.routed_experts.num_experts != config.num_experts:
-            raise ValueError("routed_experts.num_experts must equal num_experts.")
+        if config.routed_experts.inner_experts.num_experts != config.num_experts:
+            raise ValueError(
+                "routed_experts.inner_experts.num_experts must equal num_experts."
+            )
         self.num_experts = config.num_experts
         self.router = config.router.build()
         self.routed_down = config.routed_down.build()
         self.routed_experts = config.routed_experts.build()
-        self.token_dispatcher = config.token_dispatcher.build()
         self.routed_norm = config.routed_norm.build()
         self.routed_up = config.routed_up.build()
         self.shared_experts = config.shared_experts.build()
@@ -454,15 +446,10 @@ class KimiLatentMoE(Module):
         )
 
     def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
-        weights_BLK, expert_ids_BLK, _ = self.router(x_BLD, self.expert_bias_E)
-        B, L, _ = x_BLD.shape
-        routing_map_BLE = torch.zeros(
-            B,
-            L,
-            self.num_experts,
-            dtype=torch.bool,
-            device=x_BLD.device,
-        ).scatter(-1, expert_ids_BLK, True)
+        weights_BLK, expert_ids_BLK, scores_BLE = self.router(x_BLD, self.expert_bias_E)
+        routing_map_BLE = torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
+            -1, expert_ids_BLK, True
+        )
         num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
         with torch.no_grad():
             # In place so the load-balancing hook registered on the optimizer
@@ -470,31 +457,13 @@ class KimiLatentMoE(Module):
             self.tokens_per_expert_E.add_(num_tokens_per_expert_E.float())
 
         latent_BLD = self.routed_down(x_BLD)
-        latent_dim = latent_BLD.shape[-1]
-        K = weights_BLK.shape[-1]
-        T = B * L
-        latent_TD = latent_BLD.reshape(T, latent_dim)
-        weights_TK = weights_BLK.reshape(T, K)
-        expert_ids_TK = expert_ids_BLK.reshape(T, K)
-
-        # Every expert's weights are packed into one grouped-mm call, so an
-        # expert with zero assigned tokens still sits in the autograd graph
-        # and receives an all-zero gradient rather than None.
-        (
-            routed_input_RD,
+        routed_BLD = self.routed_experts(
+            latent_BLD,
+            weights_BLK,
+            expert_ids_BLK,
             num_tokens_per_expert_E,
-            metadata,
-        ) = self.token_dispatcher.dispatch(
-            latent_TD, weights_TK, expert_ids_TK, num_tokens_per_expert_E
         )
-        routed_output_RD = self.routed_experts(routed_input_RD, num_tokens_per_expert_E)
-        routed_TD = self.token_dispatcher.combine(
-            routed_output_RD,
-            metadata,
-            latent_TD,
-        )
-
-        routed_BLD = self.routed_up(self.routed_norm(routed_TD.view(B, L, latent_dim)))
+        routed_BLD = self.routed_up(self.routed_norm(routed_BLD))
         return routed_BLD + self.shared_experts(x_BLD)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -619,7 +588,7 @@ class KimiK3TransformerBlock(Module):
             h_BLD = self.attention(h_BLD, attention_masks, positions)
         else:
             assert self.delta_attention is not None
-            h_BLD = self.delta_attention(h_BLD, attention_masks, positions)
+            h_BLD = self.delta_attention(h_BLD, None, positions)
         prefix_sum_BLD = h_BLD if prefix_sum_BLD is None else prefix_sum_BLD + h_BLD
 
         assert prefix_sum_BLD is not None
@@ -650,7 +619,6 @@ class KimiK3Model(Decoder):
         spatial_merge_size: int = 2
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            del kwargs
             parallelism = config.parallelism
             unsupported = {
                 "tensor parallel": parallelism.tensor_parallel_degree,
@@ -661,7 +629,7 @@ class KimiK3Model(Decoder):
             enabled = [name for name, degree in unsupported.items() if degree > 1]
             if enabled:
                 raise NotImplementedError(
-                    "Kimi K3 eager reference supports FSDP2 data parallelism only; "
+                    "Kimi K3 supports FSDP2 data parallelism only; "
                     f"disable {', '.join(enabled)}."
                 )
             dataloader = getattr(config, "dataloader", None)
@@ -669,6 +637,7 @@ class KimiK3Model(Decoder):
                 raise NotImplementedError(
                     "Kimi K3 v1 does not support packed documents."
                 )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -712,10 +681,6 @@ class KimiK3Model(Decoder):
                     f"{merge_kernel_size}; each image would occupy a different "
                     "number of text positions than the encoder produces."
                 )
-
-    def get_attention_masks(self, positions: torch.Tensor) -> AttentionMasksType | None:
-        del positions
-        return None
 
     def _prepare_multimodal_embeds(
         self,

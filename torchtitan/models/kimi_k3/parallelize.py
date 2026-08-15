@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""FSDP2 parallelization for the eager Kimi K3 reference model."""
+"""FSDP2 parallelization for Kimi K3."""
 
 import torch.nn as nn
 
@@ -33,7 +33,7 @@ def parallelize_kimi_k3(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ) -> nn.Module:
-    """Apply FSDP2 while keeping the model's eager reference forward path."""
+    """Apply FSDP2 to the Kimi K3 decoder and vision encoder."""
     del dump_folder
 
     unsupported_parallelisms = [
@@ -48,24 +48,22 @@ def parallelize_kimi_k3(
     ]
     if unsupported_parallelisms:
         raise NotImplementedError(
-            "Kimi K3 eager reference currently supports FSDP2 data parallelism "
+            "Kimi K3 currently supports FSDP2 data parallelism "
             f"only; disable {', '.join(unsupported_parallelisms)}."
         )
     if parallelism.spmd_backend != "default":
         raise NotImplementedError(
-            "Kimi K3 eager FSDP2 currently supports the default SPMD backend only."
+            "Kimi K3 FSDP2 currently supports the default SPMD backend only."
         )
     if compile_config.enable:
-        raise NotImplementedError(
-            "Kimi K3 eager reference does not support torch.compile."
-        )
+        raise NotImplementedError("Kimi K3 does not support torch.compile.")
     if ac_config is not None:
         raise NotImplementedError(
-            "Kimi K3 eager FSDP2 does not support activation checkpointing yet."
+            "Kimi K3 FSDP2 does not support activation checkpointing yet."
         )
     if training.enable_cpu_offload:
         raise NotImplementedError(
-            "Kimi K3 eager FSDP2 does not support parameter CPU offload yet."
+            "Kimi K3 FSDP2 does not support parameter CPU offload yet."
         )
 
     dp_mesh_names = (

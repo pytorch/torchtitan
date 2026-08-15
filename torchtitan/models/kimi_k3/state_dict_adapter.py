@@ -184,7 +184,7 @@ class KimiK3StateDictAdapter(StateDictAdapter):
                     moe_config = self.kimi_config.layers[int(layer_idx)].moe
                     assert moe_config is not None
                     grouped_key = (
-                        f"layers.{layer_idx}.moe.routed_experts."
+                        f"layers.{layer_idx}.moe.routed_experts.inner_experts."
                         f"{_EXPERT_PROJECTION_TO_GROUPED_PARAM[projection]}"
                     )
                     experts = self._expert_weights_by_layer_projection.setdefault(
@@ -313,7 +313,7 @@ class KimiK3StateDictAdapter(StateDictAdapter):
             if text_match is not None:
                 layer_idx, suffix = text_match.groups()
                 expert_match = re.fullmatch(
-                    r"moe\.routed_experts\." r"(w1_EFD|w2_EDF|w3_EFD)",
+                    r"moe\.routed_experts\.inner_experts\." r"(w1_EFD|w2_EDF|w3_EFD)",
                     suffix,
                 )
                 if expert_match is not None:

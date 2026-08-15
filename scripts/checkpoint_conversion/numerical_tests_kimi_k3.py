@@ -94,10 +94,11 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         "num_experts": moe.num_experts,
         "num_experts_per_token": moe.router.top_k,
         "num_shared_experts": (
-            moe.shared_experts.w1.out_features // moe.routed_experts.hidden_dim
+            moe.shared_experts.w1.out_features
+            // moe.routed_experts.inner_experts.hidden_dim
         ),
         "moe_renormalize": moe.router.route_norm,
-        "moe_intermediate_size": moe.routed_experts.hidden_dim,
+        "moe_intermediate_size": moe.routed_experts.inner_experts.hidden_dim,
         "routed_expert_hidden_size": moe.routed_down.out_features,
         "routed_scaling_factor": moe.router.route_scale,
         "first_k_dense_replace": next(
@@ -348,6 +349,12 @@ def run_tt(
         _MEDIA_TOKEN_ID,
         int(num_vision_tokens.item()),
     ).to(device)
+    positions = torch.arange(
+        tokens.shape[1],
+        dtype=torch.int32,
+        device=device,
+    ).unsqueeze(0)
+    attention_masks = model.get_attention_masks(positions)
 
     print(
         f"tokens={tuple(tokens.shape)} pixel_values={tuple(pixel_values.shape)} "
@@ -378,6 +385,8 @@ def run_tt(
         pixel_values=pixel_values,
         grid_thw=grid_thw,
         special_tokens={"image_id": _MEDIA_TOKEN_ID},
+        positions=positions,
+        attention_masks=attention_masks,
     )
     _print_routing_comparison(ref["expert_indices"], expert_indices)
     return logits[:, -1, :].float().cpu().squeeze()
