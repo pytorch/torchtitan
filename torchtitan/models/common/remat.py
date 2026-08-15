@@ -7,8 +7,9 @@
 """Model-declared activation rematerialization regions.
 
 Model code declares candidate regions with ``REMAT_REGIONS`` and wraps their
-call sites with :func:`maybe_remat_region`. A remat activation-checkpointing
-policy selects candidates by their FQN relative to a transformer block.
+call sites with :func:`maybe_remat_save_region`. A remat
+activation-checkpointing policy selects candidates by their FQN relative to a
+transformer block.
 
 The helpers are no-ops unless a policy enables a region. ``torch_remat`` is an
 optional dependency and is imported only when an enabled region is used.
@@ -79,7 +80,7 @@ def _declared_region_names(module: nn.Module) -> tuple[str, ...]:
     return tuple(regions)
 
 
-def maybe_remat_region(
+def maybe_remat_save_region(
     fn: Callable[_P, _R], name: str, *, owner: nn.Module
 ) -> Callable[_P, _R]:
     """Return ``fn`` as a retained remat region when selected, else unchanged."""
@@ -95,7 +96,7 @@ def maybe_remat_region(
     return require_torch_remat().region(fn, region_fqn, recompute=False)
 
 
-def maybe_recompute_needs(owner: nn.Module, *tensors: torch.Tensor) -> None:
+def maybe_remat_recompute_needs(owner: nn.Module, *tensors: torch.Tensor) -> None:
     """Persist selected-region outputs that a bare operation will consume."""
     if not getattr(owner, _ENABLED_ATTR, None):
         return

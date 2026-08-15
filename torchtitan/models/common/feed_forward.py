@@ -10,7 +10,10 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.remat import maybe_recompute_needs, maybe_remat_region
+from torchtitan.models.common.remat import (
+    maybe_remat_recompute_needs,
+    maybe_remat_save_region,
+)
 from torchtitan.protocols.module import Module
 
 __all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
@@ -57,13 +60,13 @@ class FeedForward(Module):
         self.w3 = config.w3.build()
 
     def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
-        w1_out_BLF = maybe_remat_region(self.w1, "w1", owner=self)(x_BLD)
-        w3_out_BLF = maybe_remat_region(self.w3, "w3", owner=self)(x_BLD)
-        maybe_recompute_needs(self, w1_out_BLF, w3_out_BLF)
-        out_BLD = maybe_remat_region(self.w2, "w2", owner=self)(
+        w1_out_BLF = maybe_remat_save_region(self.w1, "w1", owner=self)(x_BLD)
+        w3_out_BLF = maybe_remat_save_region(self.w3, "w3", owner=self)(x_BLD)
+        maybe_remat_recompute_needs(self, w1_out_BLF, w3_out_BLF)
+        out_BLD = maybe_remat_save_region(self.w2, "w2", owner=self)(
             F.silu(w1_out_BLF) * w3_out_BLF
         )
-        maybe_recompute_needs(self, out_BLD)
+        maybe_remat_recompute_needs(self, out_BLD)
         return out_BLD
 
 

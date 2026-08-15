@@ -17,8 +17,8 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.models.common.remat import (
     apply_region_selection,
     declared_regions,
-    maybe_recompute_needs,
-    maybe_remat_region,
+    maybe_remat_recompute_needs,
+    maybe_remat_save_region,
     require_torch_remat,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -63,8 +63,8 @@ class _RematBlock(Module):
         self.recomputed = _CountingLinear()
 
     def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
-        saved_BD = maybe_remat_region(self.saved, "saved", owner=self)(x_BD)
-        maybe_recompute_needs(self, saved_BD)
+        saved_BD = maybe_remat_save_region(self.saved, "saved", owner=self)(x_BD)
+        maybe_remat_recompute_needs(self, saved_BD)
         return self.recomputed(torch.sin(saved_BD)).sum()
 
 
