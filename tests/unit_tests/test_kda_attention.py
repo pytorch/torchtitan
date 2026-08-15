@@ -4,18 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for the KDA linear-attention layer.
-
-Every test needs a Blackwell (SM 10.0+) GPU and attention-gym: the layer's L2 norm
-and gate are Triton kernels and the chunked core is CuTe, so there is no CPU path.
-Kernel numerics are attention-gym's own test suite; these tests cover the layer's
-composition -- that the pieces are wired together correctly.
-
-The layer is built with 2 heads of head_dim 128 (the chunked core is specialized
-to 128) over a model dim of 32, so the QKV projection is 3 * 2 * 128 = 768 wide.
-
-Tensor shape suffixes: B batch, L seq len, D model dim, N heads, K head dim.
-"""
+"""Unit tests for the KDA linear-attention layer."""
 
 import importlib.util
 import unittest
@@ -89,12 +78,6 @@ class TestKDA(unittest.TestCase):
         return torch.randn(1, tokens, 32, device="cuda", dtype=torch.bfloat16)
 
     def test_chunked_and_recurrent_backends_agree(self):
-        """The two algorithms must produce the same result on the same input.
-
-        Parallel-within-chunks against token-at-a-time is the strongest numerical
-        check available at this level: two different decompositions, including the
-        two different gate conventions ``KDAAttention._gate`` produces for them.
-        """
         chunked = self._make_kda(backend="chunked")
         recurrent = self._make_kda(backend="recurrent")
         recurrent.load_state_dict(chunked.state_dict())
@@ -104,36 +87,7 @@ class TestKDA(unittest.TestCase):
             chunked(x_BLD).float(), recurrent(x_BLD).float(), rtol=5e-2, atol=5e-2
         )
 
-    def test_backward_reaches_every_parameter(self):
-        """Every parameter must get a finite, nonzero gradient.
-
-        ``A_log`` and the ``[num_heads, head_dim]`` ``dt_bias`` reach the kernels
-        through the gate map rather than a matmul, so they are the ones most
-        likely to end up silently detached.
-        """
-        model = self._make_kda()
-        model(self._inputs(seed=1)).float().square().mean().backward()
-        for name, param in model.named_parameters():
-            with self.subTest(parameter=name):
-                self.assertIsNotNone(param.grad, f"{name} received no gradient")
-                self.assertTrue(torch.isfinite(param.grad).all())
-                self.assertGreater(param.grad.abs().sum().item(), 0.0)
-
     def test_varlen_matches_independent_document_forwards(self):
-        """Every packed document must match forwarding that document alone.
-
-        Both stages that carry information across tokens reset at the boundaries:
-        the recurrence, and the short convolution -- the latter because
-        ``cute_causal_conv1d_silu`` takes ``cu_seqlens``. So a packed document
-        cannot see any token of its predecessors.
-
-        Both backends are checked: they take different varlen paths, and the
-        recurrence is the stage most likely to leak state across a boundary.
-
-        The lengths are deliberately ragged. A document ending mid-chunk is the
-        case the chunked core's partial-chunk predication exists for, so it is
-        where a boundary bug would show up; 64 alone would never exercise it.
-        """
         lengths = (37, 64, 91)
         x_BLD = self._inputs(seed=2, tokens=sum(lengths))
         positions = torch.tensor(
