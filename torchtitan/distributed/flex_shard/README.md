@@ -23,8 +23,14 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   `M` independent matrices `[M, R, C]`. FlexShard routes the flat 2D compute
   tensor, and DistMuon applies the local matrix-batch view immediately before
   Muon compute. The builder validates named DTensor parameters and plans their
-  storage-to-compute transitions. An FQN without `BlockShard` uses ordinary 2D
-  Muon compute.
+  storage-to-compute transitions. A native 3D `[M, R, C]` parameter can use
+  `Shard(0)` to distribute complete matrices. A 2D parameter without
+  `BlockShard` must use whole-matrix compute such as `Owned`.
+
+Storage placements describe persistent ownership only; they do not define
+Muon matrix boundaries. Flat `BlockShard` compute currently accepts exact
+`Shard(0)` or `Replicate` storage. At most one mesh axis may require
+redistribution, and preserved storage axes must be replicated.
 
 Compute sharding is reconstruction configuration. It is validated and frozen
 when the optimizer is built, but is not stored in its state dict; checkpoint

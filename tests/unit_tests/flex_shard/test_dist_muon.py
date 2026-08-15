@@ -127,7 +127,7 @@ class TestDistMuon(DTensorTestBase):
             )
         with self.assertRaisesRegex(
             ValueError,
-            "requires BlockShard to run independent Muon compute on row blocks",
+            "2D Muon compute cannot use Shard",
         ):
             make_optimizer(
                 redistributed,

@@ -69,8 +69,9 @@ def build_dist_muon(
 
     For DistMuon, ``BlockShard(dim=0, block_size=R)`` interprets a parameter
     stored as ``[M * R, C]`` as ``M`` independent matrices ``[M, R, C]`` for
-    local Muon compute. An FQN without ``BlockShard`` retains ordinary 2D
-    matrix compute.
+    local Muon compute. A native 3D ``[M, R, C]`` parameter can use
+    ``Shard(0)`` to distribute complete matrices. A 2D parameter without
+    ``BlockShard`` must use whole-matrix compute such as ``Owned``.
     """
     return DistMuon(
         _normalize_param_groups(params),
@@ -1451,8 +1452,9 @@ def _resolve_storage_to_compute_transition(
     elif compute_shard_dims:
         if compute_view is None and len(global_compute_shape) == 2:
             raise ValueError(
-                f"Muon parameter {fqn!r} requires BlockShard to run "
-                "independent Muon compute on row blocks"
+                f"Muon parameter {fqn!r}: 2D Muon compute cannot use Shard; "
+                "use Owned() for one matrix or "
+                "BlockShard(dim=0, block_size=R) for row-concatenated matrices"
             )
         if len(global_compute_shape) != 3 or any(
             shard_dim != 0 for shard_dim in compute_shard_dims
