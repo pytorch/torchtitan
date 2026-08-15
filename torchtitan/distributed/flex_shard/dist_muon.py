@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Distributed Muon configuration, construction, and optimizer implementation."""
+"""DistMuon configuration, construction, and optimizer implementation."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ from .optimizer_reshard import _BucketSpec, BucketConfig, ComputeLayout, Owned
 
 __all__ = [
     "AttentionPerHeadComputeView",
-    "build_distributed_muon",
+    "build_dist_muon",
     "MuonComputeShardingConfig",
 ]
 
@@ -127,14 +127,14 @@ class MuonComputeShardingConfig:
         return {"repr": repr(self)}
 
 
-def build_distributed_muon(
+def build_dist_muon(
     params: Iterable[dict[str, Any]],
     *,
     compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
     bucket_configs: Sequence[BucketConfig],
     **kwargs: Any,
-) -> DistributedMuon:
-    """Construct a DistributedMuon optimizer with FlexShard redistribution."""
+) -> DistMuon:
+    """Construct a DistMuon optimizer with FlexShard redistribution."""
     prepared_params = []
     for param_group in params:
         group = dict(param_group)
@@ -151,8 +151,8 @@ def build_distributed_muon(
 
         prepared_params.append(group)
 
-    optimizer = DistributedMuon(prepared_params, **kwargs)
-    _configure_distributed_muon(
+    optimizer = DistMuon(prepared_params, **kwargs)
+    _configure_dist_muon(
         optimizer,
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
@@ -160,13 +160,13 @@ def build_distributed_muon(
     return optimizer
 
 
-def _configure_distributed_muon(
-    optimizer: DistributedMuon,
+def _configure_dist_muon(
+    optimizer: DistMuon,
     *,
     compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
     bucket_configs: Sequence[BucketConfig],
 ) -> None:
-    """Configure one newly constructed DistributedMuon optimizer.
+    """Configure one newly constructed DistMuon optimizer.
 
     Every group must provide aligned ``params`` and ``param_names``. Every
     local parameter FQN must have one entry in ``compute_sharding_by_fqn``;
@@ -279,8 +279,8 @@ def _configure_distributed_muon(
     optimizer.register_load_state_dict_post_hook(_after_load_state_dict, prepend=True)
 
 
-class DistributedMuon(Optimizer):
-    """Muon optimizer constructed by ``build_distributed_muon``.
+class DistMuon(Optimizer):
+    """Muon optimizer constructed by ``build_dist_muon``.
 
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
     are frozen after resharding is applied. Every configured parameter must
@@ -354,12 +354,12 @@ class DistributedMuon(Optimizer):
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
         if self._param_groups_frozen:
-            raise RuntimeError("DistributedMuon parameter groups are frozen")
+            raise RuntimeError("DistMuon parameter groups are frozen")
         super().add_param_group(param_group)
 
     def _validate_groups(self) -> None:
         if len(self.param_groups) != 1:
-            raise ValueError("DistributedMuon requires exactly one parameter group")
+            raise ValueError("DistMuon requires exactly one parameter group")
         for group_index, group in enumerate(self.param_groups):
             ns_steps = group["ns_steps"]
             coefficients = group["ns_coefficients"]
@@ -377,18 +377,18 @@ class DistributedMuon(Optimizer):
                 or group["adjust_lr_fn"]
                 not in (None, "original", "match_rms_adamw", "spectral_unclamped")
             ):
-                raise ValueError(f"unsupported DistributedMuon group {group_index}")
+                raise ValueError(f"unsupported DistMuon group {group_index}")
 
     def _validate_parameter_storage(self) -> torch.device:
         local_devices = set()
         for group in self.param_groups:
             for param in group["params"]:
                 if not isinstance(param, DTensor):
-                    raise TypeError("DistributedMuon requires DTensor parameters")
+                    raise TypeError("DistMuon requires DTensor parameters")
                 local_device = param.to_local().device
                 local_devices.add(local_device)
         if len(local_devices) != 1 or next(iter(local_devices)).type != "cuda":
-            raise ValueError("DistributedMuon requires one CUDA device per process")
+            raise ValueError("DistMuon requires one CUDA device per process")
         return local_devices.pop()
 
     def _build_parameter_compute_layouts(
@@ -540,14 +540,14 @@ class DistributedMuon(Optimizer):
 
         if missing_gradients:
             raise RuntimeError(
-                "DistributedMuon requires every configured gradient before "
+                "DistMuon requires every configured gradient before "
                 f"step(); missing gradients: {missing_gradients}"
             )
         if changed_parameter_storage_fqn is not None:
             raise RuntimeError(
                 f"parameter local storage changed for "
                 f"{changed_parameter_storage_fqn!r}; "
-                "rebuild DistributedMuon"
+                "rebuild DistMuon"
             )
         if changed_gradient_storage_fqn is not None:
             raise RuntimeError(
@@ -719,7 +719,7 @@ def _validate_batched_matrix_storage_alignment(
             )
 
     matrix_rows = resolved_view.matrix_rows
-    # Every rank must validate all coordinates before DistributedMuon performs
+    # Every rank must validate all coordinates before DistMuon performs
     # collectives; checking only the local shard could strand its peers.
     coordinates = product(
         *(range(mesh_axis_size) for mesh_axis_size in param.device_mesh.shape)
@@ -1525,7 +1525,7 @@ def _zeropower_via_newtonschulz(
 
 
 def _after_load_state_dict(optimizer: Optimizer) -> None:
-    muon = cast(DistributedMuon, optimizer)
+    muon = cast(DistMuon, optimizer)
     # Optimizer.load_state_dict restores group values such as ns_steps after
     # construction, and those values affect compute planning and buffer sizes.
     muon._validate_groups()
