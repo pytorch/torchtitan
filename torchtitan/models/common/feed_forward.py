@@ -10,9 +10,16 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.remat import (
+    maybe_remat_recompute_needs,
+    maybe_remat_save_region,
+)
 from torchtitan.protocols.module import Module
 
 __all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
+
+# Shape suffix legend:
+# B = batch, L = sequence length, D = model dimension, F = hidden dimension.
 
 
 def compute_ffn_hidden_dim(
@@ -38,6 +45,8 @@ class FeedForward(Module):
     Use compute_ffn_hidden_dim() for Llama3/4-style dim computation.
     """
 
+    REMAT_REGIONS = ("w1", "w3", "w2")
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         w1: Linear.Config
@@ -50,8 +59,15 @@ class FeedForward(Module):
         self.w2 = config.w2.build()
         self.w3 = config.w3.build()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
+        w1_out_BLF = maybe_remat_save_region(self.w1, "w1", owner=self)(x_BLD)
+        w3_out_BLF = maybe_remat_save_region(self.w3, "w3", owner=self)(x_BLD)
+        maybe_remat_recompute_needs(self, w1_out_BLF, w3_out_BLF)
+        out_BLD = maybe_remat_save_region(self.w2, "w2", owner=self)(
+            F.silu(w1_out_BLF) * w3_out_BLF
+        )
+        maybe_remat_recompute_needs(self, out_BLD)
+        return out_BLD
 
 
 class SigmoidGatedFeedForward(FeedForward):
@@ -62,6 +78,8 @@ class SigmoidGatedFeedForward(FeedForward):
     the weights directly shardable.
     """
 
+    REMAT_REGIONS = FeedForward.REMAT_REGIONS
+
     @dataclass(kw_only=True, slots=True)
     class Config(FeedForward.Config):
         gate: Linear.Config
@@ -70,6 +88,6 @@ class SigmoidGatedFeedForward(FeedForward):
         super().__init__(config)
         self.gate = config.gate.build()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = super().forward(x)
-        return torch.sigmoid(self.gate(x)) * out
+    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
+        out_BLD = super().forward(x_BLD)
+        return torch.sigmoid(self.gate(x_BLD)) * out_BLD
