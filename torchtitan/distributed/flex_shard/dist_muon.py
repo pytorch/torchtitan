@@ -1295,7 +1295,6 @@ def _resolve_storage_to_compute_transition(
         )
         if type(sharding) is Owned
     )
-
     if compute_view is not None:
         if applicable_owned_storage_mesh_axes:
             raise ValueError(
@@ -1313,19 +1312,6 @@ def _resolve_storage_to_compute_transition(
                 f"Muon parameter {fqn!r} with matrix-batch compute requires "
                 f"BlockShard instead of Shard on mesh axes {shard_axes}"
             )
-
-    replicated_axes = [
-        mesh_axis_names[storage_mesh_axis]
-        for storage_mesh_axis, sharding in (
-            applicable_compute_shardings_by_storage_mesh_axis.items()
-        )
-        if type(sharding) is Replicate
-    ]
-    if replicated_axes:
-        raise NotImplementedError(
-            f"Muon parameter {fqn!r} requests explicit replicated compute on "
-            f"mesh axes {replicated_axes}; replicated compute is not implemented"
-        )
 
     normalized_target_sharding_by_storage_mesh_axis: dict[
         int, _ComputeTensorSharding
@@ -1487,7 +1473,7 @@ def _resolve_storage_to_compute_transition(
     elif applicable_owned_storage_mesh_axes:
         compute_sharding = Owned()
     else:
-        raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
+        compute_sharding = Replicate()
 
     if redistribution_storage_mesh_axis is not None and type(compute_sharding) is Shard:
         source_sharding = _normalize_storage_placement(
@@ -1517,6 +1503,12 @@ def _resolve_storage_to_compute_transition(
             resolved_compute_layout_signature=resolved_compute_layout_signature,
         )
 
+    if type(compute_sharding) is Replicate:
+        axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
+        raise NotImplementedError(
+            f"Muon parameter {fqn!r} requires redistribution to replicated "
+            f"compute on mesh axis {axis_name!r}; this transition is not implemented"
+        )
     return _ResolvedStorageToComputeTransition(
         compute_sharding=compute_sharding,
         storage_to_compute_transition=_RedistributionTransition(),

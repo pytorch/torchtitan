@@ -42,6 +42,59 @@ class TestDistMuon(DTensorTestBase):
         return "cuda"
 
     @with_comms
+    def test_explicit_replicated_compute(self):
+        lr = 0.03
+        weight_decay = 0.2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(12, device=device).reshape(4, 3).float().div_(10)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), mesh, (Replicate(),))
+        )
+        fqn = "layers.0.replicated"
+        optimizer = build_dist_muon(
+            [{"params": [parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Replicate()},
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=(fqn,))],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+
+        reference = torch.nn.Parameter(value.clone())
+        reference_optimizer = torch.optim.Muon(
+            [reference],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+        )
+        grad = torch.arange(1, 13, device=device).reshape(4, 3).float().div_(17)
+        parameter.grad = distribute_tensor(grad.clone(), mesh, (Replicate(),))
+        reference.grad = grad.clone()
+
+        optimizer.step()
+        reference_optimizer.step()
+
+        torch.testing.assert_close(
+            parameter.to_local(),
+            reference,
+            rtol=0,
+            atol=0,
+        )
+
+    @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
         lr = 0.03
         num_matrices = 3
