@@ -64,6 +64,7 @@ __all__ = [
     "get_efficient_causal_mask_mod_for_packed_document",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
+    "local_head_split",
 ]
 
 
@@ -85,6 +86,24 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = (
     Mapping[str, BlockMask | VarlenMetadata | None] | BlockMask | VarlenMetadata
 )
+
+
+def local_head_split(
+    t: torch.Tensor,
+    head_dim: int,
+    *,
+    dp_shard_dim: int = 0,
+) -> torch.Tensor:
+    # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
+    use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
+    tensor_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(2)}
+    with spmd.local():
+        if use_spmd:
+            spmd.assert_type(t, tensor_type)
+        out = t.view(t.shape[0], t.shape[1], -1, head_dim)
+        if use_spmd:
+            spmd.assert_type(out, tensor_type)
+    return out
 
 
 class VarlenAttention(Module):
@@ -137,13 +156,15 @@ class VarlenAttention(Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        B, L, _, H = q_BLNH.shape
+        B, L, _, qk_head_dim = q_BLNH.shape
+        value_head_dim = v_BLNH.shape[-1]
         T = B * L
 
-        # varlen attention expects (T, N, H)
-        q_TNH = q_BLNH.reshape(T, -1, H)
-        k_TNH = k_BLNH.reshape(T, -1, H)
-        v_TNH = v_BLNH.reshape(T, -1, H)
+        # varlen attention expects (T, N, H). The value head dimension may
+        # differ from the query/key head dimension, as in MLA.
+        q_TNH = q_BLNH.reshape(T, -1, qk_head_dim)
+        k_TNH = k_BLNH.reshape(T, -1, qk_head_dim)
+        v_TNH = v_BLNH.reshape(T, -1, value_head_dim)
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support
@@ -200,7 +221,7 @@ class VarlenAttention(Module):
                 # rejected during q_TNH reshape propagation.
                 q_ps = get_partition_spec(q_TNH)
                 spmd.assert_type(result, q_local, q_ps)
-            out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
+            out_BLNH = result.view(B, L, -1, value_head_dim).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
@@ -212,7 +233,7 @@ class VarlenAttention(Module):
             lse_ps = None if q_ps is None else spmd.PartitionSpec(q_ps[1], q_ps[0])
             spmd.assert_type(lse_NT, q_local, lse_ps)
 
-        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
+        out_BLNH = out_TNH.view(B, L, -1, value_head_dim).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
         # out_transform can broadcast per (token, head).
         lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
@@ -648,6 +669,10 @@ def create_varlen_metadata_for_document(
     packed_cu_seqlens = torch.cat(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        # Packed document boundaries are rank-local ragged metadata, so they
+        # vary across DP ranks even when construction initially infers R.
+        spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
 
     max_seqlen: int
     packed_cu_seqlens_host = None
@@ -956,7 +981,6 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        B, L, _ = x_BLD.shape
         xq_BLNH, xk_BLNH, xv_BLNH = self.qkv_linear(x_BLD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
@@ -977,5 +1001,10 @@ class GQAttention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        out_BLD = out_BLNH.view(B, L, -1)
+        # Fold from out_BLNH's own shape. The stock block declares an input
+        # all-gather, so x_BLD's L is already the full sequence; a qkv_linear that
+        # gathers the sequence itself declares none, leaving x_BLD SP-sharded while
+        # out_BLNH is full-length. A view(B, L, -1) would not raise there -- the
+        # element counts still match -- it would fold sequence into features.
+        out_BLD = out_BLNH.flatten(2)
         return self.wo(out_BLD)
