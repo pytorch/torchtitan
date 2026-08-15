@@ -119,9 +119,6 @@ class VLLMKDAWrapper(Module, MambaBase):
         B, L, _ = mixed_qkv_BLC.shape
         num_tokens = B * L
         mixed_qkv_TC = mixed_qkv_BLC.reshape(num_tokens, -1)
-        # Padded rows must remain defined across vLLM graph replays. Shaped
-        # [B, L, N, K] like KDAAttention's return: set_kda_sharding places the
-        # output on Shard(2), the head axis of a 4-D tensor.
         output = mixed_qkv_TC.new_zeros(B, L, self.local_num_heads, self.head_dim)
         if metadata is None:
             # Profiling or cudagraph dummy capture: no live metadata yet.
@@ -195,10 +192,6 @@ class VLLMKDAWrapper(Module, MambaBase):
         recurrent_state,
     ) -> torch.Tensor:
         """Chunked prefill: dense conv, then the chunked core with per-sequence state."""
-        # One conv over all 3 * N * head_dim channels rather than three per
-        # branch: the conv is depthwise, and both the packed projection and the
-        # cached conv state are head-major (see KDAAttention.forward), so q/k/v
-        # are not contiguous ranges either one could be sliced into.
         convolved_TC = causal_conv1d_fn(
             mixed_qkv_TC.transpose(0, 1),
             conv_weight,
