@@ -853,7 +853,7 @@ class TestFlexShardMuon(DTensorTestBase):
             )
         optimizer = make_optimizer(redistributed, stacks)
         self.assertIs(type(optimizer), torch.optim.Muon)
-        with self.assertRaisesRegex(RuntimeError, "parameter groups are frozen"):
+        with self.assertRaisesRegex(RuntimeError, "after registering"):
             optimizer.add_param_group({"params": []})
 
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())

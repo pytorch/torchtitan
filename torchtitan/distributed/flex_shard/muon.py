@@ -619,8 +619,17 @@ class _MuonReshardIntegration:
         self, compute_layout: _ParameterComputeLayout
     ) -> tuple[Any, ...]:
         group = self._group(compute_layout)
+        lr = group["lr"]
+        if isinstance(lr, Tensor):
+            lr = (
+                "tensor",
+                tuple(lr.shape),
+                str(lr.dtype),
+                lr.device.type,
+                lr.detach().item(),
+            )
         return tuple(
-            group[key]
+            lr if key == "lr" else group[key]
             for key in (
                 "lr",
                 "weight_decay",

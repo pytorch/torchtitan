@@ -371,9 +371,8 @@ The names are not part of this design. Their required semantics are:
   two tensor dimensions rather than an incidental flattened storage shape.
 - Stock `torch.optim.Muon.step()` uses the same operations so default and
   FlexShard execution cannot silently drift.
-- `torch.optim.Muon` construction supports the batch-first 3D expert
-  parameters needed by the current integration. Today it rejects non-2D
-  parameters before FlexShard can be attached.
+- The prerequisite PyTorch change makes `torch.optim.Muon` construction
+  support the batch-first 3D expert parameters needed by this integration.
 
 These operations may remain Muon-specific. A generic optimizer decomposition
 is not required for this migration.
