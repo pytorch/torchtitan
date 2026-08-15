@@ -8,20 +8,18 @@ import unittest
 
 from torchtitan.distributed.flex_shard import NoRedistribution
 from torchtitan.models.kimi_k2_7.config_registry import (
-    _distributed_muon_optimizer,
+    _dist_muon_optimizer,
     model_registry,
 )
 
 
-class TestKimiK25DistributedMuonConfig(unittest.TestCase):
+class TestKimiK25DistMuonConfig(unittest.TestCase):
     def test_declares_each_runtime_physical_bucket_alternative(self):
-        optimizer_config = _distributed_muon_optimizer(
+        optimizer_config = _dist_muon_optimizer(
             model_registry("debugmodel"),
             lr=8e-4,
         )
-        factory_kwargs = optimizer_config.optimizer_factory_kwargs_by_name[
-            "DistributedMuon"
-        ]
+        factory_kwargs = optimizer_config.optimizer_factory_kwargs_by_name["DistMuon"]
         compute_sharding_by_fqn = factory_kwargs["compute_sharding_by_fqn"]
         bucket_configs = factory_kwargs["bucket_configs"]
 
