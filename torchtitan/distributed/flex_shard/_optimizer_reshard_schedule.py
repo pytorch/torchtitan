@@ -14,16 +14,14 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from itertools import combinations, product
 from typing import Any, cast, Generic, TypeAlias, TypeVar
 
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
-from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
 
-from .optimizer_reshard import _BucketSpec, BlockShard, BucketConfig
+from .optimizer_reshard import _BucketSpec, BucketConfig
 
 
 __all__: list[str] = []
@@ -412,172 +410,6 @@ def _tensor_region_intersection_numel(
         )
     )
     return math.prod(intersection_shape)
-
-
-_RegionLayoutPlacement = Replicate | Shard | BlockShard
-
-
-@dataclass(frozen=True, slots=True)
-class _MeshCoordinateRegionLayout:
-    """One canonical tensor region for every coordinate of a logical mesh."""
-
-    mesh_shape: tuple[int, ...]
-    regions_by_mesh_coordinate: tuple[tuple[tuple[int, ...], _TensorRegion], ...]
-
-
-def _resolve_mesh_coordinate_region_layout(
-    logical_shape: torch.Size,
-    placements: Sequence[_RegionLayoutPlacement],
-    *,
-    mesh_shape: Sequence[int],
-) -> _MeshCoordinateRegionLayout:
-    """Resolve standard and block-aligned shards into tensor regions."""
-    logical_shape = torch.Size(logical_shape)
-    mesh_shape = tuple(mesh_shape)
-    placements = tuple(placements)
-    assert len(mesh_shape) == len(placements)
-
-    block_shards = tuple(
-        placement for placement in placements if type(placement) is BlockShard
-    )
-    planning_shape = list(logical_shape)
-    planning_placements: tuple[Replicate | Shard, ...]
-    block_dim = None
-    block_size = None
-    if block_shards:
-        first_block_shard = block_shards[0]
-        block_dim = first_block_shard.dim
-        block_size = first_block_shard.block_size
-        assert block_dim < len(logical_shape)
-        assert all(
-            placement.dim == block_dim and placement.block_size == block_size
-            for placement in block_shards
-        )
-        assert logical_shape[block_dim] % block_size == 0
-        assert not any(
-            type(placement) is Shard and placement.dim % len(logical_shape) == block_dim
-            for placement in placements
-        )
-        planning_shape[block_dim] //= block_size
-        planning_placements = tuple(
-            Shard(placement.dim)
-            if type(placement) is BlockShard
-            else cast(Replicate | Shard, placement)
-            for placement in placements
-        )
-    else:
-        planning_placements = cast(tuple[Replicate | Shard, ...], placements)
-
-    regions = []
-    for coordinate in product(*(range(axis_size) for axis_size in mesh_shape)):
-        local_shape, global_offsets = _compute_local_shape_and_global_offset(
-            torch.Size(planning_shape),
-            mesh_shape,
-            list(coordinate),
-            planning_placements,
-        )
-        local_shape = list(local_shape)
-        global_offsets = list(global_offsets)
-        if block_dim is not None:
-            assert block_size is not None
-            local_shape[block_dim] *= block_size
-            global_offsets[block_dim] *= block_size
-        regions.append(
-            (
-                coordinate,
-                _TensorRegion(
-                    offsets=tuple(global_offsets),
-                    shape=tuple(local_shape),
-                ),
-            )
-        )
-    return _MeshCoordinateRegionLayout(
-        mesh_shape=mesh_shape,
-        regions_by_mesh_coordinate=tuple(regions),
-    )
-
-
-def _region_sets_have_same_coverage(
-    first: set[_TensorRegion],
-    second: set[_TensorRegion],
-) -> bool:
-    for regions in (first, second):
-        ordered_regions = tuple(regions)
-        assert all(
-            not _tensor_region_intersection_numel(region, other)
-            for index, region in enumerate(ordered_regions)
-            for other in ordered_regions[index + 1 :]
-        )
-    if sum(region.numel for region in first) != sum(region.numel for region in second):
-        return False
-    return all(
-        sum(_tensor_region_intersection_numel(region, other) for other in second)
-        == region.numel
-        for region in first
-    )
-
-
-def _region_layouts_match_by_redistribution_fiber(
-    storage_region_layout: _MeshCoordinateRegionLayout,
-    compute_input_region_layout: _MeshCoordinateRegionLayout,
-    redistribution_mesh_axes: tuple[int, ...],
-) -> bool:
-    def regions_by_redistribution_fiber(
-        layout: _MeshCoordinateRegionLayout,
-    ) -> dict[tuple[int, ...], set[_TensorRegion]]:
-        redistribution_mesh_axis_set = set(redistribution_mesh_axes)
-        regions_by_fiber: dict[tuple[int, ...], set[_TensorRegion]] = {}
-        for coordinate, region in layout.regions_by_mesh_coordinate:
-            if region.numel:
-                fiber = tuple(
-                    axis_coordinate
-                    for mesh_axis, axis_coordinate in enumerate(coordinate)
-                    if mesh_axis not in redistribution_mesh_axis_set
-                )
-                regions_by_fiber.setdefault(fiber, set()).add(region)
-        return regions_by_fiber
-
-    assert storage_region_layout.mesh_shape == compute_input_region_layout.mesh_shape
-    storage_regions_by_fiber = regions_by_redistribution_fiber(storage_region_layout)
-    compute_input_regions_by_fiber = regions_by_redistribution_fiber(
-        compute_input_region_layout
-    )
-    return (
-        storage_regions_by_fiber.keys() == compute_input_regions_by_fiber.keys()
-        and all(
-            _region_sets_have_same_coverage(
-                storage_regions_by_fiber[fiber],
-                compute_input_regions_by_fiber[fiber],
-            )
-            for fiber in storage_regions_by_fiber
-        )
-    )
-
-
-def _resolve_required_redistribution_mesh_axes(
-    storage_region_layout: _MeshCoordinateRegionLayout,
-    compute_input_region_layout: _MeshCoordinateRegionLayout,
-) -> tuple[int, ...]:
-    """Find the smallest fiber with equal storage/compute-input coverage."""
-    assert storage_region_layout.mesh_shape == compute_input_region_layout.mesh_shape
-    num_mesh_axes = len(storage_region_layout.mesh_shape)
-    for num_redistribution_axes in range(num_mesh_axes + 1):
-        candidates = tuple(
-            mesh_axes
-            for mesh_axes in combinations(
-                range(num_mesh_axes),
-                num_redistribution_axes,
-            )
-            if _region_layouts_match_by_redistribution_fiber(
-                storage_region_layout,
-                compute_input_region_layout,
-                mesh_axes,
-            )
-        )
-        if candidates:
-            assert len(candidates) == 1
-            return candidates[0]
-    raise RuntimeError("storage and target layouts cover different tensor regions")
 
 
 def _validate_regions_cover_partition(

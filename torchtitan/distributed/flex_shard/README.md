@@ -28,15 +28,15 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   `BlockShard` must use whole-matrix compute such as `Owned`.
 
 Storage placements describe persistent ownership only; they do not define
-Muon matrix boundaries. Flat `BlockShard` compute currently accepts exact
-`Shard(0)` or `Replicate` storage. At most one mesh axis may require
-redistribution, and preserved storage axes must be replicated. Every
+Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
+most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
+`Replicate`; every other non-unit storage mesh axis must be replicated. Every
 `Shard(0)` storage shard boundary must currently align with a `BlockShard`
 boundary.
 
-Compute sharding is reconstruction configuration. It is validated and frozen
-when the optimizer is built, but is not stored in its state dict; checkpoint
-restore must rebuild the optimizer with matching values.
+Compute sharding is construction-time configuration. It is validated and
+frozen when the optimizer is built, but is not stored in its state dict;
+checkpoint restore must rebuild the optimizer with matching values.
 
 ## TorchTitan Kimi integration
 

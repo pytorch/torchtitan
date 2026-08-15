@@ -8,7 +8,7 @@ import unittest
 
 import torch
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Shard
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -269,7 +269,7 @@ class TestDistMuon(DTensorTestBase):
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
-class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
+class TestDistMuonStorageContracts(DTensorTestBase):
     @property
     def world_size(self):
         return 4
@@ -277,6 +277,67 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
     @property
     def device_type(self):
         return "cuda"
+
+    @with_comms
+    def test_matrix_batch_uses_one_active_mesh_axis(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(24, device=device, dtype=torch.float32).reshape(8, 3)
+        fqn = "layers.0.attention.wq.weight"
+
+        def make_optimizer(
+            placements: tuple[Replicate | Shard, Replicate | Shard],
+            compute_layout: ComputeLayout,
+        ) -> DistMuon:
+            parameter = torch.nn.Parameter(
+                distribute_tensor(value.clone(), mesh, placements)
+            )
+            return build_dist_muon(
+                [{"params": [parameter], "param_names": [fqn]}],
+                compute_sharding_by_fqn={fqn: compute_layout},
+                bucket_configs=[BucketConfig(patterns=(fqn,))],
+            )
+
+        optimizer = make_optimizer(
+            (Replicate(), Shard(0)),
+            ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_size=2),
+                }
+            ),
+        )
+        self.assertIs(type(optimizer), DistMuon)
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "multiple active mesh axes.*only one active BlockShard axis",
+        ):
+            make_optimizer(
+                (Shard(0), Shard(0)),
+                ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_replicate": BlockShard(dim=0, block_size=2),
+                        "dp_shard": BlockShard(dim=0, block_size=2),
+                    }
+                ),
+            )
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "requires every other storage mesh axis to be replicated.*dp_replicate",
+        ):
+            make_optimizer(
+                (Shard(0), Shard(0)),
+                ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": BlockShard(dim=0, block_size=2),
+                    }
+                ),
+            )
 
     @with_comms
     def test_rejects_insufficient_expert_storage_layout(self):
