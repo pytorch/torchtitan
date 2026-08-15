@@ -14,7 +14,8 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.config_utils import get_attention_config
+from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import VisionMLP
@@ -147,7 +148,10 @@ def _mla_config(
     qk_nope_head_dim: int,
     qk_rope_head_dim: int,
     v_head_dim: int,
+    attn_backend: str,
 ) -> KimiMLAAttention.Config:
+    inner_attention = get_attention_config(attn_backend)
+
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
     return KimiMLAAttention.Config(
         dim=dim,
@@ -167,6 +171,7 @@ def _mla_config(
         ),
         gate=_linear(dim, num_heads * v_head_dim),
         wo=_linear(num_heads * v_head_dim, dim),
+        inner_attention=inner_attention,
     )
 
 
@@ -241,21 +246,23 @@ def _latent_moe_config(
             route_scale=1.0,
         ),
         routed_down=_linear(dim, latent_dim),
-        routed_experts=KimiGroupedExperts.Config(
-            dim=latent_dim,
-            hidden_dim=expert_hidden_dim,
-            num_experts=num_experts,
-            beta=4.0,
-            linear_beta=25.0,
-            param_init={
-                "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
-                "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
-                "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
-            },
-        ),
-        token_dispatcher=LocalTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
+        routed_experts=RoutedExperts.Config(
+            inner_experts=KimiGroupedExperts.Config(
+                dim=latent_dim,
+                hidden_dim=expert_hidden_dim,
+                num_experts=num_experts,
+                beta=4.0,
+                linear_beta=25.0,
+                param_init={
+                    "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                    "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
+                    "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                },
+            ),
+            token_dispatcher=LocalTokenDispatcher.Config(
+                num_experts=num_experts,
+                top_k=top_k,
+            ),
         ),
         routed_norm=_norm(latent_dim),
         routed_up=_linear(latent_dim, dim),
@@ -374,6 +381,7 @@ def _kimi_k3_config(
     top_k: int,
     num_shared_experts: int,
     vision_encoder: KimiK3VisionEncoder.Config,
+    attn_backend: str,
 ) -> KimiK3Model.Config:
     """Assemble a Kimi K3 config from the released topology's free parameters.
 
@@ -397,6 +405,7 @@ def _kimi_k3_config(
                         qk_nope_head_dim=qk_nope_head_dim,
                         qk_rope_head_dim=qk_rope_head_dim,
                         v_head_dim=v_head_dim,
+                        attn_backend=attn_backend,
                     )
                     if is_full_attention
                     else None
@@ -468,9 +477,6 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
     Both are properties of the released 93-layer stack, whose zero-based MLA
     layer indices end ``..., 87, 91, 92``.
     """
-    if attn_backend != "eager":
-        raise ValueError("Kimi K3 v1 only provides the 'eager' backend.")
-
     dim = 256
     return _kimi_k3_config(
         dim=dim,
@@ -500,6 +506,7 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
             num_layers=4,
             num_heads=3,
         ),
+        attn_backend=attn_backend,
     )
 
 
@@ -510,7 +517,7 @@ kimi_k3_configs = {
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "eager",
+    attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     """Build a Kimi K3 model specification."""

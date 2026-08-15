@@ -22,7 +22,6 @@ from . import KIMI_K3_SPECIAL_TOKENS, model_registry
 
 
 def kimi_k3_debugmodel() -> Trainer.Config:
-    """Return the topology-complete Kimi K3 eager/FSDP2 debug config."""
     model_spec = model_registry("debugmodel")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(

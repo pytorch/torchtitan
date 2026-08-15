@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common import Embedding
 from torchtitan.protocols.module import Module
@@ -44,7 +45,7 @@ class ReferenceKimiKDAKernel(Module):
     """Pure-PyTorch stand-in for KimiKDAKernel backed by an explicit recurrence.
 
     Mirrors ``KimiKDAKernel.forward``'s interface so tests can build a model
-    with it in place of the FLA kernel and exercise the surrounding eager model
+    with it in place of the FLA kernel and exercise the surrounding model
     on CPU. The loop is O(seqlen) and far too slow for training; it exists to
     pin the kernel's math.
     """
@@ -129,6 +130,7 @@ def _small_model_config(*, attn_res_block_size: int = 1) -> KimiK3Model.Config:
                     qk_nope_head_dim=4,
                     qk_rope_head_dim=4,
                     v_head_dim=4,
+                    attn_backend="flex",
                 )
                 if use_mla
                 else None
@@ -265,6 +267,32 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_flex_attention_mask(self):
+        config = _small_model_config()
+        model = config.build()
+        positions = torch.arange(4, dtype=torch.int32).unsqueeze(0)
+        attention_masks = model.get_attention_masks(positions)
+        self.assertIsInstance(attention_masks, BlockMask)
+
+    def test_update_from_config_propagates_moe_force_load_balance(self):
+        from torchtitan.config import DebugConfig
+        from torchtitan.trainer import Trainer
+
+        model_config = _small_model_config()
+        runtime_config = Trainer.Config(
+            debug=DebugConfig(moe_force_load_balance=True),
+            activation_checkpoint=None,
+        )
+        model_config.update_from_config(config=runtime_config)
+
+        router_configs = [
+            layer.moe.router for layer in model_config.layers if layer.moe is not None
+        ]
+        self.assertGreater(len(router_configs), 0)
+        self.assertTrue(
+            all(router._debug_force_load_balance for router in router_configs)
+        )
+
     @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
     def test_fla_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
@@ -341,6 +369,14 @@ class TestKimiK3(unittest.TestCase):
         state_dict = model.state_dict()
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)
+        self.assertIn(
+            "layers.1.moe.routed_experts.inner_experts.w1_EFD",
+            state_dict,
+        )
+        self.assertIn(
+            "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight",
+            hf_state_dict,
+        )
         roundtrip_state_dict = adapter.from_hf(hf_state_dict)
         self.assertEqual(state_dict.keys(), roundtrip_state_dict.keys())
         for key, value in state_dict.items():
