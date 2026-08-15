@@ -27,7 +27,11 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.full_dtensor import (
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
+    validate_config,
+)
 
 
 def parallelize_qwen3_5(
@@ -61,15 +65,12 @@ def parallelize_qwen3_5(
             "and multimodal CP needs vision scatter before CP sharding."
         )
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
-            raise RuntimeError("Async TP requires torch.compile")
-
+    if parallelism.spmd_backend == "spmd_types":
+        validate_config(parallel_dims, model)
+        model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
+    elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         # pyrefly: ignore [not-callable]
         model.parallelize(parallel_dims)
-
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
@@ -78,15 +79,36 @@ def parallelize_qwen3_5(
             ac_policy.apply(model.vision_encoder)
 
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
+        )
         if model.vision_encoder is not None:
-            # pyrefly: ignore [bad-argument-type]
-            apply_compile(model.vision_encoder, compile_config)
+            apply_compile(
+                model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
+                compile_config=compile_config,
+                parallel_dims=parallel_dims,
+            )
 
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+    if parallelism.spmd_backend == "spmd_types":
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+    else:
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        dp_mesh_dims = None
+        edp_mesh = None
+        edp_mesh_dims = None
+        if parallel_dims.ep_enabled:
+            edp_mesh_names = (
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
+            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
     if model.vision_encoder is not None:
         apply_fsdp_to_vision_encoder(
@@ -96,16 +118,8 @@ def parallelize_qwen3_5(
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             pp_enabled=parallel_dims.pp_enabled,
+            dp_mesh_dims=dp_mesh_dims,
         )
-
-    edp_mesh = None
-    if parallel_dims.ep_enabled:
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
     apply_fsdp_to_decoder(
         model,  # pyrefly: ignore [bad-argument-type]
@@ -117,6 +131,8 @@ def parallelize_qwen3_5(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
     )
 
     return model

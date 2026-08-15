@@ -11,7 +11,7 @@ A ``RoutingStrategy`` chooses one ``RoutingCandidate`` from a set given a
 ``reserved_load`` field plus object identity -- so the same strategy classes
 serve both routing layers in the RL generator:
 
-- Layer 1: ``InterGeneratorRouter`` (controller side) routes a call across
+- Layer 1: ``InterGeneratorRouter`` (router actor side) routes a call across
   generator *meshes* (replicas). See ``inter_generator_router.py``.
 - Layer 2: ``IntraGeneratorRouter`` (in-mesh, rank-0 side) routes a request
   across the *data-parallel ranks* within one generator mesh. See

@@ -38,6 +38,9 @@ class TrainingConfig:
     Defaults to `training.local_batch_size * data-parallel degree`.
     """
 
+    # TODO: Separate the packed model-input length from the per-document maximum.
+    # seq_len currently also controls document rejection, maximum position IDs,
+    # and the required RoPE cache length.
     seq_len: int = 2048
     """Sequence length"""
 
@@ -50,6 +53,18 @@ class TrainingConfig:
     enable_cpu_offload: bool = False
     """
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
+    """
+
+    disable_cuda_graphs: bool = False
+    """
+    Disable CUDA graph capture and replay for the forward+backward step. CUDA
+    graphs require fixed-shape inputs and no CPU<->GPU synchronization during
+    the captured region. Expert parallelism is supported only with HybridEP
+    when ``non_blocking_capacity_factor`` is set, or with MinimalAsyncEP. Other
+    EP backends synchronize with the host during dispatch. Pipeline parallelism
+    is not supported yet. CUDA graphs are independent of
+    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
+    capture.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
@@ -133,9 +148,6 @@ class ParallelismConfig:
 
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
-
-    enable_async_tensor_parallel: bool = False
-    """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
@@ -266,10 +278,22 @@ class CompileConfig:
     enable: bool = False
     """Whether to apply torch.compile"""
 
+    enable_async_tensor_parallel: bool = False
+    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
+
     components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
 
     backend: str = "inductor"
+
+    def __post_init__(self) -> None:
+        if self.enable_async_tensor_parallel and not (
+            self.enable and "model" in self.components
+        ):
+            raise ValueError(
+                "Async TP requires 'model' in --compile.components and "
+                "--compile.enable"
+            )
 
 
 @dataclass(kw_only=True, slots=True)

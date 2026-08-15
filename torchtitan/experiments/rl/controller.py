@@ -102,7 +102,8 @@ from typing import Annotated
 import torch  # noqa: F401
 import torchstore as ts
 import tyro
-from monarch.actor import ProcMesh
+
+from monarch.actor import ProcMesh, this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.config import CompileConfig, Configurable
@@ -134,7 +135,6 @@ from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
 )
-from torchtitan.experiments.rl.routing.types import RoutingContext
 from torchtitan.experiments.rl.types import Completion, TrainingBatch
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -452,19 +452,22 @@ class Controller(Configurable):
                 logger.exception("trainer.close failed")
 
         if self.generator_router is not None:
-            close_results = await self.generator_router.fanout(
-                "close", return_exceptions=True
-            )
-            for idx, result in enumerate(close_results):
-                if isinstance(result, BaseException):
-                    actor_name = (
-                        "generator" if len(close_results) == 1 else f"generator[{idx}]"
-                    )
-                    logger.error(
-                        "%s.close failed",
-                        actor_name,
-                        exc_info=(type(result), result, result.__traceback__),
-                    )
+            try:
+                close_results = await self.generator_router.close_generators.call_one()
+                for idx, result in enumerate(close_results):
+                    if isinstance(result, BaseException):
+                        actor_name = (
+                            "generator"
+                            if len(close_results) == 1
+                            else f"generator[{idx}]"
+                        )
+                        logger.error(
+                            "%s.close failed",
+                            actor_name,
+                            exc_info=(type(result), result, result.__traceback__),
+                        )
+            except Exception:
+                logger.exception("generator_router.close_generators failed")
 
         try:
             self.metrics_processor.close()
@@ -492,6 +495,10 @@ class Controller(Configurable):
         generation metrics with `metrics_prefix` and pinning sticky routing on `routing_session_id` (a sample's
         turns reuse one generator's prefix KV)."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
+        # Bind the router handle to a local so the closure captures it instead of
+        # `self`. A GenerateFn may be shipped to another process, where an actor
+        # handle serializes cheaply and the whole controller does not.
+        generator_router = self.generator_router
 
         @sl.log_trace_span("generate")
         async def generate(
@@ -501,22 +508,12 @@ class Controller(Configurable):
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            # Dispatches to the chosen generator's rank-0 intake via call_one, so
-            # it returns the Completion directly (no ValueMesh unwrap).
-            return await self.generator_router.route(
-                "generate",
+            return await generator_router.generate.call_one(
                 prompt_token_ids,
                 request_id=request_id,
-                # VLLMGenerator.generate also requires this field for its
-                # intra-mesh DP routing.
                 routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
-                # Load is measured as in-flight request count (one unit per call).
-                routing_ctx=RoutingContext(
-                    estimated_cost=1,
-                    session_id=routing_session_id,
-                ),
             )
 
         return generate
@@ -535,9 +532,9 @@ class Controller(Configurable):
         weight push/pull are all ``await``-based runtime side effects
         that cannot run in a synchronous constructor.
 
-        The trainer and generator meshes are provisioned by the caller
-        (see ``create_proc_mesh``) on disjoint GPUs; this method only
-        spawns the actors on them and synchronizes initial weights from
+        The trainer and generator meshes are provisioned by the caller (see
+        ``spawn_proc_mesh``). The router mesh is created on the controller host.
+        This method spawns the actors and synchronizes initial weights from
         trainer to generator. Must be called before :meth:`run`.
 
         Args:
@@ -587,8 +584,13 @@ class Controller(Configurable):
         # provisioner logic. Pull a PerHostProvisioner.spawn_meshes(...) helper and
         # shrink this span to a single call.
         with sl.log_trace_span("mesh_spawn"):
+            # One process, so the router is a singleton and every caller reaches
+            # it with `call_one`. It gets its own mesh rather than sharing the
+            # controller's process so routing does not contend with the training
+            # loop for the controller's GIL.
+            router_mesh = this_host().spawn_procs(per_host={"cpus": 1})
             # Store proc meshes for cleanup
-            self._proc_meshes = [trainer_mesh, *generator_meshes]
+            self._proc_meshes = [router_mesh, trainer_mesh, *generator_meshes]
 
             await setup_torch_elastic_env_async(trainer_mesh)
             for generator_mesh in generator_meshes:
@@ -623,7 +625,12 @@ class Controller(Configurable):
                     output_dir=config.dump_folder,
                 )
                 generators.append(generator)
-            self.generator_router = config.generator_router.build(generators=generators)
+            self.generator_router = router_mesh.spawn(
+                "generator_router",
+                InterGeneratorRouter,
+                config.generator_router,
+                generators=generators,
+            )
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -649,15 +656,13 @@ class Controller(Configurable):
         # rank-0-only generate / pull (rank 0 drives the followers through this
         # loop, so every rank must be running it first).
         with sl.log_trace_span("generator_start_engine_loop"):
-            await self.generator_router.fanout("start_engine_loop")
+            await self.generator_router.start_engine_loop.call_one()
 
         # Initial weight sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator_router.pull_model_state_dict(
-                policy_version=self.start_step
-            )
+            await self.generator_router.pull_model_state_dict.call_one(self.start_step)
 
     # TODO: fold validation into a Validator(Configurable) the controller attaches, instead of 4 methods.
     @sl.log_trace_span("_collect_validation_rollouts")
@@ -1045,7 +1050,7 @@ class Controller(Configurable):
             sl.set_step(step)  # propagate the step counter to the actors
             with sl.log_trace_span("sync_log_step"):
                 await self.trainer.sync_log_step.call(step)
-                await self.generator_router.fanout("sync_log_step", step)
+                await self.generator_router.sync_log_step.call_one(step)
             step_timer = MetricsTimer()
 
             with sl.log_trace_span("train_step"), step_timer.record(

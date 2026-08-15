@@ -20,7 +20,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -144,9 +144,8 @@ class RoutedExperts(Module):
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor->local conversion from the configured input placements and
-        local->DTensor wrapping with the configured output placement. The
-        forward body operates on plain local tensors.
+        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
+        on exit. The forward body operates on plain local tensors.
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
@@ -356,12 +355,10 @@ class MoE(Module):
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
           - LocalTokenDispatcher (no EP): scatter_add only.
           - AllToAll: all-to-all communication, then scatter_add.
-          - DeepEP: async combine_tokens; sync deferred to step 4.
+          - DeepEP: combine_tokens followed by backend synchronization.
           - HybridEP: synchronous combine_tokens.
-    3. Shared experts run on DTensor. Overlaps with DeepEP async combine
-       when the DeepEP dispatcher is used.
-    4. DeepEP combine is synced if needed, then routed and shared expert
-       outputs are summed.
+    3. Shared experts compute their output.
+    4. Routed and shared expert outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -376,9 +373,6 @@ class MoE(Module):
         super().__init__()
 
         num_experts = config.num_experts
-        # Sequence-shard count used by EP padding/combine. Set in
-        # parallelize(); stays 1 unless both EP and TP are active.
-        self.expert_sequence_parallel_size = 1
         self.routed_experts = config.routed_experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -419,18 +413,10 @@ class MoE(Module):
         input is redistributed from sp_layout to desired_input_layouts;
         output is redistributed to sp_layout. MoE.forward() operates on
         DTensors; the DTensor->local conversion happens at the GroupedExperts
-        boundary. GroupedExperts operates on local tensors.
+        boundary. GroupedExperts operates on local tensors. When EP internally
+        sequence-shards tokens across TP, the caller must provide a TP-divisible
+        sequence length.
         """
-        # For MoE-internal sequence sharding, physically pad L to a TP multiple
-        # so each TP rank gets the same local token count and combine output shape.
-        # TODO(jessicazhong): Move sequence padding outside the model code; until
-        # then, assume the global sequence length is evenly divisible by the TP
-        # size when dense SP is enabled.
-        original_L = x_BLD.shape[1]
-        seq_pad = (-original_L) % self.expert_sequence_parallel_size
-        if seq_pad:
-            x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
-
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
         (
@@ -465,43 +451,13 @@ class MoE(Module):
             num_local_tokens_per_expert_E,
         )
 
-        # shared_experts runs in parallel with deepep combine communication.
         shared_out_BLD = (
             self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
 
-        if isinstance(self.routed_experts.token_dispatcher, DeepEPTokenDispatcher):
-            # Sync the combine operation before using routed_output.
-            # This inserts a CUDA stream wait, ensuring combine is complete before
-            # the subsequent addition or view operations read routed output.
-            from torchtitan.distributed.deepep.deepep import sync_combine
-
-            sync_combine()
-
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
-
-        if seq_pad:
-            out_BLD = out_BLD[:, :original_L, :]
-
         return out_BLD
-
-    def parallelize(self, parallel_dims) -> None:
-        """Parallelize children, then derive the EP sequence-shard count.
-
-        The sequence padding in ``forward`` only matters when EP routes tokens
-        across TP-axis sequence shards. Both degrees are read from
-        ``parallel_dims``, so MoE owns ``expert_sequence_parallel_size`` without
-        inspecting the token dispatcher. Otherwise it stays 1 and no padding is
-        applied.
-        """
-        super().parallelize(parallel_dims)
-        # TODO: Remove this parallel_dims mesh lookup after DTensor backend
-        # is deprecated. spmd_types can derive this size from its global context.
-        ep_mesh = parallel_dims.get_optional_mesh("ep")
-        tp_mesh = parallel_dims.get_optional_mesh("tp")
-        if ep_mesh is not None and tp_mesh is not None:
-            self.expert_sequence_parallel_size = tp_mesh.size()
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:

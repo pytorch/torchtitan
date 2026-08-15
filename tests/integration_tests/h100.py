@@ -24,7 +24,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
                 [
                     "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
+                    "--compile.enable_async_tensor_parallel",
                 ],
             ],
             "2D async TP compile",
@@ -54,12 +54,13 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module llama3 --config llama3_debugmodel_float8",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
+                    "--compile.enable_async_tensor_parallel",
                 ],
             ],
             "FSDP+async TP+PP+torch.compile+Float8",
@@ -94,6 +95,27 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "deepseek_v3_fsdp+hybridep+compile",
             ngpu=4,
             # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module deepseek_v3 --config "
+                    "deepseek_v3_debugmodel_minimal_async_ep",
+                    "--compile.no-enable",
+                    # TODO: Remove this per-test override once the H100 suite
+                    # is migrated to the spmd_types backend.
+                    "--parallelism.spmd_backend spmd_types",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 8",
+                    "activation-checkpoint:full",
+                ],
+            ],
+            "DeepSeek V3 FSDP+CP+TP+MinimalAsyncEP",
+            "deepseek_v3_fsdp+cp+tp+minimal_async_ep",
+            ngpu=8,
             skip_rocm_test=True,
         ),
     ]

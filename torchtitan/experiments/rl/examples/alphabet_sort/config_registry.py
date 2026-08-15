@@ -630,28 +630,12 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
             ),
         ]
     )
-    config.generator.cudagraph = VLLMCudagraphConfig(enable=True, mode="FULL")
-    # Two inference knobs to set per workload (no golden default; here EP=4):
-    #  * max_num_batched_tokens: vLLM's per-step token budget. We expose the knob (default
-    #    None -> vLLM's own default of 2048). Decide it from your input/rollout sequence
-    #    length -- it is effectively the longest input sequence length the engine batches
-    #    (vLLM's 2048 default is just a stand-in for knowing that).
-    #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
-    #    deepep_override. For a dropless model (highest memory) set it to
-    #    longest_sequence_length // sp == max_num_batched_tokens // sp; lower it gradually to
-    #    save memory (trading off dropped tokens).
-    config.generator.max_num_batched_tokens = 2048
-    num_max_tokens_per_rank = (
-        config.generator.max_num_batched_tokens
-        // config.generator.parallelism.expert_parallel_degree
+    config.generator.cudagraph = VLLMCudagraphConfig(
+        enable=True, mode="FULL_AND_PIECEWISE"
     )
-    for block in config.model_spec.model.layers:
-        moe = getattr(block, "moe", None)
-        if moe is None:
-            continue
-        moe.routed_experts.token_dispatcher.num_max_tokens_per_rank = (
-            num_max_tokens_per_rank
-        )
+    # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
+    # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
+    config.generator.max_num_batched_tokens = 2048
     return config
 
 

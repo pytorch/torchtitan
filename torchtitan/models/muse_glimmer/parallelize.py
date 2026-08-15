@@ -23,7 +23,6 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_vision_encoder,
 )
 from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
 from .model import MuseGlimmerModel
@@ -38,6 +37,7 @@ def parallelize_muse_glimmer(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -87,9 +87,6 @@ def parallelize_muse_glimmer(
                     f"divisible by TP degree ({parallel_dims.tp})"
                 )
             model.parallelize(parallel_dims)
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -105,12 +102,28 @@ def parallelize_muse_glimmer(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
+        )
         if has_vision:
-            # pyrefly: ignore [bad-argument-type]
-            apply_compile(model.vision_encoder, compile_config)
-            # pyrefly: ignore [bad-argument-type]
-            apply_compile(model.vision_adapter, compile_config)
+            apply_compile(
+                model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
+                compile_config=compile_config,
+                parallel_dims=parallel_dims,
+            )
+            apply_compile(
+                model.vision_adapter,  # pyrefly: ignore [bad-argument-type]
+                compile_config=compile_config,
+                parallel_dims=parallel_dims,
+            )
+
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
+        return model
 
     if parallelism.spmd_backend == "full_dtensor":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)

@@ -6,12 +6,14 @@
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import _maybe_wrap_positions, CosSinRoPE
@@ -52,6 +54,8 @@ def _compute_learned_pos_embeds(
     merge_size = spatial_merge_size
 
     pos_embeds = learned_pos_embed.new_zeros(len(grids), max_num_patch, dim)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        pos_embeds = spmd.mutate_type(pos_embeds, "tp", src=spmd.R, dst=spmd.I)
 
     # Group images by (h, w) to batch compute position embeddings
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
@@ -141,6 +145,8 @@ def _compute_2d_rope_cache(
     rope_embeds = torch.zeros(
         len(grids), max_num_patch, head_dim // 2, device=device, dtype=torch.float32
     )
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        rope_embeds = spmd.mutate_type(rope_embeds, "tp", src=spmd.R, dst=spmd.I)
 
     # Group images by (h, w) to batch compute RoPE embeddings
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
@@ -180,6 +186,9 @@ def _compute_2d_rope_cache(
             .expand(merged_h, merged_w, merge_size, merge_size)
             .reshape(-1)
         )
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            row_idx = spmd.mutate_type(row_idx, "tp", src=spmd.R, dst=spmd.I)
+            col_idx = spmd.mutate_type(col_idx, "tp", src=spmd.R, dst=spmd.I)
 
         # 2D RoPE: row and col each get separate frequency sets, concatenated
         # (not interleaved). freq_table shape: (max_hw, head_dim//4)
@@ -242,6 +251,8 @@ class VisionRotaryEmbedding(Module):
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
         seq = _maybe_wrap_positions(seq, self.inv_freq)
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
         return torch.outer(seq, self.inv_freq)  # pyrefly: ignore
 
 
@@ -432,14 +443,16 @@ class Qwen35VisionEncoder(Module):
         x = x + learned_pos
 
         mask_mod = get_vision_block_mask_mod(num_patch)
-        attention_mask = compiled_create_block_mask(
-            mask_mod,
-            num_vision,
-            None,
-            max_num_patch,
-            max_num_patch,
-            device=x.device,
-        )
+        # BlockMask creation and use in FlexAttention are blackboxed from typechecking.
+        with spmd.no_typecheck():
+            attention_mask = compiled_create_block_mask(
+                mask_mod,
+                num_vision,
+                None,
+                max_num_patch,
+                max_num_patch,
+                device=x.device,
+            )
 
         for layer in self.layers.values():
             x = layer(

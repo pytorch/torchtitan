@@ -74,6 +74,7 @@ def llama3_debugmodel() -> Trainer.Config:
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -277,7 +278,10 @@ def llama3_70b() -> Trainer.Config:
 
 
 def llama3_405b() -> Trainer.Config:
-    compile_config = CompileConfig(enable=True)
+    compile_config = CompileConfig(
+        enable=True,
+        enable_async_tensor_parallel=True,
+    )
     model_spec = model_registry(
         "405B",
         converters=[
@@ -316,7 +320,6 @@ def llama3_405b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
-            enable_async_tensor_parallel=True,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
