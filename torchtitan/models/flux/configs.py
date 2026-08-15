@@ -58,8 +58,8 @@ class Inference:
     """Path to save the inference results"""
     prompts_path: str = "./torchtitan/experiments/flux/inference/prompts.txt"
     """Path to file with newline separated prompts to generate images for"""
-    local_batch_size: int = 2
-    """Batch size for inference"""
+    num_samples_per_batch: int = 2
+    """Number of images generated together during inference."""
     img_size: int = 256
     """Image size for inference"""
     sampling: SamplingConfig = field(default_factory=SamplingConfig)

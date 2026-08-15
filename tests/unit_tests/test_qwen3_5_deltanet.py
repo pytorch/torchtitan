@@ -165,6 +165,26 @@ class ReferenceGatedDeltaKernel(nn.Module):
 
 
 class TestQwen35DeltaNetVarlen(unittest.TestCase):
+    def test_flex_masks_ignore_padding_position_resets(self):
+        try:
+            from torchtitan.models.common.decoder import Decoder
+            from torchtitan.models.qwen3_5 import qwen3_5_configs
+            from torchtitan.models.qwen3_5.model import Qwen35AttentionMasks
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(
+                f"Qwen3.5 optional dependency unavailable: {exc.name}"
+            ) from exc
+
+        with torch.device("meta"):
+            model = qwen3_5_configs["debugmodel"]("flex").build()
+        positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
+
+        with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
+            attention_masks = model.get_attention_masks(positions)
+
+        self.assertIsInstance(attention_masks, Qwen35AttentionMasks)
+        self.assertIsNone(attention_masks.delta_net)
+
     def test_flex_masks_include_delta_net_varlen_metadata(self):
         try:
             from torchtitan.models.common.decoder import Decoder

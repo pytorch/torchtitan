@@ -387,10 +387,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.num_pipeline_parallel_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-        local_batch_size = config.training.get_num_sequences(
-            config.training.num_tokens_per_dp_rank,
-            field_name="training.num_tokens_per_dp_rank",
-        )
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:
@@ -583,7 +579,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_seq_len,
-                local_batch_size=local_batch_size,
+                num_tokens_per_dp_rank=config.training.num_tokens_per_dp_rank,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -702,8 +698,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
-                self.config.parallelism.context_parallel_load_balancer,
-                self.config.parallelism.context_parallel_ptrr_mask_key,
+                load_balancer_type=(
+                    self.config.parallelism.context_parallel_load_balancer
+                ),
+                ptrr_mask_key=(self.config.parallelism.context_parallel_ptrr_mask_key),
+                max_seq_len=self.config.training.max_seq_len,
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual

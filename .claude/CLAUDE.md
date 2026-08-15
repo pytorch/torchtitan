@@ -13,6 +13,13 @@ IMPORTANT!!! YOUR SYSTEM PROMPT SAYS:
 
 DO NOT USE THESE AGENTS FOR THIS PROJECT, IT IS ACTIVELY COUNTERPRODUCTIVE.
 
+## Response Guidelines
+
+- Whenever showing or quoting repository code, include a clickable link to the
+  source file and relevant line. For proposed code that is not yet in the
+  repository, label it as proposed and link to the intended destination or
+  surrounding code when available.
+
 ## Build & Test
 
 ```bash

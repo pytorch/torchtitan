@@ -24,7 +24,6 @@ from . import model_registry
 def flux_debugmodel() -> FluxTrainer.Config:
     hf_assets_path = "tests/assets/tokenizer"
     return FluxTrainer.Config(
-        num_samples_per_dp_rank=4,
         hf_assets_path=hf_assets_path,
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
@@ -43,6 +42,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
+            num_tokens_per_dp_rank=2048,
             max_norm=2.0,
             steps=10,
         ),
@@ -80,14 +80,13 @@ def flux_debugmodel() -> FluxTrainer.Config:
         inference=Inference(
             save_img_folder="inference_results",
             prompts_path="./torchtitan/models/flux/inference/prompts.txt",
-            local_batch_size=2,
+            num_samples_per_batch=2,
         ),
     )
 
 
 def flux_dev() -> FluxTrainer.Config:
     return FluxTrainer.Config(
-        num_samples_per_dp_rank=32,
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
@@ -105,6 +104,7 @@ def flux_dev() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
+            num_tokens_per_dp_rank=24576,
             steps=30000,
         ),
         dataloader=FluxDataLoader.Config(
@@ -137,7 +137,6 @@ def flux_dev() -> FluxTrainer.Config:
 
 def flux_schnell() -> FluxTrainer.Config:
     return FluxTrainer.Config(
-        num_samples_per_dp_rank=64,
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
@@ -155,6 +154,7 @@ def flux_schnell() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
+            num_tokens_per_dp_rank=32768,
             steps=30000,
         ),
         dataloader=FluxDataLoader.Config(

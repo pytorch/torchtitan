@@ -35,6 +35,7 @@ class FluxTokenizerContainer(BaseTokenizer):
 
     def __init__(self, config: Config, **kwargs):
         super().__init__()
+        self.max_t5_encoding_len = config.max_t5_encoding_len
         if config.test_mode:
             tokenizer_class = FluxTestTokenizer
         else:

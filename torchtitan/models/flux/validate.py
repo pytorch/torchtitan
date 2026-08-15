@@ -78,7 +78,7 @@ class FluxValidator(Validator):
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: ValidationContext,
-        local_batch_size: int,
+        num_tokens_per_dp_rank: int,
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
@@ -102,7 +102,7 @@ class FluxValidator(Validator):
         )
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
-        self.local_batch_size = local_batch_size
+        self.num_tokens_per_dp_rank = num_tokens_per_dp_rank
         self.validation_context = validation_context
         # pyrefly: ignore [bad-assignment]
         self.metrics_processor = metrics_processor
@@ -153,8 +153,8 @@ class FluxValidator(Validator):
         validation_dataloader = self.dl_config.build(
             dp_world_size=self.dp_world_size,
             dp_rank=self.dp_rank,
-            local_batch_size=self.local_batch_size,
             tokenizer=self.tokenizer,
+            num_tokens_per_batch=self.num_tokens_per_dp_rank,
         )
 
         for input_dict, labels in validation_dataloader:
@@ -269,6 +269,7 @@ class FluxValidator(Validator):
                     (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                     None,  # No attention masks for Flux
                     load_balancer_type=None,
+                    input_seq_dim=1,
                 )
 
             with self.validation_context():

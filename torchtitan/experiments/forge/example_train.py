@@ -127,7 +127,7 @@ class Trainer(ForgeEngine):
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_seq_len,
-                local_batch_size=self.local_batch_size,
+                num_tokens_per_dp_rank=config.training.num_tokens_per_dp_rank,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -196,8 +196,11 @@ class Trainer(ForgeEngine):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
-                self.config.parallelism.context_parallel_load_balancer,
-                self.config.parallelism.context_parallel_ptrr_mask_key,
+                load_balancer_type=(
+                    self.config.parallelism.context_parallel_load_balancer
+                ),
+                ptrr_mask_key=(self.config.parallelism.context_parallel_ptrr_mask_key),
+                max_seq_len=self.config.training.max_seq_len,
             )
 
         return inputs, labels, extra_kwargs

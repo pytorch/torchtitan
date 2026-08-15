@@ -22,10 +22,8 @@ from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
-    IMAGE_LATENT_SIZE_RATIO,
+    get_num_transformer_tokens_per_sample,
     pack_latents,
-    PATCH_HEIGHT,
-    PATCH_WIDTH,
     preprocess_data,
 )
 from torchtitan.trainer import Trainer
@@ -41,20 +39,10 @@ class FluxTrainer(Trainer):
         encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
         inference: Inference = field(default_factory=Inference)
-        num_samples_per_dp_rank: int = 8
-        """Number of image samples processed per data-parallel rank."""
 
         def __post_init__(self):
-            # The autoencoder downsamples the image, then pack_latents tiles
-            # the latent into 2x2 patches.
-            # pyrefly: ignore [missing-attribute]
-            img_size = self.dataloader.img_size
-            latent_side_width = img_size // IMAGE_LATENT_SIZE_RATIO // PATCH_WIDTH
-            latent_side_height = img_size // IMAGE_LATENT_SIZE_RATIO // PATCH_HEIGHT
-            seq_len_img = latent_side_width * latent_side_height
-            self.training.max_seq_len = seq_len_img + self.tokenizer.max_t5_encoding_len
-            self.training.num_tokens_per_dp_rank = (
-                self.num_samples_per_dp_rank * self.training.max_seq_len
+            self.training.max_seq_len = get_num_transformer_tokens_per_sample(
+                self.dataloader.img_size, self.tokenizer.max_t5_encoding_len
             )
             Trainer.Config.__post_init__(self)
 
@@ -261,6 +249,7 @@ class FluxTrainer(Trainer):
                 (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                 None,  # No attention masks for Flux
                 load_balancer_type=None,
+                input_seq_dim=1,
             )
 
         # Accumulate after CP sharding so the count reflects the actual

@@ -45,7 +45,7 @@ def inference(config: FluxTrainer.Config):
 
     if prompts:
         # Generate images for this process's assigned prompts
-        bs = config.inference.local_batch_size
+        bs = config.inference.num_samples_per_batch
         img_size = config.inference.img_size
 
         output_dir = os.path.join(

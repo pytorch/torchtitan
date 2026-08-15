@@ -1,0 +1,814 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fused_all_gather_matmul | CPU & CUDA Streams</title>
+  <style>
+    :root {
+      --ink: #111820;
+      --muted: #5e6b76;
+      --paper: #f4f0e7;
+      --panel: #fffdf8;
+      --line: #d8d3c8;
+      --cpu: #8a4fff;
+      --cpu-dark: #5425ad;
+      --sync: #ee6578;
+      --copy: #efb542;
+      --gemm: #2b94a5;
+      --gemm-dark: #176879;
+      --annotation: #174f5a;
+      --wait: #f06b3f;
+      --shadow: 0 16px 50px rgba(25, 30, 35, 0.10);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(17, 24, 32, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(17, 24, 32, 0.035) 1px, transparent 1px),
+        var(--paper);
+      background-size: 32px 32px;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button { font: inherit; }
+
+    .shell {
+      width: min(1440px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 34px 0 64px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+      color: var(--gemm-dark);
+      font: 700 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 99px;
+      background: var(--gemm);
+      box-shadow: 0 0 0 5px rgba(43, 148, 165, .14);
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 900px;
+      font: 760 clamp(34px, 5vw, 66px)/.98 Georgia, "Times New Roman", serif;
+      letter-spacing: -.035em;
+    }
+
+    .subtitle {
+      margin: 16px 0 0;
+      max-width: 790px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    .trace-stamp {
+      flex: 0 0 250px;
+      border: 1px solid var(--line);
+      background: rgba(255, 253, 248, .72);
+      padding: 14px 16px;
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--muted);
+    }
+
+    .trace-stamp strong { color: var(--ink); }
+
+    .hero-note {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 18px;
+      align-items: center;
+      margin: 0 0 22px;
+      padding: 13px 18px;
+      border-left: 4px solid var(--wait);
+      background: #fff7e8;
+      box-shadow: var(--shadow);
+    }
+
+    .hero-note b {
+      font: 800 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .hero-note span { line-height: 1.55; }
+
+    .workspace {
+      overflow: hidden;
+      border: 1px solid #c9c4b9;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 66px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      background: #19232b;
+      color: white;
+    }
+
+    .control-group {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .btn {
+      min-height: 38px;
+      padding: 8px 13px;
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 2px;
+      color: white;
+      background: transparent;
+      cursor: pointer;
+      transition: background .2s, border-color .2s, transform .2s;
+    }
+
+    .btn:hover { background: rgba(255,255,255,.10); border-color: rgba(255,255,255,.42); }
+    .btn:active { transform: translateY(1px); }
+    .btn.primary { color: #172028; background: #f0c563; border-color: #f0c563; font-weight: 750; }
+
+    .mode-switch {
+      display: flex;
+      border: 1px solid rgba(255,255,255,.22);
+    }
+
+    .mode-switch button {
+      padding: 8px 12px;
+      border: 0;
+      color: #bdc6cc;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .mode-switch button.active { color: #172028; background: #dceef0; font-weight: 750; }
+
+    .step-readout {
+      min-width: 310px;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #c9d0d5;
+    }
+
+    .step-readout strong { color: white; }
+
+    .timeline-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 310px;
+      min-height: 540px;
+    }
+
+    .timeline-wrap {
+      position: relative;
+      min-width: 0;
+      border-right: 1px solid var(--line);
+      background: #fbfaf5;
+    }
+
+    .time-axis {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      height: 54px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .axis-label {
+      padding: 17px 16px;
+      border-right: 1px solid var(--line);
+      color: var(--muted);
+      font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .ticks {
+      position: relative;
+      background-image: repeating-linear-gradient(90deg, transparent 0, transparent calc(12.5% - 1px), #ded9cf calc(12.5% - 1px), #ded9cf 12.5%);
+    }
+
+    .tick {
+      position: absolute;
+      top: 17px;
+      transform: translateX(-50%);
+      color: #727c84;
+      font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .lane {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      min-height: 148px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .lane:last-child { border-bottom: 0; }
+
+    .lane-label {
+      position: relative;
+      z-index: 2;
+      padding: 22px 16px;
+      border-right: 1px solid var(--line);
+      background: #f1ede4;
+    }
+
+    .lane-label strong {
+      display: block;
+      margin-bottom: 7px;
+      font: 750 14px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .lane-label span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+
+    .track {
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+      background-image: repeating-linear-gradient(90deg, transparent 0, transparent calc(12.5% - 1px), rgba(117,121,121,.15) calc(12.5% - 1px), rgba(117,121,121,.15) 12.5%);
+    }
+
+    .scope {
+      position: absolute;
+      top: 15px;
+      height: 28px;
+      border: 1px solid currentColor;
+      color: var(--annotation);
+      background: rgba(23, 79, 90, .10);
+      transition: left .55s cubic-bezier(.2,.7,.2,1), width .55s cubic-bezier(.2,.7,.2,1), opacity .25s;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      padding: 6px 8px;
+      font: 700 10px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .event {
+      position: absolute;
+      top: 64px;
+      height: 45px;
+      min-width: 3px;
+      border: 0;
+      border-radius: 2px;
+      padding: 7px 8px;
+      color: #fff;
+      overflow: hidden;
+      text-align: left;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      cursor: pointer;
+      opacity: .24;
+      filter: saturate(.55);
+      transition: left .55s cubic-bezier(.2,.7,.2,1), width .55s cubic-bezier(.2,.7,.2,1), opacity .25s, filter .25s, transform .2s, box-shadow .2s;
+      font: 700 10px/1.15 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .event small { display: block; margin-top: 4px; opacity: .83; font-weight: 500; }
+    .event.done { opacity: .88; filter: none; }
+    .event.current { opacity: 1; filter: none; transform: translateY(-4px); box-shadow: 0 8px 18px rgba(22,30,38,.25), 0 0 0 3px #fff, 0 0 0 5px currentColor; z-index: 5; }
+    .event:hover { opacity: 1; filter: none; z-index: 8; }
+    .event.cpu { background: var(--cpu); color: var(--cpu); }
+    .event.annotation { background: var(--cpu-dark); color: var(--cpu-dark); top: 80px; height: 39px; }
+    .event.sync { background: var(--sync); color: var(--sync); }
+    .event.copy { background: var(--copy); color: #9a6600; }
+    .event.gemm { background: var(--gemm); color: var(--gemm-dark); }
+
+    .event > span, .event > small { color: #fff; }
+
+    .cursor {
+      position: absolute;
+      top: 54px;
+      bottom: 0;
+      left: 150px;
+      width: 2px;
+      pointer-events: none;
+      background: var(--wait);
+      z-index: 9;
+      transition: transform .55s cubic-bezier(.2,.7,.2,1);
+    }
+
+    .cursor::before {
+      content: "";
+      position: absolute;
+      top: -5px;
+      left: -5px;
+      width: 12px;
+      height: 12px;
+      transform: rotate(45deg);
+      background: var(--wait);
+    }
+
+    .dependency-overlay {
+      position: absolute;
+      left: 150px;
+      right: 0;
+      top: 54px;
+      bottom: 0;
+      z-index: 6;
+      pointer-events: none;
+      overflow: visible;
+    }
+
+    .dependency-overlay path { fill: none; stroke: var(--wait); stroke-width: 2; stroke-dasharray: 5 4; marker-end: url(#arrow); opacity: .82; }
+    .dependency-overlay text { fill: #9a3c22; font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace; paint-order: stroke; stroke: #fbfaf5; stroke-width: 5px; }
+
+    .inspector {
+      display: flex;
+      flex-direction: column;
+      background: #f5f1e9;
+    }
+
+    .inspector-head {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font: 750 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .inspector-body { padding: 22px 20px; }
+
+    .event-kicker {
+      display: inline-block;
+      margin-bottom: 12px;
+      padding: 5px 7px;
+      color: white;
+      background: var(--gemm-dark);
+      font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+
+    .inspector h2 { margin: 0 0 10px; font: 750 25px/1.05 Georgia, serif; }
+    .inspector p { margin: 0 0 18px; color: #4f5b64; font-size: 14px; line-height: 1.6; }
+
+    .facts {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      margin: 20px 0;
+      background: var(--line);
+      border: 1px solid var(--line);
+    }
+
+    .fact { min-height: 68px; padding: 11px; background: #fffdf8; }
+    .fact b { display: block; margin-bottom: 5px; font: 700 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); text-transform: uppercase; }
+    .fact span { font: 750 14px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .inspector-code {
+      padding: 13px;
+      border-left: 3px solid var(--gemm);
+      background: #19232b;
+      color: #dfe8ea;
+      overflow: auto;
+      white-space: pre-wrap;
+      font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .legend {
+      margin-top: auto;
+      padding: 18px 20px;
+      border-top: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 12px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .legend span { display: flex; align-items: center; gap: 7px; }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; }
+
+    .progress {
+      height: 5px;
+      background: #ddd7ca;
+    }
+
+    .progress > div {
+      width: 0;
+      height: 100%;
+      background: var(--wait);
+      transition: width .55s cubic-bezier(.2,.7,.2,1);
+    }
+
+    .lower-grid {
+      display: grid;
+      grid-template-columns: 1.05fr .95fr;
+      gap: 22px;
+      margin-top: 22px;
+    }
+
+    .card {
+      border: 1px solid #cbc6bb;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .card-head {
+      padding: 17px 20px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: baseline;
+    }
+
+    .card-head h2 { margin: 0; font: 750 22px/1.1 Georgia, serif; }
+    .card-head span { color: var(--muted); font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .wait-graph { padding: 22px; }
+
+    .wait-row {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    .wait-row:last-child { margin-bottom: 0; }
+    .wait-row strong { font: 750 12px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .wait-flow { position: relative; display: flex; gap: 6px; align-items: center; min-height: 38px; }
+    .pill { padding: 8px 10px; border-radius: 99px; background: #e9e5dc; font-size: 11px; font-weight: 700; white-space: nowrap; }
+    .pill.wait { color: white; background: var(--wait); }
+    .arrow-text { color: var(--muted); }
+
+    .code-panel { background: #19232b; color: #d8e0e4; }
+    .code-panel .card-head { border-color: #344049; }
+    .code-panel .card-head h2 { color: #fff; }
+    .code-panel .card-head span { color: #94a3ac; }
+
+    .code-lines {
+      margin: 0;
+      padding: 20px 22px 22px 58px;
+      overflow: auto;
+      color: #dce5e8;
+      font: 12px/1.72 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .code-lines li { padding-left: 12px; border-left: 2px solid transparent; }
+    .code-lines li::marker { color: #697983; }
+    .code-lines li.hot { background: rgba(239,181,66,.12); border-left-color: #efb542; color: #fff; }
+    .kw { color: #d28cff; }
+    .fn { color: #69c9d5; }
+    .cm { color: #78909c; }
+
+    .footnote {
+      margin: 22px 0 0;
+      padding: 0 4px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 1050px) {
+      .timeline-layout { grid-template-columns: 1fr; }
+      .timeline-wrap { border-right: 0; border-bottom: 1px solid var(--line); }
+      .inspector { min-height: 370px; }
+      .legend { margin-top: 0; }
+    }
+
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 20px, 1440px); padding-top: 20px; }
+      .topbar, .hero-note { display: block; }
+      .trace-stamp { margin-top: 20px; }
+      .hero-note b { display: block; margin-bottom: 7px; }
+      .timeline-wrap { overflow-x: auto; }
+      .time-axis, .lane { min-width: 850px; }
+      .dependency-overlay, .cursor { min-width: 700px; }
+      .lower-grid { grid-template-columns: 1fr; }
+      .step-readout { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow"><span class="pulse-dot"></span> Trace-guided explainer / TP=2</div>
+        <h1>一个算子，三个执行视角</h1>
+        <p class="subtitle">
+          <code>fused_all_gather_matmul</code> 是一个 PyTorch 复合算子。CPU 负责调度，CUDA stream 23 处理本地 shard，stream 35 传输并处理远端 shard。下面的时间线来自你提供的 H100 trace。
+        </p>
+      </div>
+      <aside class="trace-stamp">
+        <strong>TRACE INSTANCE</strong><br>
+        rank0 · TP=2 · H100<br>
+        external id: 436<br>
+        window: 845.028 µs<br>
+        PyTorch: 2.14.0.dev
+      </aside>
+    </header>
+
+    <div class="hero-note">
+      <b>关键结论</b>
+      <span>三个同名条不是三次执行。CPU 上的是 operator / profiler range；GPU 上的是传播到各 CUDA stream 的 annotation。真正执行的是条内的 barrier、Memcpy 和 GEMM kernel。</span>
+    </div>
+
+    <section class="workspace" aria-label="Interactive trace timeline">
+      <div class="controls">
+        <div class="control-group">
+          <button class="btn primary" id="playBtn">▶ 播放</button>
+          <button class="btn" id="prevBtn">← 上一步</button>
+          <button class="btn" id="nextBtn">下一步 →</button>
+          <button class="btn" id="resetBtn">重置</button>
+        </div>
+        <div class="step-readout"><strong id="stepName">0 · CPU 调用算子</strong><br><span id="stepHint">点击播放，观察任务如何进入两个 CUDA stream。</span></div>
+        <div class="mode-switch" aria-label="Timeline scale">
+          <button class="active" data-mode="real">真实比例</button>
+          <button data-mode="teaching">教学展开</button>
+        </div>
+      </div>
+
+      <div class="timeline-layout">
+        <div class="timeline-wrap" id="timeline">
+          <div class="time-axis">
+            <div class="axis-label">Relative time</div>
+            <div class="ticks" id="ticks"></div>
+          </div>
+
+          <div class="lane">
+            <div class="lane-label"><strong>CPU thread</strong><span>thread 2663269<br>提交异步 CUDA 工作</span></div>
+            <div class="track" data-lane="cpu">
+              <div class="event cpu" data-id="cpu-op"><span>symm_mem::fused_all_gather_matmul</span><small>PyTorch operator · 396.009 µs</small></div>
+              <div class="event annotation" data-id="cpu-range"><span>record_function: fused_all_gather_matmul</span></div>
+            </div>
+          </div>
+
+          <div class="lane">
+            <div class="lane-label"><strong>CUDA stream 23</strong><span>current stream<br>本地 shard + 最终同步</span></div>
+            <div class="track" data-lane="s23">
+              <div class="scope" data-id="scope23">fused_all_gather_matmul · GPU annotation</div>
+              <button class="event sync" data-id="initial-barrier"><span>initial barrier</span><small>249.054 µs</small></button>
+              <button class="event copy" data-id="stage-copy"><span>DtoD</span><small>1.408 µs</small></button>
+              <button class="event sync" data-id="publish-barrier"><span>publish barrier</span><small>60.672 µs</small></button>
+              <button class="event gemm" data-id="local-gemm-0"><span>local GEMM 0</span><small>21.568 µs</small></button>
+              <button class="event gemm" data-id="local-gemm-1"><span>local GEMM 1</span><small>38.111 µs</small></button>
+              <button class="event sync" data-id="final-barrier"><span>final barrier</span><small>75.808 µs</small></button>
+            </div>
+          </div>
+
+          <div class="lane">
+            <div class="lane-label"><strong>CUDA stream 35</strong><span>backend stream<br>远端 shard 通信 + GEMM</span></div>
+            <div class="track" data-lane="s35">
+              <div class="scope" data-id="scope35">fused_all_gather_matmul · GPU annotation</div>
+              <button class="event copy" data-id="p2p-copy"><span>Memcpy P2P</span><small>6.432 µs</small></button>
+              <button class="event gemm" data-id="remote-gemm-0"><span>remote GEMM 0</span><small>27.551 µs</small></button>
+              <button class="event gemm" data-id="remote-gemm-1"><span>remote GEMM 1</span><small>31.743 µs</small></button>
+            </div>
+          </div>
+
+          <svg class="dependency-overlay" viewBox="0 0 1000 444" preserveAspectRatio="none" aria-hidden="true">
+            <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#f06b3f"></path></marker></defs>
+            <path d="M817 246 C835 270, 800 315, 826 356"></path>
+            <text x="724" y="302">stream 35 waits</text>
+            <path d="M908 390 C935 355, 880 285, 910 247"></path>
+            <text x="842" y="335">stream 23 joins</text>
+          </svg>
+          <div class="cursor" id="cursor"></div>
+        </div>
+
+        <aside class="inspector">
+          <div class="inspector-head">Selected event</div>
+          <div class="inspector-body">
+            <span class="event-kicker" id="detailKind">CPU OPERATOR</span>
+            <h2 id="detailTitle">调用融合算子</h2>
+            <p id="detailText">PyTorch Dispatcher 进入 CUDA implementation。CPU 运行 Python/C++ 调度代码并向两个 stream 排队，但不会亲自执行矩阵乘法。</p>
+            <div class="facts">
+              <div class="fact"><b>Lane</b><span id="detailLane">CPU thread</span></div>
+              <div class="fact"><b>Duration</b><span id="detailDuration">396.009 µs</span></div>
+              <div class="fact"><b>Starts at</b><span id="detailStart">+0.000 µs</span></div>
+              <div class="fact"><b>Meaning</b><span id="detailMeaning">dispatch</span></div>
+            </div>
+            <pre class="inspector-code" id="detailCode">@torch.library.impl(lib, "fused_all_gather_matmul", "CUDA")
+def _fused_all_gather_matmul(...):
+    return _fused_all_gather_matmul_impl(...)</pre>
+          </div>
+          <div class="legend">
+            <span><i class="swatch" style="background:var(--cpu)"></i> CPU / annotation</span>
+            <span><i class="swatch" style="background:var(--sync)"></i> synchronization</span>
+            <span><i class="swatch" style="background:var(--copy)"></i> memory copy</span>
+            <span><i class="swatch" style="background:var(--gemm)"></i> GEMM kernel</span>
+          </div>
+        </aside>
+      </div>
+      <div class="progress"><div id="progressBar"></div></div>
+    </section>
+
+    <section class="lower-grid">
+      <article class="card">
+        <div class="card-head"><h2>谁在等谁？</h2><span>CUDA events + symmetric-memory barriers</span></div>
+        <div class="wait-graph">
+          <div class="wait-row">
+            <strong>启动依赖</strong>
+            <div class="wait-flow"><span class="pill">stream 23 publish</span><span class="arrow-text">→</span><span class="pill wait">stream 35 wait_stream(23)</span><span class="arrow-text">→</span><span class="pill">P2P copy</span></div>
+          </div>
+          <div class="wait-row">
+            <strong>可重叠区间</strong>
+            <div class="wait-flow"><span class="pill">23: local GEMMs</span><span class="arrow-text">∥</span><span class="pill">35: P2P + remote GEMMs</span></div>
+          </div>
+          <div class="wait-row">
+            <strong>结束依赖</strong>
+            <div class="wait-flow"><span class="pill">stream 35 done</span><span class="arrow-text">→</span><span class="pill wait">stream 23 wait_stream(35)</span><span class="arrow-text">→</span><span class="pill">final barrier</span></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card code-panel">
+        <div class="card-head"><h2>PyTorch 对应代码</h2><span>_symmetric_memory/__init__.py</span></div>
+        <ol class="code-lines" start="181" id="codeLines">
+          <li data-step="1"><span class="fn">symm_mem.barrier</span>(channel=0)</li>
+          <li data-step="1">backend_stream = <span class="fn">_get_backend_stream</span>()</li>
+          <li data-step="1">backend_stream.<span class="fn">wait_stream</span>(current_stream)</li>
+          <li value="266" data-step="2"><span class="fn">copy_shard</span>(dst=local_p2p_bufs, src=shard)</li>
+          <li data-step="3"><span class="fn">symm_mem.barrier</span>(channel=1)</li>
+          <li data-step="3">backend_stream.<span class="fn">wait_stream</span>(current_stream)</li>
+          <li value="273" data-step="4"><span class="fn">shard_consumer</span>(shard, rank) <span class="cm"># stream 23</span></li>
+          <li value="275" data-step="4"><span class="kw">for</span> step <span class="kw">in</span> range(1, group_size):</li>
+          <li data-step="4">&nbsp;&nbsp;stream = backend_stream <span class="cm"># TP=2, step=1</span></li>
+          <li data-step="4">&nbsp;&nbsp;<span class="kw">with</span> stream:</li>
+          <li data-step="4">&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">copy_shard</span>(..., remote_p2p_bufs)</li>
+          <li data-step="5">&nbsp;&nbsp;&nbsp;&nbsp;<span class="fn">shard_consumer</span>(remote_shard, remote_rank)</li>
+          <li value="296" data-step="6">current_stream.<span class="fn">wait_stream</span>(backend_stream)</li>
+          <li data-step="6"><span class="fn">symm_mem.barrier</span>(channel=0)</li>
+        </ol>
+      </article>
+    </section>
+
+    <p class="footnote">
+      数据来自 <code>dp0_pp0_tp0_dcp0_ep0_rank0.1785383409690836002.pt.trace.json</code>，实例 External ID 436。时间以 CPU operator 起点归一化。GPU annotation 是 profiler correlation scope，不是 CUDA kernel；实际 kernel 是 barrier 和 nvjet GEMM，通信是 Memcpy P2P/DtoD。
+    </p>
+  </main>
+
+  <script>
+    const total = 845.028;
+
+    const events = {
+      "cpu-op": { start: 0, duration: 396.009, tStart: 0, tDuration: 128, step: 0, lane: "CPU thread", kind: "CPU operator", title: "调用融合算子", meaning: "dispatch", text: "PyTorch Dispatcher 进入 CUDA implementation。CPU 运行调度代码并向 CUDA streams 排队，矩阵乘法本身仍由 GPU kernel 完成。", code: '@torch.library.impl(lib, "fused_all_gather_matmul", "CUDA")\ndef _fused_all_gather_matmul(...):\n    return _fused_all_gather_matmul_impl(...)' },
+      "cpu-range": { start: 31.397, duration: 358.192, tStart: 7, tDuration: 116, step: 0, lane: "CPU thread", kind: "Profiler range", title: "CPU profiler 范围", meaning: "annotation", text: "这是 record_function 创建的 CPU 标注范围。相同 External ID 会传播为两个 GPU stream 上的同名 annotation。", code: 'with torch.profiler.record_function(\n    "fused_all_gather_matmul"\n):\n    return _fused_all_gather_matmul_impl(...)' },
+      "scope23": { start: 376.774, duration: 468.255, tStart: 135, tDuration: 685, step: 1, lane: "CUDA stream 23", kind: "GPU annotation", title: "stream 23 的相关范围", meaning: "correlation", text: "它表示下面这些 GPU 活动属于同一个 fused operator。这个长条不是 kernel，也不会单独消耗一次计算。", code: 'name = "fused_all_gather_matmul"\nexternal_id = 436\nstream = 23' },
+      "initial-barrier": { start: 376.775, duration: 249.054, tStart: 135, tDuration: 150, step: 1, lane: "CUDA stream 23", kind: "Barrier kernel", title: "等待所有 rank 就绪", meaning: "cross-rank sync", text: "channel=0 的初始 symmetric-memory barrier。trace 中它持续时间较长，说明当前 rank 在这里等待 peer 到达。", code: 'symm_mem.barrier(channel=0)\nbackend_stream = _get_backend_stream()\nbackend_stream.wait_stream(current_stream)' },
+      "stage-copy": { start: 627.205, duration: 1.408, tStart: 300, tDuration: 62, step: 2, lane: "CUDA stream 23", kind: "Memcpy DtoD", title: "发布本地 shard", meaning: "local staging", text: "把本地输入 shard 复制到 symmetric-memory P2P buffer，让另一个 GPU 能够直接读取。真实 trace 中只有 1.408 µs，所以在真实比例下很窄。", code: 'copy_shard(\n    dst=local_p2p_bufs,\n    src=shard,\n)' },
+      "publish-barrier": { start: 629.765, duration: 60.672, tStart: 375, tDuration: 92, step: 3, lane: "CUDA stream 23", kind: "Barrier kernel", title: "确认 shard 已发布", meaning: "publish sync", text: "channel=1 barrier 保证所有 rank 已把本地 shard 放入可远程访问的 buffer。随后 stream 35 才能安全开始 P2P copy。", code: 'symm_mem.barrier(channel=1)\nbackend_stream.wait_stream(\n    torch.accelerator.current_stream()\n)' },
+      "local-gemm-0": { start: 691.941, duration: 21.568, tStart: 480, tDuration: 78, step: 4, lane: "CUDA stream 23", kind: "GEMM kernel", title: "本地 shard × B0", meaning: "local compute", text: "本地 shard 已在当前 GPU 上，无需通信。第一个 nvjet GEMM 与 stream 35 的 P2P copy 在真实 trace 中发生重叠。", code: 'shard_consumer(shard, rank)\n# inside consumer:\nmm_out_op(shard, B0, out=...)' },
+      "local-gemm-1": { start: 717.285, duration: 38.111, tStart: 572, tDuration: 102, step: 5, lane: "CUDA stream 23", kind: "GEMM kernel", title: "本地 shard × B1", meaning: "local compute", text: "第二个 B matrix 的本地 GEMM。它与 stream 35 上的远端 GEMM 重叠，形成 compute/compute overlap。", code: 'for B in Bs:\n    mm_out_op(\n        local_shard, B, out=...\n    )' },
+      "scope35": { start: 697.668, duration: 69.953, tStart: 480, tDuration: 300, step: 4, lane: "CUDA stream 35", kind: "GPU annotation", title: "stream 35 的相关范围", meaning: "correlation", text: "同一个 External ID 436 的 GPU annotation。它包住远端 P2P copy 和远端 shard 的 GEMMs，不是第二次调用算子。", code: 'name = "fused_all_gather_matmul"\nexternal_id = 436\nstream = 35' },
+      "p2p-copy": { start: 697.669, duration: 6.432, tStart: 480, tDuration: 76, step: 4, lane: "CUDA stream 35", kind: "Memcpy P2P", title: "读取远端 shard", meaning: "communication", text: "stream 35 从 peer GPU 的 symmetric-memory buffer 拉取 remote shard。它与 stream 23 的 local GEMM 0 重叠。", code: 'with backend_stream:\n    copy_shard(\n        dst=remote_shard,\n        src=remote_p2p_bufs,\n    )' },
+      "remote-gemm-0": { start: 706.597, duration: 27.551, tStart: 566, tDuration: 92, step: 5, lane: "CUDA stream 35", kind: "GEMM kernel", title: "远端 shard × B0", meaning: "remote compute", text: "P2P copy 完成后，stream 35 立即消费远端 shard。这个 GEMM 可以与 stream 23 上无依赖的本地计算并行。", code: 'with backend_stream:\n    shard_consumer(\n        remote_shard, remote_rank\n    )' },
+      "remote-gemm-1": { start: 735.877, duration: 31.743, tStart: 672, tDuration: 108, step: 5, lane: "CUDA stream 35", kind: "GEMM kernel", title: "远端 shard × B1", meaning: "remote compute", text: "第二个 B matrix 的远端 GEMM。它结束后，backend stream 完成该 fused operator 的工作。", code: 'for B in Bs:\n    mm_out_op(\n        remote_shard, B, out=...\n    )' },
+      "final-barrier": { start: 769.220, duration: 75.808, tStart: 796, tDuration: 145, step: 6, lane: "CUDA stream 23", kind: "Barrier kernel", title: "汇合两个 stream", meaning: "join", text: "stream 23 先通过 wait_stream 等待 stream 35 完成，再执行最终 channel=0 barrier。算子的 GPU 工作到这里才真正闭合。", code: 'current_stream.wait_stream(\n    backend_stream\n)\nsymm_mem.barrier(channel=0)' }
+    };
+
+    const stages = [
+      { name: "0 · CPU 调用算子", hint: "Dispatcher 进入 CUDA 实现，并开始异步提交任务。", time: 20, focus: "cpu-op" },
+      { name: "1 · 初始跨 rank 同步", hint: "stream 23 执行 channel=0 barrier；stream 35 等待 current stream。", time: 470, focus: "initial-barrier" },
+      { name: "2 · 发布本地 shard", hint: "stream 23 将 local shard 放进 symmetric-memory P2P buffer。", time: 628, focus: "stage-copy" },
+      { name: "3 · 建立启动依赖", hint: "publish barrier 完成后，stream 35 才能读取 peer buffer。", time: 688, focus: "publish-barrier" },
+      { name: "4 · 通信与本地计算重叠", hint: "stream 23 做 local GEMM；stream 35 同时进行 P2P copy。", time: 703, focus: "p2p-copy" },
+      { name: "5 · 两个 stream 并行计算", hint: "本地 GEMM 与远端 shard GEMM 在两个 stream 上交错执行。", time: 748, focus: "remote-gemm-0" },
+      { name: "6 · 最终汇合", hint: "stream 23 等待 backend stream 完成，然后执行 final barrier。", time: 812, focus: "final-barrier" }
+    ];
+
+    let currentStep = 0;
+    let mode = "real";
+    let timer = null;
+
+    const pct = value => `${Math.max(0, Math.min(100, value / total * 100))}%`;
+    const teachingPct = value => `${Math.max(0, Math.min(100, value / 960 * 100))}%`;
+
+    function layoutEvents() {
+      document.querySelectorAll('[data-id]').forEach(el => {
+        const data = events[el.dataset.id];
+        if (!data) return;
+        const start = mode === "real" ? data.start : data.tStart;
+        const duration = mode === "real" ? data.duration : data.tDuration;
+        el.style.left = mode === "real" ? pct(start) : teachingPct(start);
+        el.style.width = mode === "real" ? pct(duration) : teachingPct(duration);
+      });
+      renderTicks();
+      renderStep();
+    }
+
+    function renderTicks() {
+      const ticks = document.getElementById('ticks');
+      ticks.innerHTML = '';
+      for (let i = 0; i <= 8; i++) {
+        const value = mode === 'real' ? total / 8 * i : 120 * i;
+        const node = document.createElement('span');
+        node.className = 'tick';
+        node.style.left = `${i * 12.5}%`;
+        node.textContent = mode === 'real' ? `+${value.toFixed(0)} µs` : `step ${i}`;
+        ticks.appendChild(node);
+      }
+    }
+
+    function renderStep() {
+      const stage = stages[currentStep];
+      document.getElementById('stepName').textContent = stage.name;
+      document.getElementById('stepHint').textContent = stage.hint;
+      document.getElementById('progressBar').style.width = `${currentStep / (stages.length - 1) * 100}%`;
+
+      const cursorValue = mode === 'real' ? stage.time / total : events[stage.focus].tStart / 960;
+      const track = document.querySelector('.track').clientWidth;
+      document.getElementById('cursor').style.transform = `translateX(${Math.max(0, cursorValue * track)}px)`;
+
+      document.querySelectorAll('.event').forEach(el => {
+        const data = events[el.dataset.id];
+        if (!data) return;
+        el.classList.toggle('done', data.step <= currentStep);
+        el.classList.toggle('current', el.dataset.id === stage.focus);
+      });
+
+      document.querySelectorAll('#codeLines li').forEach(line => {
+        line.classList.toggle('hot', Number(line.dataset.step) === currentStep);
+      });
+      showDetails(stage.focus);
+    }
+
+    function showDetails(id) {
+      const data = events[id];
+      if (!data) return;
+      document.getElementById('detailKind').textContent = data.kind;
+      document.getElementById('detailTitle').textContent = data.title;
+      document.getElementById('detailText').textContent = data.text;
+      document.getElementById('detailLane').textContent = data.lane;
+      document.getElementById('detailDuration').textContent = `${data.duration.toFixed(3)} µs`;
+      document.getElementById('detailStart').textContent = `+${data.start.toFixed(3)} µs`;
+      document.getElementById('detailMeaning').textContent = data.meaning;
+      document.getElementById('detailCode').textContent = data.code;
+    }
+
+    function setStep(next) {
+      currentStep = Math.max(0, Math.min(stages.length - 1, next));
+      renderStep();
+    }
+
+    function stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+      document.getElementById('playBtn').textContent = '▶ 播放';
+    }
+
+    document.getElementById('playBtn').addEventListener('click', () => {
+      if (timer) { stop(); return; }
+      if (currentStep === stages.length - 1) currentStep = -1;
+      document.getElementById('playBtn').textContent = 'Ⅱ 暂停';
+      const advance = () => {
+        if (currentStep >= stages.length - 1) { stop(); return; }
+        setStep(currentStep + 1);
+      };
+      advance();
+      timer = setInterval(advance, 1650);
+    });
+
+    document.getElementById('prevBtn').addEventListener('click', () => { stop(); setStep(currentStep - 1); });
+    document.getElementById('nextBtn').addEventListener('click', () => { stop(); setStep(currentStep + 1); });
+    document.getElementById('resetBtn').addEventListener('click', () => { stop(); setStep(0); });
+
+    document.querySelectorAll('.mode-switch button').forEach(button => {
+      button.addEventListener('click', () => {
+        mode = button.dataset.mode;
+        document.querySelectorAll('.mode-switch button').forEach(b => b.classList.toggle('active', b === button));
+        layoutEvents();
+      });
+    });
+
+    document.querySelectorAll('.event, .scope').forEach(el => {
+      el.addEventListener('click', () => showDetails(el.dataset.id));
+    });
+
+    window.addEventListener('resize', renderStep);
+    layoutEvents();
+  </script>
+</body>
+</html>

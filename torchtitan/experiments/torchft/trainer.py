@@ -90,10 +90,6 @@ class FaultTolerantTrainer(Trainer):
             else None
         )
 
-        local_batch_size = config.training.get_num_sequences(
-            config.training.num_tokens_per_dp_rank,
-            field_name="training.num_tokens_per_dp_rank",
-        )
         num_pp_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
@@ -335,7 +331,7 @@ class FaultTolerantTrainer(Trainer):
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_seq_len,
-                local_batch_size=local_batch_size,
+                num_tokens_per_dp_rank=config.training.num_tokens_per_dp_rank,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,

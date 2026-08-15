@@ -108,7 +108,7 @@ class Validator(BaseValidator):
         validation_context: ValidationContext,
         metrics_processor: MetricsProcessor,
         seq_len: int,
-        local_batch_size: int,
+        num_tokens_per_dp_rank: int,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -123,7 +123,7 @@ class Validator(BaseValidator):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.seq_len = seq_len
-        self.local_batch_size = local_batch_size
+        self.num_tokens_per_dp_rank = num_tokens_per_dp_rank
         self.validation_context = validation_context
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
@@ -200,8 +200,9 @@ class Validator(BaseValidator):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 inputs.device,
-                self.parallelism.context_parallel_load_balancer,
-                self.parallelism.context_parallel_ptrr_mask_key,
+                load_balancer_type=self.parallelism.context_parallel_load_balancer,
+                ptrr_mask_key=self.parallelism.context_parallel_ptrr_mask_key,
+                max_seq_len=self.seq_len,
             )
 
         if self.parallelism.spmd_backend == "full_dtensor":
@@ -231,7 +232,6 @@ class Validator(BaseValidator):
         num_pp_microbatches = (
             self.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-        pp_microbatch_size = self.local_batch_size // num_pp_microbatches
         num_microbatches = num_pp_microbatches
 
         validation_dataloader = self.dl_config.build(
@@ -239,7 +239,7 @@ class Validator(BaseValidator):
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
             max_seq_len=self.seq_len,
-            num_tokens_per_batch=pp_microbatch_size * self.seq_len,
+            num_tokens_per_batch=(self.num_tokens_per_dp_rank // num_pp_microbatches),
         )
 
         validation_iterator = iter(validation_dataloader)

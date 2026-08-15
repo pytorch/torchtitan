@@ -59,8 +59,8 @@ class TestFluxDataLoader(unittest.TestCase):
                         "flux",
                         "--config",
                         "flux_debugmodel",
-                        "--num-samples-per-dp-rank",
-                        str(batch_size),
+                        "--training.num-tokens-per-dp-rank",
+                        str(batch_size * 512),
                         "--dataloader.img_size",
                         str(256),
                         "--dataloader.dataset",
@@ -88,7 +88,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    local_batch_size=batch_size,
+                    num_tokens_per_batch=batch_size * 512,
                     tokenizer=tokenizer,
                 )
 
@@ -116,7 +116,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl_resumed = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    local_batch_size=batch_size,
+                    num_tokens_per_batch=batch_size * 512,
                     tokenizer=tokenizer,
                 )
                 dl_resumed.load_state_dict(state)

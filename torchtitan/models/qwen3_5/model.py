@@ -48,7 +48,7 @@ class Qwen35AttentionMasks:
     """Attention metadata for the full-attention and DeltaNet layers."""
 
     full_attention: AttentionMasksType | None
-    delta_net: VarlenMetadata
+    delta_net: VarlenMetadata | None
 
 
 def _causal_conv1d_varlen(
@@ -693,10 +693,6 @@ class Qwen35Model(Decoder):
         self,
         positions: torch.Tensor,
     ) -> Qwen35AttentionMasks | VarlenMetadata:
-        varlen_metadata = create_varlen_metadata_for_document(
-            positions,
-            include_host_offsets=True,
-        )
         attn_config = self.config.first_attention
         if attn_config is not None and isinstance(
             attn_config.inner_attention, VarlenAttention.Config
@@ -706,9 +702,34 @@ class Qwen35Model(Decoder):
             # whereas quadratic attention (torch.nn.attention.varlen) consumes
             # the device tensor directly. They are stored as Python ints so
             # SelectiveAC checkpoint metadata stays tensor-free.
-            return varlen_metadata
+            return create_varlen_metadata_for_document(
+                positions,
+                include_host_offsets=True,
+            )
         full_attention_masks = super().get_attention_masks(positions)
-        return Qwen35AttentionMasks(full_attention_masks, varlen_metadata)
+        # Multimodal padding uses position 0 for every padded token. A real
+        # document start is position 0 followed by position 1; keep index 0 as
+        # the first start. This avoids routing a single padded sample through
+        # the varlen kernel while retaining boundaries between packed samples.
+        followed_by_one = torch.cat(
+            [
+                positions[1:] == 1,
+                torch.zeros(1, dtype=torch.bool, device=positions.device),
+            ]
+        )
+        first_token = torch.arange(positions.shape[0], device=positions.device) == 0
+        sequence_starts = ((positions == 0) & followed_by_one) | first_token
+        sequence_positions = torch.where(sequence_starts, 0, 1)
+        delta_net_metadata = create_varlen_metadata_for_document(
+            sequence_positions,
+            include_host_offsets=True,
+        )
+        if (
+            delta_net_metadata.cu_seq_q_host is not None
+            and len(delta_net_metadata.cu_seq_q_host) == 2
+        ):
+            delta_net_metadata = None
+        return Qwen35AttentionMasks(full_attention_masks, delta_net_metadata)
 
     def _get_vision_embeds(
         self,

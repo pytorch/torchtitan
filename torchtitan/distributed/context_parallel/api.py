@@ -16,6 +16,7 @@ from torch.distributed.tensor.experimental._attention import (
     _context_parallel_shard,
     _enable_context_parallel_dispatcher,
     _HeadTailLoadBalancer,
+    _PerDocumentHeadTailLoadBalancer,
     _PTRRLoadBalancer,
 )
 from torch.distributed.tensor.experimental._context_parallel._attention import (
@@ -35,6 +36,8 @@ from torchtitan.tools.logging import logger
 def apply_cp_to_forward(
     attention_modules: Sequence[nn.Module],
     cp_mesh: DeviceMesh,
+    *,
+    attention_seq_dim: int = 0,
 ) -> None:
     """Wrap inner attention ``forward`` with CP logic.
 
@@ -52,6 +55,8 @@ def apply_cp_to_forward(
     Args:
         attention_modules: Sequence of inner attention modules to apply CP to.
         cp_mesh: Device mesh for context parallel dimension.
+        attention_seq_dim: Sequence dimension of the Q/K/V tensors. Defaults
+            to 0 for token-major attention.
     """
     first = attention_modules[0]
     if isinstance(first, FlexAttention):
@@ -70,7 +75,9 @@ def apply_cp_to_forward(
                         )
                     k = k.contiguous()
                     v = v.contiguous()
-                    global_k, global_v = flex_cp_allgather(k, v, 0, pg_name)
+                    global_k, global_v = flex_cp_allgather(
+                        k, v, attention_seq_dim, pg_name
+                    )
                     return orig_fn(q, global_k, global_v, **kwargs)
 
                 return cp_forward
@@ -84,7 +91,7 @@ def apply_cp_to_forward(
             original_forward = mod.forward
 
             def _make_cp_forward(orig_fn, mesh):
-                placement = [Shard(0)]
+                placement = [Shard(attention_seq_dim)]
 
                 def cp_forward(q, k, v, **kwargs):
                     if not isinstance(q, DTensor):
@@ -117,6 +124,7 @@ def prepare_context_parallel_input(
     extra_kwargs: dict[str, Any],
     cp_mesh: DeviceMesh,
     device: torch.device,
+    max_seq_len: int,
     load_balancer_type: str | None = "headtail",
     ptrr_mask_key: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
@@ -134,6 +142,9 @@ def prepare_context_parallel_input(
             optionally 'attention_masks' to be sharded.
         cp_mesh: Device mesh for context parallel dimension
         device: Device for the tensors
+        max_seq_len: Maximum logical sequence segment length. Head-tail load
+            balancing is applied independently to segments of this size so the
+            flat token layout preserves the former per-row CP partitioning.
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and the attention
@@ -155,6 +166,7 @@ def prepare_context_parallel_input(
         attention_masks,
         load_balancer_type,
         ptrr_mask_key=ptrr_mask_key,
+        headtail_segment_size=max_seq_len,
     )
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
@@ -170,6 +182,7 @@ def cp_shard(
     load_balancer_type: str | None = "headtail",
     input_seq_dim: int = 0,
     ptrr_mask_key: str | None = None,
+    headtail_segment_size: int | None = None,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.
@@ -185,7 +198,7 @@ def cp_shard(
         attention_masks: Attention masks to be sharded. Supports None,
             BlockMask, or dict[str, BlockMask]
         load_balancer_type: Type of load balancer to use. Options:
-            - "headtail": Use HeadTailLoadBalancer (for SDPA)
+            - "headtail": Use HeadTailLoadBalancer
             - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
             - None: Disable load balancing
             Defaults to "headtail".
@@ -196,6 +209,9 @@ def cp_shard(
             the dict the PTRRLoadBalancer is built from. The resulting balancer
             is used to shard every mask in the dict as well as the inputs.
             Required (must be a valid key) in that case; ignored otherwise.
+        headtail_segment_size: Apply head-tail load balancing independently to
+            fixed-size logical token segments instead of across the entire
+            flattened token dimension.
 
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
@@ -206,7 +222,8 @@ def cp_shard(
 
     Raises:
         ValueError: If load_balancer_type is "ptrr" and attention_masks
-            is None, or is a dict and ``ptrr_mask_key`` is not a valid key
+            is None, or is a dict and ``ptrr_mask_key`` is not a valid key; or
+            if a head-tail segment is not divisible by twice the CP degree.
     """
     seq_len = inputs[0].size(input_seq_dim)
     cp_world_size = cp_mesh.size(0)
@@ -215,10 +232,28 @@ def cp_shard(
     if load_balancer_type:
         match load_balancer_type:
             case "headtail":
-                # For SDPA, we use the _HeadTailLoadBalancer.
-                load_balancer = _HeadTailLoadBalancer(
-                    seq_len, cp_world_size, cp_mesh.device_type
-                )
+                if headtail_segment_size is None:
+                    load_balancer = _HeadTailLoadBalancer(
+                        seq_len, cp_world_size, cp_mesh.device_type
+                    )
+                else:
+                    num_segments, remainder = divmod(seq_len, headtail_segment_size)
+                    segment_lengths = [headtail_segment_size] * num_segments
+                    if remainder:
+                        segment_lengths.append(remainder)
+                    if any(
+                        length % (2 * cp_world_size) != 0 for length in segment_lengths
+                    ):
+                        raise ValueError(
+                            "Each head-tail token segment must be divisible by "
+                            f"2 * CP degree ({2 * cp_world_size}), but got "
+                            f"segment lengths {segment_lengths}."
+                        )
+                    load_balancer = _PerDocumentHeadTailLoadBalancer(
+                        [segment_lengths],
+                        cp_world_size,
+                        cp_mesh.device_type,
+                    )
             case "ptrr":
                 # For FlexAttention, we use _PTRRLoadBalancer.
                 # _PTRRLoadBalancer is built from a single BlockMask. When the
