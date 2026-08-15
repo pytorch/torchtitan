@@ -264,10 +264,6 @@ class VLLMKDAWrapper(Module, MambaBase):
             out=conv_out,
         )
         core_out, _ = fused_recurrent_kda_packed_decode(
-            # The conv is depthwise so it runs on the head-major channels as is,
-            # but the decode op indexes q/k/v as three contiguous N * head_dim
-            # blocks. flatten copies: the transpose cannot be viewed back into a
-            # single channel axis.
             convolved.unflatten(-1, (-1, 3, self.head_dim))
             .transpose(-2, -3)
             .flatten(-3),
