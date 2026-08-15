@@ -15,7 +15,7 @@ from typing import Any
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-__all__ = ["BucketConfig", "ComputeLayout", "Owned"]
+__all__ = ["BlockShard", "BucketConfig", "ComputeLayout", "Owned"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,18 +31,43 @@ class Owned:
     pass
 
 
-class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard]):
+@dataclass(frozen=True, slots=True)
+class BlockShard:
+    """Shard fixed-size blocks without changing the tensor shape.
+
+    The selected tensor dimension is partitioned into contiguous blocks of
+    ``block_size`` elements, and those blocks are sharded using the same
+    contiguous partitioning as ``Shard``. A block is never split between
+    participants. ``BlockShard`` describes only distribution; it does not
+    reshape or reinterpret the tensor.
+    """
+
+    dim: int
+    block_size: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.dim, bool) or not isinstance(self.dim, int):
+            raise ValueError("BlockShard.dim must be an integer")
+        if (
+            isinstance(self.block_size, bool)
+            or not isinstance(self.block_size, int)
+            or self.block_size <= 0
+        ):
+            raise ValueError("BlockShard.block_size must be a positive integer")
+
+
+class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard | BlockShard]):
     """Small immutable mapping that remains safe to copy with configs."""
 
     __slots__ = ("_items",)
 
     def __init__(
         self,
-        shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard],
+        shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard | BlockShard],
     ) -> None:
         self._items = tuple(shardings_by_mesh_axis.items())
 
-    def __getitem__(self, axis_name: str) -> Owned | Replicate | Shard:
+    def __getitem__(self, axis_name: str) -> Owned | Replicate | Shard | BlockShard:
         for candidate_axis_name, sharding in self._items:
             if candidate_axis_name == axis_name:
                 return sharding
@@ -68,10 +93,13 @@ class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard]):
 class ComputeLayout:
     """Describe temporary compute shardings on named storage-mesh axes.
 
-    Each named axis uses one of three compute shardings: ``Owned`` assigns the
+    These shardings apply before any optimizer-local tensor view.
+
+    Each named axis uses one of four compute shardings: ``Owned`` assigns the
     complete subgroup-local logical tensor to one dynamically selected owner rank,
-    ``Replicate`` assigns it to every rank, and ``Shard`` partitions one
-    tensor dimension.
+    ``Replicate`` assigns it to every rank, ``Shard`` partitions one tensor
+    dimension, and ``BlockShard`` partitions fixed-size blocks without changing
+    the tensor shape.
     Multiple ``Owned`` shardings select one owner rank from their joint Cartesian
     group.
     Omitted axes preserve their storage placement. Extra declarations may target
@@ -79,7 +107,7 @@ class ComputeLayout:
     must apply when the layout is resolved.
 
     Examples:
-        Shard a viewed matrix batch across the EFSDP and EP axes::
+        Shard a logical batch of matrices across the EFSDP and EP axes::
 
             ComputeLayout(
                 shardings_by_mesh_axis={
@@ -96,9 +124,17 @@ class ComputeLayout:
                     "dp_shard": Owned(),
                 }
             )
+
+        Shard complete four-row blocks along tensor dimension 0::
+
+            ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_size=4),
+                }
+            )
     """
 
-    shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard]
+    shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard | BlockShard]
 
     def __post_init__(self) -> None:
         shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
@@ -109,10 +145,10 @@ class ComputeLayout:
                 raise ValueError(
                     "ComputeLayout.shardings_by_mesh_axis keys must be strings"
                 )
-            if type(sharding) not in (Owned, Replicate, Shard):
+            if type(sharding) not in (Owned, Replicate, Shard, BlockShard):
                 raise ValueError(
                     "ComputeLayout.shardings_by_mesh_axis values must be "
-                    "Owned, Replicate, or Shard"
+                    "Owned, Replicate, Shard, or BlockShard"
                 )
         normalized_shardings_by_mesh_axis = dict(sorted(shardings_by_mesh_axis.items()))
         object.__setattr__(
@@ -120,6 +156,10 @@ class ComputeLayout:
             "shardings_by_mesh_axis",
             _FrozenShardingsByMeshAxis(normalized_shardings_by_mesh_axis),
         )
+
+    def to_dict(self) -> dict:
+        """Serialize for JSON logging."""
+        return {"repr": repr(self)}
 
 
 @dataclass(frozen=True, slots=True)
