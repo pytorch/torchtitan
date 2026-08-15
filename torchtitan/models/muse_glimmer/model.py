@@ -530,6 +530,12 @@ class MuseGlimmerModel(Decoder):
         if get_spmd_backend() == "spmd_types":
             # The scatter restores a token-aligned tensor, so text-model DP
             # resumes as global batch sharding after the multimodal region.
+
+            # NOTE: Under PP + TP + SP, this is not a truly correct typeing.
+            # In a later PP stage, h arrives as TP sharded activation,
+            # so annotating it as R on TP is wrong. However,
+            # PP + spmd typechecking is not supported currently and
+            # the asserted type here is not used anywhere.
             spmd.assert_type(h, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
