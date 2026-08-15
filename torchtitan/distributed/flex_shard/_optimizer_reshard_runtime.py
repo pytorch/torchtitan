@@ -210,7 +210,7 @@ class _BufferSlot:
             ),
         )
 
-    def compute_scratch_view(
+    def compute_buffer(
         self,
         shape: torch.Size | tuple[int, ...],
         *,
@@ -654,14 +654,10 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     ) -> None:
         for item in items:
             shape, dtype, device = local_tensor_spec(item)
-            compute_tensor = slot.compute_scratch_view(
-                shape,
-                dtype=dtype,
-                device=device,
-            )
-            prepare(item, compute_tensor)
-            compute(item, compute_tensor)
-            finalize(item, compute_tensor)
+            prepared = slot.compute_buffer(shape, dtype=dtype, device=device)
+            prepare(item, prepared)
+            compute(item, prepared)
+            finalize(item, prepared)
 
 
 def _prepare_redistributed(
@@ -716,7 +712,7 @@ def _compute_redistributed(
         if not math.prod(partition.tensor_shape):
             continue
         received_spans = to_compute.output_spans_by_parameter[index]
-        compute_tensor = slot.compute_scratch_view(
+        compute_tensor = slot.compute_buffer(
             partition.tensor_shape,
             dtype=plan.dtype,
             device=plan.device,

@@ -366,8 +366,8 @@ def _dist_muon_optimizer(
         ],
         optimizer_factory_kwargs_by_name={
             "DistMuon": {
-                "compute_sharding_by_fqn": compute_sharding_by_fqn,
                 "bucket_configs": bucket_configs,
+                "compute_sharding_by_fqn": compute_sharding_by_fqn,
             }
         },
     )

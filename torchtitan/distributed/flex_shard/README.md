@@ -46,7 +46,7 @@ is the first TorchTitan integration. Its shared optimizer configuration:
 - Selects matrix parameters from attention, dense MLPs, routed and shared
   experts, and routers for DistMuon. Other parameters continue to use
   AdamW.
-- Defines each selected parameter's compute sharding, including per-head Muon
+- Defines each selected parameter's compute layout, including per-head Muon
   for compatible attention projections.
 - Groups layers into buckets so compute-ready work can overlap packed
   redistribution.

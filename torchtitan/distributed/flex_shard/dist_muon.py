@@ -602,20 +602,17 @@ class DistMuon(Optimizer):
         torch.autograd.graph.increment_version(momentum_state)
 
     def _compute_update(
-        self, compute_layout: _ParameterComputeLayout, compute_tensor: Tensor
+        self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        muon_tensor = (
-            compute_tensor
-            if compute_layout.compute_view is None
-            else compute_layout.compute_view.view_as_matrix_batch(compute_tensor)
-        )
+        if compute_layout.compute_view is not None:
+            compute = compute_layout.compute_view.view_as_matrix_batch(compute)
         _compute_muon_direction(
-            muon_tensor,
+            compute,
             ns_coefficients=group["ns_coefficients"],
             ns_steps=group["ns_steps"],
             eps=group["eps"],
-            out=muon_tensor,
+            out=compute,
         )
 
     def _apply_update(
@@ -746,13 +743,6 @@ def _validate_matrix_batch_storage_alignment(
             )
 
 
-@dataclass(frozen=True, slots=True)
-class _StorageToComputeRedistributionRequirement:
-    """Storage mesh axes that require redistribution before compute."""
-
-    redistribution_storage_mesh_axes: tuple[int, ...]
-
-
 def _row_intervals_by_mesh_axis_coordinate(
     num_rows: int,
     sharding: Replicate | Shard | BlockShard,
@@ -790,7 +780,7 @@ def _resolve_storage_to_compute_redistribution_requirement(
     compute_view: _MatrixBatchView | None,
     target_sharding_by_storage_mesh_axis: Mapping[int, Replicate | Shard | BlockShard],
     declared_storage_mesh_axes: Sequence[int],
-) -> _StorageToComputeRedistributionRequirement:
+) -> tuple[int, ...]:
     """Compare actual storage with the target compute tensor."""
     if compute_view is None:
         changed_storage_mesh_axes = []
@@ -898,9 +888,7 @@ def _resolve_storage_to_compute_redistribution_requirement(
                 else (redistribution_storage_mesh_axis,)
             )
 
-    return _StorageToComputeRedistributionRequirement(
-        redistribution_storage_mesh_axes=redistribution_storage_mesh_axes,
-    )
+    return redistribution_storage_mesh_axes
 
 
 @dataclass(frozen=True, slots=True)
@@ -1389,29 +1377,13 @@ def _resolve_storage_to_compute_transition(
             storage_mesh_axis
         ] = target_sharding
 
-    requirement = _resolve_storage_to_compute_redistribution_requirement(
+    changed_storage_mesh_axes = _resolve_storage_to_compute_redistribution_requirement(
         fqn,
         param,
         compute_view,
         normalized_target_sharding_by_storage_mesh_axis,
         tuple(applicable_compute_shardings_by_storage_mesh_axis),
     )
-    changed_storage_mesh_axes = requirement.redistribution_storage_mesh_axes
-    implicitly_changed_storage_mesh_axes = tuple(
-        storage_mesh_axis
-        for storage_mesh_axis in changed_storage_mesh_axes
-        if storage_mesh_axis not in applicable_compute_shardings_by_storage_mesh_axis
-    )
-    if implicitly_changed_storage_mesh_axes:
-        axis_names = [
-            mesh_axis_names[storage_mesh_axis]
-            for storage_mesh_axis in implicitly_changed_storage_mesh_axes
-        ]
-        raise ValueError(
-            f"Muon parameter {fqn!r} compute view cannot preserve storage "
-            f"placements on omitted mesh axes {axis_names}; declare their "
-            "compute shardings explicitly"
-        )
     active_owned_storage_mesh_axes = tuple(
         storage_mesh_axis
         for storage_mesh_axis in applicable_owned_storage_mesh_axes

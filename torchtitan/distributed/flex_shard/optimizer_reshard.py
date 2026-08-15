@@ -91,7 +91,7 @@ class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard | BlockS
 
 @dataclass(frozen=True, slots=True)
 class ComputeLayout:
-    """Describe temporary compute-tensor shardings on named storage-mesh axes.
+    """Describe temporary compute shardings on named storage-mesh axes.
 
     These shardings apply before any optimizer-local tensor view.
 
