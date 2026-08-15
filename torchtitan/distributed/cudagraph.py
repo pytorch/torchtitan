@@ -305,10 +305,6 @@ class CUDAGraphWrapper:
             self._args = args
             self._record_static_input_addresses(args)
             self._graph = torch.cuda.CUDAGraph()
-            # TODO: Investigate why FSDP reshard_after_forward="always" leaves
-            # an all-gather event from warmup that causes
-            # CUDA_ERROR_STREAM_CAPTURE_ISOLATION when capture begins. The
-            # "default" and "never" policies work.
             with torch.cuda.graph(
                 self._graph,
                 pool=_manager.graph_pool,
@@ -337,7 +333,11 @@ class CUDAGraphWrapper:
 
 
 def wrap_with_cuda_graph(fwd_bwd_fn: ForwardBackwardFn) -> ForwardBackwardFn:
-    """Decorate a callable with CUDA graph capture/replay."""
+    """Decorate a callable with CUDA graph capture/replay.
+
+    After capture, the returned loss aliases graph-owned storage that is
+    overwritten by the next replay. Callers must preserve it when needed.
+    """
 
     if not (
         utils.device_type == "cuda"
@@ -400,15 +400,11 @@ def wrap_with_cuda_graph(fwd_bwd_fn: ForwardBackwardFn) -> ForwardBackwardFn:
             assert extra_input_spec is not None
             extra_flat = extra_input_spec.flatten(extra_kwargs)
 
-        loss = graph_wrapper(
+        return graph_wrapper(
             inputs,
             labels,
             global_valid_tokens,
             *extra_flat,
         )
-        # CUDA graph outputs are overwritten by each replay.
-        # TODO: Avoid this clone by migrating loss accumulation to a persistent
-        # tensor updated with add_().
-        return loss.clone()
 
     return run
