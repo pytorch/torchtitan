@@ -349,7 +349,7 @@ class KimiGroupedExperts(GroupedExperts):
 
     Inherits its stacked-weight shape (``w1_EFD``/``w2_EDF``/``w3_EFD``) and
     parameter allocation; only ``forward`` differs, since the activation is
-    baked into the ``torch._grouped_mm`` call sequence rather than being a
+    baked into the ``_grouped_mm`` call sequence rather than being a
     swappable argument.
     """
 
@@ -381,11 +381,15 @@ class KimiGroupedExperts(GroupedExperts):
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
-        gate_RF = torch._grouped_mm(
-            x_RD.bfloat16(), w1_EFD.bfloat16().transpose(-2, -1), offs=offsets_E
+        gate_RF = self._grouped_mm(
+            A=x_RD.bfloat16(),
+            B_t=w1_EFD.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
-        up_RF = torch._grouped_mm(
-            x_RD.bfloat16(), w3_EFD.bfloat16().transpose(-2, -1), offs=offsets_E
+        up_RF = self._grouped_mm(
+            A=x_RD.bfloat16(),
+            B_t=w3_EFD.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
 
         input_dtype = gate_RF.dtype
@@ -396,8 +400,10 @@ class KimiGroupedExperts(GroupedExperts):
             up_RF = self.linear_beta * torch.tanh(up_RF / self.linear_beta)
         h_RF = (gate_RF * up_RF).to(input_dtype)
 
-        return torch._grouped_mm(
-            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+        return self._grouped_mm(
+            A=h_RF,
+            B_t=w2_EDF.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         ).type_as(x_RD)
 
 
