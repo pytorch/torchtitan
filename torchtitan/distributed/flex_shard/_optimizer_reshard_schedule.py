@@ -38,7 +38,7 @@ def _bind_bucket_configs(
     get_fqn: Callable[[_ItemT], str],
     get_storage_dtensor: Callable[[_ItemT], DTensor],
     requires_redistribution: Callable[[_ItemT], bool],
-    get_redistribution_storage_mesh_axis: Callable[[_ItemT], int | None],
+    get_redistribution_storage_mesh_axes: Callable[[_ItemT], tuple[int, ...]],
     get_transport_compatibility_key: Callable[[_ItemT], Hashable],
 ) -> tuple[_BucketSpec, ...]:
     """Bind logical configs to homogeneous physical transport buckets.
@@ -78,24 +78,50 @@ def _bind_bucket_configs(
             continue
 
         physical_groups: dict[
-            tuple[str, tuple[int, ...], torch.dtype, torch.device, Hashable],
+            tuple[
+                tuple[str, ...],
+                tuple[int, ...],
+                torch.dtype,
+                torch.device,
+                Hashable,
+            ],
             tuple[DeviceMesh, list[_ItemT]],
         ] = {}
         for item in redistributed_items:
             storage_dtensor = get_storage_dtensor(item)
             storage_mesh = storage_dtensor.device_mesh
             mesh_axis_names = storage_mesh.mesh_dim_names
-            storage_mesh_axis = get_redistribution_storage_mesh_axis(item)
-            if mesh_axis_names is None or storage_mesh_axis is None:
+            raw_storage_mesh_axes = get_redistribution_storage_mesh_axes(item)
+            if mesh_axis_names is None or not raw_storage_mesh_axes:
                 raise RuntimeError(
-                    "redistributed parameter has no resolved transport axis: "
+                    "redistributed parameter has no resolved transport axes: "
                     f"{get_fqn(item)!r}"
                 )
-            mesh_axis_name = mesh_axis_names[storage_mesh_axis]
-            mesh = storage_mesh[mesh_axis_name]
+            if len(set(raw_storage_mesh_axes)) != len(raw_storage_mesh_axes):
+                raise RuntimeError(
+                    "redistributed parameter has duplicate transport axes: "
+                    f"{get_fqn(item)!r}"
+                )
+            storage_mesh_axes = tuple(sorted(raw_storage_mesh_axes))
+            if any(
+                mesh_axis < 0 or mesh_axis >= storage_mesh.ndim
+                for mesh_axis in storage_mesh_axes
+            ):
+                raise RuntimeError(
+                    "redistributed parameter has an invalid transport axis: "
+                    f"{get_fqn(item)!r}"
+                )
+            transport_axis_names = tuple(
+                mesh_axis_names[mesh_axis] for mesh_axis in storage_mesh_axes
+            )
+            if len(transport_axis_names) == 1:
+                mesh = storage_mesh[transport_axis_names[0]]
+            else:
+                flattened_axis_name = "flex_shard_" + "_".join(transport_axis_names)
+                mesh = storage_mesh[transport_axis_names]._flatten(flattened_axis_name)
             local_tensor = storage_dtensor.to_local()
             transport_key = (
-                mesh_axis_name,
+                transport_axis_names,
                 _device_mesh_ranks(mesh),
                 local_tensor.dtype,
                 local_tensor.device,
@@ -780,7 +806,7 @@ class _PackedAllToAllSchedule:
 class _RedistributionGroup:
     process_group: dist.ProcessGroup
     participants: tuple[int, ...]
-    mesh_axis_participants: tuple[int, ...]
+    mesh_ordered_participants: tuple[int, ...]
     local_participant: int
 
 
@@ -960,13 +986,13 @@ def _device_mesh_ranks(mesh: DeviceMesh) -> tuple[int, ...]:
 def _redistribution_group(mesh: DeviceMesh) -> _RedistributionGroup:
     process_group = mesh.get_group()
     participants = tuple(dist.get_process_group_ranks(process_group))
-    mesh_axis_participants = _device_mesh_ranks(mesh)
-    if set(mesh_axis_participants) != set(participants):
+    mesh_ordered_participants = _device_mesh_ranks(mesh)
+    if set(mesh_ordered_participants) != set(participants):
         raise ValueError("bucket mesh and process group participants do not match")
     return _RedistributionGroup(
         process_group=process_group,
         participants=participants,
-        mesh_axis_participants=mesh_axis_participants,
+        mesh_ordered_participants=mesh_ordered_participants,
         local_participant=participants[dist.get_rank(process_group)],
     )
 
@@ -1005,10 +1031,19 @@ def _dtensor_storage_regions(
     tensor: DTensor,
     participants: tuple[int, ...],
     *,
-    required_storage_mesh_axis: int | None,
+    required_storage_mesh_axes: tuple[int, ...],
 ) -> _GroupLocalStorage:
     storage_mesh = tensor.device_mesh
     storage_ranks = storage_mesh.mesh
+    if (
+        not required_storage_mesh_axes
+        or tuple(sorted(set(required_storage_mesh_axes))) != required_storage_mesh_axes
+        or required_storage_mesh_axes[0] < 0
+        or required_storage_mesh_axes[-1] >= storage_mesh.ndim
+    ):
+        raise ValueError(
+            "required storage mesh axes must be unique, ordered, and in range"
+        )
     reference_locations = (storage_ranks == participants[0]).nonzero()
     if tuple(reference_locations.shape) != (1, storage_mesh.ndim):
         raise ValueError(
@@ -1016,41 +1051,29 @@ def _dtensor_storage_regions(
         )
 
     reference_coordinate = reference_locations[0].tolist()
-    matching_storage_mesh_axes = []
+    transport_coordinate = list(reference_coordinate)
+    for storage_mesh_axis in required_storage_mesh_axes:
+        transport_coordinate[storage_mesh_axis] = slice(None)
+    cartesian_participants = tuple(
+        storage_ranks[tuple(transport_coordinate)].flatten().tolist()
+    )
     participant_set = set(participants)
-    for storage_mesh_axis in range(storage_mesh.ndim):
-        coordinate = list(reference_coordinate)
-        coordinate[storage_mesh_axis] = slice(None)
-        axis_participants = tuple(storage_ranks[tuple(coordinate)].flatten().tolist())
-        if (
-            len(axis_participants) == len(participants)
-            and set(axis_participants) == participant_set
-        ):
-            matching_storage_mesh_axes.append(storage_mesh_axis)
-
-    if required_storage_mesh_axis is not None:
-        if required_storage_mesh_axis not in matching_storage_mesh_axes:
-            raise ValueError(
-                "bucket mesh participants do not match the parameter storage "
-                "shard axis"
-            )
-        storage_mesh_axis = required_storage_mesh_axis
-    elif len(matching_storage_mesh_axes) == 1:
-        storage_mesh_axis = matching_storage_mesh_axes[0]
-    elif len(participants) == 1 and matching_storage_mesh_axes:
-        storage_mesh_axis = matching_storage_mesh_axes[0]
-    else:
+    if (
+        len(cartesian_participants) != len(participants)
+        or set(cartesian_participants) != participant_set
+    ):
         raise ValueError(
-            "bucket mesh participants must match exactly one DTensor storage "
-            "mesh axis"
+            "bucket mesh participants do not match the required Cartesian "
+            "storage-mesh axes"
         )
 
+    transport_axis_set = set(required_storage_mesh_axes)
     for mesh_axis, placement in enumerate(tensor.placements):
-        if mesh_axis == storage_mesh_axis:
+        if mesh_axis in transport_axis_set:
             if type(placement) not in (Replicate, Shard):
                 raise ValueError(
                     "redistributed optimizer storage requires exact Shard or "
-                    "Replicate on the communication mesh axis"
+                    "Replicate on the communication mesh axes"
                 )
         elif storage_mesh.size(mesh_axis) != 1 and type(placement) not in (
             Replicate,
@@ -1058,11 +1081,12 @@ def _dtensor_storage_regions(
         ):
             raise ValueError(
                 "redistributed optimizer storage requires exact Shard or "
-                "Replicate outside the communication mesh axis"
+                "Replicate outside the communication mesh axes"
             )
 
     domain_placements = list(tensor.placements)
-    domain_placements[storage_mesh_axis] = Replicate()
+    for storage_mesh_axis in required_storage_mesh_axes:
+        domain_placements[storage_mesh_axis] = Replicate()
     domain_shape, domain_offsets = _compute_local_shape_and_global_offset(
         tensor.shape,
         storage_mesh.shape,
