@@ -4,20 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Public optimizer-reshard configuration."""
+"""Public optimizer-reshard configuration and setup."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from torch.distributed.tensor import Replicate, Shard
+from torch.optim import Optimizer
 
 __all__ = [
     "BlockShard",
     "BucketConfig",
     "ComputeLayout",
+    "flex_optimizer_reshard",
     "NoRedistribution",
     "Owned",
 ]
@@ -230,3 +232,37 @@ class BucketConfig:
             "redistribution_mesh_axis_names",
             redistribution_mesh_axis_names,
         )
+
+
+_OptimizerT = TypeVar("_OptimizerT", bound=Optimizer)
+_ComputeShardingT = TypeVar("_ComputeShardingT")
+
+
+def flex_optimizer_reshard(
+    optimizer: _OptimizerT,
+    *,
+    compute_sharding_by_fqn: Mapping[str, _ComputeShardingT],
+    bucket_configs: Sequence[BucketConfig],
+) -> _OptimizerT:
+    """Configure a supported optimizer for FlexShard redistribution.
+
+    The optimizer integration resolves its compute shardings and installs the
+    private execution plan. The returned object is ``optimizer`` itself; its
+    exact type and declared ``step`` method remain unchanged.
+
+    Configuration may create process groups and run validation collectives.
+    All participating ranks must call this function in a consistent order.
+    Parameter data is not redistributed until ``optimizer.step()``.
+    """
+    configure = getattr(optimizer, "_configure_flex_optimizer_reshard", None)
+    if not callable(configure):
+        raise TypeError(
+            "flex_optimizer_reshard does not support optimizer type "
+            f"{type(optimizer).__name__!r}; the optimizer must provide a "
+            "FlexShard integration"
+        )
+    configure(
+        compute_sharding_by_fqn=compute_sharding_by_fqn,
+        bucket_configs=tuple(bucket_configs),
+    )
+    return optimizer

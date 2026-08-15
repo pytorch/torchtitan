@@ -17,13 +17,18 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
-  values in `compute_sharding_by_fqn`. Within DistMuon,
-  `BlockShard(dim=0, block_size=R)` interprets a 2D parameter `[M * R, C]` as
-  `M` independent matrices `[M, R, C]`. FlexShard routes the flat 2D compute
-  tensor, and DistMuon applies the local matrix-batch view immediately before
-  Muon compute. The builder validates named DTensor parameters and plans their
-  storage-to-compute transitions. A native 3D `[M, R, C]` parameter can use
+- `DistMuon` is the optimizer implementation used by the initial FlexShard
+  integration.
+- `flex_optimizer_reshard` binds a supported optimizer to its per-parameter
+  compute shardings and physical buckets without replacing the optimizer
+  object, its exact type, or its declared `step` method.
+- `build_dist_muon` is the convenience construction path. It constructs
+  `DistMuon` and binds optimizer-agnostic per-parameter `ComputeLayout` values
+  in `compute_sharding_by_fqn` through `flex_optimizer_reshard`. Within
+  DistMuon, `BlockShard(dim=0, block_size=R)` interprets a 2D parameter
+  `[M * R, C]` as `M` independent matrices `[M, R, C]`. FlexShard routes the
+  flat 2D compute tensor, and DistMuon applies the local matrix-batch view
+  immediately before Muon compute. A native 3D `[M, R, C]` parameter can use
   `Shard(0)` to distribute complete matrices. A 2D parameter without
   `BlockShard` must use whole-matrix compute such as `Owned`.
 
@@ -32,9 +37,9 @@ Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
 most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
 `Replicate`; every other non-unit storage mesh axis must be replicated.
 
-Compute sharding is construction-time configuration. It is validated and
-frozen when the optimizer is built, but is not stored in its state dict;
-checkpoint restore must rebuild the optimizer with matching values.
+Compute sharding is binding-time configuration. It is validated and frozen by
+`flex_optimizer_reshard`, but is not stored in the optimizer state dict;
+checkpoint restore must rebuild and bind the optimizer with matching values.
 
 ## TorchTitan Kimi integration
 
