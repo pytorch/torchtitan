@@ -7,7 +7,6 @@
 import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
@@ -226,6 +225,67 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
         local_map=LocalMapConfig(
             in_grad_placements=(q_placements, kv_grad_placements, kv_grad_placements),
         ),
+    )
+
+
+def set_kda_sharding(
+    kda_cfg, *, attention_input_layout: SpmdLayout, cp_enabled: bool
+) -> None:
+    """Set head-sharded TP on a :class:`KDA` config.
+
+    shard on head axis instead of sequences
+    """
+    if cp_enabled:
+        # TODO: work out what CP needs here.
+        raise NotImplementedError("Context Parallel is not yet supported for KDA")
+
+    for name in ("in_proj_qkv", "gate_proj_b", "beta_proj", "out_gate_proj_b"):
+        getattr(kda_cfg, name).sharding_config = colwise_config()
+
+    replicated = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        out_src_shardings=dense_activation_placement(tp=spmd.R),
+    )
+    kda_cfg.gate_proj_a.sharding_config = replicated
+    kda_cfg.out_gate_proj_a.sharding_config = replicated
+
+    kda_cfg.conv_qkv.sharding_config = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+    )
+
+    head_plc = dense_activation_placement(tp=spmd.S(2))
+    kda_cfg.out_norm.sharding_config = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        in_src_shardings={"input": head_plc},
+        in_dst_shardings={"input": head_plc},
+        out_src_shardings=head_plc,
+    )
+
+    kda_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
+
+    param_plc = dense_param_placement(tp=spmd.S(0))
+    kda_cfg.attention.sharding_config = ShardingConfig(
+        in_src_shardings={
+            "mixed_qkv_BLC": head_plc,
+            "raw_gate_BLNK": head_plc,
+            "raw_beta_BLN": head_plc,
+            "conv_weight_C1W": param_plc,
+            "A_log_N": param_plc,
+            "dt_bias_NK": param_plc,
+        },
+        out_src_shardings=head_plc,
+        local_map=LocalMapConfig(
+            in_grad_placements=(head_plc,) * 3 + (param_plc,) * 3,
+        ),
+    )
+
+    kda_cfg.sharding_config = ShardingConfig(
+        state_shardings={
+            "A_log": dense_param_placement(tp=spmd.S(0)),
+            "dt_bias": dense_param_placement(tp=spmd.S(0)),
+        },
+        in_src_shardings={"x_BLD": attention_input_layout},
+        in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
     )
 
 
