@@ -27,6 +27,8 @@ from torchtitan.distributed.flex_shard import (
     BucketConfig,
     build_dist_muon,
     ComputeLayout,
+    DistMuon,
+    flex_optimizer_reshard,
     NoRedistribution,
     Owned,
 )
@@ -39,7 +41,6 @@ from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
 )
 from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
-    DistMuon,
 )
 
 
@@ -192,6 +193,90 @@ class TestBucketOverlapPlan(unittest.TestCase):
             )
 
 
+class TestFlexOptimizerReshard(unittest.TestCase):
+    def test_configures_supported_optimizer_in_place(self):
+        optimizer = DistMuon(
+            [
+                {
+                    "params": [torch.nn.Parameter(torch.ones(2, 2))],
+                    "param_names": ["weight"],
+                }
+            ]
+        )
+        compute_sharding_by_fqn: dict[str, object] = {}
+        bucket_configs: tuple[BucketConfig, ...] = ()
+
+        with patch.object(
+            DistMuon,
+            "_configure_flex_optimizer_reshard",
+            autospec=True,
+        ) as configure:
+            configured = flex_optimizer_reshard(
+                optimizer,
+                compute_sharding_by_fqn=compute_sharding_by_fqn,
+                bucket_configs=bucket_configs,
+            )
+
+        self.assertIs(configured, optimizer)
+        self.assertIs(type(configured), DistMuon)
+        configure.assert_called_once_with(
+            optimizer,
+            compute_sharding_by_fqn=compute_sharding_by_fqn,
+            bucket_configs=bucket_configs,
+        )
+
+    def test_rejects_unsupported_optimizer(self):
+        optimizer = torch.optim.SGD([torch.nn.Parameter(torch.ones(2, 2))], lr=0.1)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "does not support optimizer type 'SGD'",
+        ):
+            flex_optimizer_reshard(
+                optimizer,
+                compute_sharding_by_fqn={},
+                bucket_configs=(),
+            )
+
+    def test_failed_configuration_leaves_dist_muon_unconfigured(self):
+        fqn = "weight"
+        optimizer = DistMuon(
+            [
+                {
+                    "params": [torch.nn.Parameter(torch.ones(2, 2))],
+                    "param_names": [fqn],
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(TypeError, "requires DTensor parameters"):
+            flex_optimizer_reshard(
+                optimizer,
+                compute_sharding_by_fqn={
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Replicate()},
+                    )
+                },
+                bucket_configs=(
+                    BucketConfig(
+                        patterns=(fqn,),
+                        redistribution_mesh_axis_names=NoRedistribution(),
+                    ),
+                ),
+            )
+
+        closure_called = False
+
+        def closure() -> float:
+            nonlocal closure_called
+            closure_called = True
+            return 0.0
+
+        with self.assertRaisesRegex(RuntimeError, "flex_optimizer_reshard"):
+            optimizer.step(closure)
+        self.assertFalse(closure_called)
+
+
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistMuon(DTensorTestBase):
     @property
@@ -217,25 +302,68 @@ class TestDistMuon(DTensorTestBase):
             distribute_tensor(value.clone(), mesh, (Replicate(),))
         )
         fqn = "layers.0.replicated"
-        optimizer = build_dist_muon(
+        compute_sharding_by_fqn = {
+            fqn: ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": Replicate(),
+                },
+            )
+        }
+        bucket_configs = (
+            BucketConfig(
+                patterns=(fqn,),
+                redistribution_mesh_axis_names=NoRedistribution(),
+            ),
+        )
+        unconfigured_optimizer = DistMuon(
             [{"params": [parameter], "param_names": [fqn]}],
-            compute_sharding_by_fqn={
-                fqn: ComputeLayout(
-                    shardings_by_mesh_axis={"dp_shard": Replicate()},
-                )
-            },
-            bucket_configs=[
-                BucketConfig(
-                    patterns=(fqn,),
-                    redistribution_mesh_axis_names=NoRedistribution(),
-                )
-            ],
             lr=lr,
             weight_decay=weight_decay,
             momentum=0.8,
             nesterov=True,
             ns_steps=2,
         )
+        original_type = type(unconfigured_optimizer)
+        original_step = unconfigured_optimizer.step.__func__
+        hook_events = []
+        unconfigured_optimizer.register_step_pre_hook(
+            lambda *_args: hook_events.append("pre")
+        )
+        unconfigured_optimizer.register_step_post_hook(
+            lambda *_args: hook_events.append("post")
+        )
+        with patch.object(torch.optim.Optimizer, "_patch_step_function") as patch_step:
+            optimizer = flex_optimizer_reshard(
+                unconfigured_optimizer,
+                compute_sharding_by_fqn=compute_sharding_by_fqn,
+                bucket_configs=bucket_configs,
+            )
+        self.assertIs(optimizer, unconfigured_optimizer)
+        self.assertIs(type(optimizer), original_type)
+        self.assertIs(optimizer.step.__func__, original_step)
+        patch_step.assert_not_called()
+
+        with self.assertRaisesRegex(ValueError, "more than once"):
+            flex_optimizer_reshard(
+                optimizer,
+                compute_sharding_by_fqn={},
+                bucket_configs=(),
+            )
+
+        original_param_names = optimizer.param_groups[0]["param_names"]
+        optimizer.param_groups[0]["param_names"] = ["renamed"]
+        with self.assertRaisesRegex(RuntimeError, "parameter groups changed"):
+            optimizer.step()
+        matching_mutated_state = optimizer.state_dict()
+        with self.assertRaisesRegex(ValueError, "current DistMuon"):
+            optimizer.load_state_dict(matching_mutated_state)
+        optimizer.param_groups[0]["param_names"] = original_param_names
+        hook_events.clear()
+
+        mismatched_state_dict = optimizer.state_dict()
+        mismatched_state_dict["param_groups"][0]["param_names"] = ["renamed"]
+        with self.assertRaisesRegex(ValueError, "configured FlexShard FQNs"):
+            optimizer.load_state_dict(mismatched_state_dict)
 
         reference = torch.nn.Parameter(value.clone())
         reference_optimizer = torch.optim.Muon(
@@ -252,6 +380,7 @@ class TestDistMuon(DTensorTestBase):
 
         optimizer.step()
         reference_optimizer.step()
+        self.assertEqual(hook_events, ["pre", "post"])
 
         torch.testing.assert_close(
             parameter.to_local(),
@@ -831,7 +960,7 @@ class TestDistMuonMultiMesh(DTensorTestBase):
             ),
         )
         self.assertIs(type(optimizer), DistMuon)
-        compute_layout = optimizer._parameter_compute_layouts[0]
+        compute_layout = optimizer._require_optimizer_reshard_binding().plan_items[0]
         self.assertFalse(compute_layout.storage_is_compute_ready)
         self.assertEqual(compute_layout.redistribution_storage_mesh_axes, (1,))
 
