@@ -18,10 +18,9 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.flex_shard import (
-    AttentionPerHeadComputeView,
+    BlockShard,
     BucketConfig,
     ComputeLayout,
-    MuonComputeShardingConfig,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -68,7 +67,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=_mm_dataloader("cc12m-test"),
-        optimizer=_distributed_muon_optimizer(model_spec, lr=8e-4),
+        optimizer=_dist_muon_optimizer(model_spec, lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -102,7 +101,7 @@ def moonlight_16b_a3b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Moonlight-16B-A3B",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_distributed_muon_optimizer(model_spec, lr=3e-4),
+        optimizer=_dist_muon_optimizer(model_spec, lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -143,7 +142,7 @@ def kimi_vl_a3b() -> Trainer.Config:
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
         dataloader=_mm_dataloader("cc12m"),
-        optimizer=_distributed_muon_optimizer(model_spec, lr=3e-4),
+        optimizer=_dist_muon_optimizer(model_spec, lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -179,7 +178,7 @@ def kimi_k2_5() -> Trainer.Config:
         hf_assets_path="./assets/hf/Kimi-K2.5",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_distributed_muon_optimizer(model_spec, lr=2.2e-4),
+        optimizer=_dist_muon_optimizer(model_spec, lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -203,49 +202,53 @@ def kimi_k2_5() -> Trainer.Config:
     )
 
 
-def _distributed_muon_optimizer(
+def _dist_muon_optimizer(
     model_spec: ModelSpec,
     *,
     lr: float,
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
-    owned = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Owned(),
-            },
-        )
+    owned = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Owned(),
+        },
     )
-    per_head = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
-        ),
-        compute_view=AttentionPerHeadComputeView(
-            num_heads=attention.n_heads,
-        ),
+    per_query_head = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
+            )
+        },
     )
-    per_expert = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
-                MeshAxisName.EFSDP.value: Shard(0),
-                MeshAxisName.EP.value: Shard(0),
-            },
-        )
+    per_key_value_head = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_size=attention.qk_nope_head_dim + attention.v_head_dim,
+            )
+        },
     )
-    query_shardings: dict[str, MuonComputeShardingConfig] = (
+    per_expert = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Shard(0),
+            MeshAxisName.EFSDP.value: Shard(0),
+            MeshAxisName.EP.value: Shard(0),
+        },
+    )
+    query_shardings: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
-            "wq_b": per_head,
+            "wq_b": per_query_head,
         }
         if attention.q_lora_rank
-        else {"wq": per_head}
+        else {"wq": per_query_head}
     )
     attention_shardings = {
         **query_shardings,
         "wkv_a": owned,
-        "wkv_b": per_head,
+        "wkv_b": per_key_value_head,
         "wo": owned,
     }
     num_layers = len(model_config.layers)
@@ -268,7 +271,7 @@ def _distributed_muon_optimizer(
 
     def compute_shardings_for_layer(
         layer_id: int,
-    ) -> dict[str, MuonComputeShardingConfig]:
+    ) -> dict[str, ComputeLayout]:
         prefix = f"layers.{layer_id}"
         shardings = {
             f"{prefix}.attention.{projection}.weight": compute_sharding
@@ -350,7 +353,7 @@ def _distributed_muon_optimizer(
         param_groups=[
             ParamGroupConfig(
                 pattern=muon_pattern,
-                optimizer_name="DistributedMuon",
+                optimizer_name="DistMuon",
                 optimizer_kwargs=muon_kwargs,
             ),
             # The remaining parameters are embeddings, norms, biases, LM head,
@@ -362,7 +365,7 @@ def _distributed_muon_optimizer(
             ),
         ],
         optimizer_factory_kwargs_by_name={
-            "DistributedMuon": {
+            "DistMuon": {
                 "bucket_configs": bucket_configs,
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
             }
@@ -374,8 +377,8 @@ def _distributed_muon_optimizer(
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        # TODO(#3353): Support TP-produced _StridedShard layouts in DistributedMuon.
-        # TODO(#4102): Build DistributedMuon from PP stage-local parameter groups.
+        # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
+        # TODO(#4102): Build DistMuon from PP stage-local parameter groups.
         if (
             self.parallelism.tensor_parallel_degree > 1
             or self.parallelism.pipeline_parallel_degree > 1
@@ -383,7 +386,7 @@ class _KimiTrainerConfig(Trainer.Config):
             # Fail during config parsing, before TP/FSDP creates _StridedShard
             # storage or PP constructs optimizers from stage-local parameters.
             raise ValueError(
-                "Kimi DistributedMuon currently requires "
+                "Kimi DistMuon currently requires "
                 "tensor_parallel_degree=1 and pipeline_parallel_degree=1: "
                 "tensor parallelism can produce unsupported _StridedShard "
                 "parameter layouts, and pipeline parallelism gives each stage "

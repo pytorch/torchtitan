@@ -5,27 +5,35 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from fla.modules.conv.triton.ops import CausalConv1dFunction
 
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
 )
+from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction
+from fla.ops.gated_delta_rule.fused_recurrent import FusedRecurrentFunction
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.distributed.spmd_types import spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
+    local_head_split,
     VarlenAttention,
     VarlenMetadata,
 )
@@ -38,13 +46,26 @@ from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 from .rope import MRoPE
-from .sharding import set_qwen35_sharding_config
+from .sharding import annotate_qwen35_input_spmd_types, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
 Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
+spmd.register_local_autograd_function(ChunkGatedDeltaRuleFunction)
+spmd.register_local_autograd_function(FusedRecurrentFunction)
+spmd.register_local_autograd_function(CausalConv1dFunction)
 
+
+@spmd.local_map(
+    in_types=(
+        {"dp": spmd.S(1), "tp": spmd.S(2)},
+        {"dp": spmd.R, "tp": spmd.S(0)},
+        {"dp": spmd.V, "tp": spmd.R},
+        {"dp": spmd.V, "tp": spmd.R},
+    ),
+    out_types={"dp": spmd.S(1), "tp": spmd.S(2)},
+)
 def _causal_conv1d_varlen(
     x_BTD: torch.Tensor,
     weight: torch.Tensor,
@@ -74,6 +95,16 @@ def _causal_conv1d_varlen(
         cu_seqlens_cpu=cu_seqlens_cpu,
     )
     return out_BTD
+
+
+@spmd.local_map(
+    in_types=({"dp": spmd.S(1), "tp": spmd.S(2)}, None, None),
+    out_types={"dp": spmd.S(0), "tp": spmd.S(2)},
+)
+def unflatten_to_bld(
+    tensor: torch.Tensor, batch_size: int, seq_len: int
+) -> torch.Tensor:
+    return tensor.reshape(batch_size, seq_len, -1)
 
 
 class OffsetRMSNorm(Module):
@@ -318,32 +349,43 @@ class GatedDeltaNet(Module):
                     )
 
                 return self._local_map_conv(x_BLD, conv, _conv_varlen, cu_seqlens)
-            return _causal_conv1d_varlen(
-                x_BLD,
-                conv.weight,
-                cu_seqlens,
-                cu_seqlens_cpu,
+            else:
+                return _causal_conv1d_varlen(
+                    x_BLD,
+                    conv.weight,
+                    cu_seqlens,
+                    cu_seqlens_cpu,
+                )
+
+        # standard fixed-length convolution path
+        x_BDL = F.pad(x_BLD.transpose(1, 2), [self.conv_kernel_size - 1, 0])
+
+        @spmd.local_map(
+            in_types=(
+                {"dp": spmd.S(2), "tp": spmd.S(1)},
+                {"dp": spmd.R, "tp": spmd.S(0)},
+            ),
+            out_types={"dp": spmd.S(2), "tp": spmd.S(1)},
+        )
+        def _local_depthwise_conv1d(
+            x_local_BDL: torch.Tensor, w_local: torch.Tensor
+        ) -> torch.Tensor:
+            return F.conv1d(
+                x_local_BDL,
+                w_local,
+                None,
+                conv.stride,
+                conv.padding,
+                conv.dilation,
+                w_local.size(0),
             )
 
-        x_BDL = F.pad(x_BLD.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x_BDL, DTensor):
             # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
             # groups lands in a released torch.
-            def _conv(x_local_BDL: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
-                # groups == local out-channels (depthwise, channel-sharded)
-                return F.conv1d(
-                    x_local_BDL,
-                    w_local,
-                    None,
-                    conv.stride,
-                    conv.padding,
-                    conv.dilation,
-                    w_local.size(0),
-                )
-
-            x_BDL = self._local_map_conv(x_BDL, conv, _conv)
+            x_BDL = self._local_map_conv(x_BDL, conv, _local_depthwise_conv1d)
         else:
-            x_BDL = conv(x_BDL)
+            x_BDL = _local_depthwise_conv1d(x_BDL, conv.weight)
         return F.silu(x_BDL).transpose(1, 2)
 
     def forward(
@@ -358,7 +400,8 @@ class GatedDeltaNet(Module):
             # FLA caches varlen index helpers by tensor identity. A fresh
             # tensor ensures forward and activation-checkpoint recompute both
             # execute the helpers instead of taking different cache paths.
-            cu_seqlens = attention_masks.cu_seq_q.clone()
+            with spmd.local():
+                cu_seqlens = attention_masks.cu_seq_q.clone()
             cu_seqlens_host = attention_masks.cu_seq_q_host
             if cu_seqlens_host is None:
                 raise ValueError(
@@ -373,46 +416,48 @@ class GatedDeltaNet(Module):
                 dtype=cu_seqlens.dtype,
                 device="cpu",
             )
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                # Python host metadata loses the DP-varying provenance of the
+                # device offsets when it is materialized as a new tensor.
+                spmd.mutate_type(cu_seqlens_cpu, "dp", src=spmd.R, dst=spmd.V)
 
-        if cu_seqlens is None:
-            kernel_B, kernel_L = B, L
-        else:
-            kernel_B, kernel_L = 1, B * L
-
-        def _maybe_flatten(tensor: torch.Tensor) -> torch.Tensor:
-            if cu_seqlens is None:
-                return tensor
+        def fold_bl_dim(tensor: torch.Tensor) -> torch.Tensor:
             return tensor.reshape(1, B * L, *tensor.shape[2:])
 
-        # Shapes:
-        #   xq_BLNK, xk_BLNK: (B, L, n_key_heads, key_head_dim)
-        #   xv_BLNV, xz_BLNV: (B, L, n_value_heads, value_head_dim)
-        #   xa_BLN, xb_BLN: (B, L, n_value_heads)
+        # Folded recurrence shapes:
+        #   xq_BLNK, xk_BLNK: (1, B * L, n_key_heads, key_head_dim)
+        #   xv_BLNV, xz_BLNV: (1, B * L, n_value_heads, value_head_dim)
+        #   xa_BLN, xb_BLN: (1, B * L, n_value_heads)
         xq_BLNK = self._causal_conv(
-            _maybe_flatten(self.in_proj_q(x_BLD)),
+            fold_bl_dim(self.in_proj_q(x_BLD)),
             self.conv_q,
             cu_seqlens,
             cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.key_head_dim)
+        )
+        xq_BLNK = local_head_split(xq_BLNK, self.key_head_dim, dp_shard_dim=1)
         xk_BLNK = self._causal_conv(
-            _maybe_flatten(self.in_proj_k(x_BLD)),
+            fold_bl_dim(self.in_proj_k(x_BLD)),
             self.conv_k,
             cu_seqlens,
             cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.key_head_dim)
+        )
+        xk_BLNK = local_head_split(xk_BLNK, self.key_head_dim, dp_shard_dim=1)
         xv_BLNV = self._causal_conv(
-            _maybe_flatten(self.in_proj_v(x_BLD)),
+            fold_bl_dim(self.in_proj_v(x_BLD)),
             self.conv_v,
             cu_seqlens,
             cu_seqlens_cpu,
-        ).view(kernel_B, kernel_L, -1, self.value_head_dim)
-        xz_BLNV = _maybe_flatten(self.in_proj_z(x_BLD)).view(
-            kernel_B, kernel_L, -1, self.value_head_dim
         )
-        xa_BLN = _maybe_flatten(self.in_proj_a(x_BLD))
-        xb_BLN = _maybe_flatten(self.in_proj_b(x_BLD))
+        xv_BLNV = local_head_split(xv_BLNV, self.value_head_dim, dp_shard_dim=1)
+        xz_BLNV = local_head_split(
+            fold_bl_dim(self.in_proj_z(x_BLD)),
+            self.value_head_dim,
+            dp_shard_dim=1,
+        )
+        xa_BLN = fold_bl_dim(self.in_proj_a(x_BLD))
+        xb_BLN = fold_bl_dim(self.in_proj_b(x_BLD))
 
-        # Gating signals have shape (B, L, n_value_heads):
+        # Gating signals have shape (1, B * L, n_value_heads):
         #   g_BLN:    decay rate per head, always negative
         #   beta_BLN: update gate in (0, 1)
         g_BLN = -torch.exp(self.A_log.float()) * F.softplus(
@@ -432,9 +477,8 @@ class GatedDeltaNet(Module):
 
         out_BLNV = self.norm(out_BLNV, xz_BLNV)
 
-        # Merge value heads and restore (B, L); under varlen the kernel ran on a
-        # flattened (1, B*L) layout, so this also unpacks the batch.
-        out_BLD = out_BLNV.reshape(B, L, -1)
+        # Merge value heads and restore (B, L) from the folded (1, B * L) layout.
+        out_BLD = unflatten_to_bld(out_BLNV, B, L)
         return self.out_proj(out_BLD)
 
 
@@ -498,10 +542,10 @@ class Qwen35Attention(BaseAttention):
         B, L, _ = x_BLD.shape
 
         # wq is 2x wider: produces query + gate
-        xq_gate_BLN2H = self.wq(x_BLD).view(B, L, -1, self.head_dim * 2)
+        xq_gate_BLN2H = local_head_split(self.wq(x_BLD), self.head_dim * 2)
         xq_BLNH, gate_BLNH = xq_gate_BLN2H.chunk(2, dim=-1)
-        xk_BLNH = self.wk(x_BLD).view(B, L, -1, self.head_dim)
-        xv_BLNH = self.wv(x_BLD).view(B, L, -1, self.head_dim)
+        xk_BLNH = local_head_split(self.wk(x_BLD), self.head_dim)
+        xv_BLNH = local_head_split(self.wv(x_BLD), self.head_dim)
 
         # QK norm (before RoPE)
         xq_BLNH = self.q_norm(xq_BLNH)
@@ -705,6 +749,12 @@ class Qwen35Model(Decoder):
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
+    def multimodal_context(self) -> contextlib.AbstractContextManager[None]:
+        """Use local DP typechecking while preparing multimodal inputs."""
+        if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
+            return spmd.set_current_mesh(local_axes=("dp",))
+        return contextlib.nullcontext()
+
     def get_attention_masks(
         self,
         positions: torch.Tensor,
@@ -869,17 +919,33 @@ class Qwen35Model(Decoder):
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        if self.tok_embeddings is not None:
-            x = self._prepare_multimodal_embeds(
-                tokens,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                grid_thw=grid_thw,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
-            )
-        else:
-            x = tokens
+        with self.multimodal_context():
+            if get_spmd_backend() == "spmd_types":
+                annotate_qwen35_input_spmd_types(
+                    attention_masks=attention_masks,
+                    mrope_positions=mrope_positions,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                )
+
+            if self.tok_embeddings is not None:
+                x = self._prepare_multimodal_embeds(
+                    tokens,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                )
+            else:
+                x = tokens
+
+        if get_spmd_backend() == "spmd_types":
+            # The scatter restores a token-aligned tensor, so text-model DP
+            # resumes as global batch sharding after the multimodal region.
+            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
