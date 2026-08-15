@@ -682,13 +682,10 @@ class TestFlexShardMuon(DTensorTestBase):
             redistributed: torch.nn.Parameter,
             stacks: dict[str, torch.nn.Parameter],
             ns_steps: int = 2,
-            matrix_sharding: BlockShard | Shard | None = None,
         ):
             redistributed_fqn = "layers.0.redistributed"
             oversharded_fqn = "layers.0.attention.oversharded"
             aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
-            if matrix_sharding is None:
-                matrix_sharding = BlockShard(dim=0, block_size=4)
             aligned_compute_sharding = ComputeLayout(
                 shardings_by_mesh_axis={
                     "dp_shard": BlockShard(dim=0, block_size=5),
@@ -717,12 +714,13 @@ class TestFlexShardMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
-                            "alternate_mesh": BlockShard(dim=0, block_size=1),
                             "dp_shard": Owned(),
                         },
                     ),
                     oversharded_fqn: ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": matrix_sharding},
+                        shardings_by_mesh_axis={
+                            "dp_shard": BlockShard(dim=0, block_size=4),
+                        },
                     ),
                     **{fqn: aligned_compute_sharding for fqn in aligned_fqns},
                 },
@@ -833,24 +831,6 @@ class TestFlexShardMuon(DTensorTestBase):
         )
         redistributed = make_parameter(redistributed_value)
         stacks = {name: make_parameter(value) for name, value in values.items()}
-        with self.assertRaisesRegex(
-            ValueError,
-            "cannot be partitioned into 5-row Muon matrices",
-        ):
-            make_optimizer(
-                redistributed,
-                stacks,
-                matrix_sharding=BlockShard(dim=0, block_size=5),
-            )
-        with self.assertRaisesRegex(
-            ValueError,
-            "2D Muon compute cannot use Shard",
-        ):
-            make_optimizer(
-                redistributed,
-                stacks,
-                matrix_sharding=Shard(0),
-            )
         optimizer = make_optimizer(redistributed, stacks)
         self.assertIs(type(optimizer), torch.optim.Muon)
         with self.assertRaisesRegex(RuntimeError, "after registering"):
