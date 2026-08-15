@@ -30,6 +30,7 @@ from ._optimizer_reshard_runtime import (
 from ._optimizer_reshard_schedule import (
     _bind_bucket_configs,
     _BucketPlanningContext,
+    _BucketSpec,
     _build_bucket_plans,
     _build_dim0_shard_redistribution_plan,
     _build_owned_redistribution_plan,
@@ -45,13 +46,7 @@ from ._optimizer_reshard_schedule import (
     _TensorRegionRoute,
     _validate_bucket_plans_across_ranks,
 )
-from .optimizer_reshard import (
-    _BucketSpec,
-    BlockShard,
-    BucketConfig,
-    ComputeLayout,
-    Owned,
-)
+from .optimizer_reshard import BlockShard, BucketConfig, ComputeLayout, Owned
 
 
 __all__ = [
@@ -228,11 +223,10 @@ def _initialize_dist_muon(
         compute_layouts,
         get_fqn=lambda layout: layout.fqn,
         get_storage_dtensor=lambda layout: layout.param,
-        requires_redistribution=lambda layout: (not layout.storage_is_compute_ready),
         get_redistribution_storage_mesh_axes=lambda layout: (
             layout.redistribution_storage_mesh_axes
         ),
-        get_transport_compatibility_key=_transport_compatibility_key,
+        get_bucket_compatibility_key=_bucket_compatibility_key,
     )
     optimizer._initialize_plan(compute_layouts)
     optimizer._validate_plan_across_ranks()
@@ -437,7 +431,7 @@ class DistMuon(
             ),
         )
         self._bucket_plans = result.plans
-        self._parameter_compute_layouts = result.ordered_items
+        self._parameter_compute_layouts = result.plan_items
         self._local_execution_plans: dict[
             tuple[str, ...], tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]
         ] = {}
@@ -1065,21 +1059,21 @@ _ComputeTensorSharding = Replicate | Shard | BlockShard
 
 
 @dataclass(frozen=True, slots=True)
-class _TransportCompatibilityKey:
+class _BucketCompatibilityKey:
     replicated_fanout_fqn: str | None
 
 
-def _transport_compatibility_key(
+def _bucket_compatibility_key(
     compute_layout: _ParameterComputeLayout,
-) -> _TransportCompatibilityKey:
+) -> _BucketCompatibilityKey:
     if (
         not compute_layout.storage_is_compute_ready
         and type(compute_layout.compute_sharding) is Replicate
     ):
         # Replicated fanout reads more exchange spans than writeback sends.
         # Isolate it so in-place writeback cannot overwrite another item's input.
-        return _TransportCompatibilityKey(replicated_fanout_fqn=compute_layout.fqn)
-    return _TransportCompatibilityKey(replicated_fanout_fqn=None)
+        return _BucketCompatibilityKey(replicated_fanout_fqn=compute_layout.fqn)
+    return _BucketCompatibilityKey(replicated_fanout_fqn=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1287,14 +1281,14 @@ def _build_parameter_redistribution_plan(
         return _build_dim0_shard_redistribution_plan(
             storage_regions,
             participants=group.participants,
-            shard_participants=group.mesh_ordered_participants,
+            participant_by_shard_index=group.participant_by_shard_index,
             logical_shape=group_local_compute_shape,
         )
 
     return _build_batched_matrix_redistribution_plan(
         storage_regions,
         participants=group.participants,
-        shard_participants=group.mesh_ordered_participants,
+        participant_by_shard_index=group.participant_by_shard_index,
         storage_shape=group_local_storage_shape,
         compute_shape=group_local_compute_shape,
     )
@@ -1304,7 +1298,7 @@ def _build_batched_matrix_redistribution_plan(
     storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
     *,
     participants: tuple[int, ...],
-    shard_participants: tuple[int, ...],
+    participant_by_shard_index: tuple[int, ...],
     storage_shape: tuple[int, ...],
     compute_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
@@ -1357,21 +1351,23 @@ def _build_batched_matrix_redistribution_plan(
     )
 
     _require_valid_plan(
-        len(shard_participants) == len(participants)
-        and set(shard_participants) == set(participants),
-        "matrix-batch shard participants must order all participants",
+        len(participant_by_shard_index) == len(participants)
+        and set(participant_by_shard_index) == set(participants),
+        "matrix-batch participant-by-shard-index mapping must contain every "
+        "participant",
     )
     shard_index_by_participant = {
-        participant: index for index, participant in enumerate(shard_participants)
+        participant: index
+        for index, participant in enumerate(participant_by_shard_index)
     }
     compute_endpoints = []
     compute_partitions_list = []
     for participant in participants:
-        mesh_rank = shard_index_by_participant[participant]
+        shard_index = shard_index_by_participant[participant]
         local_num_matrices, matrix_offset = Shard.local_shard_size_and_offset(
             num_matrices,
             len(participants),
-            mesh_rank,
+            shard_index,
         )
         logical_region = _TensorRegion(
             offsets=(matrix_offset * matrix_rows, 0),

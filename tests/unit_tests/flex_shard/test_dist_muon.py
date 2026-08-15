@@ -5,9 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import patch
 
 import torch
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -19,16 +22,174 @@ from torchtitan.components.checkpoint_utils import (
     load_flat_optim_state_dict,
 )
 from torchtitan.distributed.flex_shard import (
+    _optimizer_reshard_runtime,
     BlockShard,
     BucketConfig,
     build_dist_muon,
     ComputeLayout,
+    NoRedistribution,
     Owned,
+)
+from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
+    _BucketOverlapPlan,
+    _compose_bucket_overlap_plans,
+    _LocalBucketPlan,
+    _RedistributionBucketPlan,
+    _validate_bucket_plans_across_ranks,
 )
 from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
+
+
+class TestBucketConfig(unittest.TestCase):
+    def test_validates_redistribution_mesh_axis_names(self):
+        for invalid_redistribution in (
+            "dp_shard",
+            ["dp_shard"],
+            {"dp_shard"},
+            None,
+        ):
+            with (
+                self.subTest(redistribution=invalid_redistribution),
+                self.assertRaisesRegex(ValueError, "tuple or NoRedistribution"),
+            ):
+                BucketConfig(
+                    patterns=("*",),
+                    redistribution_mesh_axis_names=cast(
+                        Any,
+                        invalid_redistribution,
+                    ),
+                )
+        with self.assertRaisesRegex(ValueError, "use NoRedistribution"):
+            BucketConfig(
+                patterns=("*",),
+                redistribution_mesh_axis_names=(),
+            )
+        with self.assertRaisesRegex(ValueError, "nonempty strings"):
+            BucketConfig(
+                patterns=("*",),
+                redistribution_mesh_axis_names=("",),
+            )
+        with self.assertRaisesRegex(ValueError, "duplicate axes"):
+            BucketConfig(
+                patterns=("*",),
+                redistribution_mesh_axis_names=("dp_shard", "dp_shard"),
+            )
+        no_redistribution = NoRedistribution()
+        config = BucketConfig(
+            patterns=("*",),
+            redistribution_mesh_axis_names=no_redistribution,
+        )
+        self.assertIs(config.redistribution_mesh_axis_names, no_redistribution)
+
+
+class TestBucketOverlapPlan(unittest.TestCase):
+    @staticmethod
+    def _redistribution_bucket(name: str) -> _RedistributionBucketPlan[str]:
+        return _RedistributionBucketPlan(
+            redistributed_items=(name,),
+            redistribution_plans=(),
+            group=cast(Any, SimpleNamespace(process_group=None)),
+            storage_to_compute_schedule=cast(Any, None),
+            compute_to_storage_schedule=cast(Any, None),
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+    def test_composes_adjacent_local_buckets_without_merging_them(self):
+        leading_local = _LocalBucketPlan(("leading",))
+        first_redistribution = self._redistribution_bucket("first")
+        first_local = _LocalBucketPlan(("first_local",))
+        second_local = _LocalBucketPlan(("second_local",))
+        second_redistribution = self._redistribution_bucket("second")
+
+        plans = _compose_bucket_overlap_plans(
+            (
+                leading_local,
+                first_redistribution,
+                first_local,
+                second_local,
+                second_redistribution,
+            )
+        )
+
+        self.assertEqual(len(plans), 2)
+        overlap = plans[0]
+        self.assertIsInstance(overlap, _BucketOverlapPlan)
+        self.assertIs(overlap.redistribution_bucket, first_redistribution)
+        self.assertEqual(
+            overlap.local_buckets,
+            (leading_local, first_local, second_local),
+        )
+        self.assertIs(plans[1], second_redistribution)
+
+    def test_preserves_local_buckets_without_redistribution(self):
+        first = _LocalBucketPlan(("first",))
+        second = _LocalBucketPlan(("second",))
+
+        self.assertEqual(
+            _compose_bucket_overlap_plans((first, second)),
+            (first, second),
+        )
+
+    def test_rank_validation_ignores_overlapped_local_bucket_membership(self):
+        redistribution_bucket = self._redistribution_bucket("redistributed")
+        first = _BucketOverlapPlan(
+            redistribution_bucket,
+            (_LocalBucketPlan(("first_local",)),),
+        )
+        second = _BucketOverlapPlan(
+            redistribution_bucket,
+            (_LocalBucketPlan(("second_local",)),),
+        )
+        captured_hash: torch.Tensor | None = None
+
+        def capture_hash(gathered, local_hash, *, group):
+            nonlocal captured_hash
+            captured_hash = local_hash.clone()
+            gathered[0].copy_(local_hash)
+
+        with (
+            patch(
+                "torchtitan.distributed.flex_shard."
+                "_optimizer_reshard_schedule.dist.get_world_size",
+                return_value=1,
+            ),
+            patch(
+                "torchtitan.distributed.flex_shard."
+                "_optimizer_reshard_schedule.dist.all_gather",
+                side_effect=capture_hash,
+            ),
+        ):
+            _validate_bucket_plans_across_ranks(
+                (first,),
+                item_signature=lambda item: (item,),
+            )
+
+        self.assertIsNotNone(captured_hash)
+
+        def replay_hash(gathered, local_hash, *, group):
+            assert captured_hash is not None
+            gathered[0].copy_(captured_hash)
+
+        with (
+            patch(
+                "torchtitan.distributed.flex_shard."
+                "_optimizer_reshard_schedule.dist.get_world_size",
+                return_value=1,
+            ),
+            patch(
+                "torchtitan.distributed.flex_shard."
+                "_optimizer_reshard_schedule.dist.all_gather",
+                side_effect=replay_hash,
+            ),
+        ):
+            _validate_bucket_plans_across_ranks(
+                (second,),
+                item_signature=lambda item: (item,),
+            )
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -63,7 +224,12 @@ class TestDistMuon(DTensorTestBase):
                     shardings_by_mesh_axis={"dp_shard": Replicate()},
                 )
             },
-            bucket_configs=[BucketConfig(patterns=(fqn,))],
+            bucket_configs=[
+                BucketConfig(
+                    patterns=(fqn,),
+                    redistribution_mesh_axis_names=NoRedistribution(),
+                )
+            ],
             lr=lr,
             weight_decay=weight_decay,
             momentum=0.8,
@@ -93,6 +259,226 @@ class TestDistMuon(DTensorTestBase):
             rtol=0,
             atol=0,
         )
+
+    @with_comms
+    def test_dispatches_explicit_axis_alternatives(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(12, device=device).reshape(4, 3).float()
+        fqn = "layers.0.weight"
+        bucket_configs = (
+            BucketConfig(
+                patterns=(fqn,),
+                redistribution_mesh_axis_names=("dp_shard",),
+            ),
+            BucketConfig(
+                patterns=(fqn,),
+                redistribution_mesh_axis_names=NoRedistribution(),
+            ),
+        )
+
+        local_parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), mesh, (Replicate(),))
+        )
+        local_optimizer = build_dist_muon(
+            [{"params": [local_parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Replicate()},
+                )
+            },
+            bucket_configs=bucket_configs,
+        )
+        self.assertEqual(len(local_optimizer._specs), 1)
+        local_spec = local_optimizer._specs[0]
+        self.assertEqual(
+            (
+                local_spec.redistribution_mesh_axis_names,
+                local_spec.fqns,
+            ),
+            (NoRedistribution(), (fqn,)),
+        )
+        self.assertEqual(
+            local_spec.diagnostic_label,
+            "BucketConfig(redistribution_mesh_axis_names=NoRedistribution(), "
+            f"fqns=({fqn!r},))",
+        )
+
+        redistributed_parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), mesh, (Shard(0),))
+        )
+        redistributed_optimizer = build_dist_muon(
+            [{"params": [redistributed_parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Owned()},
+                )
+            },
+            bucket_configs=bucket_configs,
+        )
+        self.assertEqual(
+            tuple(
+                spec.redistribution_mesh_axis_names
+                for spec in redistributed_optimizer._specs
+            ),
+            (("dp_shard",),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "matching BucketConfigs declare"):
+            build_dist_muon(
+                [{"params": [local_parameter], "param_names": [fqn]}],
+                compute_sharding_by_fqn={
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Replicate()},
+                    )
+                },
+                bucket_configs=(bucket_configs[0],),
+            )
+
+        with self.assertRaisesRegex(ValueError, "matches multiple BucketConfigs"):
+            build_dist_muon(
+                [{"params": [local_parameter], "param_names": [fqn]}],
+                compute_sharding_by_fqn={
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Replicate()},
+                    )
+                },
+                bucket_configs=(bucket_configs[1], bucket_configs[1]),
+            )
+
+    @with_comms
+    def test_rejects_incompatible_routes_in_one_physical_bucket(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        values = (
+            torch.arange(12, device=device).reshape(4, 3).float(),
+            torch.arange(12, 24, device=device).reshape(4, 3).float(),
+        )
+        fqns = ("layers.0.first", "layers.0.second")
+        parameters = tuple(
+            torch.nn.Parameter(distribute_tensor(value, mesh, (Shard(0),)))
+            for value in values
+        )
+        replicated_compute = ComputeLayout(
+            shardings_by_mesh_axis={"dp_shard": Replicate()},
+        )
+
+        with self.assertRaisesRegex(ValueError, "incompatible routes"):
+            build_dist_muon(
+                [{"params": parameters, "param_names": fqns}],
+                compute_sharding_by_fqn={fqn: replicated_compute for fqn in fqns},
+                bucket_configs=(
+                    BucketConfig(
+                        patterns=fqns,
+                        redistribution_mesh_axis_names=("dp_shard",),
+                    ),
+                ),
+            )
+
+    @with_comms
+    def test_validates_physical_bucket_participant_by_shard_index(self):
+        standard_mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        permuted_mesh = DeviceMesh(
+            self.device_type,
+            torch.tensor((1, 0)),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(12, device=device).reshape(4, 3).float()
+        first_fqn = "layers.0.first"
+        second_fqn = "layers.0.second"
+        first = torch.nn.Parameter(
+            distribute_tensor(value.clone(), standard_mesh, (Shard(0),))
+        )
+        second = torch.nn.Parameter(
+            distribute_tensor(value.clone(), permuted_mesh, (Shard(0),))
+        )
+        owned_compute = ComputeLayout(
+            shardings_by_mesh_axis={"dp_shard": Owned()},
+        )
+
+        permuted_optimizer = build_dist_muon(
+            [{"params": (second,), "param_names": (second_fqn,)}],
+            compute_sharding_by_fqn={second_fqn: owned_compute},
+            bucket_configs=(
+                BucketConfig(
+                    patterns=(second_fqn,),
+                    redistribution_mesh_axis_names=("dp_shard",),
+                ),
+            ),
+        )
+        permuted_plan = permuted_optimizer._bucket_plans[0]
+        self.assertIsInstance(permuted_plan, _RedistributionBucketPlan)
+        permuted_plan = cast(_RedistributionBucketPlan, permuted_plan)
+        self.assertEqual(permuted_plan.group.participant_by_shard_index, (1, 0))
+
+        with self.assertRaisesRegex(ValueError, "participant-by-shard-index"):
+            build_dist_muon(
+                [{"params": (first, second), "param_names": (first_fqn, second_fqn)}],
+                compute_sharding_by_fqn={
+                    first_fqn: owned_compute,
+                    second_fqn: owned_compute,
+                },
+                bucket_configs=(
+                    BucketConfig(
+                        patterns=(first_fqn, second_fqn),
+                        redistribution_mesh_axis_names=("dp_shard",),
+                    ),
+                ),
+            )
+
+    @with_comms
+    def test_rejects_mixed_dtype_physical_bucket(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        fqns = ("layers.0.float", "layers.0.bfloat")
+        parameters = (
+            torch.nn.Parameter(
+                distribute_tensor(
+                    torch.arange(12, device=device).reshape(4, 3).float(),
+                    mesh,
+                    (Shard(0),),
+                )
+            ),
+            torch.nn.Parameter(
+                distribute_tensor(
+                    torch.arange(12, device=device).reshape(4, 3).bfloat16(),
+                    mesh,
+                    (Shard(0),),
+                )
+            ),
+        )
+        owned_compute = ComputeLayout(
+            shardings_by_mesh_axis={"dp_shard": Owned()},
+        )
+
+        with self.assertRaisesRegex(ValueError, "uses torch.float32"):
+            build_dist_muon(
+                [{"params": parameters, "param_names": fqns}],
+                compute_sharding_by_fqn={fqn: owned_compute for fqn in fqns},
+                bucket_configs=(
+                    BucketConfig(
+                        patterns=fqns,
+                        redistribution_mesh_axis_names=("dp_shard",),
+                    ),
+                ),
+            )
 
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
@@ -131,7 +517,7 @@ class TestDistMuon(DTensorTestBase):
                     "dp_shard": BlockShard(dim=0, block_size=5),
                 }
             )
-            return build_dist_muon(
+            optimizer = build_dist_muon(
                 [
                     {
                         "params": [
@@ -166,11 +552,33 @@ class TestDistMuon(DTensorTestBase):
                 },
                 bucket_configs=[
                     BucketConfig(
-                        patterns=("layers.0.*",),
-                        name="layers.0",
-                    )
+                        patterns=(redistributed_fqn, oversharded_fqn),
+                        redistribution_mesh_axis_names=("dp_shard",),
+                    ),
+                    BucketConfig(
+                        patterns=aligned_fqns,
+                        redistribution_mesh_axis_names=NoRedistribution(),
+                    ),
                 ],
             )
+            self.assertEqual(len(optimizer._specs), 2)
+            self.assertEqual(len(optimizer._bucket_plans), 1)
+            overlap = optimizer._bucket_plans[0]
+            self.assertIsInstance(overlap, _BucketOverlapPlan)
+            overlap = cast(_BucketOverlapPlan, overlap)
+            self.assertEqual(
+                {
+                    item.fqn
+                    for item in overlap.redistribution_bucket.redistributed_items
+                },
+                {redistributed_fqn, oversharded_fqn},
+            )
+            self.assertEqual(len(overlap.local_buckets), 1)
+            self.assertEqual(
+                {item.fqn for item in overlap.local_buckets[0].items},
+                set(aligned_fqns),
+            )
+            return optimizer
 
         def set_grads(
             redistributed: torch.nn.Parameter,
@@ -331,13 +739,22 @@ class TestDistMuon(DTensorTestBase):
         first_stack_grads["layers.0.attention.wkv"] = (
             first_stack_grads["layers.0.attention.wkv"].flip(1).contiguous()
         )
-        step_and_assert(
-            optimizer,
-            redistributed,
-            stacks,
-            first_redistributed_grad,
-            first_stack_grads,
+        execute_packed_all_to_all = (
+            _optimizer_reshard_runtime._execute_packed_all_to_all
         )
+        with patch.object(
+            _optimizer_reshard_runtime,
+            "_execute_packed_all_to_all",
+            wraps=execute_packed_all_to_all,
+        ) as execute_collective:
+            step_and_assert(
+                optimizer,
+                redistributed,
+                stacks,
+                first_redistributed_grad,
+                first_stack_grads,
+            )
+        self.assertEqual(execute_collective.call_count, 2)
 
         flat_state_dict = get_flat_optim_state_dict(optimizer)
         resumed_redistributed = make_parameter(redistributed.full_tensor().detach())
@@ -389,6 +806,7 @@ class TestDistMuonMultiMesh(DTensorTestBase):
         def make_optimizer(
             placements: tuple[Replicate | Shard, Replicate | Shard],
             compute_layout: ComputeLayout,
+            redistribution_mesh_axis_names: tuple[str, ...] = ("dp_shard",),
         ) -> DistMuon:
             parameter = torch.nn.Parameter(
                 distribute_tensor(value.clone(), mesh, placements)
@@ -396,7 +814,12 @@ class TestDistMuonMultiMesh(DTensorTestBase):
             return build_dist_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={fqn: compute_layout},
-                bucket_configs=[BucketConfig(patterns=(fqn,))],
+                bucket_configs=[
+                    BucketConfig(
+                        patterns=(fqn,),
+                        redistribution_mesh_axis_names=(redistribution_mesh_axis_names),
+                    )
+                ],
             )
 
         optimizer = make_optimizer(
@@ -423,6 +846,56 @@ class TestDistMuonMultiMesh(DTensorTestBase):
                         "dp_replicate": BlockShard(dim=0, block_size=4),
                         "dp_shard": BlockShard(dim=0, block_size=4),
                     }
+                ),
+                ("dp_replicate", "dp_shard"),
+            )
+
+    @with_comms
+    def test_rejects_missing_physical_bucket_axis_alternative(self):
+        dense_mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        sparse_mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("efsdp", "ep"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        dense_fqn = "layers.0.dense"
+        expert_fqn = "layers.0.expert"
+        dense = torch.nn.Parameter(
+            distribute_tensor(
+                torch.arange(32, device=device).reshape(8, 4).float(),
+                dense_mesh,
+                (Shard(0),),
+            )
+        )
+        expert = torch.nn.Parameter(
+            distribute_tensor(
+                torch.arange(64, device=device).reshape(4, 4, 4).float(),
+                sparse_mesh,
+                (Shard(1), Shard(0)),
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires redistribution axes"):
+            build_dist_muon(
+                [{"params": (dense, expert), "param_names": (dense_fqn, expert_fqn)}],
+                compute_sharding_by_fqn={
+                    dense_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Owned()},
+                    ),
+                    expert_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"efsdp": Shard(0)},
+                    ),
+                },
+                bucket_configs=(
+                    BucketConfig(
+                        patterns=("layers.0.*",),
+                        redistribution_mesh_axis_names=("dp_shard",),
+                    ),
                 ),
             )
 
@@ -454,11 +927,16 @@ class TestDistMuonMultiMesh(DTensorTestBase):
                         },
                     )
                 },
-                bucket_configs=[BucketConfig(patterns=(fqn,))],
+                bucket_configs=[
+                    BucketConfig(
+                        patterns=(fqn,),
+                        redistribution_mesh_axis_names=("efsdp", "ep"),
+                    )
+                ],
             )
 
     @with_comms
-    def test_multi_mesh_redistribution_in_mixed_logical_bucket(self):
+    def test_explicit_multi_mesh_physical_buckets(self):
         lr = 0.03
         weight_decay = 0.2
         dense_mesh = init_device_mesh(
@@ -598,14 +1076,53 @@ class TestDistMuonMultiMesh(DTensorTestBase):
                     },
                 ),
             },
-            bucket_configs=[BucketConfig(patterns=("layers.0.*",), name="layers.0")],
+            bucket_configs=[
+                BucketConfig(
+                    patterns=(dense_fqn,),
+                    redistribution_mesh_axis_names=("dp_shard",),
+                ),
+                BucketConfig(
+                    patterns=(jointly_assigned_fqn,),
+                    redistribution_mesh_axis_names=("efsdp", "ep"),
+                ),
+                BucketConfig(
+                    patterns=("layers.0.routed_experts.sharded",),
+                    redistribution_mesh_axis_names=("efsdp",),
+                ),
+                BucketConfig(
+                    patterns=("layers.0.routed_experts.replicated",),
+                    redistribution_mesh_axis_names=("efsdp",),
+                ),
+                BucketConfig(
+                    patterns=("layers.0.routed_experts.repeated_shard",),
+                    redistribution_mesh_axis_names=("efsdp",),
+                ),
+                BucketConfig(
+                    patterns=(fully_replicated_fqn,),
+                    redistribution_mesh_axis_names=("ep", "efsdp"),
+                ),
+            ],
         )
+        self.assertEqual(
+            tuple(spec.redistribution_mesh_axis_names for spec in optimizer._specs),
+            (
+                ("dp_shard",),
+                ("efsdp", "ep"),
+                ("efsdp",),
+                ("efsdp",),
+                ("efsdp",),
+                ("ep", "efsdp"),
+            ),
+        )
+        redistribution_buckets = []
+        for bucket_plan in optimizer._bucket_plans:
+            self.assertIsInstance(bucket_plan, _RedistributionBucketPlan)
+            redistribution_buckets.append(bucket_plan)
 
         def redistribution_plan_for(fqn: str):
             return next(
                 redistribution_plan
-                for bucket_plan in optimizer._bucket_plans
-                if hasattr(bucket_plan, "redistribution_plans")
+                for bucket_plan in redistribution_buckets
                 for item, redistribution_plan in zip(
                     bucket_plan.redistributed_items,
                     bucket_plan.redistribution_plans,
@@ -615,9 +1132,7 @@ class TestDistMuonMultiMesh(DTensorTestBase):
             )
 
         transport_groups = {
-            frozenset(plan.group.participants)
-            for plan in optimizer._bucket_plans
-            if hasattr(plan, "group")
+            frozenset(plan.group.participants) for plan in redistribution_buckets
         }
         self.assertEqual(
             transport_groups,
@@ -628,6 +1143,16 @@ class TestDistMuonMultiMesh(DTensorTestBase):
             },
         )
         fully_replicated_plan = redistribution_plan_for(fully_replicated_fqn)
+        fully_replicated_bucket = next(
+            bucket_plan
+            for bucket_plan in redistribution_buckets
+            if fully_replicated_fqn
+            in {item.fqn for item in bucket_plan.redistributed_items}
+        )
+        self.assertEqual(
+            fully_replicated_bucket.group.participant_by_shard_index,
+            tuple(sparse_mesh.mesh.permute(1, 0).flatten().tolist()),
+        )
         self.assertEqual(
             frozenset(fully_replicated_plan.participants),
             frozenset(range(self.world_size)),
@@ -781,6 +1306,60 @@ class TestDistMuonJointOwnedValidation(DTensorTestBase):
         return "cuda"
 
     @with_comms
+    def test_builds_stage_local_cartesian_groups_in_different_axis_orders(self):
+        root_mesh = init_device_mesh(
+            self.device_type,
+            (2, 2, 2),
+            mesh_dim_names=("pp", "efsdp", "ep"),
+        )
+        stage_mesh = root_mesh["efsdp", "ep"]
+        coordinate = root_mesh.get_coordinate()
+        assert coordinate is not None
+        pp_rank = coordinate[0]
+        fqn = f"stages.{pp_rank}.weight"
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(48, device=device).reshape(8, 6).float()
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value, stage_mesh, (Shard(1), Shard(0)))
+        )
+        axis_names_by_stage = (
+            ("efsdp", "ep"),
+            ("ep", "efsdp"),
+        )
+
+        optimizer = build_dist_muon(
+            [{"params": (parameter,), "param_names": (fqn,)}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "efsdp": Owned(),
+                        "ep": Owned(),
+                    }
+                )
+            },
+            bucket_configs=tuple(
+                BucketConfig(
+                    patterns=(f"stages.{stage}.*",),
+                    redistribution_mesh_axis_names=axis_names,
+                )
+                for stage, axis_names in enumerate(axis_names_by_stage)
+            ),
+        )
+
+        self.assertEqual(len(optimizer._bucket_plans), 1)
+        plan = optimizer._bucket_plans[0]
+        self.assertIsInstance(plan, _RedistributionBucketPlan)
+        expected_participant_by_shard_index = stage_mesh.mesh
+        if pp_rank == 1:
+            expected_participant_by_shard_index = (
+                expected_participant_by_shard_index.permute(1, 0)
+            )
+        self.assertEqual(
+            plan.group.participant_by_shard_index,
+            tuple(expected_participant_by_shard_index.reshape(-1).tolist()),
+        )
+
+    @with_comms
     def test_rejects_nonreplicated_axis_outside_joint_owned(self):
         mesh = init_device_mesh(
             self.device_type,
@@ -812,7 +1391,12 @@ class TestDistMuonJointOwnedValidation(DTensorTestBase):
                         },
                     )
                 },
-                bucket_configs=[BucketConfig(patterns=(fqn,))],
+                bucket_configs=[
+                    BucketConfig(
+                        patterns=(fqn,),
+                        redistribution_mesh_axis_names=("efsdp", "ep"),
+                    )
+                ],
             )
 
 
