@@ -727,6 +727,14 @@ class ChunkedLossWrapper(BaseLoss):
                 lm_head.set_reshard_after_forward(False)
                 lm_head.set_reshard_after_backward(False)
                 lm_head.set_requires_gradient_sync(False, recurse=False)
+                # An implicit unshard stores an all-gather event in FSDP's shared
+                # all_gather_state for the next FSDP module to consume. Since
+                # lm_head is the final FSDP forward in this loop, eager warmup
+                # leaves that state uncleared, and CUDA graph capture cannot wait
+                # on its eager event. Explicitly unshard while FSDP is idle to
+                # avoid populating the shared state.
+                with spmd.no_typecheck():
+                    lm_head.unshard()
 
             last_idx = len(h_chunks) - 1
             for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
