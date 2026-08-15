@@ -132,9 +132,26 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     if not cfg.layers:
         raise ValueError(f"ModelSpec {spec.name!r} has no layers")
     # Some models mix dense and MoE layers (e.g. deepseek_v3 has dense
-    # first layers, MoE later); scan the layer list for a representative
-    # of each component rather than relying on layer 0.
-    attn = cfg.layers[0].attention
+    # first layers, MoE later), and hybrids interleave softmax and linear
+    # attention; scan the layer list for a representative of each component
+    # rather than relying on layer 0. Only softmax layers carry the head counts
+    # and the rope bound read below.
+    attn = next(
+        (
+            a
+            for layer in cfg.layers
+            if (a := getattr(layer, "attention", None)) is not None
+            and getattr(a, "n_heads", None) is not None
+        ),
+        None,
+    )
+    if attn is None:
+        raise ValueError(
+            f"ModelSpec {spec.name!r} has no softmax-attention layer. vLLM's engine "
+            "reads num_attention_heads / head_dim / max_position_embeddings before "
+            "any model class is built, and a linear-attention layer (KDA) carries "
+            "none of them."
+        )
     ffn = next(
         (
             ff

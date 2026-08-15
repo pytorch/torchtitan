@@ -59,7 +59,6 @@ class VLLMKDAWrapper(Module, MambaBase):
         self.head_dim = config.head_dim
         self.conv_kernel_size = config.conv_kernel_size
         self.gate_lower_bound = config.gate_lower_bound
-        self.local_projection_size = self.local_num_heads * self.head_dim
 
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -120,11 +119,14 @@ class VLLMKDAWrapper(Module, MambaBase):
         B, L, _ = mixed_qkv_BLC.shape
         num_tokens = B * L
         mixed_qkv_TC = mixed_qkv_BLC.reshape(num_tokens, -1)
-        # Padded rows must remain defined across vLLM graph replays.
-        output = mixed_qkv_TC.new_zeros(num_tokens, self.local_num_heads, self.head_dim)
+        # Padded rows must remain defined across vLLM graph replays. Shaped
+        # [B, L, N, K] like KDAAttention's return: set_kda_sharding places the
+        # output on Shard(2), the head axis of a 4-D tensor.
+        output = mixed_qkv_TC.new_zeros(B, L, self.local_num_heads, self.head_dim)
         if metadata is None:
             # Profiling or cudagraph dummy capture: no live metadata yet.
             return output
+        output_TNK = output.view(num_tokens, self.local_num_heads, self.head_dim)
 
         live = metadata.num_actual_tokens
         mixed_qkv_TC = mixed_qkv_TC[:live]
@@ -166,7 +168,7 @@ class VLLMKDAWrapper(Module, MambaBase):
                 conv_weight,
                 recurrent_state,
             )
-        output[:live] = result[0, :live].to(output.dtype)
+        output_TNK[:live] = result[0, :live].to(output.dtype)
         return output
 
     def _layer_metadata(self) -> GDNAttentionMetadata | None:
@@ -193,30 +195,26 @@ class VLLMKDAWrapper(Module, MambaBase):
         recurrent_state,
     ) -> torch.Tensor:
         """Chunked prefill: dense conv, then the chunked core with per-sequence state."""
-        query, key, value = mixed_qkv_TC.split(self.local_projection_size, dim=-1)
-        conv_weights = conv_weight.split(self.local_projection_size, dim=0)
-        conv_states = conv_state.split(self.local_projection_size, dim=-2)
-
-        def convolve(x, state, weight):
-            return causal_conv1d_fn(
-                x.transpose(0, 1),
-                weight,
-                None,
-                activation="silu",
-                conv_states=state,
-                has_initial_state=metadata.has_initial_state,
-                cache_indices=metadata.non_spec_state_indices_tensor,
-                query_start_loc=metadata.non_spec_query_start_loc,
-                metadata=metadata,
-            ).transpose(0, 1)
-
+        # One conv over all 3 * N * head_dim channels rather than three per
+        # branch: the conv is depthwise, and both the packed projection and the
+        # cached conv state are head-major (see KDAAttention.forward), so q/k/v
+        # are not contiguous ranges either one could be sliced into.
+        convolved_TC = causal_conv1d_fn(
+            mixed_qkv_TC.transpose(0, 1),
+            conv_weight,
+            None,
+            activation="silu",
+            conv_states=conv_state,
+            has_initial_state=metadata.has_initial_state,
+            cache_indices=metadata.non_spec_state_indices_tensor,
+            query_start_loc=metadata.non_spec_query_start_loc,
+            metadata=metadata,
+        ).transpose(0, 1)
+        # reshape copies: the head-major views are strided, and the chunked core
+        # wants a leading batch axis of 1.
         query, key, value = (
-            convolve(x, state, weight).reshape(
-                1, -1, self.local_num_heads, self.head_dim
-            )
-            for x, state, weight in zip(
-                (query, key, value), conv_states, conv_weights, strict=True
-            )
+            tensor.reshape(1, -1, self.local_num_heads, self.head_dim)
+            for tensor in convolved_TC.unflatten(-1, (-1, 3, self.head_dim)).unbind(-2)
         )
 
         # The chunked core's dense state is [num_sequences, H, K, V]; the paged
@@ -273,7 +271,13 @@ class VLLMKDAWrapper(Module, MambaBase):
             out=conv_out,
         )
         core_out, _ = fused_recurrent_kda_packed_decode(
-            convolved,
+            # The conv is depthwise so it runs on the head-major channels as is,
+            # but the decode op indexes q/k/v as three contiguous N * head_dim
+            # blocks. flatten copies: the transpose cannot be viewed back into a
+            # single channel axis.
+            convolved.unflatten(-1, (-1, 3, self.head_dim))
+            .transpose(-2, -3)
+            .flatten(-3),
             raw_gate,
             raw_beta,
             A_log,
