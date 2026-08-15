@@ -232,7 +232,6 @@ class Validator(BaseValidator):
         num_pp_microbatches = (
             self.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-        num_microbatches = num_pp_microbatches
 
         validation_dataloader = self.dl_config.build(
             dp_world_size=self.dp_world_size,
@@ -253,7 +252,7 @@ class Validator(BaseValidator):
                 local_valid_tokens = torch.tensor(
                     0, dtype=torch.int64, device=device_type
                 )
-                for _ in range(num_microbatches):
+                for _ in range(num_pp_microbatches):
                     input_dict, labels = next(validation_iterator)
                     self.metrics_processor.ntokens_since_last_log += labels.numel()
                     for k, v in input_dict.items():

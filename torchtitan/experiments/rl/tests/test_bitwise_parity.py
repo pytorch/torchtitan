@@ -313,11 +313,10 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 
 
 def _build_padded_varlen_metadata(batch_size, max_len, device):
-    """Build VarlenMetadata for a padded (batch_size, max_len) tensor.
+    """Build VarlenMetadata for packed fixed-width sequences.
 
-    VarlenAttention reshapes (batch_size, max_len) -> (batch_size * max_len,)
-    so each row boundary is at multiples of max_len. Causal masking prevents
-    padding tokens from affecting valid positions.
+    Each logical sequence occupies ``max_len`` contiguous tokens. Causal
+    masking prevents padding tokens from affecting valid positions.
     """
     cu_seqs = torch.arange(
         0, (batch_size + 1) * max_len, max_len, dtype=torch.int32, device=device
@@ -356,8 +355,8 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
         parts.append(padded)
         pos_parts.append(torch.arange(psl, device=device))
 
-    packed_ids = torch.cat(parts).unsqueeze(0)
-    positions = torch.cat(pos_parts).unsqueeze(0)
+    packed_ids = torch.cat(parts)
+    positions = torch.cat(pos_parts)
 
     mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
 
@@ -365,8 +364,8 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
         and_masks(*mask_mods),
         1,
         None,
-        positions.shape[1],
-        positions.shape[1],
+        positions.shape[0],
+        positions.shape[0],
         BLOCK_SIZE=block_size,
         separate_full_blocks=not batch_invariant,
     )
@@ -378,7 +377,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     labels = torch.full_like(packed_ids, IGNORE_INDEX)
     offset = 0
     for sl, psl in zip(seq_lens, padded_seq_lens):
-        labels[0, offset : offset + sl - 1] = packed_ids[0, offset + 1 : offset + sl]
+        labels[offset : offset + sl - 1] = packed_ids[offset + 1 : offset + sl]
         offset += psl
 
     logprobs = compute_logprobs(logits, labels)
@@ -386,41 +385,47 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     results = []
     offset = 0
     for sl, psl in zip(seq_lens, padded_seq_lens):
-        results.append(logprobs[0, offset : offset + sl - 1])
+        results.append(logprobs[offset : offset + sl - 1])
         offset += psl
     return results
 
 
 def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
-    """Compute per-sequence logprobs using varlen attention with padded batches."""
+    """Compute per-sequence logprobs using packed fixed-width varlen segments."""
     max_len = max(seq_lens)
-    padded = torch.zeros(len(input_tensors), max_len, dtype=torch.long, device=device)
-    for i, t in enumerate(input_tensors):
-        padded[i, : t.shape[0]] = t
+    padded_parts = []
+    position_parts = []
+    for t in input_tensors:
+        padded = torch.zeros(max_len, dtype=torch.long, device=device)
+        padded[: t.shape[0]] = t
+        padded_parts.append(padded)
+        position_parts.append(torch.arange(max_len, device=device))
+    packed_ids = torch.cat(padded_parts)
+    positions = torch.cat(position_parts)
 
     attention_masks = _build_padded_varlen_metadata(len(input_tensors), max_len, device)
 
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which can break torch.compile with symbolic shapes.
-    positions = (
-        torch.arange(max_len, device=device).unsqueeze(0).expand(len(input_tensors), -1)
-    )
-
-    logits = model(padded, attention_masks=attention_masks, positions=positions)
+    logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
 
     # Build pre-shifted labels matching the trainer convention:
-    # labels[i] = padded[i+1] for valid positions, IGNORE_INDEX otherwise.
-    labels = torch.full_like(padded, IGNORE_INDEX)
-    for i, t in enumerate(input_tensors):
+    # labels[i] = packed_ids[i+1] within each segment, IGNORE_INDEX otherwise.
+    labels = torch.full_like(packed_ids, IGNORE_INDEX)
+    offset = 0
+    for t in input_tensors:
         seq_len = t.shape[0]
-        labels[i, : seq_len - 1] = t[1:seq_len]
+        labels[offset : offset + seq_len - 1] = t[1:seq_len]
+        offset += max_len
 
     logprobs = compute_logprobs(logits, labels)
 
     results = []
-    for i, t in enumerate(input_tensors):
+    offset = 0
+    for t in input_tensors:
         seq_len = t.shape[0]
-        results.append(logprobs[i, : seq_len - 1])
+        results.append(logprobs[offset : offset + seq_len - 1])
+        offset += max_len
     return results
 
 

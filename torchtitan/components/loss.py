@@ -35,32 +35,31 @@ def cross_entropy_loss(
     *,
     global_vocab_size: int | None = None,
 ) -> torch.Tensor:
-    """Cross-entropy loss with sum reduction for token-based normalization."""
+    """Cross-entropy over ``pred[T, V]`` and ``labels[T]`` with sum reduction."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
         return _cross_entropy_via_local_map(pred, labels)
 
     if isinstance(pred, DTensor):
         assert get_spmd_backend() == "default"
         if pred.placements == (Shard(pred.ndim - 1),):
-            pred_local = pred.to_local()
             return _LossParallelCrossEntropy.apply(
-                pred_local.reshape(-1, pred_local.shape[-1]).float(),
-                labels.reshape(-1),
+                pred.to_local().float(),
+                labels,
                 pred.device_mesh.get_group("tp"),
                 pred.shape[-1],
                 "sum",
             )
     elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
         return _LossParallelCrossEntropy.apply(
-            pred.reshape(-1, pred.shape[-1]).float(),
-            labels.reshape(-1),
+            pred.float(),
+            labels,
             current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
             global_vocab_size,
         )
 
     return torch.nn.functional.cross_entropy(
-        pred.reshape(-1, pred.shape[-1]).float(),
-        labels.reshape(-1),
+        pred.float(),
+        labels,
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )
@@ -69,7 +68,7 @@ def cross_entropy_loss(
 @spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
-    Vocab-parallel cross-entropy on plain (non-DTensor) local tensors.
+    Vocab-parallel cross-entropy on local ``[T, V_local]`` logits.
 
     Replaces ``torch.distributed.tensor.parallel.loss_parallel()`` with an
     explicit autograd Function so that SPMD code can operate on local tensors
@@ -122,12 +121,11 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         """Compute exact CE from local vocab shards via TP all-reduces.
 
         ``reduction="sum"`` returns the scalar summed loss (SFT/CE).
-        ``reduction="none"`` returns the per-token NLL ``[N]``, which GRPO
+        ``reduction="none"`` returns the per-token NLL ``[T]``, which GRPO
         negates to get per-token logprobs without all-gathering the vocab.
         """
-        logits_shape = logits.shape
-        logits_2d = logits.flatten(0, -2).float()
-        labels_1d = labels.flatten()
+        logits_dtype = logits.dtype
+        logits = logits.float()
 
         # Compute this rank's vocab shard bounds for the local logits.
         tp_world_size = dist.get_world_size(tp_group)
@@ -136,11 +134,11 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         vocab_start = min(global_vocab_size, chunk_size * tp_rank)
         vocab_end = min(global_vocab_size, vocab_start + chunk_size)
         local_vocab_size = max(0, vocab_end - vocab_start)
-        if logits_2d.shape[-1] != local_vocab_size:
+        if logits.shape[-1] != local_vocab_size:
             raise ValueError(
                 "_LossParallelCrossEntropy expected local vocab size "
                 f"{local_vocab_size} for global vocab size {global_vocab_size}, "
-                f"got {logits_2d.shape[-1]}."
+                f"got {logits.shape[-1]}."
             )
         if local_vocab_size == 0:
             raise ValueError(
@@ -148,13 +146,13 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             )
 
         # All-reduce max for numerically stable distributed log-softmax.
-        local_max = torch.amax(logits_2d, dim=-1, keepdim=True)
+        local_max = torch.amax(logits, dim=-1, keepdim=True)
         local_max = funcol.all_reduce(
             local_max, reduceOp=dist.ReduceOp.MAX.name, group=tp_group
         )
 
         # All-reduce sum over shifted logits for the global softmax denominator.
-        shifted = logits_2d - local_max
+        shifted = logits - local_max
         shifted_sumexp = torch.sum(torch.exp(shifted), dim=-1, keepdim=True)
         shifted_sumexp = funcol.all_reduce(
             shifted_sumexp, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
@@ -163,7 +161,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
         # Mask labels outside this vocab shard; the TP all-reduce below selects
         # the owner rank's log probability for each target token.
-        safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
+        safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
         out_of_range = (safe_labels < vocab_start) | (
             safe_labels >= vocab_start + local_vocab_size
         )
@@ -178,12 +176,11 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
         # Per-token NLL, dropping ignored labels (logprob 0 for ignored).
         result = -local_result.squeeze(-1)
-        result = torch.where(labels_1d != IGNORE_INDEX, result, 0)
+        result = torch.where(labels != IGNORE_INDEX, result, 0)
 
         # Save local-shard log probabilities for the fused CE backward.
-        ctx.save_for_backward(log_probs, labels_1d)
-        ctx.logits_shape = logits_shape
-        ctx.logits_dtype = logits.dtype
+        ctx.save_for_backward(log_probs, labels)
+        ctx.logits_dtype = logits_dtype
         ctx.vocab_start = vocab_start
         ctx.local_vocab_size = local_vocab_size
         ctx.reduction = reduction
@@ -196,8 +193,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
-        log_probs, labels_1d = ctx.saved_tensors
-        safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
+        log_probs, labels = ctx.saved_tensors
+        safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
         out_of_range = (safe_labels < ctx.vocab_start) | (
             safe_labels >= ctx.vocab_start + ctx.local_vocab_size
         )
@@ -209,16 +206,16 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         grad_update = out_of_range.to(grad_input.dtype) - 1.0
         grad_input[row_idx, local_labels] = grad_update
 
-        # reduction="none" gives a per-token ``[N]`` upstream grad; reshape to
-        # ``[N, 1]`` to broadcast over the local vocab. "sum" gives the scalar
+        # reduction="none" gives a per-token ``[T]`` upstream grad; unsqueeze to
+        # ``[T, 1]`` to broadcast over the local vocab. "sum" gives the scalar
         # loss grad, which broadcasts as-is.
         if ctx.reduction == "none":
-            grad_output = grad_output.reshape(-1, 1)
+            grad_output = grad_output.unsqueeze(-1)
         grad_output = torch.where(
-            (labels_1d != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
+            (labels != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
         )
         grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
-        grad_logits = grad_logits.reshape(ctx.logits_shape).to(ctx.logits_dtype)
+        grad_logits = grad_logits.to(ctx.logits_dtype)
         return grad_logits, None, None, None, None
 
 
@@ -239,7 +236,6 @@ def _cross_entropy_via_local_map(
             f"got {labels.placements}"
         )
 
-    # After local reshape, tensor dims are [tokens, vocab].
     # Per-axis placement:
     #   Shard on tokens -> Shard(0) (valid because reduction is sum)
     #   Shard on vocab -> Shard(1)
@@ -264,18 +260,16 @@ def _cross_entropy_via_local_map(
     def _local_cross_entropy(
         pred_local: torch.Tensor, labels_local: torch.Tensor
     ) -> torch.Tensor:
-        flat_pred = pred_local.reshape(-1, pred_local.shape[-1]).float()
-        flat_labels = labels_local.reshape(-1)
         if not vocab_sharded:
             return torch.nn.functional.cross_entropy(
-                flat_pred,
-                flat_labels,
+                pred_local.float(),
+                labels_local,
                 reduction="sum",
                 ignore_index=IGNORE_INDEX,
             )
         return _LossParallelCrossEntropy.apply(
-            flat_pred,
-            flat_labels,
+            pred_local.float(),
+            labels_local,
             mesh.get_group("tp"),
             pred.shape[-1],
             "sum",
@@ -387,15 +381,14 @@ def compute_logprobs(
     *,
     return_entropy: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Per-position logprobs from logits and labels, optionally with entropy.
+    """Per-token logprobs from ``logits[T, V]`` and ``labels[T]``.
 
-    Output shape matches ``labels``. Any DTensor placement
-    handling is centralized here so RL losses that call ``compute_logprobs`` do
-    not need to duplicate the vocab-gather logic.
+    Any DTensor placement handling is centralized here so RL losses that call
+    ``compute_logprobs`` do not need to duplicate the vocab-gather logic.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
-    ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, shape
-    matching ``labels``. Both share the single vocab gather + fp32 upcast.
+    ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
+    ``[T]``. Both share the single vocab gather + fp32 upcast.
     Entropy is a metric only, so it is computed under ``no_grad``: it never
     contributes gradient and must not build an autograd graph over the logits
     softmax.
@@ -432,13 +425,12 @@ def compute_logprobs(
 
     # Single bf16->fp32 upcast, reused by both logprobs and (optionally) entropy.
     logits = logits.float()
-    vocab_size = logits.shape[-1]
     logprobs = -F.cross_entropy(
-        logits.reshape(-1, vocab_size),
-        labels.reshape(-1),
+        logits,
+        labels,
         reduction="none",
         ignore_index=IGNORE_INDEX,
-    ).reshape(labels.shape)
+    )
     if not return_entropy:
         return logprobs
     with torch.no_grad():

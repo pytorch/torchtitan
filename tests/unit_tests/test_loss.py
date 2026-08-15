@@ -28,6 +28,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
     ChunkedLossWrapper,
+    compute_logprobs,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
@@ -39,6 +40,20 @@ from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
 
 
 class TestLoss(unittest.TestCase):
+    def test_compute_logprobs_token_major(self):
+        torch.manual_seed(42)
+        logits = torch.randn(8, 16)
+        labels = torch.randint(0, 16, (8,))
+
+        logprobs, entropy = compute_logprobs(logits, labels, return_entropy=True)
+        expected_logprobs = -F.cross_entropy(logits, labels, reduction="none")
+        expected_entropy = torch.logsumexp(logits, dim=-1) - (
+            torch.softmax(logits, dim=-1) * logits
+        ).sum(dim=-1)
+
+        torch.testing.assert_close(logprobs, expected_logprobs)
+        torch.testing.assert_close(entropy, expected_entropy)
+
     def test_roll_mtp_sequence_respects_packed_document_boundaries(self):
         tokens = torch.tensor([10, 11, 12, 20, 21, 22, 23, 24])
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
@@ -106,21 +121,20 @@ class TestLoss(unittest.TestCase):
         3. The sum-based loss calculation is correct for token normalization
         """
         torch.manual_seed(42)
-        batch_size = 4
-        seq_len = 8
+        num_tokens = 32
         vocab_size = 100
 
         # Create predictions (logits) - same for all test cases
-        predictions = torch.randn(batch_size, seq_len, vocab_size)
+        predictions = torch.randn(num_tokens, vocab_size)
 
         # Create base labels with some tokens as IGNORE_INDEX, others valid
         # This ensures we test on the same subset of valid tokens
-        labels = torch.randint(0, vocab_size, (batch_size, seq_len))
+        labels = torch.randint(0, vocab_size, (num_tokens,))
         # Mark specific positions as IGNORE_INDEX
-        labels[0, 1] = IGNORE_INDEX
-        labels[1, 3] = IGNORE_INDEX
-        labels[2, 5] = IGNORE_INDEX
-        labels[3, 7] = IGNORE_INDEX
+        labels[1] = IGNORE_INDEX
+        labels[11] = IGNORE_INDEX
+        labels[21] = IGNORE_INDEX
+        labels[31] = IGNORE_INDEX
 
         # Test case 1: Compute loss on this label set
         loss1 = cross_entropy_loss(predictions, labels)
@@ -144,8 +158,8 @@ class TestLoss(unittest.TestCase):
             msg="Per-token loss should be the same across gradient accumulation steps",
         )
 
-        # Test case 3: Verify loss scaling with batch replication
-        # Stack the batch to create 2x the data
+        # Test case 3: Verify loss scaling with token replication
+        # Concatenate the sequence to create 2x the data
         predictions_doubled = torch.cat([predictions, predictions], dim=0)
         labels_doubled = torch.cat([labels, labels], dim=0)
 
@@ -158,7 +172,7 @@ class TestLoss(unittest.TestCase):
             per_token_loss1.item(),
             per_token_loss_doubled.item(),
             places=6,
-            msg="Per-token loss should remain constant when scaling batch size",
+            msg="Per-token loss should remain constant when scaling token count",
         )
 
         # Verify that total loss scales linearly with number of valid tokens
@@ -184,23 +198,23 @@ class TestLoss(unittest.TestCase):
         torch.manual_seed(123)
         vocab_size = 100
 
-        # Microbatch 1: 2x4 with all valid tokens
-        pred1 = torch.randn(2, 4, vocab_size)
-        labels1 = torch.randint(0, vocab_size, (2, 4))
+        # Microbatch 1: eight valid tokens
+        pred1 = torch.randn(8, vocab_size)
+        labels1 = torch.randint(0, vocab_size, (8,))
         loss1 = cross_entropy_loss(pred1, labels1)
         tokens1 = (labels1 != IGNORE_INDEX).sum()
 
-        # Microbatch 2: 2x4 with half valid tokens
-        pred2 = torch.randn(2, 4, vocab_size)
-        labels2 = torch.randint(0, vocab_size, (2, 4))
-        labels2[:, ::2] = IGNORE_INDEX  # Mask every other token
+        # Microbatch 2: half valid tokens
+        pred2 = torch.randn(8, vocab_size)
+        labels2 = torch.randint(0, vocab_size, (8,))
+        labels2[::2] = IGNORE_INDEX  # Mask every other token
         loss2 = cross_entropy_loss(pred2, labels2)
         tokens2 = (labels2 != IGNORE_INDEX).sum()
 
-        # Microbatch 3: 2x4 with 1/4 valid tokens
-        pred3 = torch.randn(2, 4, vocab_size)
-        labels3 = torch.randint(0, vocab_size, (2, 4))
-        labels3[:, 1:] = IGNORE_INDEX  # Only first token valid
+        # Microbatch 3: two valid tokens
+        pred3 = torch.randn(8, vocab_size)
+        labels3 = torch.randint(0, vocab_size, (8,))
+        labels3[2:] = IGNORE_INDEX
         loss3 = cross_entropy_loss(pred3, labels3)
         tokens3 = (labels3 != IGNORE_INDEX).sum()
 
@@ -375,16 +389,16 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
         Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
         Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
 
-        Runs _LossParallelCrossEntropy under typing checking: logits S(2)@TP, labels I@TP -> I@TP.
+        Runs _LossParallelCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
         """
         # Ensure the determinism.
         torch.use_deterministic_algorithms(True)
         torch.set_num_threads(1)
 
-        B, L = 4, 32
+        T = 128
         mesh_configs = (
-            ((4,), ("tp",), (Shard(2),), (Replicate(),)),
-            ((2, 2), ("dp", "tp"), (Shard(0), Shard(2)), (Shard(0), Replicate())),
+            ((4,), ("tp",), (Shard(1),), (Replicate(),)),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
         )
         cases = ((32000, 109, False), (32003, 211, False), (32000, 307, True))
 
@@ -403,8 +417,7 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         seed
                     )
                     global_logits = torch.randn(
-                        B,
-                        L,
+                        T,
                         vocab_size,
                         device=self.device_type,
                         generator=generator,
@@ -412,15 +425,14 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     global_labels = torch.randint(
                         0,
                         vocab_size,
-                        (B, L),
+                        (T,),
                         device=self.device_type,
                         dtype=torch.long,
                         generator=generator,
                     )
                     if ignore:
                         mask = torch.rand(
-                            B,
-                            L,
+                            T,
                             device=self.device_type,
                             generator=generator,
                         )
@@ -438,18 +450,17 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         label_placements,
                     )
 
-                    # pytorch loss_parallel() as ground truth. F.cross_entropy
-                    # expects the class dimension at dim 1.
+                    # pytorch loss_parallel() as ground truth.
                     with loss_parallel():
                         wrapper_loss = F.cross_entropy(
-                            logits_dtensor.float().transpose(1, 2),
+                            logits_dtensor.float(),
                             labels_dtensor,
                             reduction="sum",
                             ignore_index=IGNORE_INDEX,
                         )
 
-                    # typecheck S(2)@TP, I@TP -> I@TP
-                    logits_type = {tp_group: spmd.S(2)}
+                    # typecheck S(1)@TP, I@TP -> I@TP
+                    logits_type = {tp_group: spmd.S(1)}
                     labels_type = {tp_group: spmd.I}
                     if "dp" in axis_names:
                         dp_group = mesh.get_group("dp")
@@ -487,8 +498,8 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         local_logits.grad,
                         mesh,
                         logits_placements,
-                        shape=torch.Size((B, L, vocab_size)),
-                        stride=(L * vocab_size, vocab_size, 1),
+                        shape=torch.Size((T, vocab_size)),
+                        stride=(vocab_size, 1),
                     )
                     self.assertTrue(
                         torch.equal(

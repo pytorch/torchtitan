@@ -21,8 +21,8 @@ from torchtitan.components.loss import cross_entropy_loss, IGNORE_INDEX
 
 def _reference_ce(pred, labels):
     return torch.nn.functional.cross_entropy(
-        pred.flatten(0, 1).float(),
-        labels.flatten(0, 1),
+        pred.float(),
+        labels,
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )
@@ -40,18 +40,18 @@ class TestCrossEntropyDTensor(DTensorTestBase):
             mesh = init_device_mesh(
                 self.device_type, (2, 2, 2), mesh_dim_names=("dp_shard", "cp", "tp")
             )
-            pred_pl = (Shard(0), Shard(1), Shard(2) if tp_shard_v else Replicate())
-            labels_pl = (Shard(0), Shard(1), Replicate())
+            pred_pl = (Shard(0), Shard(0), Shard(1) if tp_shard_v else Replicate())
+            labels_pl = (Shard(0), Shard(0), Replicate())
         else:
             mesh = init_device_mesh(self.device_type, (8,), mesh_dim_names=("tp",))
-            pred_pl = (Shard(2) if tp_shard_v else Replicate(),)
+            pred_pl = (Shard(1) if tp_shard_v else Replicate(),)
             labels_pl = (Replicate(),)
 
-        B, S, V = 4, 16, 64
+        T, V = 64, 64
         gen = torch.Generator(device=self.device_type).manual_seed(42)
-        global_pred = torch.randn(B, S, V, device=self.device_type, generator=gen)
+        global_pred = torch.randn(T, V, device=self.device_type, generator=gen)
         global_labels = torch.randint(
-            0, V, (B, S), device=self.device_type, dtype=torch.long, generator=gen
+            0, V, (T,), device=self.device_type, dtype=torch.long, generator=gen
         )
 
         ref_loss = _reference_ce(global_pred, global_labels)
