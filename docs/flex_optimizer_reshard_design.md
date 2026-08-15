@@ -7,13 +7,13 @@ The accompanying change implements Phase 1 of this design: restoring
 restoring the former dynamic optimizer wrapper. Phases 2 and 3 remain future
 work.
 
-Before this change, the public API exposed only `build_distributed_muon`.
-`DistributedMuon` already owned its normal `step()` method, and the FlexShard
+Before this change, the public API exposed only `build_dist_muon`.
+`DistMuon` already owned its normal `step()` method, and the FlexShard
 schedule and runtime were private implementation details.
 
 ## Motivation
 
-`build_distributed_muon` is convenient for TorchTitan, but it combines two
+`build_dist_muon` is convenient for TorchTitan, but it combines two
 operations:
 
 1. Construct a particular optimizer.
@@ -24,8 +24,14 @@ stable entry point for explicit optimizer construction:
 
 ```python
 optimizer = flex_optimizer_reshard(
-    DistributedMuon(named_param_groups, **optimizer_kwargs),
-    compute_sharding_by_fqn=compute_sharding_by_fqn,
+    DistMuon(named_param_groups, **optimizer_kwargs),
+    compute_sharding_by_fqn={
+        fqn: ComputeLayout(
+            shardings_by_mesh_axis={
+                "dp_shard": BlockShard(dim=0, block_size=rows_per_matrix),
+            }
+        )
+    },
     bucket_configs=bucket_configs,
 )
 ```
@@ -42,11 +48,11 @@ The removed API had this public signature:
 
 ```python
 def flex_optimizer_reshard(
-    optimizer: DistributedMuon,
+    optimizer: DistMuon,
     *,
-    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
-) -> DistributedMuon:
+) -> DistMuon:
     ...
 ```
 
@@ -57,7 +63,7 @@ called PyTorch's private `Optimizer._patch_step_function()` so the new mixin's
 
 That mechanism had several problems:
 
-- The generic-looking API rejected every optimizer except `DistributedMuon`.
+- The generic-looking API rejected every optimizer except `DistMuon`.
 - The exact Python class changed after construction.
 - It depended on a private PyTorch method.
 - Whole-optimizer pickling was unsupported.
@@ -73,7 +79,7 @@ mutation should not be restored.
 
 - Restore `flex_optimizer_reshard` as the public configuration front door.
 - Return the same optimizer object without changing its exact type.
-- Keep `build_distributed_muon` as the convenient TorchTitan factory.
+- Keep `build_dist_muon` as the convenient TorchTitan factory.
 - Preserve one public `BucketConfig` as one physical bucket.
 - Keep scheduling, communication, and overlap implementation private.
 - Define a clean optimizer-integration boundary without claiming arbitrary
@@ -98,11 +104,11 @@ The initial supported call is explicit about Muon:
 
 ```python
 def flex_optimizer_reshard(
-    optimizer: DistributedMuon,
+    optimizer: DistMuon,
     *,
-    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
-) -> DistributedMuon:
+) -> DistMuon:
     """Configure a supported optimizer for FlexShard redistribution.
 
     Return the same optimizer object. Configuration freezes parameter
@@ -118,17 +124,17 @@ The call shape does not need to change.
 The package root should export:
 
 - `flex_optimizer_reshard`
-- `DistributedMuon`
-- `build_distributed_muon`
+- `DistMuon`
+- `build_dist_muon`
 - The existing compute-layout and physical-bucket configuration types
 
-`build_distributed_muon` becomes a convenience composition:
+`build_dist_muon` becomes a convenience composition:
 
 ```python
-def build_distributed_muon(...):
-    prepared_params = _prepare_named_param_groups(...)
+def build_dist_muon(...):
+    normalized_param_groups = _normalize_param_groups(...)
     return flex_optimizer_reshard(
-        DistributedMuon(prepared_params, **optimizer_kwargs),
+        DistMuon(normalized_param_groups, **optimizer_kwargs),
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
     )
@@ -155,8 +161,8 @@ The concrete optimizer continues to declare `step()` normally. For Muon, the
 shape is conceptually:
 
 ```python
-class DistributedMuon(Optimizer):
-    _optimizer_reshard_binding: _DistributedMuonReshardBinding | None
+class DistMuon(Optimizer):
+    _optimizer_reshard_binding: _DistMuonReshardBinding | None
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -189,10 +195,10 @@ Successful configuration installs one private, per-instance binding:
 
 ```python
 @dataclass(slots=True)
-class _DistributedMuonReshardBinding(
+class _DistMuonReshardBinding(
     _LocalBucketExecutor[_ParameterComputeLayout]
 ):
-    optimizer: DistributedMuon
+    optimizer: DistMuon
     bucket_specs: tuple[_BucketSpec, ...]
     plans: tuple[_BucketExecutionPlan[_ParameterComputeLayout], ...]
     plan_items: tuple[_ParameterComputeLayout, ...]
@@ -239,7 +245,7 @@ FlexShard core owns optimizer-independent mechanics:
 The optimizer integration owns algorithm-specific semantics:
 
 - Interpreting its per-FQN compute configuration.
-- Resolving logical compute views.
+- Deriving optimizer-local matrix views from compute sharding.
 - Resolving storage-to-compute transitions.
 - Initializing and validating optimizer state.
 - Estimating compute cost and assigning dynamic owners.
@@ -249,7 +255,7 @@ The optimizer integration owns algorithm-specific semantics:
 For the first restoration, this boundary should remain a private protocol or
 private optimizer hook. `flex_optimizer_reshard` asks the optimizer's supported
 integration to compile a binding and then installs it. Core must not import
-`DistributedMuon` merely to dispatch the public API.
+`DistMuon` merely to dispatch the public API.
 
 After a second optimizer integration exists, the common boundary can be
 evaluated and, if useful, promoted to a public
@@ -331,11 +337,11 @@ The initial restoration needs focused tests for:
 
 - The returned object is the input object and its exact type is unchanged.
 - No dynamic class is created and no private step-patching API is called.
-- `build_distributed_muon` and explicit construction produce equivalent plans
+- `build_dist_muon` and explicit construction produce equivalent plans
   and numerical results.
 - Repeated configuration raises `ValueError`.
 - An unsupported optimizer raises `TypeError`.
-- Calling an unconfigured `DistributedMuon.step()` raises a clear error.
+- Calling an unconfigured `DistMuon.step()` raises a clear error.
 - Failed configuration does not leave a binding installed.
 - Parameter groups cannot be added after configuration.
 - Optimizer pre/post hooks and LR schedulers still work.
@@ -344,23 +350,23 @@ The initial restoration needs focused tests for:
 - A checkpoint cannot replace the configured parameter FQNs.
 - Existing physical-bucket, collective-count, overlap, pipeline-parallel, and
   Cartesian-redistribution tests remain unchanged.
-- DistributedMuon loss and updates match the current builder path.
+- DistMuon loss and updates match the current builder path.
 
 ## Rollout
 
 ### Phase 1: restore the stable front door
 
 - Add and export `flex_optimizer_reshard`.
-- Export `DistributedMuon` for explicit construction.
+- Export `DistMuon` for explicit construction.
 - Add the private binding and use-once state.
-- Keep `DistributedMuon.step()` as the declared optimizer method.
-- Implement `build_distributed_muon` through the restored function.
+- Keep `DistMuon.step()` as the declared optimizer method.
+- Implement `build_dist_muon` through the restored function.
 - Add lifecycle, identity, hook, and state-dict tests.
 
 ### Phase 2: consolidate proven optimizer-neutral code
 
 - Move only genuinely shared binding and lifecycle operations into core.
-- Keep Muon views, transition resolution, state, batching, and update kernels
+- Keep Muon matrix views, transition resolution, state, batching, and update kernels
   in the Muon integration.
 - Preserve the current public function signature.
 

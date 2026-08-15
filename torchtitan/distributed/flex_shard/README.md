@@ -3,30 +3,43 @@
 FlexShard provides PyTorch-native building blocks for running optimizer compute
 with layouts that differ from persistent DTensor parameter storage layouts. It
 plans packed storage-to-compute redistribution and overlaps communication with
-optimizer work. DistributedMuon is its initial consumer.
+optimizer work. DistMuon is its initial consumer.
 
 ## Public API
 
 The public API is exported from `torchtitan.distributed.flex_shard`:
 
 - `ComputeLayout` describes temporary optimizer-compute sharding on named
-  `DeviceMesh` axes using PyTorch DTensor placements or `Owned`.
+  `DeviceMesh` axes using PyTorch DTensor placements, `BlockShard`, or `Owned`.
+- `BlockShard` shards complete fixed-size blocks along one tensor dimension. It
+  preserves the tensor's rank and global shape and never creates a tensor view.
 - `Owned` assigns a complete subgroup-local logical tensor to one dynamically
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `MuonComputeShardingConfig` associates a parameter with its `ComputeLayout`
-  and an optional logical compute view.
-- `AttentionPerHeadComputeView` treats a flattened attention projection as a
-  batch of independent per-head matrices for Muon.
-- `DistributedMuon` is the optimizer implementation used by the initial
-  FlexShard integration.
+- `DistMuon` is the optimizer implementation used by the initial FlexShard
+  integration.
 - `flex_optimizer_reshard` binds a supported optimizer to its per-parameter
-  compute shardings and physical buckets without replacing the optimizer or
-  its `step` method.
-- `build_distributed_muon` validates named DTensor parameters, plans their
-  storage-to-compute transitions, and provides a convenient construction path
-  through `flex_optimizer_reshard`.
+  compute shardings and physical buckets without replacing the optimizer
+  object, its exact type, or its declared `step` method.
+- `build_dist_muon` is the convenience construction path. It constructs
+  `DistMuon` and binds optimizer-agnostic per-parameter `ComputeLayout` values
+  in `compute_sharding_by_fqn` through `flex_optimizer_reshard`. Within
+  DistMuon, `BlockShard(dim=0, block_size=R)` interprets a 2D parameter
+  `[M * R, C]` as `M` independent matrices `[M, R, C]`. FlexShard routes the
+  flat 2D compute tensor, and DistMuon applies the local matrix-batch view
+  immediately before Muon compute. A native 3D `[M, R, C]` parameter can use
+  `Shard(0)` to distribute complete matrices. A 2D parameter without
+  `BlockShard` must use whole-matrix compute such as `Owned`.
+
+Storage placements describe persistent ownership only; they do not define
+Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
+most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
+`Replicate`; every other non-unit storage mesh axis must be replicated.
+
+Compute sharding is binding-time configuration. It is validated and frozen by
+`flex_optimizer_reshard`, but is not stored in the optimizer state dict;
+checkpoint restore must rebuild and bind the optimizer with matching values.
 
 ## TorchTitan Kimi integration
 
@@ -34,7 +47,7 @@ The [Kimi configuration registry](../../models/kimi_k2_7/config_registry.py)
 is the first TorchTitan integration. Its shared optimizer configuration:
 
 - Selects matrix parameters from attention, dense MLPs, routed and shared
-  experts, and routers for DistributedMuon. Other parameters continue to use
+  experts, and routers for DistMuon. Other parameters continue to use
   AdamW.
 - Defines each selected parameter's compute layout, including per-head Muon
   for compatible attention projections.
