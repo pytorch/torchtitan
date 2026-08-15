@@ -26,6 +26,11 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_gemm import (
+    AllGatherFusedFeedForward,
+    AllGatherFusedQKVLinear,
+    RowParallelLinear,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import (
@@ -52,6 +57,15 @@ def decoder_vocab_size(model_spec: ModelSpec) -> int:
     model_config = model_spec.model
     assert isinstance(model_config, Decoder.Config)
     return model_config.vocab_size
+
+
+# Which implementation runs the TP-parallel linear layers. "default" leaves the
+# collectives to the framework, as separate all-gather / reduce-scatter either side
+# of an ordinary GEMM. "dist_gemm" folds each collective into its adjacent GEMM
+# over symmetric memory, so communication overlaps compute -- the technique
+# Megatron exposes as --tp-comm-overlap. Further implementations (CuTeDSL, Triton)
+# would be additional values here.
+TpGemmBackend = Literal["default", "dist_gemm"]
 
 
 def get_attention_config(
@@ -182,14 +196,40 @@ def make_gqa_config(
     head_dim: int | None = None,
     fuse_qkv: bool = False,
     qk_norm: RMSNorm.Config | None = None,
+    tp_gemm_backend: TpGemmBackend = "default",
 ) -> GQAttention.Config:
-    """Build a fully-specified GQAttention.Config."""
+    """Build a fully-specified GQAttention.Config.
+
+    ``tp_gemm_backend`` selects which implementation runs the QKV and output
+    projections. ``"default"`` leaves the TP collectives to the framework, either
+    side of an ordinary GEMM. ``"dist_gemm"`` folds each into its adjacent GEMM
+    over symmetric memory.
+
+    ``"dist_gemm"`` raises here unless ``fuse_qkv=True`` -- the all-gather feeds a
+    single wqkv GEMM, so there is no separate wq/wk/wv schedule. It also needs CUDA
+    and the spmd_types backend; those are rejected by
+    ``validate_dist_gemm_preconditions`` at sharding time, which is the first point
+    that sees the parallelism settings.
+    """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
     rope = dataclasses.replace(rope)
 
+    # The backend picks the classes; everything below builds the same shapes into
+    # whichever was chosen.
+    fused_qkv_cls, wo_cls = FusedQKVLinear, Linear
+    if tp_gemm_backend == "dist_gemm":
+        if not fuse_qkv:
+            raise ValueError(
+                "tp_gemm_backend='dist_gemm' requires fuse_qkv=True: the all-gather "
+                "feeds a single wqkv GEMM, so there is no separate wq/wk/wv "
+                "schedule to fall back on."
+            )
+        fused_qkv_cls = AllGatherFusedQKVLinear
+        wo_cls = RowParallelLinear
+
     if fuse_qkv:
-        qkv = FusedQKVLinear.Config(
+        qkv = fused_qkv_cls.Config(
             head_dim=per_head_dim,
             n_heads=n_heads,
             n_kv_heads=n_kv,
@@ -227,7 +267,7 @@ def make_gqa_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=Linear.Config(
+        wo=wo_cls.Config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,
@@ -244,9 +284,18 @@ def make_ffn_config(
     hidden_dim: int,
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
+    tp_gemm_backend: TpGemmBackend = "default",
 ) -> FeedForward.Config:
-    """Build a fully-specified FeedForward.Config."""
-    return FeedForward.Config(
+    """Build a fully-specified FeedForward.Config.
+
+    ``tp_gemm_backend="dist_gemm"`` overlaps the TP collectives with the GEMMs by
+    folding them in: one all-gather feeds w1 and w3, and w2 reduce-scatters. A bias
+    on w1/w3 is rejected by the config. See make_gqa_config.
+    """
+    ffn_cls = (
+        AllGatherFusedFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
+    )
+    return ffn_cls.Config(
         w1=Linear.Config(
             in_features=dim, out_features=hidden_dim, param_init=w1_param_init
         ),

@@ -43,7 +43,7 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
     torch.testing.assert_close(loss, torch.tensor([-1.0]))
 
 
-def test_cuda_graph_wrapper_decorates_fwd_bwd_and_clones_reused_output():
+def test_cuda_graph_wrapper_returns_graph_owned_output():
     class PassthroughCUDAGraphWrapper:
         def __init__(self, fn, example_inputs):
             self.fn = fn
@@ -54,7 +54,6 @@ def test_cuda_graph_wrapper_decorates_fwd_bwd_and_clones_reused_output():
     graph_loss = torch.tensor(0.0)
     fwd_bwd = MagicMock(return_value=graph_loss)
 
-    accumulated_losses = []
     with (
         patch("torchtitan.distributed.cudagraph.utils.device_type", "cuda"),
         patch("torch.cuda.is_available", return_value=True),
@@ -73,16 +72,92 @@ def test_cuda_graph_wrapper_decorates_fwd_bwd_and_clones_reused_output():
                 torch.tensor(1),
                 {"position": torch.ones(1)},
             )
-            accumulated_losses.append(loss.detach())
+            # Sanity check that the wrapper returns the same graph-owned object.
+            assert loss is graph_loss
 
-    torch.testing.assert_close(
-        torch.sum(torch.stack(accumulated_losses)), torch.tensor(6.0)
-    )
     assert fwd_bwd.call_count == 3
     _, _, global_valid_tokens, extra_kwargs = fwd_bwd.call_args.args
     torch.testing.assert_close(global_valid_tokens, torch.tensor(1))
     assert global_valid_tokens.dtype == torch.int64
     torch.testing.assert_close(extra_kwargs["position"], torch.ones(1))
+
+
+def test_trainer_accumulates_reused_cuda_graph_losses():
+    graph_loss = torch.tensor(0.0)
+    loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+
+    def forward_backward_step(**kwargs):
+        graph_loss.fill_(next(loss_values))
+        return graph_loss
+
+    metrics_processor = SimpleNamespace(
+        should_log=MagicMock(return_value=True),
+        log=MagicMock(),
+    )
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                training=SimpleNamespace(
+                    disable_cuda_graphs=False,
+                    max_norm=1.0,
+                )
+            ),
+            optimizers=MagicMock(),
+            lr_schedulers=SimpleNamespace(
+                get_metrics=MagicMock(return_value={}),
+                step=MagicMock(),
+            ),
+            parallel_dims=SimpleNamespace(
+                dp_enabled=False,
+                pp_enabled=False,
+                dp_cp_enabled=False,
+                ep_enabled=False,
+                get_optional_mesh=lambda name: None,
+            ),
+            gradient_accumulation_steps=3,
+            num_pipeline_parallel_microbatches=1,
+            device=torch.device("cpu"),
+            forward_backward_step=forward_backward_step,
+            model_parts=[],
+            checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
+            metrics_processor=metrics_processor,
+            step=1,
+            ntokens_seen=3,
+        ),
+    )
+    data_iterator = iter(
+        [({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))] * 3
+    )
+
+    with patch(
+        "torchtitan.trainer.dist_utils.clip_grad_norm_",
+        return_value=torch.tensor(4.0),
+    ):
+        Trainer.train_step(trainer, data_iterator)
+
+    metrics_processor.log.assert_called_once_with(
+        1,
+        6.0,
+        6.0,
+        4.0,
+        extra_metrics={"n_tokens_seen": 3},
+    )
+
+    metrics_processor.should_log.return_value = False
+    metrics_processor.log.reset_mock()
+    with patch(
+        "torchtitan.trainer.dist_utils.clip_grad_norm_",
+        return_value=torch.tensor(4.0),
+    ):
+        Trainer.train_step(
+            trainer,
+            data_iterator=iter(
+                [({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))] * 3
+            ),
+        )
+
+    metrics_processor.log.assert_not_called()
 
 
 @pytest.mark.parametrize(
