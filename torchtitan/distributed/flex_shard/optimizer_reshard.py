@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any
 
 from torch.distributed.tensor import Replicate, Shard
-from torch.optim import Optimizer
+from torch.optim import Muon
 
 __all__ = [
     "BlockShard",
@@ -234,16 +234,12 @@ class BucketConfig:
         )
 
 
-_OptimizerT = TypeVar("_OptimizerT", bound=Optimizer)
-_ComputeShardingT = TypeVar("_ComputeShardingT")
-
-
 def flex_optimizer_reshard(
-    optimizer: _OptimizerT,
+    optimizer: Muon,
     *,
-    compute_sharding_by_fqn: Mapping[str, _ComputeShardingT],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
-) -> _OptimizerT:
+) -> Muon:
     """Configure a supported optimizer for FlexShard redistribution.
 
     The optimizer integration resolves its compute shardings and installs the
@@ -252,16 +248,17 @@ def flex_optimizer_reshard(
 
     Configuration may create process groups and run validation collectives.
     All participating ranks must call this function in a consistent order.
-    Parameter data is not redistributed until ``optimizer.step()``.
+    No runtime tensor is redistributed until ``optimizer.step()``.
     """
-    configure = getattr(optimizer, "_configure_flex_optimizer_reshard", None)
-    if not callable(configure):
+    if type(optimizer) is not Muon:
         raise TypeError(
             "flex_optimizer_reshard does not support optimizer type "
-            f"{type(optimizer).__name__!r}; the optimizer must provide a "
-            "FlexShard integration"
+            f"{type(optimizer).__name__!r}"
         )
-    configure(
+    from .muon import _configure_muon_reshard
+
+    _configure_muon_reshard(
+        optimizer,
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=tuple(bucket_configs),
     )

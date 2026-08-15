@@ -269,7 +269,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--training.disable_cuda_graphs",
                     # One four-GPU smoke path covers PP=2, FSDP=2, and EP=2.
                     # Each PP stage consumes its local subset of the global
-                    # DistMuon compute-sharding map. TP remains unsupported
+                    # Muon compute-sharding map. TP remains unsupported
                     # because it can produce _StridedShard storage.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
@@ -284,7 +284,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--training.steps 1",
                 ],
             ],
-            "Kimi K2.7 DistMuon PP+FSDP+EP",
+            "Kimi K2.7 FlexShard Muon PP+FSDP+EP",
             "kimi_k2_5_muon_pp+fsdp+ep",
             ngpu=4,
             timeout=600,
