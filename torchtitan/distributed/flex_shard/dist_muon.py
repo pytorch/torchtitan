@@ -868,7 +868,13 @@ def _row_intervals_by_mesh_axis_coordinate(
     *,
     mesh_axis_size: int,
 ) -> tuple[tuple[int, int], ...]:
-    """Return ``(start, end)`` row intervals along one mesh axis."""
+    """Resolve the global rows owned by each mesh-axis coordinate.
+
+    Placement names alone do not show whether communication is needed:
+    ``Shard(0)`` and ``BlockShard(0, R)`` may own the same rows when shard
+    boundaries align, or different rows when a storage shard splits a block.
+    Comparing these intervals distinguishes a local view from redistribution.
+    """
     if type(sharding) is Replicate:
         return ((0, num_rows),) * mesh_axis_size
 
@@ -1285,7 +1291,7 @@ def _build_parameter_redistribution_plan(
             logical_shape=group_local_compute_shape,
         )
 
-    return _build_matrix_batch_redistribution_plan(
+    return _build_batched_matrix_redistribution_plan(
         storage_regions,
         participants=group.participants,
         shard_participants=group.mesh_ordered_participants,
@@ -1294,7 +1300,7 @@ def _build_parameter_redistribution_plan(
     )
 
 
-def _build_matrix_batch_redistribution_plan(
+def _build_batched_matrix_redistribution_plan(
     storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
     *,
     participants: tuple[int, ...],
@@ -1358,8 +1364,8 @@ def _build_matrix_batch_redistribution_plan(
     shard_index_by_participant = {
         participant: index for index, participant in enumerate(shard_participants)
     }
-    compute_matrix_assignments = []
-    compute_partitions = []
+    compute_endpoints = []
+    compute_partitions_list = []
     for participant in participants:
         mesh_rank = shard_index_by_participant[participant]
         local_num_matrices, matrix_offset = Shard.local_shard_size_and_offset(
@@ -1371,26 +1377,25 @@ def _build_matrix_batch_redistribution_plan(
             offsets=(matrix_offset * matrix_rows, 0),
             shape=(local_num_matrices * matrix_rows, matrix_columns),
         )
-        compute_matrix_assignments.append(
-            ((participant,), matrix_offset, local_num_matrices)
-        )
-        compute_partitions.append(
+        compute_endpoints.append(((participant,), matrix_offset, local_num_matrices))
+        compute_partitions_list.append(
             _ParticipantPartition(
                 participant=participant,
                 tensor_shape=logical_region.shape,
                 logical_regions=(logical_region,),
             )
         )
+    compute_partitions = tuple(compute_partitions_list)
 
     storage_to_compute_routes = []
     for source_holders, storage_region, storage_tensor_base in storage_endpoints:
         storage_row_offset = storage_region.offsets[0]
         storage_row_end = storage_row_offset + storage_region.shape[0]
         for (
-            destination_participants,
+            destination_holders,
             matrix_offset,
             local_num_matrices,
-        ) in compute_matrix_assignments:
+        ) in compute_endpoints:
             for local_matrix_index in range(local_num_matrices):
                 matrix_index = matrix_offset + local_matrix_index
                 matrix_row_offset = matrix_index * matrix_rows
@@ -1434,7 +1439,7 @@ def _build_matrix_batch_redistribution_plan(
                         ),
                         destination=_RouteEndpoint(
                             compute_tensor_region,
-                            destination_participants,
+                            destination_holders,
                         ),
                     )
                 )
@@ -1443,7 +1448,7 @@ def _build_matrix_batch_redistribution_plan(
         participants=participants,
         logical_shape=storage_shape,
         storage_partitions=storage_partitions,
-        compute_partitions=tuple(compute_partitions),
+        compute_partitions=compute_partitions,
         storage_to_compute_routes=tuple(storage_to_compute_routes),
     )
 
