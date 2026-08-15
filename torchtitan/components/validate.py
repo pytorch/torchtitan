@@ -268,14 +268,14 @@ class Validator(BaseValidator):
             except StopIteration:
                 break
 
-            # All-reduce token count across DP ranks to get global token count
+            # All-reduce token count across DP ranks while keeping it on device.
             if parallel_dims.dp_enabled:
                 batch_mesh = parallel_dims.get_mesh("batch")
-                global_valid_tokens = dist_utils.dist_sum(
+                global_valid_tokens = dist_utils.dist_sum_tensor(
                     local_valid_tokens, batch_mesh, None
                 )
             else:
-                global_valid_tokens = float(local_valid_tokens.item())
+                global_valid_tokens = local_valid_tokens
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None

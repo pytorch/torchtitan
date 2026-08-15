@@ -93,7 +93,11 @@ def parallelize_gptoss(
     if model_compile_enabled:
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
             _raise_dynamo_recompile_limit(model)
-        apply_compile(model, compile_config)
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
+        )
 
     # Skip FSDP wrapper for inference. FSDP's forward hooks
     # are incompatible with torch.inference_mode() used by vLLM.

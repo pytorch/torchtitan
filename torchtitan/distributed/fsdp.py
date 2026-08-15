@@ -85,6 +85,8 @@ def apply_fsdp_to_vision_encoder(
     reduce_dtype: torch.dtype,
     reshard_after_forward_policy: str = "default",
     pp_enabled: bool = False,
+    *,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
 ) -> None:
     """FSDP a VLM vision encoder as a single unit.
 
@@ -101,6 +103,7 @@ def apply_fsdp_to_vision_encoder(
         mesh=dp_mesh,
         mp_policy=mp_policy,
         reshard_after_forward=reshard_after_forward,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
 

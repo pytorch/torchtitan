@@ -11,6 +11,7 @@ _supported_models = frozenset(
         "gpt_oss",
         "kimi_k2_7",
         "llama3",
+        "muse_glimmer",
         "qwen3",
         "qwen3_5",
     ]

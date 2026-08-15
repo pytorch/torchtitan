@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import cast
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -12,7 +14,9 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import (
     Float8LinearConverter,
     MXFP8LinearConverter,
+    NVFP4LinearConverter,
 )
+from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -25,6 +29,7 @@ from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+from .model import Llama3Model
 
 
 def llama3_debugmodel() -> Trainer.Config:
@@ -69,6 +74,23 @@ def llama3_debugmodel() -> Trainer.Config:
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def llama3_debugmodel_dist_gemm() -> Trainer.Config:
+    """Async-TP: the attention TP collectives are folded into their GEMMs.
+
+    Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
+    fall back to the stock projections, so this stays runnable on one rank.
+
+    ``spmd_backend`` is pinned to spmd_types: the fused modules take and return
+    plain local tensors, which is that backend's contract. The DTensor backends
+    are being deprecated and are not supported here.
+    """
+    config = llama3_debugmodel()
+    config.model_spec = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
+    config.parallelism.spmd_backend = "spmd_types"
     return config
 
 
@@ -81,6 +103,51 @@ def llama3_debugmodel_float8() -> Trainer.Config:
         "debugmodel",
         converters=[
             Float8LinearConverter.Config(model_compile_enabled=model_compile_enabled),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_nvfp4() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.parallelism.spmd_backend = "spmd_types"
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    # fqns=["layers"] converts every in-layer Linear (attention + feed_forward)
+    # while leaving the lm_head stock: NVFP4 requires each GEMM dim divisible by
+    # 128, which the vocab projection does not satisfy.
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=["layers"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    # Mixed precision: convert the leading decoder layers to NVFP4 and keep the
+    # last _NVFP4_BF16_TAIL_FRACTION of layers (plus the lm_head) in bf16.
+    n_layers = len(cast(Llama3Model.Config, config.model_spec.model).layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
+    fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=fqns,
+                model_compile_enabled=model_compile_enabled,
+            ),
         ],
     )
     return config
@@ -150,6 +217,29 @@ def llama3_8b() -> Trainer.Config:
     )
 
 
+def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
+    config = llama3_8b()
+    config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
+    # Enable compile so NVFP4's dynamic quantization runs at competitive perf.
+    config.compile = CompileConfig(enable=True, components=["model"])
+    # Mixed precision: convert the leading decoder layers to NVFP4 and keep the
+    # last _NVFP4_BF16_TAIL_FRACTION of layers (plus the lm_head) in bf16.
+    n_layers = len(cast(Llama3Model.Config, config.model_spec.model).layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
+    fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
+    config.model_spec = model_registry(
+        "8B",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=fqns,
+                model_compile_enabled=True,
+            ),
+        ],
+    )
+    return config
+
+
 def llama3_8b_mxfp8() -> Trainer.Config:
     config = llama3_8b()
     # Swap dense Linear layers for MXFP8Linear. compile is enabled so the
@@ -204,7 +294,10 @@ def llama3_70b() -> Trainer.Config:
 
 
 def llama3_405b() -> Trainer.Config:
-    compile_config = CompileConfig(enable=True)
+    compile_config = CompileConfig(
+        enable=True,
+        enable_async_tensor_parallel=True,
+    )
     model_spec = model_registry(
         "405B",
         converters=[
@@ -243,7 +336,6 @@ def llama3_405b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
-            enable_async_tensor_parallel=True,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),

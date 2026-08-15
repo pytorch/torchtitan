@@ -19,7 +19,6 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 
 
@@ -52,9 +51,6 @@ def parallelize_llama(
             )
         if parallel_dims.tp_enabled:
             model.parallelize(parallel_dims)
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -64,7 +60,11 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
+        )
 
     # Always run apply_fsdp_to_decoder -- with shard_degree=1 it is a no-op for
     # the all-gather but still installs the MixedPrecisionPolicy.
