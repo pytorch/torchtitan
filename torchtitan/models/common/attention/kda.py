@@ -144,14 +144,6 @@ class KDAAttention(Module):
             conv_weight_C1W[:, 0],
             cu_seqlens=cu_seqlens,
         )
-        # The packed channels are head-major, [N, 3, K]: q/k/v are interleaved
-        # inside each head so a plain Shard(0) of the fused projection weight (see
-        # set_kda_sharding) leaves every rank holding whole heads with their q, k,
-        # and v together. Three contiguous [3, N, K] blocks -- what attn_gym's
-        # packed decode op indexes, so the paged adapter in
-        # experiments/rl/models/kda_attention.py repacks -- would instead hand
-        # rank 0 all of q plus part of k. The layouts coincide at num_heads == 1,
-        # so a divergence stays silent until multi-head or TP runs.
         conv_output_BLN3K = conv_output_BLC.unflatten(-1, (-1, 3, self.head_dim))
         q_BLNK, k_BLNK, v_BLNK = (
             tensor.contiguous() for tensor in conv_output_BLN3K.unbind(-2)
