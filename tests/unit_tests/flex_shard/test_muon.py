@@ -25,9 +25,8 @@ from torchtitan.distributed.flex_shard import (
     _optimizer_reshard_runtime,
     BlockShard,
     BucketConfig,
-    build_dist_muon,
+    build_flex_shard_muon,
     ComputeLayout,
-    DistMuon,
     flex_optimizer_reshard,
     NoRedistribution,
     Owned,
@@ -39,9 +38,24 @@ from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
     _RedistributionBucketPlan,
     _validate_bucket_plans_across_ranks,
 )
-from torchtitan.distributed.flex_shard.dist_muon import (
-    _adjust_muon_learning_rate,
-)
+from torchtitan.distributed.flex_shard.muon import _get_muon_reshard_integration
+
+
+def _adjust_muon_learning_rate(
+    lr: float,
+    adjust_lr_fn: str | None,
+    matrix_shape: torch.Size | tuple[int, ...],
+) -> float:
+    rows, columns = matrix_shape[-2:]
+    if adjust_lr_fn is None or adjust_lr_fn == "original":
+        ratio = max(1.0, rows / columns) ** 0.5
+    elif adjust_lr_fn == "match_rms_adamw":
+        ratio = 0.2 * max(rows, columns) ** 0.5
+    elif adjust_lr_fn == "spectral_unclamped":
+        ratio = (rows / columns) ** 0.5
+    else:
+        raise ValueError(f"unsupported adjust_lr_fn {adjust_lr_fn!r}")
+    return lr * ratio
 
 
 class TestBucketConfig(unittest.TestCase):
@@ -195,7 +209,7 @@ class TestBucketOverlapPlan(unittest.TestCase):
 
 class TestFlexOptimizerReshard(unittest.TestCase):
     def test_configures_supported_optimizer_in_place(self):
-        optimizer = DistMuon(
+        optimizer = torch.optim.Muon(
             [
                 {
                     "params": [torch.nn.Parameter(torch.ones(2, 2))],
@@ -206,9 +220,8 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         compute_sharding_by_fqn: dict[str, object] = {}
         bucket_configs: tuple[BucketConfig, ...] = ()
 
-        with patch.object(
-            DistMuon,
-            "_configure_flex_optimizer_reshard",
+        with patch(
+            "torchtitan.distributed.flex_shard.muon._configure_muon_reshard",
             autospec=True,
         ) as configure:
             configured = flex_optimizer_reshard(
@@ -218,7 +231,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             )
 
         self.assertIs(configured, optimizer)
-        self.assertIs(type(configured), DistMuon)
+        self.assertIs(type(configured), torch.optim.Muon)
         configure.assert_called_once_with(
             optimizer,
             compute_sharding_by_fqn=compute_sharding_by_fqn,
@@ -238,9 +251,27 @@ class TestFlexOptimizerReshard(unittest.TestCase):
                 bucket_configs=(),
             )
 
-    def test_failed_configuration_leaves_dist_muon_unconfigured(self):
+    def test_missing_upstream_api_fails_before_configuration(self):
+        optimizer = torch.optim.Muon([torch.nn.Parameter(torch.ones(2, 2))])
+
+        with (
+            patch.object(
+                optimizer,
+                "register_step_executor",
+                None,
+                create=True,
+            ),
+            self.assertRaisesRegex(RuntimeError, "Muon.register_step_executor"),
+        ):
+            flex_optimizer_reshard(
+                optimizer,
+                compute_sharding_by_fqn={},
+                bucket_configs=(),
+            )
+
+    def test_failed_configuration_leaves_stock_muon_usable(self):
         fqn = "weight"
-        optimizer = DistMuon(
+        optimizer = torch.optim.Muon(
             [
                 {
                     "params": [torch.nn.Parameter(torch.ones(2, 2))],
@@ -249,7 +280,17 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(TypeError, "requires DTensor parameters"):
+        with (
+            patch.object(
+                optimizer,
+                "register_step_executor",
+                create=True,
+            ),
+            patch.object(torch.optim, "muon_prepare", create=True),
+            patch.object(torch.optim, "muon_orthogonalize", create=True),
+            patch.object(torch.optim, "muon_apply", create=True),
+            self.assertRaisesRegex(TypeError, "requires DTensor parameters"),
+        ):
             flex_optimizer_reshard(
                 optimizer,
                 compute_sharding_by_fqn={
@@ -272,13 +313,12 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             closure_called = True
             return 0.0
 
-        with self.assertRaisesRegex(RuntimeError, "flex_optimizer_reshard"):
-            optimizer.step(closure)
-        self.assertFalse(closure_called)
+        self.assertEqual(optimizer.step(closure), 0.0)
+        self.assertTrue(closure_called)
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
-class TestDistMuon(DTensorTestBase):
+class TestFlexShardMuon(DTensorTestBase):
     @property
     def world_size(self):
         return 2
@@ -315,7 +355,7 @@ class TestDistMuon(DTensorTestBase):
                 redistribution_mesh_axis_names=NoRedistribution(),
             ),
         )
-        unconfigured_optimizer = DistMuon(
+        unconfigured_optimizer = torch.optim.Muon(
             [{"params": [parameter], "param_names": [fqn]}],
             lr=lr,
             weight_decay=weight_decay,
@@ -355,7 +395,7 @@ class TestDistMuon(DTensorTestBase):
         with self.assertRaisesRegex(RuntimeError, "parameter groups changed"):
             optimizer.step()
         matching_mutated_state = optimizer.state_dict()
-        with self.assertRaisesRegex(ValueError, "current DistMuon"):
+        with self.assertRaisesRegex(ValueError, "current Muon"):
             optimizer.load_state_dict(matching_mutated_state)
         optimizer.param_groups[0]["param_names"] = original_param_names
         hook_events.clear()
@@ -413,7 +453,7 @@ class TestDistMuon(DTensorTestBase):
         local_parameter = torch.nn.Parameter(
             distribute_tensor(value.clone(), mesh, (Replicate(),))
         )
-        local_optimizer = build_dist_muon(
+        local_optimizer = build_flex_shard_muon(
             [{"params": [local_parameter], "param_names": [fqn]}],
             compute_sharding_by_fqn={
                 fqn: ComputeLayout(
@@ -422,8 +462,9 @@ class TestDistMuon(DTensorTestBase):
             },
             bucket_configs=bucket_configs,
         )
-        self.assertEqual(len(local_optimizer._specs), 1)
-        local_spec = local_optimizer._specs[0]
+        local_integration = _get_muon_reshard_integration(local_optimizer)
+        self.assertEqual(len(local_integration._specs), 1)
+        local_spec = local_integration._specs[0]
         self.assertEqual(
             (
                 local_spec.redistribution_mesh_axis_names,
@@ -440,7 +481,7 @@ class TestDistMuon(DTensorTestBase):
         redistributed_parameter = torch.nn.Parameter(
             distribute_tensor(value.clone(), mesh, (Shard(0),))
         )
-        redistributed_optimizer = build_dist_muon(
+        redistributed_optimizer = build_flex_shard_muon(
             [{"params": [redistributed_parameter], "param_names": [fqn]}],
             compute_sharding_by_fqn={
                 fqn: ComputeLayout(
@@ -449,16 +490,19 @@ class TestDistMuon(DTensorTestBase):
             },
             bucket_configs=bucket_configs,
         )
+        redistributed_integration = _get_muon_reshard_integration(
+            redistributed_optimizer
+        )
         self.assertEqual(
             tuple(
                 spec.redistribution_mesh_axis_names
-                for spec in redistributed_optimizer._specs
+                for spec in redistributed_integration._specs
             ),
             (("dp_shard",),),
         )
 
         with self.assertRaisesRegex(ValueError, "matching BucketConfigs declare"):
-            build_dist_muon(
+            build_flex_shard_muon(
                 [{"params": [local_parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(
@@ -469,7 +513,7 @@ class TestDistMuon(DTensorTestBase):
             )
 
         with self.assertRaisesRegex(ValueError, "matches multiple BucketConfigs"):
-            build_dist_muon(
+            build_flex_shard_muon(
                 [{"params": [local_parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(
@@ -501,7 +545,7 @@ class TestDistMuon(DTensorTestBase):
         )
 
         with self.assertRaisesRegex(ValueError, "incompatible routes"):
-            build_dist_muon(
+            build_flex_shard_muon(
                 [{"params": parameters, "param_names": fqns}],
                 compute_sharding_by_fqn={fqn: replicated_compute for fqn in fqns},
                 bucket_configs=(
@@ -538,7 +582,7 @@ class TestDistMuon(DTensorTestBase):
             shardings_by_mesh_axis={"dp_shard": Owned()},
         )
 
-        permuted_optimizer = build_dist_muon(
+        permuted_optimizer = build_flex_shard_muon(
             [{"params": (second,), "param_names": (second_fqn,)}],
             compute_sharding_by_fqn={second_fqn: owned_compute},
             bucket_configs=(
@@ -548,13 +592,14 @@ class TestDistMuon(DTensorTestBase):
                 ),
             ),
         )
-        permuted_plan = permuted_optimizer._bucket_plans[0]
+        permuted_integration = _get_muon_reshard_integration(permuted_optimizer)
+        permuted_plan = permuted_integration._bucket_plans[0]
         self.assertIsInstance(permuted_plan, _RedistributionBucketPlan)
         permuted_plan = cast(_RedistributionBucketPlan, permuted_plan)
         self.assertEqual(permuted_plan.group.participant_by_shard_index, (1, 0))
 
         with self.assertRaisesRegex(ValueError, "participant-by-shard-index"):
-            build_dist_muon(
+            build_flex_shard_muon(
                 [{"params": (first, second), "param_names": (first_fqn, second_fqn)}],
                 compute_sharding_by_fqn={
                     first_fqn: owned_compute,
@@ -598,7 +643,7 @@ class TestDistMuon(DTensorTestBase):
         )
 
         with self.assertRaisesRegex(ValueError, "uses torch.float32"):
-            build_dist_muon(
+            build_flex_shard_muon(
                 [{"params": parameters, "param_names": fqns}],
                 compute_sharding_by_fqn={fqn: owned_compute for fqn in fqns},
                 bucket_configs=(
@@ -646,7 +691,7 @@ class TestDistMuon(DTensorTestBase):
                     "dp_shard": BlockShard(dim=0, block_size=5),
                 }
             )
-            optimizer = build_dist_muon(
+            optimizer = build_flex_shard_muon(
                 [
                     {
                         "params": [
@@ -690,9 +735,10 @@ class TestDistMuon(DTensorTestBase):
                     ),
                 ],
             )
-            self.assertEqual(len(optimizer._specs), 2)
-            self.assertEqual(len(optimizer._bucket_plans), 1)
-            overlap = optimizer._bucket_plans[0]
+            integration = _get_muon_reshard_integration(optimizer)
+            self.assertEqual(len(integration._specs), 2)
+            self.assertEqual(len(integration._bucket_plans), 1)
+            overlap = integration._bucket_plans[0]
             self.assertIsInstance(overlap, _BucketOverlapPlan)
             overlap = cast(_BucketOverlapPlan, overlap)
             self.assertEqual(
@@ -786,8 +832,8 @@ class TestDistMuon(DTensorTestBase):
         redistributed = make_parameter(redistributed_value)
         stacks = {name: make_parameter(value) for name, value in values.items()}
         optimizer = make_optimizer(redistributed, stacks)
-        self.assertIs(type(optimizer), DistMuon)
-        with self.assertRaisesRegex(RuntimeError, "parameter groups are frozen"):
+        self.assertIs(type(optimizer), torch.optim.Muon)
+        with self.assertRaisesRegex(RuntimeError, "after registering"):
             optimizer.add_param_group({"params": []})
 
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
@@ -912,7 +958,7 @@ class TestDistMuon(DTensorTestBase):
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
-class TestDistMuonMultiMesh(DTensorTestBase):
+class TestFlexShardMuonMultiMesh(DTensorTestBase):
     @property
     def world_size(self):
         return 4
@@ -936,11 +982,11 @@ class TestDistMuonMultiMesh(DTensorTestBase):
             placements: tuple[Replicate | Shard, Replicate | Shard],
             compute_layout: ComputeLayout,
             redistribution_mesh_axis_names: tuple[str, ...] = ("dp_shard",),
-        ) -> DistMuon:
+        ) -> torch.optim.Muon:
             parameter = torch.nn.Parameter(
                 distribute_tensor(value.clone(), mesh, placements)
             )
-            return build_dist_muon(
+            return build_flex_shard_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={fqn: compute_layout},
                 bucket_configs=[
@@ -959,8 +1005,9 @@ class TestDistMuonMultiMesh(DTensorTestBase):
                 }
             ),
         )
-        self.assertIs(type(optimizer), DistMuon)
-        compute_layout = optimizer._require_optimizer_reshard_binding().plan_items[0]
+        self.assertIs(type(optimizer), torch.optim.Muon)
+        integration = _get_muon_reshard_integration(optimizer)
+        compute_layout = integration._require_optimizer_reshard_binding().plan_items[0]
         self.assertFalse(compute_layout.storage_is_compute_ready)
         self.assertEqual(compute_layout.redistribution_storage_mesh_axes, (1,))
 
@@ -1010,7 +1057,7 @@ class TestDistMuonMultiMesh(DTensorTestBase):
         )
 
         with self.assertRaisesRegex(ValueError, "requires redistribution axes"):
-            build_dist_muon(
+            build_flex_shard_muon(
                 [{"params": (dense, expert), "param_names": (dense_fqn, expert_fqn)}],
                 compute_sharding_by_fqn={
                     dense_fqn: ComputeLayout(
@@ -1046,7 +1093,7 @@ class TestDistMuonMultiMesh(DTensorTestBase):
             NotImplementedError,
             "cannot combine Owned and placement redistribution",
         ):
-            build_dist_muon(
+            build_flex_shard_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(
@@ -1162,7 +1209,7 @@ class TestDistMuonMultiMesh(DTensorTestBase):
             for fqn, value in sparse_values.items()
         }
         dense_fqn = "layers.0.dense"
-        optimizer = build_dist_muon(
+        optimizer = build_flex_shard_muon(
             [
                 {
                     "params": [dense, jointly_assigned, *sparse.values()],
@@ -1232,8 +1279,9 @@ class TestDistMuonMultiMesh(DTensorTestBase):
                 ),
             ],
         )
+        integration = _get_muon_reshard_integration(optimizer)
         self.assertEqual(
-            tuple(spec.redistribution_mesh_axis_names for spec in optimizer._specs),
+            tuple(spec.redistribution_mesh_axis_names for spec in integration._specs),
             (
                 ("dp_shard",),
                 ("efsdp", "ep"),
@@ -1244,7 +1292,7 @@ class TestDistMuonMultiMesh(DTensorTestBase):
             ),
         )
         redistribution_buckets = []
-        for bucket_plan in optimizer._bucket_plans:
+        for bucket_plan in integration._bucket_plans:
             self.assertIsInstance(bucket_plan, _RedistributionBucketPlan)
             redistribution_buckets.append(bucket_plan)
 
@@ -1425,7 +1473,7 @@ class TestDistMuonMultiMesh(DTensorTestBase):
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 8, "requires eight CUDA devices")
-class TestDistMuonJointOwnedValidation(DTensorTestBase):
+class TestFlexShardMuonJointOwnedValidation(DTensorTestBase):
     @property
     def world_size(self):
         return 8
@@ -1456,7 +1504,7 @@ class TestDistMuonJointOwnedValidation(DTensorTestBase):
             ("ep", "efsdp"),
         )
 
-        optimizer = build_dist_muon(
+        optimizer = build_flex_shard_muon(
             [{"params": (parameter,), "param_names": (fqn,)}],
             compute_sharding_by_fqn={
                 fqn: ComputeLayout(
@@ -1475,8 +1523,9 @@ class TestDistMuonJointOwnedValidation(DTensorTestBase):
             ),
         )
 
-        self.assertEqual(len(optimizer._bucket_plans), 1)
-        plan = optimizer._bucket_plans[0]
+        integration = _get_muon_reshard_integration(optimizer)
+        self.assertEqual(len(integration._bucket_plans), 1)
+        plan = integration._bucket_plans[0]
         self.assertIsInstance(plan, _RedistributionBucketPlan)
         expected_participant_by_shard_index = stage_mesh.mesh
         if pp_rank == 1:
@@ -1510,7 +1559,7 @@ class TestDistMuonJointOwnedValidation(DTensorTestBase):
             NotImplementedError,
             "cannot preserve non-replicated mesh axis 'dp_replicate'",
         ):
-            build_dist_muon(
+            build_flex_shard_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(

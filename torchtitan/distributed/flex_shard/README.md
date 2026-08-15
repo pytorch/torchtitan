@@ -3,7 +3,8 @@
 FlexShard provides PyTorch-native building blocks for running optimizer compute
 with layouts that differ from persistent DTensor parameter storage layouts. It
 plans packed storage-to-compute redistribution and overlaps communication with
-optimizer work. DistMuon is its initial consumer.
+optimizer work. Its Muon integration configures an exact `torch.optim.Muon`
+instance through supported PyTorch execution and tensor-operation APIs.
 
 ## Public API
 
@@ -17,20 +18,19 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `DistMuon` is the optimizer implementation used by the initial FlexShard
-  integration.
 - `flex_optimizer_reshard` binds a supported optimizer to its per-parameter
   compute shardings and physical buckets without replacing the optimizer
   object, its exact type, or its declared `step` method.
-- `build_dist_muon` is the convenience construction path. It constructs
-  `DistMuon` and binds optimizer-agnostic per-parameter `ComputeLayout` values
-  in `compute_sharding_by_fqn` through `flex_optimizer_reshard`. Within
-  DistMuon, `BlockShard(dim=0, block_size=R)` interprets a 2D parameter
+- `build_flex_shard_muon` is the convenience construction path. It constructs
+  an exact `torch.optim.Muon` and binds optimizer-agnostic per-parameter
+  `ComputeLayout` values in `compute_sharding_by_fqn` through
+  `flex_optimizer_reshard`.
+- `BlockShard(dim=0, block_size=R)` interprets a 2D parameter
   `[M * R, C]` as `M` independent matrices `[M, R, C]`. FlexShard routes the
-  flat 2D compute tensor, and DistMuon applies the local matrix-batch view
-  immediately before Muon compute. A native 3D `[M, R, C]` parameter can use
-  `Shard(0)` to distribute complete matrices. A 2D parameter without
-  `BlockShard` must use whole-matrix compute such as `Owned`.
+  flat 2D compute tensor, and the private Muon integration applies the local
+  matrix-batch view immediately before Muon compute. A native 3D `[M, R, C]`
+  parameter can use `Shard(0)` to distribute complete matrices. A 2D parameter
+  without `BlockShard` must use whole-matrix compute such as `Owned`.
 
 Storage placements describe persistent ownership only; they do not define
 Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
@@ -47,8 +47,7 @@ The [Kimi configuration registry](../../models/kimi_k2_7/config_registry.py)
 is the first TorchTitan integration. Its shared optimizer configuration:
 
 - Selects matrix parameters from attention, dense MLPs, routed and shared
-  experts, and routers for DistMuon. Other parameters continue to use
-  AdamW.
+  experts, and routers for Muon. Other parameters continue to use AdamW.
 - Defines each selected parameter's compute layout, including per-head Muon
   for compatible attention projections.
 - Groups layers into buckets so compute-ready work can overlap packed
