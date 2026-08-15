@@ -11,8 +11,6 @@ from tests.integration_tests import OverrideDefinitions
 
 
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Use ``backend`` for every variant."""
-
     test_name = f"{t.test_name}_{backend}"
     new_args = []
     for variant in t.override_args:
