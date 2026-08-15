@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -13,7 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -29,6 +27,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.multimodal import multimodal_context
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -357,19 +356,6 @@ class MuseGlimmerModel(Decoder):
             config.vision_adapter.build() if config.vision_adapter is not None else None
         )
 
-    def multimodal_context(self) -> contextlib.AbstractContextManager[None]:
-        """Use a DP-local mesh while preparing multimodal inputs.
-
-        Under spmd_types, the vision encoder and the vision->text scatter run
-        per-DP-rank on that rank's own images: the pixel tensors are DP-local
-        (``V@DP``), so the region must execute with DP treated as a local axis.
-        After the scatter the tensor is token-aligned again and global DP batch
-        sharding resumes. Mirrors qwen3_5/kimi_k2_7's ``multimodal_context``.
-        """
-        if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
-            return spmd.set_current_mesh(local_axes=("dp",))
-        return contextlib.nullcontext()
-
     def _get_vision_features(
         self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
     ) -> torch.Tensor:
@@ -476,7 +462,7 @@ class MuseGlimmerModel(Decoder):
         # tok_embeddings) and inject vision features before the decoder layers.
         # On non-embedding pipeline stages tok_embeddings is None and the input
         # is already hidden states, so injection is skipped there.
-        with self.multimodal_context():
+        with multimodal_context():
             if get_spmd_backend() == "spmd_types":
                 from .sharding import annotate_muse_glimmer_input_spmd_types
 
