@@ -267,22 +267,27 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--training.disable_cuda_graphs",
-                    # Consolidate the former 2-GPU FSDP smoke and 8-GPU
-                    # FSDP+TP+EP+PP test into one supported FSDP+EP path. Kimi
-                    # DistMuon rejects TP because it produces _StridedShard
-                    # storage. PP support follows in the next stack change.
+                    # One four-GPU smoke path covers PP=2, FSDP=2, and EP=2.
+                    # Each PP stage consumes its local subset of the global
+                    # DistMuon compute-sharding map. TP remains unsupported
+                    # because it can produce _StridedShard storage.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
                     "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
+                    # Four microbatches match the four virtual pipeline stages.
+                    "--training.local_batch_size 4",
                     "--training.steps 1",
                 ],
             ],
-            "Kimi K2.7 DistMuon spmd_types FSDP+EP",
-            "kimi_k2_5_muon_fsdp+ep_spmd_types",
+            "Kimi K2.7 DistMuon PP+FSDP+EP",
+            "kimi_k2_5_muon_pp+fsdp+ep",
             ngpu=4,
+            timeout=600,
         ),
         # Integration Test Cases for Muse Glimmer
         OverrideDefinitions(

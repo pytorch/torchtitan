@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Literal
 
 import spmd_types as spmd
+from torch.distributed import ProcessGroup
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
@@ -512,6 +513,11 @@ class ParallelDims:
                 f"Ensure the corresponding parallelism dimension is {enabled_str}."
             )
         return mesh
+
+    def get_optional_process_group(self, axis: str) -> ProcessGroup | None:
+        """Get the process group for an enabled mesh axis, or None."""
+        mesh = self.get_optional_mesh(axis)
+        return None if mesh is None else mesh.get_group()
 
     def spmd_meshes(self) -> list[DeviceMesh]:
         """Valid full-SPMD meshes, restricted to enabled axes.
