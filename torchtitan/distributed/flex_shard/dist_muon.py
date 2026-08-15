@@ -201,6 +201,7 @@ def _initialize_dist_muon(
         )
         if compute_view is not None:
             if isinstance(param, DTensor):
+                _validate_matrix_batch_storage_placements(fqn, param)
                 _validate_matrix_batch_storage_alignment(fqn, param, compute_view)
         if compute_view is None:
             compute_view_key = ("identity",)
@@ -695,12 +696,11 @@ class _MatrixBatchView:
         return compute_tensor.unflatten(0, matrix_batch_shape[:2])
 
 
-def _validate_matrix_batch_storage_alignment(
+def _validate_matrix_batch_storage_placements(
     fqn: str,
     param: DTensor,
-    compute_view: _MatrixBatchView,
 ) -> None:
-    """Validate that storage shards already preserve matrix boundaries."""
+    """Validate placements supported by matrix-batch storage."""
     for mesh_axis_size, placement in zip(
         param.device_mesh.shape,
         param.placements,
@@ -719,6 +719,13 @@ def _validate_matrix_batch_storage_alignment(
                 "requires shards along tensor dimension 0"
             )
 
+
+def _validate_matrix_batch_storage_alignment(
+    fqn: str,
+    param: DTensor,
+    compute_view: _MatrixBatchView,
+) -> None:
+    """Validate that storage shards already preserve matrix boundaries."""
     matrix_rows = compute_view.matrix_rows
     # Every rank must validate all coordinates before DistMuon performs
     # collectives; checking only the local shard could strand its peers.

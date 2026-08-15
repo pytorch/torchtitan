@@ -30,7 +30,9 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
 Storage placements describe persistent ownership only; they do not define
 Muon matrix boundaries. Flat `BlockShard` compute currently accepts exact
 `Shard(0)` or `Replicate` storage. At most one mesh axis may require
-redistribution, and preserved storage axes must be replicated.
+redistribution, and preserved storage axes must be replicated. Every
+`Shard(0)` storage shard boundary must currently align with a `BlockShard`
+boundary.
 
 Compute sharding is reconstruction configuration. It is validated and frozen
 when the optimizer is built, but is not stored in its state dict; checkpoint
