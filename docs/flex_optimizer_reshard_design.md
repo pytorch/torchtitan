@@ -12,7 +12,7 @@ This implementation consumes the supported PyTorch step-executor API and
 public phased Muon operations described below. It fails during configuration,
 before process-group or planning side effects, when the installed PyTorch does
 not provide those APIs. The historical rollout sections retain the design-only
-name `DistributedMuon` for the implementation removed by this change; it is not an
+name `DistMuon` for the implementation removed by this change; it is not an
 exported or selectable optimizer.
 
 ## Motivation
@@ -72,11 +72,11 @@ The removed API had this public signature:
 
 ```python
 def flex_optimizer_reshard(
-    optimizer: DistributedMuon,
+    optimizer: DistMuon,
     *,
-    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
-) -> DistributedMuon:
+) -> DistMuon:
     ...
 ```
 
@@ -87,7 +87,7 @@ called PyTorch's private `Optimizer._patch_step_function()` so the new mixin's
 
 That mechanism had several problems:
 
-- The generic-looking API rejected every optimizer except `DistributedMuon`.
+- The generic-looking API rejected every optimizer except `DistMuon`.
 - The exact Python class changed after construction.
 - It depended on a private PyTorch method.
 - Whole-optimizer pickling was unsupported.
@@ -144,11 +144,11 @@ The historical Phase 1 call was explicit about the self-hosted optimizer:
 
 ```python
 def flex_optimizer_reshard(
-    optimizer: DistributedMuon,
+    optimizer: DistMuon,
     *,
-    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
-) -> DistributedMuon:
+) -> DistMuon:
     """Configure a supported optimizer for FlexShard redistribution.
 
     Return the same optimizer object. Configuration freezes parameter
@@ -163,17 +163,17 @@ shape did not need to change for the stock-Muon integration.
 During the historical Phase 1, the package root exported:
 
 - `flex_optimizer_reshard`
-- `DistributedMuon`
-- `build_distributed_muon`
+- `DistMuon`
+- `build_dist_muon`
 - The existing compute-layout and physical-bucket configuration types
 
-`build_distributed_muon` was a convenience composition:
+`build_dist_muon` was a convenience composition:
 
 ```python
-def build_distributed_muon(...):
-    prepared_params = _prepare_named_param_groups(...)
+def build_dist_muon(...):
+    normalized_param_groups = _prepare_named_param_groups(...)
     return flex_optimizer_reshard(
-        DistributedMuon(prepared_params, **optimizer_kwargs),
+        DistMuon(normalized_param_groups, **optimizer_kwargs),
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
     )
@@ -190,22 +190,26 @@ The current supported signature uses stock Muon:
 def flex_optimizer_reshard(
     optimizer: torch.optim.Muon,
     *,
-    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
 ) -> torch.optim.Muon:
     """Configure this Muon instance to execute through FlexShard."""
 ```
 
 The final FlexShard package exports `flex_optimizer_reshard` and the existing
-compute-sharding and bucket configuration types. It no longer exports a
-`DistributedMuon` optimizer class. TorchTitan retains
+`BlockShard`, compute-sharding, and bucket configuration types. A flat 2D
+parameter uses `BlockShard(dim=0, block_size=R)` to declare complete Muon
+matrix boundaries. The private Muon integration derives the local
+matrix-batch view from that placement; there is no public compute-view wrapper
+or separate matrix-count configuration. The package no longer exports a
+`DistMuon` optimizer class. TorchTitan retains
 `build_flex_shard_muon` as its construction factory:
 
 ```python
 def build_flex_shard_muon(...):
-    prepared_params = _prepare_named_param_groups(...)
+    normalized_param_groups = _normalize_param_groups(...)
     return flex_optimizer_reshard(
-        torch.optim.Muon(prepared_params, **optimizer_kwargs),
+        torch.optim.Muon(normalized_param_groups, **optimizer_kwargs),
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
     )
@@ -226,11 +230,11 @@ assert configured_optimizer is optimizer
 assert type(configured_optimizer) is original_type
 ```
 
-Historical Phase 1 satisfied this contract because `DistributedMuon` declared
+Historical Phase 1 satisfied this contract because `DistMuon` declared
 `step()` normally. Its shape was conceptually:
 
 ```python
-class DistributedMuon(Optimizer):
+class DistMuon(Optimizer):
     _optimizer_reshard_binding: _MuonReshardBinding | None
 
     @torch.no_grad()
@@ -275,7 +279,7 @@ Current PyTorch optimizer pre- and post-step hooks are insufficient: they can
 observe or modify step arguments, but they cannot report that the original
 step body was fully handled. Calling stock `Muon.step()` after FlexShard has
 updated a bucket would apply the update twice. A supported upstream execution
-seam is therefore a prerequisite for removing `DistributedMuon`.
+seam is therefore a prerequisite for removing `DistMuon`.
 
 ### Required PyTorch step-execution seam
 
@@ -377,14 +381,14 @@ is not required for this migration.
 ## Internal integration and binding
 
 In Phase 1, successful configuration installs one private, per-instance
-binding owned by `DistributedMuon`:
+binding owned by `DistMuon`:
 
 ```python
 @dataclass(slots=True)
 class _MuonReshardBinding(
     _LocalBucketExecutor[_ParameterComputeLayout]
 ):
-    optimizer: DistributedMuon
+    optimizer: DistMuon
     bucket_specs: tuple[_BucketSpec, ...]
     plans: tuple[_BucketExecutionPlan[_ParameterComputeLayout], ...]
     plan_items: tuple[_ParameterComputeLayout, ...]
@@ -503,7 +507,7 @@ The FlexShard integration owns when and on which temporary layout each phase
 runs.
 
 For the first restoration, this boundary remains a private optimizer hook on
-`DistributedMuon`. The final implementation instead uses a private FlexShard
+`DistMuon`. The final implementation instead uses a private FlexShard
 registry keyed by explicitly supported optimizer types. Conceptually:
 
 ```python
@@ -654,7 +658,7 @@ optimizer is accepted.
 
 ## Feature-parity and removal gate
 
-The migration treated deleting `DistributedMuon` as its last step, not as the
+The migration treated deleting `DistMuon` as its last step, not as the
 mechanism for forcing completion. The stock-Muon path first had to preserve
 these contracts.
 
@@ -725,7 +729,7 @@ these contracts.
 
 - A 2D compute-ready path matches stock `torch.optim.Muon` exactly when both
   use the same upstream kernels and schedule.
-- Redistributed 2D paths match the current `DistributedMuon` update after
+- Redistributed 2D paths match the current `DistMuon` update after
   gathering persistent parameters and momentum.
 - Batched expert and per-head views remain mathematically equivalent to one
   stock Muon update per logical matrix. Any accepted tolerance must be limited
@@ -749,8 +753,8 @@ Phase 1 retains focused tests for the restored front door:
   and numerical results.
 - Repeated configuration raises `ValueError`.
 - An unsupported optimizer raises `TypeError`.
-- Calling an unconfigured `DistributedMuon.step()` raises a clear error.
-- Failed configuration does not leave a binding installed.
+- An unconfigured stock `torch.optim.Muon` keeps its normal step behavior.
+- Failed configuration does not install a binding or executor.
 - Parameter groups cannot be added after configuration.
 - Optimizer pre/post hooks and LR schedulers still work.
 - `state_dict()` and `load_state_dict()` rebuild planning-dependent buffers
@@ -809,19 +813,19 @@ from Phase 3. The intermediate phases need not land as separate commits.
 ### Phase 1: restore the stable front door
 
 - Add and export `flex_optimizer_reshard`.
-- Export `DistributedMuon` for explicit construction.
+- Export `DistMuon` for explicit construction.
 - Add the private binding and use-once state.
-- Keep `DistributedMuon.step()` as the declared optimizer method.
-- Implement `build_distributed_muon` through the restored function.
+- Keep `DistMuon.step()` as the declared optimizer method.
+- Implement `build_dist_muon` through the restored function.
 - Add lifecycle, identity, hook, and state-dict tests.
 
 ### Phase 2: externalize the Muon integration
 
 - Move preflight validation, compute-layout resolution, planning callbacks,
   state access, local batching, and checkpoint rebuilding from
-  `DistributedMuon` methods into `_MuonReshardIntegration` and
+  `DistMuon` methods into `_MuonReshardIntegration` and
   `_MuonReshardBinding`.
-- Keep `DistributedMuon.step()` temporarily as a thin host for the extracted
+- Keep `DistMuon.step()` temporarily as a thin host for the extracted
   integration so this refactor can be tested without changing the public
   optimizer type at the same time.
 - Keep the existing Muon mathematics temporarily so this phase is a structural
@@ -850,7 +854,7 @@ not an acceptable intermediate dependency.
   supported upstream phased operations.
 - Register `_MuonReshardIntegration` through the upstream execution seam only
   after binding compilation and validation succeed.
-- Reuse the former `DistributedMuon` acceptance coverage for configured stock
+- Reuse the former `DistMuon` acceptance coverage for configured stock
   Muon and compare parameters, momentum, placements, collectives, and
   checkpoint continuation with plain stock Muon where applicable.
 - Add deterministic TorchTitan before/after numerical evidence for the Kimi
@@ -859,20 +863,20 @@ not an acceptable intermediate dependency.
 
 ### Phase 5: switch TorchTitan to stock Muon
 
-- Change `build_distributed_muon` to construct and return
+- Change `build_dist_muon` to construct and return
   `torch.optim.Muon`, then configure that object with
   `flex_optimizer_reshard`.
 - Switch the TorchTitan optimizer registry and Kimi integration to the stock
   object. Retain an old configuration-name alias only for an explicit
   deprecation window if compatibility requires it.
-- Retain `DistributedMuon` temporarily as a differential oracle rather than a
+- Retain `DistMuon` temporarily as a differential oracle rather than a
   selectable production fallback.
 - Update the minimum PyTorch version and fail clearly on older versions; do
   not silently select the self-hosted optimizer.
 
 ### Phase 6: remove the self-hosted optimizer
 
-- Remove the `DistributedMuon` class, its export, its constructor-only tests,
+- Remove the `DistMuon` class, its export, its constructor-only tests,
   and the self-hosted `_adjust_muon_learning_rate`, `_prepare_muon_input`,
   `_compute_muon_direction`, `_apply_muon_update`, and
   `_zeropower_via_newtonschulz` implementations.

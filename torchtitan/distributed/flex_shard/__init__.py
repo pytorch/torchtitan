@@ -6,12 +6,9 @@
 
 """Flexible storage-to-compute redistribution APIs."""
 
-from .muon import (
-    AttentionPerHeadComputeView,
-    build_flex_shard_muon,
-    MuonComputeShardingConfig,
-)
+from .muon import build_flex_shard_muon
 from .optimizer_reshard import (
+    BlockShard,
     BucketConfig,
     ComputeLayout,
     flex_optimizer_reshard,
@@ -20,12 +17,11 @@ from .optimizer_reshard import (
 )
 
 __all__ = [
-    "AttentionPerHeadComputeView",
+    "BlockShard",
     "build_flex_shard_muon",
     "BucketConfig",
     "ComputeLayout",
     "flex_optimizer_reshard",
-    "MuonComputeShardingConfig",
     "NoRedistribution",
     "Owned",
 ]

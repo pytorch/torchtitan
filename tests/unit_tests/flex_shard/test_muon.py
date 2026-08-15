@@ -23,12 +23,11 @@ from torchtitan.components.checkpoint_utils import (
 )
 from torchtitan.distributed.flex_shard import (
     _optimizer_reshard_runtime,
-    AttentionPerHeadComputeView,
+    BlockShard,
     BucketConfig,
     build_flex_shard_muon,
     ComputeLayout,
     flex_optimizer_reshard,
-    MuonComputeShardingConfig,
     NoRedistribution,
     Owned,
 )
@@ -41,8 +40,6 @@ from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
 )
 from torchtitan.distributed.flex_shard.muon import (
     _get_muon_reshard_integration,
-    _resolve_mesh_axis_participant_distribution,
-    _ResolvedBatchedMatrixView,
 )
 
 
@@ -61,91 +58,6 @@ def _adjust_muon_learning_rate(
     else:
         raise ValueError(f"unsupported adjust_lr_fn {adjust_lr_fn!r}")
     return lr * ratio
-
-
-class TestBatchedMatrixParticipantDistribution(unittest.TestCase):
-    @staticmethod
-    def _canonical_regions(
-        *,
-        num_heads: int,
-        matrix_rows: int,
-        matrix_columns: int,
-        num_participants: int,
-    ):
-        view = _ResolvedBatchedMatrixView(
-            matrix_rows=matrix_rows,
-            matrix_columns=matrix_columns,
-        )
-        storage = _resolve_mesh_axis_participant_distribution(
-            torch.Size((num_heads * matrix_rows, matrix_columns)),
-            Shard(0),
-            mesh_axis_size=num_participants,
-            canonicalize_region=lambda region: region,
-        )
-        compute = _resolve_mesh_axis_participant_distribution(
-            torch.Size((num_heads, matrix_rows, matrix_columns)),
-            Shard(0),
-            mesh_axis_size=num_participants,
-            canonicalize_region=view.canonical_storage_region,
-        )
-        return storage.canonical_regions_by_coordinate, (
-            compute.canonical_regions_by_coordinate
-        )
-
-    def test_aligned_storage_matches_compute_ownership(self):
-        storage, compute = self._canonical_regions(
-            num_heads=4,
-            matrix_rows=3,
-            matrix_columns=2,
-            num_participants=2,
-        )
-        self.assertEqual(storage, compute)
-        self.assertEqual(
-            tuple((region.offsets, region.shape) for region in compute),
-            (((0, 0), (6, 2)), ((6, 0), (6, 2))),
-        )
-
-    def test_split_head_changes_compute_ownership(self):
-        storage, compute = self._canonical_regions(
-            num_heads=3,
-            matrix_rows=4,
-            matrix_columns=2,
-            num_participants=2,
-        )
-        self.assertEqual(
-            tuple((region.offsets, region.shape) for region in storage),
-            (((0, 0), (6, 2)), ((6, 0), (6, 2))),
-        )
-        self.assertEqual(
-            tuple((region.offsets, region.shape) for region in compute),
-            (((0, 0), (8, 2)), ((8, 0), (4, 2))),
-        )
-
-    def test_heads_fewer_than_participants_have_empty_compute_regions(self):
-        storage, compute = self._canonical_regions(
-            num_heads=2,
-            matrix_rows=4,
-            matrix_columns=2,
-            num_participants=4,
-        )
-        self.assertEqual(tuple(region.shape[0] for region in storage), (2, 2, 2, 2))
-        self.assertEqual(tuple(region.shape[0] for region in compute), (4, 4, 0, 0))
-
-    def test_uneven_storage_and_compute_partitions(self):
-        storage, compute = self._canonical_regions(
-            num_heads=5,
-            matrix_rows=3,
-            matrix_columns=2,
-            num_participants=4,
-        )
-        self.assertEqual(
-            tuple((region.offsets[0], region.shape[0]) for region in storage),
-            ((0, 4), (4, 4), (8, 4), (12, 3)),
-        )
-        self.assertEqual(
-            tuple((region.offsets[0], region.shape[0]) for region in compute),
-            ((0, 6), (6, 6), (12, 3), (15, 0)),
-        )
 
 
 class TestBucketConfig(unittest.TestCase):
@@ -311,7 +223,7 @@ class TestFlexOptimizerReshard(unittest.TestCase):
         bucket_configs: tuple[BucketConfig, ...] = ()
 
         with patch(
-            "torchtitan.distributed.flex_shard.muon." "_configure_muon_reshard",
+            "torchtitan.distributed.flex_shard.muon._configure_muon_reshard",
             autospec=True,
         ) as configure:
             configured = flex_optimizer_reshard(
@@ -384,10 +296,8 @@ class TestFlexOptimizerReshard(unittest.TestCase):
             flex_optimizer_reshard(
                 optimizer,
                 compute_sharding_by_fqn={
-                    fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"dp_shard": Replicate()},
-                        )
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Replicate()},
                     )
                 },
                 bucket_configs=(
@@ -420,58 +330,6 @@ class TestFlexShardMuon(DTensorTestBase):
         return "cuda"
 
     @with_comms
-    def test_aligned_storage_uses_local_compute_view(self):
-        num_heads = 4
-        matrix_rows = 3
-        matrix_columns = 2
-        mesh = init_device_mesh(
-            self.device_type,
-            (self.world_size,),
-            mesh_dim_names=("dp_shard",),
-        )
-        device = torch.device(self.device_type, self.rank)
-        value = torch.arange(
-            num_heads * matrix_rows * matrix_columns,
-            device=device,
-            dtype=torch.float32,
-        ).reshape(num_heads * matrix_rows, matrix_columns)
-        parameter = torch.nn.Parameter(distribute_tensor(value, mesh, (Shard(0),)))
-        fqn = "layers.0.attention.wq.weight"
-
-        optimizer = build_flex_shard_muon(
-            [{"params": [parameter], "param_names": [fqn]}],
-            compute_sharding_by_fqn={
-                fqn: MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Shard(0)},
-                    ),
-                    compute_view=AttentionPerHeadComputeView(num_heads=num_heads),
-                )
-            },
-            bucket_configs=[
-                BucketConfig(
-                    patterns=(fqn,),
-                    redistribution_mesh_axis_names=NoRedistribution(),
-                )
-            ],
-        )
-
-        integration = _get_muon_reshard_integration(optimizer)
-        compute_layout = integration._require_optimizer_reshard_binding().plan_items[0]
-        local_storage_view = compute_layout.local_storage_view
-        self.assertTrue(compute_layout.storage_is_compute_ready)
-        self.assertIsNotNone(local_storage_view)
-        assert local_storage_view is not None
-        self.assertEqual(
-            local_storage_view.shape,
-            (num_heads // self.world_size, matrix_rows, matrix_columns),
-        )
-        self.assertEqual(
-            local_storage_view.data_ptr(),
-            parameter.to_local().data_ptr(),
-        )
-
-    @with_comms
     def test_explicit_replicated_compute(self):
         lr = 0.03
         weight_decay = 0.2
@@ -487,12 +345,10 @@ class TestFlexShardMuon(DTensorTestBase):
         )
         fqn = "layers.0.replicated"
         compute_sharding_by_fqn = {
-            fqn: MuonComputeShardingConfig(
-                compute_layout=ComputeLayout(
-                    shardings_by_mesh_axis={
-                        "dp_shard": Replicate(),
-                    },
-                )
+            fqn: ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": Replicate(),
+                },
             )
         }
         bucket_configs = (
@@ -602,10 +458,8 @@ class TestFlexShardMuon(DTensorTestBase):
         local_optimizer = build_flex_shard_muon(
             [{"params": [local_parameter], "param_names": [fqn]}],
             compute_sharding_by_fqn={
-                fqn: MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Replicate()},
-                    )
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Replicate()},
                 )
             },
             bucket_configs=bucket_configs,
@@ -632,10 +486,8 @@ class TestFlexShardMuon(DTensorTestBase):
         redistributed_optimizer = build_flex_shard_muon(
             [{"params": [redistributed_parameter], "param_names": [fqn]}],
             compute_sharding_by_fqn={
-                fqn: MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Owned()},
-                    )
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Owned()},
                 )
             },
             bucket_configs=bucket_configs,
@@ -655,10 +507,8 @@ class TestFlexShardMuon(DTensorTestBase):
             build_flex_shard_muon(
                 [{"params": [local_parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
-                    fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"dp_shard": Replicate()},
-                        )
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Replicate()},
                     )
                 },
                 bucket_configs=(bucket_configs[0],),
@@ -668,10 +518,8 @@ class TestFlexShardMuon(DTensorTestBase):
             build_flex_shard_muon(
                 [{"params": [local_parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
-                    fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"dp_shard": Replicate()},
-                        )
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Replicate()},
                     )
                 },
                 bucket_configs=(bucket_configs[1], bucket_configs[1]),
@@ -694,10 +542,8 @@ class TestFlexShardMuon(DTensorTestBase):
             torch.nn.Parameter(distribute_tensor(value, mesh, (Shard(0),)))
             for value in values
         )
-        replicated_compute = MuonComputeShardingConfig(
-            compute_layout=ComputeLayout(
-                shardings_by_mesh_axis={"dp_shard": Replicate()},
-            )
+        replicated_compute = ComputeLayout(
+            shardings_by_mesh_axis={"dp_shard": Replicate()},
         )
 
         with self.assertRaisesRegex(ValueError, "incompatible routes"):
@@ -734,10 +580,8 @@ class TestFlexShardMuon(DTensorTestBase):
         second = torch.nn.Parameter(
             distribute_tensor(value.clone(), permuted_mesh, (Shard(0),))
         )
-        owned_compute = MuonComputeShardingConfig(
-            compute_layout=ComputeLayout(
-                shardings_by_mesh_axis={"dp_shard": Owned()},
-            )
+        owned_compute = ComputeLayout(
+            shardings_by_mesh_axis={"dp_shard": Owned()},
         )
 
         permuted_optimizer = build_flex_shard_muon(
@@ -796,10 +640,8 @@ class TestFlexShardMuon(DTensorTestBase):
                 )
             ),
         )
-        owned_compute = MuonComputeShardingConfig(
-            compute_layout=ComputeLayout(
-                shardings_by_mesh_axis={"dp_shard": Owned()},
-            )
+        owned_compute = ComputeLayout(
+            shardings_by_mesh_axis={"dp_shard": Owned()},
         )
 
         with self.assertRaisesRegex(ValueError, "uses torch.float32"):
@@ -826,7 +668,7 @@ class TestFlexShardMuon(DTensorTestBase):
         device = torch.device(self.device_type, self.rank)
         stack_shapes = {
             # Two storage shards each own six rows, so their boundary splits
-            # the middle head matrix and exercises overshard redistribution.
+            # the middle matrix and exercises overshard redistribution.
             "layers.0.attention.oversharded": (3, 4, 3),
             # These aligned siblings remain local and share one batched NS call.
             "layers.0.attention.wq": (4, 5, 3),
@@ -842,17 +684,17 @@ class TestFlexShardMuon(DTensorTestBase):
             redistributed: torch.nn.Parameter,
             stacks: dict[str, torch.nn.Parameter],
             ns_steps: int = 2,
+            matrix_sharding: BlockShard | Shard | None = None,
         ):
             redistributed_fqn = "layers.0.redistributed"
             oversharded_fqn = "layers.0.attention.oversharded"
             aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
-            aligned_compute_sharding = MuonComputeShardingConfig(
-                compute_layout=ComputeLayout(
-                    shardings_by_mesh_axis={"dp_shard": Shard(0)},
-                ),
-                compute_view=AttentionPerHeadComputeView(
-                    num_heads=4,
-                ),
+            if matrix_sharding is None:
+                matrix_sharding = BlockShard(dim=0, block_size=4)
+            aligned_compute_sharding = ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_size=5),
+                }
             )
             optimizer = build_flex_shard_muon(
                 [
@@ -875,20 +717,14 @@ class TestFlexShardMuon(DTensorTestBase):
                 nesterov=True,
                 ns_steps=ns_steps,
                 compute_sharding_by_fqn={
-                    redistributed_fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={
-                                "dp_shard": Owned(),
-                            },
-                        )
+                    redistributed_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "alternate_mesh": BlockShard(dim=0, block_size=1),
+                            "dp_shard": Owned(),
+                        },
                     ),
-                    oversharded_fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"dp_shard": Shard(0)},
-                        ),
-                        compute_view=AttentionPerHeadComputeView(
-                            num_heads=3,
-                        ),
+                    oversharded_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": matrix_sharding},
                     ),
                     **{fqn: aligned_compute_sharding for fqn in aligned_fqns},
                 },
@@ -984,11 +820,11 @@ class TestFlexShardMuon(DTensorTestBase):
 
         values = {}
         start = 12
-        for name, (num_heads, rows, columns) in stack_shapes.items():
-            numel = num_heads * rows * columns
+        for name, (num_matrices, rows, columns) in stack_shapes.items():
+            numel = num_matrices * rows * columns
             values[name] = (
                 torch.arange(start, start + numel, device=device)
-                .reshape(num_heads * rows, columns)
+                .reshape(num_matrices * rows, columns)
                 .float()
                 .div_(10)
             )
@@ -999,9 +835,27 @@ class TestFlexShardMuon(DTensorTestBase):
         )
         redistributed = make_parameter(redistributed_value)
         stacks = {name: make_parameter(value) for name, value in values.items()}
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot be partitioned into 5-row Muon matrices",
+        ):
+            make_optimizer(
+                redistributed,
+                stacks,
+                matrix_sharding=BlockShard(dim=0, block_size=5),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "2D Muon compute cannot use Shard",
+        ):
+            make_optimizer(
+                redistributed,
+                stacks,
+                matrix_sharding=Shard(0),
+            )
         optimizer = make_optimizer(redistributed, stacks)
         self.assertIs(type(optimizer), torch.optim.Muon)
-        with self.assertRaisesRegex(RuntimeError, "step executor"):
+        with self.assertRaisesRegex(RuntimeError, "parameter groups are frozen"):
             optimizer.add_param_group({"params": []})
 
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
@@ -1136,6 +990,65 @@ class TestFlexShardMuonMultiMesh(DTensorTestBase):
         return "cuda"
 
     @with_comms
+    def test_matrix_batch_uses_one_active_mesh_axis(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(36, device=device, dtype=torch.float32).reshape(12, 3)
+        fqn = "layers.0.attention.wq.weight"
+
+        def make_optimizer(
+            placements: tuple[Replicate | Shard, Replicate | Shard],
+            compute_layout: ComputeLayout,
+            redistribution_mesh_axis_names: tuple[str, ...] = ("dp_shard",),
+        ) -> torch.optim.Muon:
+            parameter = torch.nn.Parameter(
+                distribute_tensor(value.clone(), mesh, placements)
+            )
+            return build_flex_shard_muon(
+                [{"params": [parameter], "param_names": [fqn]}],
+                compute_sharding_by_fqn={fqn: compute_layout},
+                bucket_configs=[
+                    BucketConfig(
+                        patterns=(fqn,),
+                        redistribution_mesh_axis_names=(redistribution_mesh_axis_names),
+                    )
+                ],
+            )
+
+        optimizer = make_optimizer(
+            (Replicate(), Shard(0)),
+            ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_size=4),
+                }
+            ),
+        )
+        self.assertIs(type(optimizer), torch.optim.Muon)
+        integration = _get_muon_reshard_integration(optimizer)
+        compute_layout = integration._require_optimizer_reshard_binding().plan_items[0]
+        self.assertFalse(compute_layout.storage_is_compute_ready)
+        self.assertEqual(compute_layout.redistribution_storage_mesh_axes, (1,))
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "multiple active mesh axes.*only one active BlockShard axis",
+        ):
+            make_optimizer(
+                (Shard(0), Shard(0)),
+                ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_replicate": BlockShard(dim=0, block_size=4),
+                        "dp_shard": BlockShard(dim=0, block_size=4),
+                    }
+                ),
+                ("dp_replicate", "dp_shard"),
+            )
+
+    @with_comms
     def test_rejects_missing_physical_bucket_axis_alternative(self):
         dense_mesh = init_device_mesh(
             self.device_type,
@@ -1169,15 +1082,11 @@ class TestFlexShardMuonMultiMesh(DTensorTestBase):
             build_flex_shard_muon(
                 [{"params": (dense, expert), "param_names": (dense_fqn, expert_fqn)}],
                 compute_sharding_by_fqn={
-                    dense_fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"dp_shard": Owned()},
-                        )
+                    dense_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Owned()},
                     ),
-                    expert_fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"efsdp": Shard(0)},
-                        )
+                    expert_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"efsdp": Shard(0)},
                     ),
                 },
                 bucket_configs=(
@@ -1209,13 +1118,11 @@ class TestFlexShardMuonMultiMesh(DTensorTestBase):
             build_flex_shard_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
-                    fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={
-                                "efsdp": Owned(),
-                                "ep": Replicate(),
-                            },
-                        )
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "efsdp": Owned(),
+                            "ep": Replicate(),
+                        },
                     )
                 },
                 bucket_configs=[
@@ -1337,46 +1244,34 @@ class TestFlexShardMuonMultiMesh(DTensorTestBase):
             nesterov=True,
             ns_steps=2,
             compute_sharding_by_fqn={
-                dense_fqn: MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={
-                            "dp_shard": Owned(),
-                        },
-                    )
+                dense_fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": Owned(),
+                    },
                 ),
-                jointly_assigned_fqn: MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={
-                            "efsdp": Owned(),
-                            "ep": Owned(),
-                        },
-                    )
+                jointly_assigned_fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "efsdp": Owned(),
+                        "ep": Owned(),
+                    },
                 ),
-                "layers.0.routed_experts.sharded": MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={"efsdp": Shard(0)},
-                    )
+                "layers.0.routed_experts.sharded": ComputeLayout(
+                    shardings_by_mesh_axis={"efsdp": Shard(0)},
                 ),
-                "layers.0.routed_experts.replicated": MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={
-                            "efsdp": Replicate(),
-                            "ep": Shard(0),
-                        },
-                    )
+                "layers.0.routed_experts.replicated": ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "efsdp": Replicate(),
+                        "ep": Shard(0),
+                    },
                 ),
-                "layers.0.routed_experts.repeated_shard": MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={"efsdp": Replicate()},
-                    )
+                "layers.0.routed_experts.repeated_shard": ComputeLayout(
+                    shardings_by_mesh_axis={"efsdp": Replicate()},
                 ),
-                fully_replicated_fqn: MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={
-                            "efsdp": Replicate(),
-                            "ep": Replicate(),
-                        },
-                    )
+                fully_replicated_fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "efsdp": Replicate(),
+                        "ep": Replicate(),
+                    },
                 ),
             },
             bucket_configs=[
@@ -1634,13 +1529,11 @@ class TestFlexShardMuonJointOwnedValidation(DTensorTestBase):
         optimizer = build_flex_shard_muon(
             [{"params": (parameter,), "param_names": (fqn,)}],
             compute_sharding_by_fqn={
-                fqn: MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={
-                            "efsdp": Owned(),
-                            "ep": Owned(),
-                        }
-                    )
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "efsdp": Owned(),
+                        "ep": Owned(),
+                    }
                 )
             },
             bucket_configs=tuple(
@@ -1691,109 +1584,17 @@ class TestFlexShardMuonJointOwnedValidation(DTensorTestBase):
             build_flex_shard_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
-                    fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={
-                                "efsdp": Owned(),
-                                "ep": Owned(),
-                            },
-                        )
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "efsdp": Owned(),
+                            "ep": Owned(),
+                        },
                     )
                 },
                 bucket_configs=[
                     BucketConfig(
                         patterns=(fqn,),
                         redistribution_mesh_axis_names=("efsdp", "ep"),
-                    )
-                ],
-            )
-
-
-@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
-class TestFlexShardMuonBatchedMatrixMesh(DTensorTestBase):
-    @property
-    def world_size(self):
-        return 4
-
-    @property
-    def device_type(self):
-        return "cuda"
-
-    @with_comms
-    def test_replicated_orthogonal_axis_preserves_ownership(self):
-        mesh = init_device_mesh(
-            self.device_type,
-            (2, 2),
-            mesh_dim_names=("dp_shard", "replicate"),
-        )
-        device = torch.device(self.device_type, self.rank)
-        value = torch.arange(36, device=device, dtype=torch.float32).reshape(12, 3)
-        parameter = torch.nn.Parameter(
-            distribute_tensor(value, mesh, (Shard(0), Replicate()))
-        )
-        fqn = "layers.0.attention.wq.weight"
-
-        optimizer = build_flex_shard_muon(
-            [{"params": [parameter], "param_names": [fqn]}],
-            compute_sharding_by_fqn={
-                fqn: MuonComputeShardingConfig(
-                    compute_layout=ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Shard(0)},
-                    ),
-                    compute_view=AttentionPerHeadComputeView(num_heads=3),
-                )
-            },
-            bucket_configs=[
-                BucketConfig(
-                    patterns=(fqn,),
-                    redistribution_mesh_axis_names=("dp_shard",),
-                )
-            ],
-        )
-
-        integration = _get_muon_reshard_integration(optimizer)
-        compute_layout = integration._require_optimizer_reshard_binding().plan_items[0]
-        self.assertFalse(compute_layout.storage_is_compute_ready)
-        self.assertEqual(compute_layout.redistribution_storage_mesh_axes, (0,))
-
-    @with_comms
-    def test_two_changing_axes_fail_at_transport_boundary(self):
-        mesh = init_device_mesh(
-            self.device_type,
-            (2, 2),
-            mesh_dim_names=("dp_shard", "other_shard"),
-        )
-        device = torch.device(self.device_type, self.rank)
-        value = torch.arange(36, device=device, dtype=torch.float32).reshape(12, 3)
-        parameter = torch.nn.Parameter(
-            distribute_tensor(value, mesh, (Shard(0), Shard(0)))
-        )
-        fqn = "layers.0.attention.wq.weight"
-
-        with self.assertRaisesRegex(
-            NotImplementedError,
-            "cannot apply a compute view while redistributing multiple mesh axes",
-        ):
-            build_flex_shard_muon(
-                [{"params": [parameter], "param_names": [fqn]}],
-                compute_sharding_by_fqn={
-                    fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={
-                                "dp_shard": Shard(0),
-                                "other_shard": Shard(0),
-                            },
-                        ),
-                        compute_view=AttentionPerHeadComputeView(num_heads=3),
-                    )
-                },
-                bucket_configs=[
-                    BucketConfig(
-                        patterns=(fqn,),
-                        redistribution_mesh_axis_names=(
-                            "dp_shard",
-                            "other_shard",
-                        ),
                     )
                 ],
             )

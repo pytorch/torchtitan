@@ -51,6 +51,7 @@ from ._optimizer_reshard_schedule import (
     _validate_bucket_plans_across_ranks,
 )
 from .optimizer_reshard import (
+    BlockShard,
     BucketConfig,
     ComputeLayout,
     flex_optimizer_reshard,
@@ -59,10 +60,7 @@ from .optimizer_reshard import (
 
 
 __all__ = [
-    "AttentionPerHeadComputeView",
     "build_flex_shard_muon",
-    "flex_optimizer_reshard",
-    "MuonComputeShardingConfig",
 ]
 
 
@@ -168,132 +166,127 @@ def _get_muon_reshard_integration(optimizer: Muon) -> _MuonReshardIntegration:
     return integration
 
 
-@dataclass(frozen=True, slots=True)
-class AttentionPerHeadComputeView:
-    """Treat a flattened attention projection as one Muon matrix per head.
-
-    Storage has shape ``[H * R, C]``, where ``H`` is ``num_heads``. Muon
-    computes on ``[H, R, C]`` and applies its Newton-Schulz iteration
-    independently to each ``[R, C]`` head matrix without changing the stored
-    parameter shape.
-    """
-
-    num_heads: int
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.num_heads, bool)
-            or not isinstance(self.num_heads, int)
-            or self.num_heads <= 0
-        ):
-            raise ValueError("num_heads must be a positive integer")
-
-    def _resolve(self, storage_shape: torch.Size) -> _ResolvedBatchedMatrixView:
-        if (
-            len(storage_shape) != 2
-            or storage_shape[0] == 0
-            or storage_shape[0] % self.num_heads
-        ):
-            raise ValueError(
-                f"storage shape {tuple(storage_shape)} cannot be viewed as "
-                f"{self.num_heads} attention heads"
-            )
-        return _ResolvedBatchedMatrixView(
-            matrix_rows=storage_shape[0] // self.num_heads,
-            matrix_columns=storage_shape[1],
-        )
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class MuonComputeShardingConfig:
-    """Define Muon's logical tensor and temporary named-axis compute layout.
-
-    ``Owned`` balances complete subgroup-local 2D matrices across dynamically
-    selected owner ranks; multiple such axes form one joint Cartesian group.
-    ``Shard(0)`` on a named axis partitions a 3D batch-first tensor
-    ``[B, R, C]`` along its matrix batch. Omitted axes preserve their storage
-    placement. Storage and compute ownership are compared in the flattened
-    storage coordinate system. Identical ownership computes through a local
-    view; different ownership is redistributed. Identity-view redistribution
-    accepts exact ``Shard`` or ``Replicate`` source placement on one transport
-    axis while preserving supported orthogonal placements. Compute-view
-    redistribution remains limited to compatible row-sharded storage.
-    """
-
-    compute_layout: ComputeLayout
-
-    # Defines the logical tensor used for placement planning and Muon compute.
-    # Shard dimensions in compute_layout refer to the viewed tensor.
-    compute_view: AttentionPerHeadComputeView | None = None
-
-    def __post_init__(self) -> None:
-        if type(self.compute_layout) is not ComputeLayout:
-            raise ValueError(
-                "MuonComputeShardingConfig.compute_layout must be ComputeLayout"
-            )
-        if (
-            self.compute_view is not None
-            and type(self.compute_view) is not AttentionPerHeadComputeView
-        ):
-            raise ValueError(
-                "MuonComputeShardingConfig.compute_view must be "
-                "AttentionPerHeadComputeView or None"
-            )
-
-    def to_dict(self) -> dict:
-        """Serialize for JSON logging."""
-        return {"repr": repr(self)}
-
-
 def build_flex_shard_muon(
     params: Iterable[dict[str, Any]],
     *,
-    compute_sharding_by_fqn: Mapping[str, MuonComputeShardingConfig],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
     **kwargs: Any,
 ) -> Muon:
-    """Construct a ``torch.optim.Muon`` with FlexShard redistribution."""
-    prepared_params: list[dict[str, Any]] = []
-    for param_group in params:
-        group = dict(param_group)
-        raw_params = group.get("params", ())
-        group_params = (
-            (raw_params,) if isinstance(raw_params, Tensor) else tuple(raw_params)
-        )
-        raw_param_names = group.get("param_names")
-        param_names = () if raw_param_names is None else tuple(raw_param_names)
-        if raw_param_names is None or len(group_params) != len(param_names):
-            raise ValueError("params and param_names must be aligned")
-        group["params"] = group_params
-        group["param_names"] = param_names
+    """Construct a ``torch.optim.Muon`` with FlexShard redistribution.
 
-        prepared_params.append(group)
-
+    ``BlockShard(dim=0, block_size=R)`` interprets a parameter
+    stored as ``[M * R, C]`` as ``M`` independent matrices ``[M, R, C]`` for
+    optimizer-local Muon compute. A native 3D ``[M, R, C]`` parameter can use
+    ``Shard(0)`` to distribute complete matrices. A 2D parameter without
+    ``BlockShard`` must use whole-matrix compute such as ``Owned``.
+    """
     return flex_optimizer_reshard(
-        Muon(prepared_params, **kwargs),
+        Muon(_normalize_param_groups(params), **kwargs),
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
+    )
+
+
+def _normalize_param_groups(
+    params: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Copy parameter groups and materialize their aligned values."""
+    normalized_param_groups = []
+    for param_group in params:
+        normalized_group = dict(param_group)
+        params_value = normalized_group.get("params", ())
+        normalized_params = (
+            (params_value,) if isinstance(params_value, Tensor) else tuple(params_value)
+        )
+        param_names_value = normalized_group.get("param_names")
+        normalized_param_names = (
+            () if param_names_value is None else tuple(param_names_value)
+        )
+        if param_names_value is None or len(normalized_params) != len(
+            normalized_param_names
+        ):
+            raise ValueError("params and param_names must be aligned")
+        normalized_group["params"] = normalized_params
+        normalized_group["param_names"] = normalized_param_names
+        normalized_param_groups.append(normalized_group)
+
+    return normalized_param_groups
+
+
+def _validate_compute_sharding_configuration(
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
+) -> None:
+    """Validate per-parameter compute sharding configuration."""
+    for fqn, compute_layout in compute_sharding_by_fqn.items():
+        if not isinstance(fqn, str):
+            raise ValueError("compute_sharding_by_fqn keys must be strings")
+        if type(compute_layout) is not ComputeLayout:
+            raise ValueError("compute_sharding_by_fqn values must be ComputeLayout")
+
+
+def _matrix_batch_view_from_compute_layout(
+    fqn: str,
+    param: Tensor,
+    compute_layout: ComputeLayout,
+) -> _MatrixBatchView | None:
+    storage_shape = torch.Size(param.shape)
+    applicable_axis_names = None
+    if isinstance(param, DTensor):
+        mesh_axis_names = param.device_mesh.mesh_dim_names
+        if mesh_axis_names is None:
+            raise ValueError(
+                f"Muon parameter {fqn!r} requires a storage mesh with named axes"
+            )
+        applicable_axis_names = set(mesh_axis_names)
+    block_shards = tuple(
+        sharding
+        for axis_name, sharding in compute_layout.shardings_by_mesh_axis.items()
+        if type(sharding) is BlockShard
+        and (applicable_axis_names is None or axis_name in applicable_axis_names)
+    )
+    if not block_shards:
+        return None
+
+    normalized_dims = tuple(
+        _normalize_dim(block_shard.dim, len(storage_shape))
+        for block_shard in block_shards
+    )
+    if any(dim != 0 for dim in normalized_dims):
+        raise ValueError(
+            f"Muon parameter {fqn!r} matrix-batch BlockShard must shard "
+            "tensor dimension 0"
+        )
+    block_size = block_shards[0].block_size
+    if any(block_shard.block_size != block_size for block_shard in block_shards):
+        raise ValueError(
+            f"Muon parameter {fqn!r} must use one BlockShard block size "
+            "across mesh axes"
+        )
+    return _MatrixBatchView.from_storage_shape(
+        storage_shape,
+        matrix_rows=block_size,
     )
 
 
 def _configure_muon_reshard(
     optimizer: Muon,
     *,
-    compute_sharding_by_fqn: Mapping[str, object],
+    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
 ) -> None:
     """Configure one newly constructed ``torch.optim.Muon`` optimizer.
 
     Every group must provide aligned ``params`` and ``param_names``. Every
     local parameter FQN must have one entry in ``compute_sharding_by_fqn``;
-    extra entries for parameters on other pipeline stages are ignored.
-    Parameter groups, compute sharding, bucket configuration, and layouts are
-    frozen after this call because optimizer state and collectives depend on
-    them.
+    extra compute-sharding entries for parameters on other pipeline stages are
+    ignored. Parameter groups, compute layouts, and bucket configuration are
+    frozen because optimizer state and collectives depend on them.
     """
     integration_ref = _RESHARD_INTEGRATIONS.get(optimizer)
     if integration_ref is not None and integration_ref() is not None:
         raise ValueError("flex_optimizer_reshard cannot be applied more than once")
+    _validate_compute_sharding_configuration(compute_sharding_by_fqn)
     torch_muon_apis = _require_torch_muon_apis(optimizer)
     integration = _MuonReshardIntegration(optimizer, torch_muon_apis)
     integration._validate_groups()
@@ -308,38 +301,26 @@ def _configure_muon_reshard(
         for param, fqn in zip(group_params, param_names, strict=True):
             if fqn not in compute_sharding_by_fqn:
                 raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
-            compute_sharding = compute_sharding_by_fqn[fqn]
-            if type(compute_sharding) is not MuonComputeShardingConfig:
-                raise ValueError(
-                    "Muon compute sharding values must be MuonComputeShardingConfig"
-                )
-            parameters_to_prepare.append((param, fqn, compute_sharding))
+            compute_layout = compute_sharding_by_fqn[fqn]
+            parameters_to_prepare.append((param, fqn, compute_layout))
 
     prepared_compute_layouts = {}
-    for param, fqn, compute_sharding in parameters_to_prepare:
-        compute_view = compute_sharding.compute_view
+    for param, fqn, compute_layout in parameters_to_prepare:
         global_storage_shape = torch.Size(param.shape)
-        resolved_view = None
+        compute_view = _matrix_batch_view_from_compute_layout(
+            fqn,
+            param,
+            compute_layout,
+        )
         if compute_view is not None:
-            resolved_view = compute_view._resolve(global_storage_shape)
             if isinstance(param, DTensor):
-                _validate_batched_matrix_storage_placements(fqn, param)
+                _validate_matrix_batch_storage_placements(fqn, param)
         if compute_view is None:
             compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
         else:
-            compute_view_key = (
-                "attention_per_head",
-                compute_view.num_heads,
-            )
-            assert resolved_view is not None
-            global_compute_shape = torch.Size(
-                (
-                    compute_view.num_heads,
-                    resolved_view.matrix_rows,
-                    resolved_view.matrix_columns,
-                )
-            )
+            compute_view_key = ("matrix_batch", compute_view.matrix_rows)
+            global_compute_shape = compute_view.matrix_batch_shape(global_storage_shape)
         if len(global_compute_shape) not in (2, 3):
             raise ValueError(
                 f"Muon parameter {fqn!r} compute shape "
@@ -347,10 +328,9 @@ def _configure_muon_reshard(
             )
         prepared_compute_layouts[fqn] = _PreparedParameterComputeLayout(
             compute_view_key=compute_view_key,
-            has_compute_view=compute_view is not None,
-            compute_layout=compute_sharding.compute_layout,
+            compute_layout=compute_layout,
             global_compute_shape=global_compute_shape,
-            resolved_compute_view=resolved_view,
+            compute_view=compute_view,
         )
     tensor_device = integration._validate_parameter_storage()
     compute_layouts = integration._build_parameter_compute_layouts(
@@ -404,7 +384,7 @@ class _MuonReshardIntegration:
     have a layout-compatible DTensor gradient before each rank enters
     ``step()``.
 
-    Batched matrix compute views use batched BF16 kernels. They implement the
+    Matrix-batch compute views use batched BF16 kernels. They implement the
     same mathematical update as ``torch.optim.Muon`` running one matrix at a
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
@@ -528,7 +508,7 @@ class _MuonReshardIntegration:
                 fqn,
                 param,
                 global_compute_shape,
-                prepared.resolved_compute_view,
+                prepared.compute_view,
                 prepared.compute_layout,
             )
             compute_layouts.append(
@@ -537,9 +517,8 @@ class _MuonReshardIntegration:
                     param=param,
                     group_index=group_index,
                     compute_view_key=prepared.compute_view_key,
-                    has_compute_view=prepared.has_compute_view,
                     global_compute_shape=global_compute_shape,
-                    local_storage_view=resolved_transition.local_storage_view,
+                    compute_view=prepared.compute_view,
                     storage_mesh_ranks=_device_mesh_ranks(param.device_mesh),
                     storage_layout_signature=_storage_layout_signature(param),
                     local_storage_signature=_local_storage_signature(param.to_local()),
@@ -783,12 +762,9 @@ class _MuonReshardIntegration:
             DTensor,
             self.state[compute_layout.param]["momentum_buffer"],
         )
-        local_reference = (
-            compute_layout.local_storage_view
-            if compute_layout.storage_is_compute_ready
-            else compute_layout.param.to_local()
-        )
-        assert local_reference is not None
+        local_reference = compute_layout.param.to_local()
+        if compute_layout.storage_is_compute_ready:
+            local_reference = local_reference.detach()
         local_grad = grad.to_local().view_as(local_reference)
         local_momentum = momentum_state.to_local().view_as(local_reference)
         group = self._group(compute_layout)
@@ -812,6 +788,13 @@ class _MuonReshardIntegration:
     def _compute_update(
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
+        if compute_layout.compute_view is not None:
+            compute = compute_layout.compute_view.view_as_matrix_batch(compute)
+        self._compute_direction(compute_layout, compute)
+
+    def _compute_direction(
+        self, compute_layout: _ParameterComputeLayout, compute: Tensor
+    ) -> None:
         group = self._group(compute_layout)
         self.torch_muon_apis.orthogonalize(
             compute,
@@ -825,12 +808,9 @@ class _MuonReshardIntegration:
         self, compute_layout: _ParameterComputeLayout, direction: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        local_param = (
-            compute_layout.local_storage_view
-            if compute_layout.storage_is_compute_ready
-            else compute_layout.param.to_local()
-        )
-        assert local_param is not None
+        local_param = compute_layout.param.to_local()
+        if compute_layout.storage_is_compute_ready:
+            local_param = local_param.detach()
         self.torch_muon_apis.apply(
             local_param,
             direction,
@@ -891,16 +871,18 @@ class _MuonReshardIntegration:
                 device=local_execution.device,
             )
             for batch_slice in local_execution.slices:
+                matrix_batch = prepared.narrow(0, batch_slice.offset, batch_slice.size)
                 self._prepare_local(
                     batch_slice.layout,
-                    prepared.narrow(0, batch_slice.offset, batch_slice.size),
+                    _physical_compute_tensor(batch_slice.layout, matrix_batch),
                 )
 
-            self._compute_update(local_execution.slices[0].layout, prepared)
+            self._compute_direction(local_execution.slices[0].layout, prepared)
             for batch_slice in local_execution.slices:
+                matrix_batch = prepared.narrow(0, batch_slice.offset, batch_slice.size)
                 self._apply_update(
                     batch_slice.layout,
-                    prepared.narrow(0, batch_slice.offset, batch_slice.size),
+                    _physical_compute_tensor(batch_slice.layout, matrix_batch),
                 )
 
     def _execute_local_item(
@@ -931,9 +913,8 @@ class _MuonReshardIntegration:
     ) -> tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]:
         grouped: dict[tuple[Any, ...], list[_ParameterComputeLayout]] = {}
         for layout in layouts:
-            tensor = layout.local_storage_view
-            assert tensor is not None
-            if tensor.ndim != 3:
+            shape, dtype, device = _local_matrix_batch_spec(layout)
+            if len(shape) != 3:
                 key = (layout.fqn,)
             else:
                 # Communication buckets may span layers. Restrict batching to
@@ -941,9 +922,9 @@ class _MuonReshardIntegration:
                 parent_fqn, separator, _ = layout.fqn.rpartition(".")
                 key = (
                     parent_fqn if separator else layout.fqn,
-                    tuple(tensor.shape[1:]),
-                    tensor.dtype,
-                    tensor.device,
+                    tuple(shape[1:]),
+                    dtype,
+                    device,
                     self._ns_signature(layout),
                 )
             grouped.setdefault(key, []).append(layout)
@@ -953,9 +934,8 @@ class _MuonReshardIntegration:
             batch_layouts = []
             batch_bytes = 0
             for layout in compatible_layouts:
-                tensor = layout.local_storage_view
-                assert tensor is not None
-                tensor_bytes = tensor.numel() * tensor.element_size()
+                shape, _dtype, _device = _local_matrix_batch_spec(layout)
+                tensor_bytes = math.prod(shape) * layout.param.element_size()
                 if (
                     batch_layouts
                     and batch_bytes + tensor_bytes > _MAX_LOCAL_MATRIX_BATCH_BYTES
@@ -972,8 +952,8 @@ class _MuonReshardIntegration:
     def _local_tensor_spec(
         compute_layout: _ParameterComputeLayout,
     ) -> tuple[torch.Size, torch.dtype, torch.device]:
-        tensor = compute_layout.local_storage_view
-        assert tensor is not None
+        assert compute_layout.storage_is_compute_ready
+        tensor = compute_layout.param.to_local().detach()
         return tensor.shape, tensor.dtype, tensor.device
 
 
@@ -983,51 +963,60 @@ _MAX_LOCAL_MATRIX_BATCH_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedBatchedMatrixView:
+class _MatrixBatchView:
     matrix_rows: int
     matrix_columns: int
 
-    def compute_shape(self, storage_shape: torch.Size) -> torch.Size:
+    @classmethod
+    def from_storage_shape(
+        cls,
+        storage_shape: torch.Size,
+        *,
+        matrix_rows: int,
+    ) -> _MatrixBatchView:
+        if (
+            len(storage_shape) != 2
+            or storage_shape[0] == 0
+            or storage_shape[0] % matrix_rows
+        ):
+            raise ValueError(
+                f"storage shape {tuple(storage_shape)} cannot be partitioned "
+                f"into {matrix_rows}-row Muon matrices"
+            )
+        return cls(
+            matrix_rows=matrix_rows,
+            matrix_columns=storage_shape[1],
+        )
+
+    def matrix_batch_shape(self, compute_tensor_shape: torch.Size) -> torch.Size:
         if not (
-            len(storage_shape) == 2
-            and not storage_shape[0] % self.matrix_rows
-            and storage_shape[1] == self.matrix_columns
+            len(compute_tensor_shape) == 2
+            and not compute_tensor_shape[0] % self.matrix_rows
+            and compute_tensor_shape[1] == self.matrix_columns
         ):
             raise RuntimeError(
-                "prepared batched-matrix view is internally inconsistent"
+                "compute tensor shape is inconsistent with the prepared "
+                "matrix-batch view"
             )
         return torch.Size(
             (
-                storage_shape[0] // self.matrix_rows,
+                compute_tensor_shape[0] // self.matrix_rows,
                 self.matrix_rows,
                 self.matrix_columns,
             )
         )
 
-    def canonical_storage_region(
-        self,
-        compute_region: _TensorRegion,
-    ) -> _TensorRegion:
-        """Map one complete-matrix compute region to flattened storage."""
-        if not (
-            len(compute_region.shape) == 3
-            and compute_region.offsets[1:] == (0, 0)
-            and compute_region.shape[1:] == (self.matrix_rows, self.matrix_columns)
-        ):
-            raise RuntimeError(
-                "prepared batched-matrix distribution is internally inconsistent"
-            )
-        return _TensorRegion(
-            offsets=(compute_region.offsets[0] * self.matrix_rows, 0),
-            shape=(compute_region.shape[0] * self.matrix_rows, self.matrix_columns),
-        )
+    def view_as_matrix_batch(self, compute_tensor: Tensor) -> Tensor:
+        """Return a zero-copy matrix-batch view of the compute tensor."""
+        matrix_batch_shape = self.matrix_batch_shape(torch.Size(compute_tensor.shape))
+        return compute_tensor.unflatten(0, matrix_batch_shape[:2])
 
 
-def _validate_batched_matrix_storage_placements(
+def _validate_matrix_batch_storage_placements(
     fqn: str,
     param: DTensor,
 ) -> None:
-    """Validate storage placements supported by a batched-matrix view."""
+    """Validate placements supported by matrix-batch storage."""
     for mesh_axis_size, placement in zip(
         param.device_mesh.shape,
         param.placements,
@@ -1037,144 +1026,170 @@ def _validate_batched_matrix_storage_placements(
             continue
         if type(placement) is not Shard:
             raise ValueError(
-                f"batched-matrix Muon parameter {fqn!r} requires exact "
-                "Shard or Replicate storage placements"
+                f"Muon parameter {fqn!r} with matrix-batch storage "
+                "requires exact Shard or Replicate placements"
             )
         if placement.dim % param.ndim != 0:
             raise ValueError(
-                f"batched-matrix Muon parameter {fqn!r} requires storage "
-                "shards along tensor dimension 0"
+                f"Muon parameter {fqn!r} with matrix-batch storage "
+                "requires shards along tensor dimension 0"
             )
 
 
-@dataclass(frozen=True, slots=True)
-class _MeshAxisParticipantDistribution:
-    """Canonical regions owned at each coordinate of one mesh axis."""
-
-    canonical_regions_by_coordinate: tuple[_TensorRegion, ...]
-
-
-def _resolve_mesh_axis_participant_distribution(
-    logical_shape: torch.Size,
-    placement: Replicate | Shard,
+def _row_intervals_by_mesh_axis_coordinate(
+    num_rows: int,
+    sharding: Replicate | Shard | BlockShard,
     *,
     mesh_axis_size: int,
-    canonicalize_region: Callable[[_TensorRegion], _TensorRegion],
-) -> _MeshAxisParticipantDistribution:
-    """Resolve one placement into participant regions in canonical coordinates."""
-    full_region = _TensorRegion(
-        offsets=(0,) * len(logical_shape),
-        shape=tuple(logical_shape),
-    )
-    if type(placement) is Replicate:
-        regions = (canonicalize_region(full_region),) * mesh_axis_size
+) -> tuple[tuple[int, int], ...]:
+    """Return ``(start, end)`` row intervals along one mesh axis."""
+    if type(sharding) is Replicate:
+        return ((0, num_rows),) * mesh_axis_size
+
+    if type(sharding) is BlockShard:
+        assert sharding.dim == 0 and not num_rows % sharding.block_size
+        num_sharding_units = num_rows // sharding.block_size
+        rows_per_unit = sharding.block_size
     else:
-        assert type(placement) is Shard
-        shard_dim = placement.dim % len(logical_shape)
-        regions_list = []
-        for coordinate in range(mesh_axis_size):
-            local_size, offset = Shard.local_shard_size_and_offset(
-                logical_shape[shard_dim],
-                mesh_axis_size,
-                coordinate,
-            )
-            region_offsets = [0] * len(logical_shape)
-            region_offsets[shard_dim] = offset
-            region_shape = list(logical_shape)
-            region_shape[shard_dim] = local_size
-            regions_list.append(
-                canonicalize_region(
-                    _TensorRegion(
-                        offsets=tuple(region_offsets),
-                        shape=tuple(region_shape),
-                    )
-                )
-            )
-        regions = tuple(regions_list)
-    return _MeshAxisParticipantDistribution(regions)
+        assert type(sharding) is Shard and sharding.dim == 0
+        num_sharding_units = num_rows
+        rows_per_unit = 1
+
+    intervals = []
+    for axis_coordinate in range(mesh_axis_size):
+        local_num_units, unit_offset = Shard.local_shard_size_and_offset(
+            num_sharding_units,
+            mesh_axis_size,
+            axis_coordinate,
+        )
+        start = unit_offset * rows_per_unit
+        intervals.append((start, start + local_num_units * rows_per_unit))
+    return tuple(intervals)
 
 
-@dataclass(frozen=True, slots=True)
-class _ResolvedComputeDistribution:
-    """Ownership changes and the local view derived from compute ownership."""
-
-    changed_storage_mesh_axes: tuple[int, ...]
-    local_storage_view: Tensor | None
-
-
-def _resolve_compute_distribution(
+def _resolve_storage_to_compute_redistribution_requirement(
     fqn: str,
     param: DTensor,
-    global_compute_shape: torch.Size,
-    resolved_compute_view: _ResolvedBatchedMatrixView | None,
-    target_shardings: Sequence[Owned | Replicate | Shard],
-) -> _ResolvedComputeDistribution:
-    """Compare storage and compute ownership in storage coordinates."""
-    changed_storage_mesh_axes = []
-    for storage_mesh_axis, target_sharding in enumerate(target_shardings):
-        if type(target_sharding) is Owned:
-            continue
-        assert type(target_sharding) in (Replicate, Shard)
-        target_placement = cast(Replicate | Shard, target_sharding)
-        source_sharding = _normalize_storage_placement(
-            param.placements[storage_mesh_axis],
-            ndim=param.ndim,
-            mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
+    compute_view: _MatrixBatchView | None,
+    target_sharding_by_storage_mesh_axis: Mapping[int, Replicate | Shard | BlockShard],
+    declared_storage_mesh_axes: Sequence[int],
+) -> tuple[int, ...]:
+    """Compare actual storage with the target compute tensor."""
+    if compute_view is None:
+        changed_storage_mesh_axes = []
+        mesh_axis_names = param.device_mesh.mesh_dim_names
+        assert mesh_axis_names is not None
+        for storage_mesh_axis in sorted(declared_storage_mesh_axes):
+            source_sharding = _normalize_storage_placement(
+                param.placements[storage_mesh_axis],
+                ndim=param.ndim,
+                mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
+            )
+            if type(source_sharding) is _UnsupportedStoragePlacement:
+                raise NotImplementedError(
+                    f"Muon parameter {fqn!r} has unsupported storage placement "
+                    f"{source_sharding.type_name!r} "
+                    f"({source_sharding.representation}) on mesh axis "
+                    f"{mesh_axis_names[storage_mesh_axis]!r}"
+                )
+            target_sharding = target_sharding_by_storage_mesh_axis.get(
+                storage_mesh_axis
+            )
+            if target_sharding is not None and source_sharding != target_sharding:
+                changed_storage_mesh_axes.append(storage_mesh_axis)
+        redistribution_storage_mesh_axes = tuple(changed_storage_mesh_axes)
+    else:
+        mesh_axis_names = param.device_mesh.mesh_dim_names
+        assert mesh_axis_names is not None
+        active_block_shard_mesh_axes = tuple(
+            storage_mesh_axis
+            for storage_mesh_axis, target_sharding in (
+                target_sharding_by_storage_mesh_axis.items()
+            )
+            if type(target_sharding) is BlockShard
+            and param.device_mesh.size(storage_mesh_axis) > 1
         )
-        if type(source_sharding) is _UnsupportedStoragePlacement:
-            mesh_axis_names = param.device_mesh.mesh_dim_names
-            assert mesh_axis_names is not None
+        if len(active_block_shard_mesh_axes) > 1:
+            axis_names = [
+                mesh_axis_names[axis] for axis in active_block_shard_mesh_axes
+            ]
             raise NotImplementedError(
-                f"Muon parameter {fqn!r} has unsupported storage placement "
-                f"{source_sharding.type_name!r} "
-                f"({source_sharding.representation}) on mesh axis "
-                f"{mesh_axis_names[storage_mesh_axis]!r}"
+                f"Muon parameter {fqn!r} requests matrix-batch compute on "
+                f"multiple active mesh axes {axis_names}; only one active "
+                "BlockShard axis is supported"
             )
-        source_placement = cast(Replicate | Shard, source_sharding)
 
-        if resolved_compute_view is None:
-            ownership_changed = source_placement != target_placement
-        else:
-            mesh_axis_size = param.device_mesh.size(storage_mesh_axis)
-            storage_distribution = _resolve_mesh_axis_participant_distribution(
-                torch.Size(param.shape),
-                source_placement,
-                mesh_axis_size=mesh_axis_size,
-                canonicalize_region=lambda region: region,
-            )
-            compute_distribution = _resolve_mesh_axis_participant_distribution(
-                global_compute_shape,
-                target_placement,
-                mesh_axis_size=mesh_axis_size,
-                canonicalize_region=(resolved_compute_view.canonical_storage_region),
-            )
-            ownership_changed = storage_distribution != compute_distribution
-        if ownership_changed:
-            changed_storage_mesh_axes.append(storage_mesh_axis)
-
-    local_storage_view = None
-    if not changed_storage_mesh_axes:
-        local_storage = param.to_local().detach()
-        local_storage_view = (
-            local_storage
-            if resolved_compute_view is None
-            else local_storage.view(
-                resolved_compute_view.compute_shape(torch.Size(local_storage.shape))
-            )
+        redistribution_storage_mesh_axis = (
+            active_block_shard_mesh_axes[0] if active_block_shard_mesh_axes else None
         )
-    return _ResolvedComputeDistribution(
-        changed_storage_mesh_axes=tuple(changed_storage_mesh_axes),
-        local_storage_view=local_storage_view,
-    )
+        nonreplicated_other_mesh_axes = []
+        for storage_mesh_axis, placement in enumerate(param.placements):
+            if storage_mesh_axis == redistribution_storage_mesh_axis:
+                continue
+            storage_sharding = _normalize_storage_placement(
+                placement,
+                ndim=param.ndim,
+                mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
+            )
+            if type(storage_sharding) is not Replicate:
+                nonreplicated_other_mesh_axes.append(mesh_axis_names[storage_mesh_axis])
+        if nonreplicated_other_mesh_axes:
+            if redistribution_storage_mesh_axis is None:
+                raise NotImplementedError(
+                    f"Muon parameter {fqn!r} matrix-batch compute requires an "
+                    "active BlockShard target for every non-replicated storage "
+                    f"mesh axis; non-replicated axes: {nonreplicated_other_mesh_axes}"
+                )
+            raise NotImplementedError(
+                f"Muon parameter {fqn!r} matrix-batch compute along mesh "
+                f"axis {mesh_axis_names[redistribution_storage_mesh_axis]!r} "
+                "requires every other storage mesh axis to be replicated; "
+                f"non-replicated axes: {nonreplicated_other_mesh_axes}"
+            )
+
+        if redistribution_storage_mesh_axis is None:
+            redistribution_storage_mesh_axes = ()
+        else:
+            storage_sharding = cast(
+                Replicate | Shard,
+                _normalize_storage_placement(
+                    param.placements[redistribution_storage_mesh_axis],
+                    ndim=param.ndim,
+                    mesh_axis_size=param.device_mesh.size(
+                        redistribution_storage_mesh_axis
+                    ),
+                ),
+            )
+            compute_sharding = target_sharding_by_storage_mesh_axis[
+                redistribution_storage_mesh_axis
+            ]
+            assert type(compute_sharding) is BlockShard
+            mesh_axis_size = param.device_mesh.size(redistribution_storage_mesh_axis)
+            storage_intervals = _row_intervals_by_mesh_axis_coordinate(
+                param.shape[0],
+                storage_sharding,
+                mesh_axis_size=mesh_axis_size,
+            )
+            compute_intervals = _row_intervals_by_mesh_axis_coordinate(
+                param.shape[0],
+                compute_sharding,
+                mesh_axis_size=mesh_axis_size,
+            )
+            redistribution_storage_mesh_axes = (
+                ()
+                if storage_intervals == compute_intervals
+                else (redistribution_storage_mesh_axis,)
+            )
+
+    return redistribution_storage_mesh_axes
 
 
 @dataclass(frozen=True, slots=True)
 class _PreparedParameterComputeLayout:
     compute_view_key: tuple[Any, ...]
-    has_compute_view: bool
     compute_layout: ComputeLayout
     global_compute_shape: torch.Size
-    resolved_compute_view: _ResolvedBatchedMatrixView | None
+    compute_view: _MatrixBatchView | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1183,9 +1198,8 @@ class _ParameterComputeLayout:
     param: DTensor
     group_index: int
     compute_view_key: tuple[Any, ...]
-    has_compute_view: bool
     global_compute_shape: torch.Size
-    local_storage_view: Tensor | None
+    compute_view: _MatrixBatchView | None
     storage_mesh_ranks: tuple[int, ...]
     storage_layout_signature: tuple[Any, ...]
     local_storage_signature: tuple[Any, ...]
@@ -1215,6 +1229,7 @@ _StorageToComputeTransition = _NoRedistributionTransition | _RedistributionTrans
 
 
 _ComputeSharding = Owned | Replicate | Shard
+_ComputeTensorSharding = Replicate | Shard | BlockShard
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,7 +1261,6 @@ class _ResolvedStorageToComputeTransition:
     compute_sharding: _ComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
-    local_storage_view: Tensor | None
     redistribution_storage_mesh_axes: tuple[int, ...] = ()
 
 
@@ -1405,14 +1419,15 @@ def _build_parameter_redistribution_plan(
     group_local_storage_shape = group_local_storage.logical_shape
     global_storage_shape = tuple(compute_layout.param.shape)
     global_compute_shape = tuple(compute_layout.global_compute_shape)
-    if not compute_layout.has_compute_view:
+    if compute_layout.compute_view is None:
         group_local_compute_shape = group_local_storage_shape
     elif group_local_storage_shape == global_storage_shape:
         group_local_compute_shape = global_compute_shape
     else:
         raise NotImplementedError(
-            f"Muon parameter {compute_layout.fqn!r} cannot yet apply a compute "
-            "view while preserving a non-replicated storage-mesh axis"
+            f"Muon parameter {compute_layout.fqn!r} cannot yet use BlockShard "
+            "matrix-batch compute while preserving a non-replicated storage "
+            "mesh axis"
         )
 
     compute_sharding = compute_layout.compute_sharding
@@ -1423,7 +1438,7 @@ def _build_parameter_redistribution_plan(
             storage_regions,
             participants=group.participants,
             owner_rank=owner_rank,
-            logical_shape=group_local_storage_shape,
+            logical_shape=group_local_compute_shape,
         )
 
     assert owner_rank is None
@@ -1436,7 +1451,7 @@ def _build_parameter_redistribution_plan(
         )
 
     assert type(compute_sharding) is Shard
-    if not compute_layout.has_compute_view:
+    if compute_layout.compute_view is None:
         return _build_dim0_shard_redistribution_plan(
             storage_regions,
             participants=group.participants,
@@ -1444,7 +1459,7 @@ def _build_parameter_redistribution_plan(
             logical_shape=group_local_compute_shape,
         )
 
-    return _build_batched_matrix_redistribution_plan(
+    return _build_matrix_batch_redistribution_plan(
         storage_regions,
         participants=group.participants,
         participant_by_shard_index=group.participant_by_shard_index,
@@ -1453,7 +1468,7 @@ def _build_parameter_redistribution_plan(
     )
 
 
-def _build_batched_matrix_redistribution_plan(
+def _build_matrix_batch_redistribution_plan(
     storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
     *,
     participants: tuple[int, ...],
@@ -1461,13 +1476,14 @@ def _build_batched_matrix_redistribution_plan(
     storage_shape: tuple[int, ...],
     compute_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
-    """Map flat row storage to sharded matrix batches."""
+    """Build flat 2D routes whose destination shards contain complete matrices."""
     _require_valid_plan(
         len(storage_shape) == 2
         and len(compute_shape) == 3
         and storage_shape[0] == compute_shape[0] * compute_shape[1]
         and storage_shape[1] == compute_shape[2],
-        "matrix-batch redistribution requires a flattened 2D view",
+        "matrix-batch redistribution requires flat 2D storage plus a 3D "
+        "matrix-batch compute shape",
     )
 
     num_matrices, matrix_rows, matrix_columns = compute_shape
@@ -1518,8 +1534,8 @@ def _build_batched_matrix_redistribution_plan(
         participant: index
         for index, participant in enumerate(participant_by_shard_index)
     }
-    compute_endpoints = []
-    compute_partitions_list = []
+    compute_matrix_assignments = []
+    compute_partitions = []
     for participant in participants:
         shard_index = shard_index_by_participant[participant]
         local_num_matrices, matrix_offset = Shard.local_shard_size_and_offset(
@@ -1531,25 +1547,26 @@ def _build_batched_matrix_redistribution_plan(
             offsets=(matrix_offset * matrix_rows, 0),
             shape=(local_num_matrices * matrix_rows, matrix_columns),
         )
-        compute_endpoints.append(((participant,), matrix_offset, local_num_matrices))
-        compute_partitions_list.append(
+        compute_matrix_assignments.append(
+            ((participant,), matrix_offset, local_num_matrices)
+        )
+        compute_partitions.append(
             _ParticipantPartition(
                 participant=participant,
-                tensor_shape=(local_num_matrices, matrix_rows, matrix_columns),
+                tensor_shape=logical_region.shape,
                 logical_regions=(logical_region,),
             )
         )
-    compute_partitions = tuple(compute_partitions_list)
 
     storage_to_compute_routes = []
     for source_holders, storage_region, storage_tensor_base in storage_endpoints:
         storage_row_offset = storage_region.offsets[0]
         storage_row_end = storage_row_offset + storage_region.shape[0]
         for (
-            destination_holders,
+            destination_participants,
             matrix_offset,
             local_num_matrices,
-        ) in compute_endpoints:
+        ) in compute_matrix_assignments:
             for local_matrix_index in range(local_num_matrices):
                 matrix_index = matrix_offset + local_matrix_index
                 matrix_row_offset = matrix_index * matrix_rows
@@ -1577,11 +1594,12 @@ def _build_batched_matrix_redistribution_plan(
                 )
                 compute_tensor_region = _TensorRegion(
                     offsets=(
-                        local_matrix_index,
-                        route_row_offset - matrix_row_offset,
+                        local_matrix_index * matrix_rows
+                        + route_row_offset
+                        - matrix_row_offset,
                         0,
                     ),
-                    shape=(1, route_rows, matrix_columns),
+                    shape=(route_rows, matrix_columns),
                 )
                 storage_to_compute_routes.append(
                     _TensorRegionRoute(
@@ -1592,7 +1610,7 @@ def _build_batched_matrix_redistribution_plan(
                         ),
                         destination=_RouteEndpoint(
                             compute_tensor_region,
-                            destination_holders,
+                            destination_participants,
                         ),
                     )
                 )
@@ -1601,7 +1619,7 @@ def _build_batched_matrix_redistribution_plan(
         participants=participants,
         logical_shape=storage_shape,
         storage_partitions=storage_partitions,
-        compute_partitions=compute_partitions,
+        compute_partitions=tuple(compute_partitions),
         storage_to_compute_routes=tuple(storage_to_compute_routes),
     )
 
@@ -1610,7 +1628,7 @@ def _resolve_storage_to_compute_transition(
     fqn: str,
     param: DTensor,
     global_compute_shape: torch.Size,
-    resolved_compute_view: _ResolvedBatchedMatrixView | None,
+    compute_view: _MatrixBatchView | None,
     compute_layout: ComputeLayout,
 ) -> _ResolvedStorageToComputeTransition:
     """Validate one storage layout and resolve its concrete compute transition."""
@@ -1651,7 +1669,27 @@ def _resolve_storage_to_compute_transition(
         )
         if type(sharding) is Owned
     )
-    normalized_target_sharding_by_storage_mesh_axis: dict[int, Replicate | Shard] = {}
+    if compute_view is not None:
+        if applicable_owned_storage_mesh_axes:
+            raise ValueError(
+                f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
+            )
+        shard_axes = [
+            mesh_axis_names[storage_mesh_axis]
+            for storage_mesh_axis, sharding in (
+                applicable_compute_shardings_by_storage_mesh_axis.items()
+            )
+            if type(sharding) is Shard
+        ]
+        if shard_axes:
+            raise ValueError(
+                f"Muon parameter {fqn!r} with matrix-batch compute requires "
+                f"BlockShard instead of Shard on mesh axes {shard_axes}"
+            )
+
+    normalized_target_sharding_by_storage_mesh_axis: dict[
+        int, _ComputeTensorSharding
+    ] = {}
     declared_shard_dims = []
     for (
         storage_mesh_axis,
@@ -1659,95 +1697,39 @@ def _resolve_storage_to_compute_transition(
     ) in applicable_compute_shardings_by_storage_mesh_axis.items():
         if type(sharding) is Owned:
             continue
-        placement = cast(Replicate | Shard, sharding)
+        placement = cast(_ComputeTensorSharding, sharding)
         if type(placement) is Shard:
-            declared_shard_dims.append(
-                _normalize_dim(placement.dim, len(global_compute_shape))
-            )
+            declared_shard_dims.append(_normalize_dim(placement.dim, param.ndim))
+        elif type(placement) is BlockShard:
+            declared_shard_dims.append(0)
         target_sharding = _normalize_compute_placement(
             placement,
-            ndim=len(global_compute_shape),
+            ndim=param.ndim,
             mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
         )
         normalized_target_sharding_by_storage_mesh_axis[
             storage_mesh_axis
         ] = target_sharding
-    resolved_target_signature = []
-    resolved_target_shardings = []
-    resolved_target_by_storage_mesh_axis: dict[int, Owned | Replicate | Shard] = {}
-    resolved_shard_dims = []
-    owned_axis_set = set(applicable_owned_storage_mesh_axes)
-    for storage_mesh_axis, axis_name in enumerate(mesh_axis_names):
-        if storage_mesh_axis in owned_axis_set:
-            target_sharding: (
-                Owned | Replicate | Shard | _UnsupportedStoragePlacement
-            ) = Owned()
-        elif storage_mesh_axis in normalized_target_sharding_by_storage_mesh_axis:
-            target_sharding = normalized_target_sharding_by_storage_mesh_axis[
-                storage_mesh_axis
-            ]
-        else:
-            target_sharding = _normalize_storage_placement(
-                param.placements[storage_mesh_axis],
-                ndim=param.ndim,
-                mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
-            )
-        if isinstance(target_sharding, _UnsupportedStoragePlacement):
-            raise NotImplementedError(
-                f"Muon parameter {fqn!r} has unsupported compute placement "
-                f"{target_sharding.type_name!r} "
-                f"({target_sharding.representation}) on mesh axis {axis_name!r}"
-            )
-        resolved_target_signature.append((axis_name, target_sharding))
-        resolved_target_shardings.append(target_sharding)
-        resolved_target_by_storage_mesh_axis[storage_mesh_axis] = target_sharding
-        if type(target_sharding) is Shard:
-            resolved_shard_dims.append(target_sharding.dim)
 
-    resolved_compute_layout_signature = tuple(resolved_target_signature)
-    compute_shard_dims = [*resolved_shard_dims, *declared_shard_dims]
+    changed_storage_mesh_axes = _resolve_storage_to_compute_redistribution_requirement(
+        fqn,
+        param,
+        compute_view,
+        normalized_target_sharding_by_storage_mesh_axis,
+        tuple(applicable_compute_shardings_by_storage_mesh_axis),
+    )
     active_owned_storage_mesh_axes = tuple(
         storage_mesh_axis
         for storage_mesh_axis in applicable_owned_storage_mesh_axes
         if param.device_mesh.size(storage_mesh_axis) > 1
     )
-    if applicable_owned_storage_mesh_axes and (
-        len(global_compute_shape) != 2 or param.ndim != 2
-    ):
-        raise ValueError(
-            f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
-        )
-    if (
-        not active_owned_storage_mesh_axes
-        and compute_shard_dims
-        and (
-            len(global_compute_shape) != 3
-            or any(shard_dim != 0 for shard_dim in compute_shard_dims)
-        )
-    ):
-        raise ValueError(
-            f"Muon sharded compute for parameter {fqn!r} requires a 3D "
-            "batch-first tensor sharded only on tensor dimension 0"
-        )
-
-    resolved_distribution = _resolve_compute_distribution(
-        fqn,
-        param,
-        global_compute_shape,
-        resolved_compute_view,
-        cast(Sequence[Owned | Replicate | Shard], resolved_target_shardings),
+    transport_mesh_axes = tuple(
+        sorted(set(changed_storage_mesh_axes).union(active_owned_storage_mesh_axes))
     )
-    transport_axes = tuple(
-        sorted(
-            set(resolved_distribution.changed_storage_mesh_axes).union(
-                active_owned_storage_mesh_axes
-            )
-        )
-    )
-    if len(transport_axes) > 1:
-        axis_names = [mesh_axis_names[axis] for axis in transport_axes]
+    if len(transport_mesh_axes) > 1:
+        axis_names = [mesh_axis_names[axis] for axis in transport_mesh_axes]
         if active_owned_storage_mesh_axes:
-            if resolved_distribution.changed_storage_mesh_axes:
+            if changed_storage_mesh_axes:
                 raise NotImplementedError(
                     f"Muon parameter {fqn!r} cannot combine Owned "
                     f"and placement redistribution on mesh axes {axis_names}"
@@ -1768,42 +1750,26 @@ def _resolve_storage_to_compute_transition(
                             f"mesh axis {mesh_axis_names[storage_mesh_axis]!r} "
                             f"outside joint Owned axes {axis_names}"
                         )
-        elif resolved_compute_view is not None:
+        elif compute_view is not None:
             raise NotImplementedError(
-                f"Muon parameter {fqn!r} cannot apply a compute view while "
+                f"Muon parameter {fqn!r} cannot use BlockShard while "
                 f"redistributing multiple mesh axes {axis_names}"
             )
         elif any(
-            type(resolved_target_by_storage_mesh_axis[axis]) is not Replicate
-            for axis in transport_axes
+            type(normalized_target_sharding_by_storage_mesh_axis[axis]) is not Replicate
+            for axis in transport_mesh_axes
         ):
             raise NotImplementedError(
                 f"Muon parameter {fqn!r} multi-axis redistribution currently "
                 f"requires Replicate targets on mesh axes {axis_names}"
             )
 
-    if active_owned_storage_mesh_axes:
-        compute_sharding: _ComputeSharding = Owned()
-    elif transport_axes:
-        transport_shardings = tuple(
-            resolved_target_by_storage_mesh_axis[axis] for axis in transport_axes
+    transport_axis_set = set(transport_mesh_axes)
+    if transport_mesh_axes:
+        transport_axis_names = [mesh_axis_names[axis] for axis in transport_mesh_axes]
+        single_transport_axis = (
+            transport_mesh_axes[0] if len(transport_mesh_axes) == 1 else None
         )
-        if len(transport_shardings) == 1 and type(transport_shardings[0]) is Shard:
-            compute_sharding = Shard(transport_shardings[0].dim)
-        else:
-            assert all(type(sharding) is Replicate for sharding in transport_shardings)
-            compute_sharding = Replicate()
-    elif compute_shard_dims:
-        compute_sharding = Shard(0)
-    elif applicable_owned_storage_mesh_axes:
-        compute_sharding = Owned()
-    else:
-        compute_sharding = Replicate()
-
-    transport_axis_set = set(transport_axes)
-    if transport_axes:
-        transport_axis_names = [mesh_axis_names[axis] for axis in transport_axes]
-        single_transport_axis = transport_axes[0] if len(transport_axes) == 1 else None
         single_transport_placement = (
             param.placements[single_transport_axis]
             if single_transport_axis is not None
@@ -1840,7 +1806,7 @@ def _resolve_storage_to_compute_transition(
                     f"{mesh_axis_names[single_transport_axis]!r} and "
                     f"{mesh_axis_names[storage_mesh_axis]!r}"
                 )
-            elif resolved_compute_view is not None:
+            elif compute_view is not None:
                 preserved_storage_sharding = _normalize_storage_placement(
                     placement,
                     ndim=param.ndim,
@@ -1848,27 +1814,105 @@ def _resolve_storage_to_compute_transition(
                 )
                 if type(preserved_storage_sharding) is not Replicate:
                     raise NotImplementedError(
-                        f"Muon parameter {fqn!r} cannot yet apply a compute view "
-                        f"while preserving non-replicated mesh axis "
-                        f"{mesh_axis_names[storage_mesh_axis]!r}"
+                        f"Muon parameter {fqn!r} cannot yet use BlockShard "
+                        "matrix-batch compute while preserving non-replicated "
+                        f"storage mesh axis {mesh_axis_names[storage_mesh_axis]!r}"
                     )
 
-    if not transport_axes:
-        if resolved_distribution.local_storage_view is None:
-            _raise_unsupported_layout(fqn)
+    resolved_target_signature = []
+    resolved_target_by_storage_mesh_axis: dict[
+        int, Owned | Replicate | Shard | BlockShard
+    ] = {}
+    resolved_shard_dims = []
+    owned_axis_set = set(applicable_owned_storage_mesh_axes)
+    for storage_mesh_axis, axis_name in enumerate(mesh_axis_names):
+        if storage_mesh_axis in owned_axis_set:
+            target_sharding: (
+                Owned | Replicate | Shard | BlockShard | _UnsupportedStoragePlacement
+            ) = Owned()
+        elif storage_mesh_axis in normalized_target_sharding_by_storage_mesh_axis:
+            target_sharding = normalized_target_sharding_by_storage_mesh_axis[
+                storage_mesh_axis
+            ]
+        else:
+            target_sharding = _normalize_storage_placement(
+                param.placements[storage_mesh_axis],
+                ndim=param.ndim,
+                mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
+            )
+        if isinstance(target_sharding, _UnsupportedStoragePlacement):
+            raise NotImplementedError(
+                f"Muon parameter {fqn!r} has unsupported compute placement "
+                f"{target_sharding.type_name!r} "
+                f"({target_sharding.representation}) on mesh axis {axis_name!r}"
+            )
+        resolved_target_signature.append((axis_name, target_sharding))
+        resolved_target_by_storage_mesh_axis[storage_mesh_axis] = target_sharding
+        if type(target_sharding) is Shard:
+            resolved_shard_dims.append(target_sharding.dim)
+        elif type(target_sharding) is BlockShard:
+            resolved_shard_dims.append(0)
+
+    resolved_compute_layout_signature = tuple(resolved_target_signature)
+    compute_shard_dims = [*resolved_shard_dims, *declared_shard_dims]
+    if applicable_owned_storage_mesh_axes and (
+        len(global_compute_shape) != 2 or param.ndim != 2
+    ):
+        raise ValueError(
+            f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
+        )
+    if not active_owned_storage_mesh_axes and compute_shard_dims:
+        if compute_view is None and len(global_compute_shape) == 2:
+            raise ValueError(
+                f"Muon parameter {fqn!r}: 2D Muon compute cannot use Shard; "
+                "use Owned() for one matrix or "
+                "BlockShard(dim=0, block_size=R) for row-concatenated matrices"
+            )
+        if len(global_compute_shape) != 3 or any(
+            shard_dim != 0 for shard_dim in compute_shard_dims
+        ):
+            raise ValueError(
+                f"Muon sharded compute for parameter {fqn!r} requires a 3D "
+                "batch-first tensor sharded only on tensor dimension 0"
+            )
+
+    if active_owned_storage_mesh_axes:
+        compute_sharding: _ComputeSharding = Owned()
+    elif transport_mesh_axes:
+        transport_shardings = tuple(
+            resolved_target_by_storage_mesh_axis[axis] for axis in transport_mesh_axes
+        )
+        if len(transport_shardings) == 1:
+            transport_sharding = transport_shardings[0]
+            if type(transport_sharding) is Replicate:
+                compute_sharding = Replicate()
+            elif type(transport_sharding) is Shard:
+                compute_sharding = Shard(transport_sharding.dim)
+            else:
+                assert type(transport_sharding) is BlockShard
+                compute_sharding = Shard(0)
+        else:
+            assert all(type(sharding) is Replicate for sharding in transport_shardings)
+            compute_sharding = Replicate()
+    elif compute_shard_dims:
+        compute_sharding = Shard(0)
+    elif applicable_owned_storage_mesh_axes:
+        compute_sharding = Owned()
+    else:
+        compute_sharding = Replicate()
+
+    if not transport_mesh_axes:
         return _ResolvedStorageToComputeTransition(
             compute_sharding=compute_sharding,
             storage_to_compute_transition=_NoRedistributionTransition(),
             resolved_compute_layout_signature=resolved_compute_layout_signature,
-            local_storage_view=resolved_distribution.local_storage_view,
         )
 
     return _ResolvedStorageToComputeTransition(
         compute_sharding=compute_sharding,
         storage_to_compute_transition=_RedistributionTransition(),
         resolved_compute_layout_signature=resolved_compute_layout_signature,
-        local_storage_view=None,
-        redistribution_storage_mesh_axes=transport_axes,
+        redistribution_storage_mesh_axes=transport_mesh_axes,
     )
 
 
@@ -1877,18 +1921,23 @@ def _raise_unsupported_layout(fqn: str) -> NoReturn:
 
 
 def _normalize_compute_placement(
-    placement: Replicate | Shard,
+    placement: _ComputeTensorSharding,
     *,
     ndim: int,
     mesh_axis_size: int,
-) -> Replicate | Shard:
+) -> _ComputeTensorSharding:
     if type(placement) is Replicate:
         return Replicate()
-    assert type(placement) is Shard
+    if type(placement) is Shard:
+        normalized_dim = _normalize_dim(placement.dim, ndim)
+        if mesh_axis_size == 1:
+            return Replicate()
+        return Shard(normalized_dim)
+    assert type(placement) is BlockShard
     normalized_dim = _normalize_dim(placement.dim, ndim)
     if mesh_axis_size == 1:
         return Replicate()
-    return Shard(normalized_dim)
+    return BlockShard(normalized_dim, placement.block_size)
 
 
 def _normalize_storage_placement(
@@ -1962,22 +2011,43 @@ def _make_local_matrix_execution(
     if len(layouts) == 1:
         return layouts[0]
 
-    first_tensor = layouts[0].local_storage_view
-    assert first_tensor is not None and first_tensor.ndim == 3
+    first_shape, dtype, device = _local_matrix_batch_spec(layouts[0])
+    assert len(first_shape) == 3
     offset = 0
     slices = []
     for layout in layouts:
-        tensor = layout.local_storage_view
-        assert tensor is not None
-        size = tensor.shape[0]
+        shape, layout_dtype, layout_device = _local_matrix_batch_spec(layout)
+        assert shape[1:] == first_shape[1:]
+        assert layout_dtype == dtype and layout_device == device
+        size = shape[0]
         slices.append(_LocalMatrixSlice(layout, offset, size))
         offset += size
     return _LocalMatrixBatch(
         slices=tuple(slices),
-        shape=torch.Size((offset, *first_tensor.shape[1:])),
-        dtype=first_tensor.dtype,
-        device=first_tensor.device,
+        shape=torch.Size((offset, *first_shape[1:])),
+        dtype=dtype,
+        device=device,
     )
+
+
+def _local_matrix_batch_spec(
+    layout: _ParameterComputeLayout,
+) -> tuple[torch.Size, torch.dtype, torch.device]:
+    assert layout.storage_is_compute_ready
+    tensor = layout.param.to_local().detach()
+    shape = torch.Size(tensor.shape)
+    if layout.compute_view is not None:
+        shape = layout.compute_view.matrix_batch_shape(shape)
+    return shape, tensor.dtype, tensor.device
+
+
+def _physical_compute_tensor(
+    layout: _ParameterComputeLayout,
+    matrix_batch: Tensor,
+) -> Tensor:
+    if layout.compute_view is None:
+        return matrix_batch
+    return matrix_batch.flatten(0, 1)
 
 
 def _local_bucket_key(
