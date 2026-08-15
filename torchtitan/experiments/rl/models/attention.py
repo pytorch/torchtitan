@@ -20,6 +20,7 @@ from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
@@ -273,8 +274,6 @@ class VLLMAttentionWrapper(Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-
-        from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         tp_degree = vllm_config.parallel_config.tensor_parallel_size
