@@ -714,7 +714,7 @@ def _validate_matrix_batch_storage_placements(
 
 def _row_intervals_by_mesh_axis_coordinate(
     num_rows: int,
-    sharding: Replicate | Shard | BlockShard,
+    sharding: _AxisComputeSharding,
     *,
     mesh_axis_size: int,
 ) -> tuple[tuple[int, int], ...]:
@@ -753,7 +753,7 @@ def _resolve_storage_to_compute_redistribution_requirement(
     fqn: str,
     param: DTensor,
     compute_view: _MatrixBatchView | None,
-    target_sharding_by_storage_mesh_axis: Mapping[int, Replicate | Shard | BlockShard],
+    target_sharding_by_storage_mesh_axis: Mapping[int, _AxisComputeSharding],
     declared_storage_mesh_axes: Sequence[int],
 ) -> tuple[int, ...]:
     """Compare actual storage with the target compute tensor."""
@@ -885,7 +885,7 @@ class _ParameterComputeLayout:
     storage_mesh_ranks: tuple[int, ...]
     storage_layout_signature: tuple[Any, ...]
     local_storage_signature: tuple[Any, ...]
-    compute_sharding: _ComputeSharding
+    compute_sharding: _ResolvedComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
     redistribution_storage_mesh_axis: int | None
@@ -910,8 +910,13 @@ class _RedistributionTransition:
 _StorageToComputeTransition = _NoRedistributionTransition | _RedistributionTransition
 
 
-_ComputeSharding = Owned | Replicate | Shard
-_ComputeTensorSharding = Replicate | Shard | BlockShard
+# Per-mesh-axis tensor sharding while resolving ``ComputeLayout``. ``BlockShard``
+# remains explicit here, while ``Owned`` is handled separately.
+_AxisComputeSharding = Replicate | Shard | BlockShard
+
+# Executor strategy after per-axis shardings are resolved. ``BlockShard`` has
+# become ``Shard(0)`` plus ``_MatrixBatchView``; ``Owned`` remains valid here.
+_ResolvedComputeSharding = Owned | Replicate | Shard
 
 
 @dataclass(frozen=True, slots=True)
@@ -922,7 +927,7 @@ class _UnsupportedStoragePlacement:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedStorageToComputeTransition:
-    compute_sharding: _ComputeSharding
+    compute_sharding: _ResolvedComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
     redistribution_storage_mesh_axis: int | None = None
@@ -1328,7 +1333,7 @@ def _resolve_storage_to_compute_transition(
         )
 
     normalized_target_sharding_by_storage_mesh_axis: dict[
-        int, _ComputeTensorSharding
+        int, _AxisComputeSharding
     ] = {}
     declared_shard_dims = []
     for (
@@ -1337,7 +1342,7 @@ def _resolve_storage_to_compute_transition(
     ) in applicable_compute_shardings_by_storage_mesh_axis.items():
         if type(sharding) is Owned:
             continue
-        placement = cast(_ComputeTensorSharding, sharding)
+        placement = cast(_AxisComputeSharding, sharding)
         if type(placement) is Shard:
             declared_shard_dims.append(_normalize_dim(placement.dim, param.ndim))
         elif type(placement) is BlockShard:
@@ -1435,7 +1440,7 @@ def _resolve_storage_to_compute_transition(
     for storage_mesh_axis, axis_name in enumerate(mesh_axis_names):
         if storage_mesh_axis in owned_axis_set:
             target_sharding: (
-                Owned | Replicate | Shard | BlockShard | _UnsupportedStoragePlacement
+                Owned | _AxisComputeSharding | _UnsupportedStoragePlacement
             ) = Owned()
         elif storage_mesh_axis in normalized_target_sharding_by_storage_mesh_axis:
             target_sharding = normalized_target_sharding_by_storage_mesh_axis[
@@ -1468,7 +1473,7 @@ def _resolve_storage_to_compute_transition(
             f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
         )
     if active_owned_storage_mesh_axes:
-        compute_sharding: _ComputeSharding = Owned()
+        compute_sharding: _ResolvedComputeSharding = Owned()
     elif compute_shard_dims:
         if compute_view is None and len(global_compute_shape) == 2:
             raise ValueError(
@@ -1530,11 +1535,11 @@ def _raise_unsupported_layout(fqn: str) -> NoReturn:
 
 
 def _normalize_compute_placement(
-    placement: _ComputeTensorSharding,
+    placement: _AxisComputeSharding,
     *,
     ndim: int,
     mesh_axis_size: int,
-) -> _ComputeTensorSharding:
+) -> _AxisComputeSharding:
     if type(placement) is Replicate:
         return Replicate()
     if type(placement) is Shard:
