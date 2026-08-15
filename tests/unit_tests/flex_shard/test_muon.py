@@ -38,9 +38,7 @@ from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
     _RedistributionBucketPlan,
     _validate_bucket_plans_across_ranks,
 )
-from torchtitan.distributed.flex_shard.muon import (
-    _get_muon_reshard_integration,
-)
+from torchtitan.distributed.flex_shard.muon import _get_muon_reshard_integration
 
 
 def _adjust_muon_learning_rate(
