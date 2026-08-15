@@ -441,7 +441,12 @@ def register_moe_load_balancing_hook(
 
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
-        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
+        # Remat mutates the block forward instead of setting checkpoint_impl.
+        return getattr(
+            module, "checkpoint_impl", None
+        ) is CheckpointImpl.NO_REENTRANT or getattr(
+            module, "_torchtitan_recomputes_forward", False
+        )
 
     def _update_expert_bias(
         model_parts: list[nn.Module],

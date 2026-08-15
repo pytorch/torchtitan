@@ -18,6 +18,10 @@ from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_s
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.remat import (
+    maybe_remat_recompute_needs,
+    maybe_remat_save_region,
+)
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -33,6 +37,8 @@ from .token_dispatcher import LocalTokenDispatcher
 
 
 class GroupedExperts(Module):
+    REMAT_REGIONS = ("w1", "w3", "w2")
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
@@ -91,21 +97,23 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        h_RF = F.silu(
-            self._grouped_mm(
-                A=x_RD.bfloat16(),
-                B_t=w1_EFD.bfloat16().transpose(-2, -1),
-                offs=offsets_E,
-            )
+        w1_out_RF = maybe_remat_save_region(self._grouped_mm, "w1", owner=self)(
+            A=x_RD.bfloat16(),
+            B_t=w1_EFD.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
-        h_RF = h_RF * self._grouped_mm(
+        w3_out_RF = maybe_remat_save_region(self._grouped_mm, "w3", owner=self)(
             A=x_RD.bfloat16(),
             B_t=w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
-        return self._grouped_mm(
+        maybe_remat_recompute_needs(self, w1_out_RF, w3_out_RF)
+        h_RF = F.silu(w1_out_RF) * w3_out_RF
+        out_RD = maybe_remat_save_region(self._grouped_mm, "w2", owner=self)(
             A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
-        ).type_as(x_RD)
+        )
+        maybe_remat_recompute_needs(self, out_RD)
+        return out_RD.type_as(x_RD)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
@@ -361,6 +369,8 @@ class MoE(Module):
     4. Routed and shared expert outputs are summed.
     """
 
+    REMAT_REGIONS = ("router",)
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
@@ -419,11 +429,12 @@ class MoE(Module):
         """
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
-        (
-            topk_scores_BLK,
-            topk_expert_ids_BLK,
-            scores_BLE,
-        ) = self.router(x_BLD, self.expert_bias_E)
+        (topk_scores_BLK, topk_expert_ids_BLK, scores_BLE) = maybe_remat_save_region(
+            self.router, "router", owner=self
+        )(x_BLD, self.expert_bias_E)
+        maybe_remat_recompute_needs(
+            self, topk_scores_BLK, topk_expert_ids_BLK, scores_BLE
+        )
 
         # Build a one-hot routing map (B, L, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on

@@ -43,6 +43,7 @@ from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     MemoryBudgetAC,
     SelectiveAC,
+    validate_activation_checkpointing_compile,
 )
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.cudagraph import (
@@ -140,6 +141,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
             self._validate_cuda_graphs()
+
+            validate_activation_checkpointing_compile(
+                self.activation_checkpoint,
+                model_compile_enabled=(
+                    self.compile.enable and "model" in self.compile.components
+                ),
+            )
 
             if (
                 self.parallelism.spmd_backend == "spmd_types"
