@@ -12,10 +12,15 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-__all__ = ["BlockShard", "BucketConfig", "ComputeLayout", "Owned"]
+__all__ = [
+    "BlockShard",
+    "BucketConfig",
+    "ComputeLayout",
+    "NoRedistribution",
+    "Owned",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +59,17 @@ class BlockShard:
             or self.block_size <= 0
         ):
             raise ValueError("BlockShard.block_size must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class NoRedistribution:
+    """Declare a bucket whose storage shards are already compute-ready.
+
+    Parameters in this bucket may still use sharded DTensor storage. The marker
+    means only that optimizer compute needs no storage-to-compute redistribution.
+    """
+
+    pass
 
 
 class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard | BlockShard]):
@@ -164,46 +180,53 @@ class ComputeLayout:
 
 @dataclass(frozen=True, slots=True)
 class BucketConfig:
-    """Ordered optimizer-work bucket selected by canonical FQN patterns.
+    """One physical optimizer-redistribution bucket.
 
-    Compute layouts determine communication topology. A bucket controls only
-    scheduling order and overlap. FlexShard internally splits its selected
-    parameters into adjacent homogeneous physical transport buckets.
+    ``redistribution_mesh_axis_names`` declares the ordered storage-mesh axes
+    whose Cartesian product forms this bucket's exact redistribution group.
+    ``NoRedistribution`` declares local-only work. A config is never split
+    automatically.
+
+    Multiple configs may use the same patterns with different redistribution
+    choices. This explicitly describes runtime-topology alternatives; each
+    local parameter must resolve to exactly one matching pattern-and-choice
+    config.
     """
 
     patterns: tuple[str, ...]
-    name: str = ""
+    redistribution_mesh_axis_names: tuple[str, ...] | NoRedistribution
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "patterns", tuple(self.patterns))
-
-    def _bind(
-        self,
-        mesh: DeviceMesh | None,
-        fqns: tuple[str, ...],
-    ) -> _BucketSpec:
-        return _BucketSpec(
-            fqns=fqns,
-            mesh=mesh,
-            name=self.name,
+        redistribution = self.redistribution_mesh_axis_names
+        if isinstance(redistribution, NoRedistribution):
+            return
+        if not isinstance(redistribution, tuple):
+            raise ValueError(
+                "BucketConfig.redistribution_mesh_axis_names must be a tuple "
+                "or NoRedistribution"
+            )
+        redistribution_mesh_axis_names = tuple(redistribution)
+        if not redistribution_mesh_axis_names:
+            raise ValueError(
+                "BucketConfig.redistribution_mesh_axis_names must be nonempty; "
+                "use NoRedistribution() for local-only work"
+            )
+        for axis_name in redistribution_mesh_axis_names:
+            if not isinstance(axis_name, str) or not axis_name:
+                raise ValueError(
+                    "BucketConfig.redistribution_mesh_axis_names values must be "
+                    "nonempty strings"
+                )
+        if len(set(redistribution_mesh_axis_names)) != len(
+            redistribution_mesh_axis_names
+        ):
+            raise ValueError(
+                "BucketConfig.redistribution_mesh_axis_names must not contain "
+                "duplicate axes"
+            )
+        object.__setattr__(
+            self,
+            "redistribution_mesh_axis_names",
+            redistribution_mesh_axis_names,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _BucketSpec:
-    """One resolved physical optimizer-work bucket.
-
-    ``fqns`` are bound from one public ``BucketConfig`` after compute layouts
-    select concrete transport groups. ``mesh`` is the bucket's exact
-    one-dimensional communication mesh, or ``None`` when every parameter is
-    already compute-ready. ``name`` is diagnostic metadata only.
-    """
-
-    fqns: tuple[str, ...]
-    mesh: DeviceMesh | None
-    name: str = ""
-
-    def __post_init__(self) -> None:
-        if self.mesh is not None and self.mesh.ndim != 1:
-            raise ValueError("bucket mesh must be one-dimensional")
-        object.__setattr__(self, "fqns", tuple(self.fqns))

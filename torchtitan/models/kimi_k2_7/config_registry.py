@@ -21,6 +21,7 @@ from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
     ComputeLayout,
+    NoRedistribution,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -308,8 +309,20 @@ def _dist_muon_optimizer(
         for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
         for fqn, compute_sharding in layer_compute_sharding_by_fqn.items()
     }
-    layer_bucket_fqns = tuple(
-        tuple(layer_compute_sharding_by_fqn)
+    layer_dense_bucket_fqns = tuple(
+        tuple(
+            fqn
+            for fqn in layer_compute_sharding_by_fqn
+            if ".moe.routed_experts." not in fqn
+        )
+        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
+    )
+    layer_expert_bucket_fqns = tuple(
+        tuple(
+            fqn
+            for fqn in layer_compute_sharding_by_fqn
+            if ".moe.routed_experts." in fqn
+        )
         for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
     )
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
@@ -318,21 +331,44 @@ def _dist_muon_optimizer(
         tuple(range(first_layer_id, min(first_layer_id + 2, num_layers)))
         for first_layer_id in range(1, num_layers, 2)
     )
-    bucket_fqns = tuple(
-        tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
-        for layer_ids in bucket_layer_ids
-    )
-    bucket_configs = tuple(
-        BucketConfig(
-            name="layers." + "-".join(map(str, layer_ids)),
-            patterns=fqns,
+    bucket_configs_list: list[BucketConfig] = []
+    for layer_ids in bucket_layer_ids:
+        dense_fqns = tuple(
+            fqn for layer_id in layer_ids for fqn in layer_dense_bucket_fqns[layer_id]
         )
-        for layer_ids, fqns in zip(
-            bucket_layer_ids,
-            bucket_fqns,
-            strict=True,
+        bucket_configs_list.extend(
+            (
+                BucketConfig(
+                    patterns=dense_fqns,
+                    redistribution_mesh_axis_names=(MeshAxisName.DP_SHARD.value,),
+                ),
+                BucketConfig(
+                    patterns=dense_fqns,
+                    redistribution_mesh_axis_names=NoRedistribution(),
+                ),
+            )
         )
-    )
+        expert_fqns = tuple(
+            fqn for layer_id in layer_ids for fqn in layer_expert_bucket_fqns[layer_id]
+        )
+        if expert_fqns:
+            bucket_configs_list.extend(
+                (
+                    BucketConfig(
+                        patterns=expert_fqns,
+                        redistribution_mesh_axis_names=(MeshAxisName.DP_SHARD.value,),
+                    ),
+                    BucketConfig(
+                        patterns=expert_fqns,
+                        redistribution_mesh_axis_names=(MeshAxisName.EFSDP.value,),
+                    ),
+                    BucketConfig(
+                        patterns=expert_fqns,
+                        redistribution_mesh_axis_names=NoRedistribution(),
+                    ),
+                )
+            )
+    bucket_configs = tuple(bucket_configs_list)
     # Muon is designed for matrix parameters; Moonlight uses AdamW for
     # non-matrix parameters such as RMSNorm, LM head, and embeddings. Expert
     # tensors below are batch-first stacks of matrices. See Sec. 2.2:
