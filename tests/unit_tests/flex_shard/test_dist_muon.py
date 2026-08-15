@@ -19,6 +19,7 @@ from torchtitan.components.checkpoint_utils import (
     load_flat_optim_state_dict,
 )
 from torchtitan.distributed.flex_shard import (
+    BlockShard,
     BucketConfig,
     build_dist_muon,
     ComputeLayout,
@@ -43,6 +44,10 @@ class TestDistMuon(DTensorTestBase):
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
         lr = 0.03
+        num_matrices = self.world_size
+        matrix_rows = 2
+        # Each storage shard already owns one complete matrix, so matrix-batch
+        # compute needs only a local view.
         weight_decay = 0.2
         mesh = init_device_mesh(
             self.device_type,
@@ -60,9 +65,15 @@ class TestDistMuon(DTensorTestBase):
             redistributed: torch.nn.Parameter,
             local_blocks: torch.nn.Parameter,
             ns_steps: int = 2,
+            matrix_sharding: BlockShard | Shard | None = None,
         ):
             redistributed_fqn = "layers.0.redistributed"
             local_blocks_fqn = "layers.0.local_blocks"
+            if matrix_sharding is None:
+                matrix_sharding = BlockShard(
+                    dim=0,
+                    block_size=matrix_rows,
+                )
             return build_dist_muon(
                 [
                     {
@@ -73,11 +84,12 @@ class TestDistMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
+                            "alternate_mesh": BlockShard(dim=0, block_size=1),
                             "dp_shard": Owned(),
                         },
                     ),
                     local_blocks_fqn: ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Shard(0)},
+                        shardings_by_mesh_axis={"dp_shard": matrix_sharding},
                     ),
                 },
                 bucket_configs=[
@@ -86,7 +98,6 @@ class TestDistMuon(DTensorTestBase):
                         name="layers.0",
                     )
                 ],
-                num_stacked_matrices_by_fqn={local_blocks_fqn: self.world_size},
                 lr=lr,
                 weight_decay=weight_decay,
                 momentum=0.8,
@@ -98,10 +109,44 @@ class TestDistMuon(DTensorTestBase):
             torch.arange(12, device=device).reshape(4, 3).float().div_(10).add_(1)
         )
         local_blocks_value = (
-            torch.arange(12, 24, device=device).reshape(4, 3).float().div_(10)
+            torch.arange(12, 24, device=device)
+            .reshape(num_matrices * matrix_rows, 3)
+            .float()
+            .div_(10)
         )
         redistributed = make_parameter(redistributed_value)
         local_blocks = make_parameter(local_blocks_value)
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot be partitioned into 3-row Muon matrices",
+        ):
+            make_optimizer(
+                redistributed,
+                local_blocks,
+                matrix_sharding=BlockShard(dim=0, block_size=3),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires BlockShard to run independent Muon compute on row blocks",
+        ):
+            make_optimizer(
+                redistributed,
+                local_blocks,
+                matrix_sharding=Shard(0),
+            )
+        misaligned_blocks_value = (
+            torch.arange(12, 48, device=device).reshape(3 * 4, 3).float().div_(10)
+        )
+        misaligned_blocks = make_parameter(misaligned_blocks_value)
+        with self.assertRaisesRegex(
+            ValueError,
+            "storage shards are not aligned to matrix rows of size 4",
+        ):
+            make_optimizer(
+                redistributed,
+                misaligned_blocks,
+                matrix_sharding=BlockShard(dim=0, block_size=4),
+            )
         optimizer = make_optimizer(redistributed, local_blocks)
         self.assertIs(type(optimizer), DistMuon)
         with self.assertRaisesRegex(RuntimeError, "parameter groups are frozen"):
@@ -110,7 +155,7 @@ class TestDistMuon(DTensorTestBase):
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
         reference_local_blocks = tuple(
             torch.nn.Parameter(block.clone())
-            for block in local_blocks_value.chunk(self.world_size, dim=0)
+            for block in local_blocks_value.view(num_matrices, matrix_rows, 3)
         )
         reference_optimizer = torch.optim.Muon(
             [reference_redistributed, *reference_local_blocks],
@@ -141,7 +186,7 @@ class TestDistMuon(DTensorTestBase):
             reference_redistributed.grad = redistributed_grad.clone()
             for parameter, grad in zip(
                 reference_local_blocks,
-                local_blocks_grad.chunk(self.world_size, dim=0),
+                local_blocks_grad.view(num_matrices, matrix_rows, 3),
                 strict=True,
             ):
                 parameter.grad = grad.clone()
@@ -160,16 +205,21 @@ class TestDistMuon(DTensorTestBase):
                 atol=0,
             )
 
-            expected_local_blocks = reference_local_blocks[rank].detach()
+            expected_local_blocks = torch.cat(
+                tuple(parameter.detach() for parameter in reference_local_blocks)
+            ).chunk(self.world_size)[rank]
+            expected_local_blocks_before = torch.cat(
+                reference_local_blocks_before
+            ).chunk(self.world_size)[rank]
             decay = 1 - lr * weight_decay
             adjusted_lr = _adjust_muon_learning_rate(
-                lr, None, expected_local_blocks.shape
+                lr, None, reference_local_blocks[0].shape
             )
             actual_update = (
                 local_blocks_before * decay - current_local_blocks.to_local()
             ) / adjusted_lr
             expected_update = (
-                reference_local_blocks_before[rank] * decay - expected_local_blocks
+                expected_local_blocks_before * decay - expected_local_blocks
             ) / adjusted_lr
             # Batched BF16 Newton-Schulz can differ slightly across GEMM schedules.
             torch.testing.assert_close(
@@ -183,7 +233,10 @@ class TestDistMuon(DTensorTestBase):
             torch.arange(1, 13, device=device).reshape(4, 3).float().div_(17)
         )
         first_local_blocks_grad = (
-            torch.arange(13, 25, device=device).reshape(4, 3).float().div_(19)
+            torch.arange(13, 25, device=device)
+            .reshape(num_matrices * matrix_rows, 3)
+            .float()
+            .div_(19)
         )
         step_and_assert(
             optimizer,
@@ -262,7 +315,6 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
                     )
                 },
                 bucket_configs=[BucketConfig(patterns=(fqn,))],
-                num_stacked_matrices_by_fqn={},
             )
 
 

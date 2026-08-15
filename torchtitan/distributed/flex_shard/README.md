@@ -10,23 +10,25 @@ optimizer work. DistMuon is its initial consumer.
 The public API is exported from `torchtitan.distributed.flex_shard`:
 
 - `ComputeLayout` describes temporary optimizer-compute sharding on named
-  `DeviceMesh` axes using PyTorch DTensor placements or `Owned`.
+  `DeviceMesh` axes using PyTorch DTensor placements, `BlockShard`, or `Owned`.
+- `BlockShard` shards complete fixed-size blocks along one tensor dimension. It
+  preserves the tensor's rank and global shape and never creates a tensor view.
 - `Owned` assigns a complete subgroup-local logical tensor to one dynamically
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `build_dist_muon` combines optimizer-agnostic per-parameter
-  `ComputeLayout` values in `compute_sharding_by_fqn` with optimizer-owned
-  `num_stacked_matrices_by_fqn` counts. Each configured count interprets a 2D
-  parameter `[M * R, C]` as `M` independent matrices `[M, R, C]`. The builder
-  validates named DTensor parameters and plans their storage-to-compute
-  transitions. An absent FQN uses ordinary 2D Muon compute; an explicit count
-  of one uses the stacked `[1, R, C]` compute path.
+- `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
+  values in `compute_sharding_by_fqn`. Within DistMuon,
+  `BlockShard(dim=0, block_size=R)` interprets a 2D parameter `[M * R, C]` as
+  `M` independent matrices `[M, R, C]`. FlexShard routes the flat 2D compute
+  tensor, and DistMuon applies the local matrix-batch view immediately before
+  Muon compute. The builder validates named DTensor parameters and plans their
+  storage-to-compute transitions. An FQN without `BlockShard` uses ordinary 2D
+  Muon compute.
 
-Compute sharding and stacked-matrix counts are reconstruction configuration.
-They are validated and frozen when the optimizer is built, but are not stored
-in its state dict; checkpoint restore must rebuild the optimizer with matching
-values.
+Compute sharding is reconstruction configuration. It is validated and frozen
+when the optimizer is built, but is not stored in its state dict; checkpoint
+restore must rebuild the optimizer with matching values.
 
 ## TorchTitan Kimi integration
 

@@ -17,7 +17,12 @@ from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfi
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout, Owned
+from torchtitan.distributed.flex_shard import (
+    BlockShard,
+    BucketConfig,
+    ComputeLayout,
+    Owned,
+)
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
@@ -209,8 +214,21 @@ def _dist_muon_optimizer(
             MeshAxisName.DP_SHARD.value: Owned(),
         },
     )
-    per_head = ComputeLayout(
-        shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
+    per_query_head = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
+            )
+        },
+    )
+    per_key_value_head = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_size=attention.qk_nope_head_dim + attention.v_head_dim,
+            )
+        },
     )
     per_expert = ComputeLayout(
         shardings_by_mesh_axis={
@@ -222,20 +240,17 @@ def _dist_muon_optimizer(
     query_shardings: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
-            "wq_b": per_head,
+            "wq_b": per_query_head,
         }
         if attention.q_lora_rank
-        else {"wq": per_head}
+        else {"wq": per_query_head}
     )
     attention_shardings = {
         **query_shardings,
         "wkv_a": owned,
-        "wkv_b": per_head,
+        "wkv_b": per_key_value_head,
         "wo": owned,
     }
-    per_head_attention_projections = (
-        ("wq_b", "wkv_b") if attention.q_lora_rank else ("wq", "wkv_b")
-    )
     num_layers = len(model_config.layers)
     muon_kwargs = {
         "lr": lr,
@@ -292,11 +307,6 @@ def _dist_muon_optimizer(
         fqn: compute_sharding
         for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
         for fqn, compute_sharding in layer_compute_sharding_by_fqn.items()
-    }
-    num_stacked_matrices_by_fqn = {
-        f"layers.{layer_id}.attention.{projection}.weight": attention.n_heads
-        for layer_id in range(num_layers)
-        for projection in per_head_attention_projections
     }
     layer_bucket_fqns = tuple(
         tuple(layer_compute_sharding_by_fqn)
@@ -358,7 +368,6 @@ def _dist_muon_optimizer(
             "DistMuon": {
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
                 "bucket_configs": bucket_configs,
-                "num_stacked_matrices_by_fqn": num_stacked_matrices_by_fqn,
             }
         },
     )
