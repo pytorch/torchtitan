@@ -32,7 +32,11 @@ You can replace `cu130` with another version of CUDA.
 On ROCm, set `GPU_MAX_HW_QUEUES` before launching so concurrent streams do not alias onto the same hardware queue. Pass the same `--module`/`--config` you train with to set it to the optimal value for that run:
 ```bash
 eval "$(python -m torchtitan.experiments.graph_trainer.hw_queues \
-    --module <module> --config <config> 2>/dev/null)"
+    --module <module> --config <config>)"
+
+# e.g. for Llama3-8B:
+eval "$(python -m torchtitan.experiments.graph_trainer.hw_queues \
+    --module graph_trainer.llama3 --config graph_trainer_llama3_8b)"
 ```
 
 ### Quick Start
