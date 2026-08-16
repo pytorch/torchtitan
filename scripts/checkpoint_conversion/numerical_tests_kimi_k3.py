@@ -15,22 +15,22 @@ The released checkpoint is MXFP4-quantized and is not loaded. Instead, the
 script reduces the HuggingFace config to TorchTitan's debug model, initializes
 TorchTitan, and strictly transfers its state dict to HuggingFace.
 
-The local HuggingFace directory must contain the config, modeling, processor,
-tokenizer code, and tokenizer assets. The released code requires
-``transformers==4.56.2`` and ``tiktoken``.
+The script downloads the config, modeling, processor, and tokenizer assets from
+a pinned HuggingFace revision without downloading the released weight shards.
+The released code requires ``transformers==4.56.2`` and ``tiktoken``.
 
 Usage:
     CUDA_VISIBLE_DEVICES=0 python -m \
         scripts.checkpoint_conversion.numerical_tests_kimi_k3 \
-        --hf_model_path ~/hf_assets/moonshotai/Kimi-K3 --dtype float32
+        --dtype float32
 """
 
 import argparse
-import os
 from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
+from huggingface_hub import snapshot_download
 from PIL import Image
 
 from torchtitan.hf_datasets.multimodal.utils.image import (
@@ -44,6 +44,8 @@ from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
 
 
+_HF_REPO_ID = "moonshotai/Kimi-K3"
+_HF_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
 _MEDIA_TOKEN_ID = 163605
 _PATCH_SIZE = 14
 _MERGE_SIZE = 2
@@ -418,11 +420,6 @@ def compare(ref_logits: torch.Tensor, tt_logits: torch.Tensor) -> bool:
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--hf_model_path",
-        default=os.path.expanduser("~/hf_assets/moonshotai/Kimi-K3"),
-        help="Local directory containing the Kimi K3 HuggingFace assets.",
-    )
     parser.add_argument("--model_flavor", default="debugmodel")
     parser.add_argument("--image_size", type=int, default=336)
     parser.add_argument(
@@ -446,6 +443,11 @@ def main() -> None:
     if not torch.cuda.is_available():
         parser.error("Kimi K3 numerical parity requires a CUDA GPU.")
 
+    hf_model_path = snapshot_download(
+        repo_id=_HF_REPO_ID,
+        revision=_HF_REVISION,
+        allow_patterns=["*.json", "*.py", "tiktoken.model"],
+    )
     device = torch.device("cuda")
     dtype = getattr(torch, args.dtype)
     vision_dtype = getattr(torch, args.vision_dtype) if args.vision_dtype else dtype
@@ -463,7 +465,7 @@ def main() -> None:
     )
 
     ref = run_hf(
-        args.hf_model_path,
+        hf_model_path,
         tt_config,
         hf_state_dict,
         args.image_size,
