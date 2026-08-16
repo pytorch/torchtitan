@@ -9,9 +9,11 @@ import os
 from collections.abc import Callable
 
 import torch
+import torch.distributed as dist
 from einops import rearrange
 from PIL import ExifTags, Image
 from torch import Tensor
+from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.model import FluxModel
@@ -81,6 +83,7 @@ def generate_image(
     tokenizer: FluxTokenizerContainer,
     t5_encoder: FluxEmbedder,
     clip_encoder: FluxEmbedder,
+    cp_mesh: DeviceMesh | None = None,
 ) -> torch.Tensor:
     """
     Sampling and save a single images from noise using a given prompt.
@@ -148,6 +151,7 @@ def generate_image(
             empty_batch["clip_encodings"] if empty_batch is not None else None
         ),
         classifier_free_guidance_scale=classifier_free_guidance_scale,
+        cp_mesh=cp_mesh,
     )
 
     img = autoencoder.decode(img)
@@ -167,6 +171,7 @@ def denoise(
     empty_t5_encodings: torch.Tensor | None = None,
     empty_clip_encodings: torch.Tensor | None = None,
     classifier_free_guidance_scale: float | None = None,
+    cp_mesh: DeviceMesh | None = None,
 ) -> torch.Tensor:
     """
     Sampling images from noise using a given prompt, by running inference with trained Flux model.
@@ -199,7 +204,19 @@ def denoise(
     text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM).to(latents)
 
     # convert img-like latents into sequences of patches
-    latents = pack_latents(latents)
+    latents = pack_latents(latents).flatten(0, 1)
+    latent_pos_enc = latent_pos_enc.flatten(0, 1)
+    t5_encodings = t5_encodings.flatten(0, 1)
+    text_pos_enc = text_pos_enc.flatten(0, 1)
+
+    cp_degree = 1
+    if cp_mesh is not None:
+        cp_degree = cp_mesh.size()
+        cp_rank = cp_mesh.get_local_rank()
+        latents = _shard_sample_sequence(latents, bsz, cp_degree, cp_rank)
+        latent_pos_enc = _shard_sample_sequence(latent_pos_enc, bsz, cp_degree, cp_rank)
+        t5_encodings = _shard_sample_sequence(t5_encodings, bsz, cp_degree, cp_rank)
+        text_pos_enc = _shard_sample_sequence(text_pos_enc, bsz, cp_degree, cp_rank)
 
     # this is ignored for schnell
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
@@ -211,17 +228,23 @@ def denoise(
             txt_ids=text_pos_enc,
             y=clip_encodings,
             timesteps=t_vec,
+            cp_degree=cp_degree,
         )
         if enable_classifier_free_guidance:
+            pred = pred.view(bsz, -1, pred.shape[-1])
             pred_u, pred_c = pred.chunk(2)
             pred = pred_u + classifier_free_guidance_scale * (pred_c - pred_u)
 
             # repeat along batch dimension to update both unconditional and conditional latents
-            pred = pred.repeat(2, 1, 1)
+            pred = pred.repeat(2, 1, 1).flatten(0, 1)
 
         latents = latents + (t_prev - t_curr) * pred
 
     # take the conditional latents for the final result
+    if cp_mesh is not None:
+        latents = _gather_sample_sequence(latents, bsz, cp_mesh)
+    else:
+        latents = latents.view(bsz, -1, latents.shape[-1])
     if enable_classifier_free_guidance:
         latents = latents.chunk(2)[1]
 
@@ -229,6 +252,49 @@ def denoise(
     latents = unpack_latents(latents, latent_height, latent_width)
 
     return latents
+
+
+def _shard_sample_sequence(
+    x: torch.Tensor,
+    num_samples: int,
+    cp_degree: int,
+    cp_rank: int,
+) -> torch.Tensor:
+    """Shard each sample's token sequence across CP ranks."""
+    x = x.view(num_samples, -1, *x.shape[1:])
+    if x.shape[1] % cp_degree != 0:
+        raise ValueError(
+            f"Flux tokens per sample ({x.shape[1]}) must be divisible by "
+            f"the CP degree ({cp_degree})."
+        )
+    return x.chunk(cp_degree, dim=1)[cp_rank].flatten(0, 1).contiguous()
+
+
+def _gather_sample_sequence(
+    x: torch.Tensor,
+    num_samples: int,
+    cp_mesh: DeviceMesh,
+) -> torch.Tensor:
+    """Gather CP shards and restore sample-major token order."""
+    cp_degree = cp_mesh.size()
+    num_local_tokens_per_sample = x.shape[0] // num_samples
+    gathered = torch.empty(
+        cp_degree * x.shape[0],
+        *x.shape[1:],
+        dtype=x.dtype,
+        device=x.device,
+    )
+    dist.all_gather_single(gathered, x, group=cp_mesh.get_group())
+    return (
+        gathered.view(
+            cp_degree,
+            num_samples,
+            num_local_tokens_per_sample,
+            *x.shape[1:],
+        )
+        .transpose(0, 1)
+        .flatten(1, 2)
+    )
 
 
 def save_image(

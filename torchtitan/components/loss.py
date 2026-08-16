@@ -41,7 +41,7 @@ def cross_entropy_loss(
 
     if isinstance(pred, DTensor):
         assert get_spmd_backend() == "default"
-        if pred.placements == (Shard(pred.ndim - 1),):
+        if pred.placements == (Shard(1),):
             return _LossParallelCrossEntropy.apply(
                 pred.to_local().float(),
                 labels,
@@ -109,7 +109,6 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return result
 
     @staticmethod
-    # pyrefly: ignore [bad-override]
     def forward(
         ctx,
         logits: torch.Tensor,
@@ -224,10 +223,9 @@ def _cross_entropy_via_local_map(
     labels: DTensor,
 ) -> torch.Tensor:
     mesh = pred.device_mesh
-    vocab_dim = pred.ndim - 1
     # Labels don't have a vocab dim.
     expected_labels_placements = tuple(
-        Replicate() if isinstance(p, Shard) and p.dim == vocab_dim else p
+        Replicate() if isinstance(p, Shard) and p.dim == 1 else p
         for p in pred.placements
     )
     if labels.placements != expected_labels_placements:
@@ -239,15 +237,13 @@ def _cross_entropy_via_local_map(
     # Per-axis placement:
     #   Shard on tokens -> Shard(0) (valid because reduction is sum)
     #   Shard on vocab -> Shard(1)
-    vocab_sharded = any(
-        isinstance(p, Shard) and p.dim == vocab_dim for p in pred.placements
-    )
+    vocab_sharded = any(isinstance(p, Shard) and p.dim == 1 for p in pred.placements)
 
     # Per-axis output placement for sum reduction:
     #   Shard on non-vocab-dim -> Partial
     #   Shard on vocab-dim -> Replicate
     out_placements = [
-        Partial() if isinstance(p, Shard) and p.dim != vocab_dim else Replicate()
+        Partial() if isinstance(p, Shard) and p.dim != 1 else Replicate()
         for p in pred.placements
     ]
 
@@ -834,7 +830,6 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """
 
     @staticmethod
-    # pyrefly: ignore [bad-override]
     def forward(
         ctx,
         hidden_states: torch.Tensor,

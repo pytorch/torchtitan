@@ -234,22 +234,31 @@ class FluxTrainer(Trainer):
             latents = pack_latents(latents)
             target = pack_latents(noise - labels)
 
+        num_image_tokens_per_sample = latents.shape[1]
+        num_text_tokens_per_sample = t5_encodings.shape[1]
+        latents = latents.flatten(0, 1)
+        latent_pos_enc = latent_pos_enc.flatten(0, 1)
+        t5_encodings = t5_encodings.flatten(0, 1)
+        text_pos_enc = text_pos_enc.flatten(0, 1)
+        target = target.flatten(0, 1)
+
         # Apply CP sharding if enabled
         if self.parallel_dims.cp_enabled:
             from torchtitan.distributed.context_parallel import cp_shard
 
-            (
-                latents,
-                latent_pos_enc,
-                t5_encodings,
-                text_pos_enc,
-                target,
-            ), _ = cp_shard(
+            (latents, latent_pos_enc, target), _ = cp_shard(
                 self.parallel_dims.get_mesh("cp"),
-                (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
+                (latents, latent_pos_enc, target),
                 None,  # No attention masks for Flux
-                load_balancer_type=None,
-                input_seq_dim=1,
+                load_balancer_type="headtail",
+                headtail_segment_size=num_image_tokens_per_sample,
+            )
+            (t5_encodings, text_pos_enc), _ = cp_shard(
+                self.parallel_dims.get_mesh("cp"),
+                (t5_encodings, text_pos_enc),
+                None,
+                load_balancer_type="headtail",
+                headtail_segment_size=num_text_tokens_per_sample,
             )
 
         # Accumulate after CP sharding so the count reflects the actual
@@ -275,11 +284,11 @@ class FluxTrainer(Trainer):
                 txt_ids=text_pos_enc,
                 y=clip_encodings,
                 timesteps=timesteps,
+                cp_degree=self.parallel_dims.cp,
             )
 
             # Scale loss as we used SUM reduction for mse loss function
             loss, _ = self.loss_fn(latent_noise_pred, target, global_valid_tokens)
-            # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[unsupported-delete]
             del (latent_noise_pred, noise, target)

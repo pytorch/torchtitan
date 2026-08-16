@@ -11,7 +11,7 @@ import torch.nn as nn
 
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
-from torchtitan.models.flux.model.layers import FluxScaledDotProductAttention
+from torchtitan.models.flux.model.layers import create_flux_attention_mask
 from torchtitan.models.gpt_oss import gptoss_configs
 from torchtitan.models.kimi_k2_7 import kimi_k2_5_configs
 from torchtitan.models.muse_glimmer import muse_glimmer_configs
@@ -32,13 +32,16 @@ class _AttentionOutput(nn.Module):
 
 
 class TestModelTDLayout(unittest.TestCase):
-    def test_flux_keeps_its_real_diffusion_batch(self):
-        attention = FluxScaledDotProductAttention.Config().build()
-        q_BLNH = torch.randn(2, 8, 4, 16)
-
-        out_BLNH = attention(q_BLNH, q_BLNH, q_BLNH, is_causal=False)
-
-        self.assertEqual(out_BLNH.shape, q_BLNH.shape)
+    def test_flux_mask_isolates_flattened_samples(self):
+        mask = create_flux_attention_mask(
+            num_samples=2,
+            num_local_tokens_per_sample=4,
+            cp_degree=1,
+            device=torch.device("cpu"),
+        )
+        zero = torch.tensor(0)
+        self.assertTrue(mask.mask_mod(zero, zero, torch.tensor(1), torch.tensor(3)))
+        self.assertFalse(mask.mask_mod(zero, zero, torch.tensor(1), torch.tensor(5)))
 
     def test_sdpa_preserves_tnh_shape(self):
         attention = ScaledDotProductAttention.Config().build()

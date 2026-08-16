@@ -36,8 +36,6 @@ from torchtitan.tools.logging import logger
 def apply_cp_to_forward(
     attention_modules: Sequence[nn.Module],
     cp_mesh: DeviceMesh,
-    *,
-    attention_seq_dim: int = 0,
 ) -> None:
     """Wrap inner attention ``forward`` with CP logic.
 
@@ -55,8 +53,6 @@ def apply_cp_to_forward(
     Args:
         attention_modules: Sequence of inner attention modules to apply CP to.
         cp_mesh: Device mesh for context parallel dimension.
-        attention_seq_dim: Sequence dimension of the Q/K/V tensors. Defaults
-            to 0 for token-major attention.
     """
     first = attention_modules[0]
     if isinstance(first, FlexAttention):
@@ -75,9 +71,7 @@ def apply_cp_to_forward(
                         )
                     k = k.contiguous()
                     v = v.contiguous()
-                    global_k, global_v = flex_cp_allgather(
-                        k, v, attention_seq_dim, pg_name
-                    )
+                    global_k, global_v = flex_cp_allgather(k, v, 0, pg_name)
                     return orig_fn(q, global_k, global_v, **kwargs)
 
                 return cp_forward
@@ -91,7 +85,7 @@ def apply_cp_to_forward(
             original_forward = mod.forward
 
             def _make_cp_forward(orig_fn, mesh):
-                placement = [Shard(attention_seq_dim)]
+                placement = [Shard(0)]
 
                 def cp_forward(q, k, v, **kwargs):
                     if not isinstance(q, DTensor):
@@ -136,8 +130,8 @@ def prepare_context_parallel_input(
     upstream in ``post_dataloading_process``.
 
     Args:
-        inputs: Input tensor of shape ``[T]``.
-        labels: Label tensor of shape ``[T]``.
+        inputs: Input tensor of shape ``[num_tokens]``.
+        labels: Label tensor of shape ``[num_tokens]``.
         extra_kwargs: Dictionary containing 'positions' (required) and
             optionally 'attention_masks' to be sharded.
         cp_mesh: Device mesh for context parallel dimension
@@ -203,7 +197,7 @@ def cp_shard(
             - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dim: Token dimension index for sharding. Defaults to 0 for
-            tensors whose leading dimension is ``T``.
+            tensors whose leading dimension is ``num_tokens``.
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and
             ``attention_masks`` is a dict[str, BlockMask], selects which mask in
             the dict the PTRRLoadBalancer is built from. The resulting balancer

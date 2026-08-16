@@ -7,19 +7,21 @@
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
-import torch
 from torch import nn, Tensor
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 
 from torchtitan.models.flux.model.layers import (
+    assert_token_layout,
+    concat_sample_sequences,
+    create_flux_attention_mask,
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
-    local_split_text_image,
     MLPEmbedder,
     SingleStreamBlock,
+    split_sample_sequences,
     timestep_embedding,
 )
 from torchtitan.protocols import BaseModel
@@ -155,36 +157,56 @@ class FluxModel(BaseModel):
         txt_ids: Tensor,
         timesteps: Tensor,
         y: Tensor,
+        cp_degree: int = 1,
     ) -> Tensor:
-        @spmd.local_map(
-            in_types=(
-                spmd.PartitionSpec("dp", "cp", None),
-                spmd.PartitionSpec("dp", "cp", None),
-            ),
-            out_types=spmd.PartitionSpec("dp", "cp", None),
-        )
-        def _local_concat_text_image(text: Tensor, image: Tensor) -> Tensor:
-            return torch.cat((text, image), dim=1)
-
-        if img.ndim != 3 or txt.ndim != 3:
-            raise ValueError("Input img and txt tensors must have 3 dimensions.")
-
         # running on sequences img
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 
-        ids = _local_concat_text_image(txt_ids, img_ids)
+        num_samples = timesteps.shape[0]
+        num_text_tokens_per_sample = txt.shape[0] // num_samples
+        num_image_tokens_per_sample = img.shape[0] // num_samples
+        num_joint_tokens_per_sample = (
+            num_text_tokens_per_sample + num_image_tokens_per_sample
+        )
+        ids = concat_sample_sequences(txt_ids, img_ids, num_samples)
         pe = self.pe_embedder(ids)
+        attention_mask = create_flux_attention_mask(
+            num_samples,
+            num_joint_tokens_per_sample,
+            cp_degree,
+            img.device,
+        )
 
         for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+            with spmd.local():
+                img, txt = block(
+                    img=img,
+                    txt=txt,
+                    vec=vec,
+                    pe=pe,
+                    attention_mask=attention_mask,
+                    num_samples=num_samples,
+                )
+                assert_token_layout(img)
+                assert_token_layout(txt)
 
-        img = _local_concat_text_image(txt, img)
+        img = concat_sample_sequences(txt, img, num_samples)
         for block in self.single_blocks:
-            img = block(img, vec=vec, pe=pe)
-        _, img = local_split_text_image(img, txt.shape[1])
+            with spmd.local():
+                img = block(
+                    img,
+                    vec=vec,
+                    pe=pe,
+                    attention_mask=attention_mask,
+                    num_samples=num_samples,
+                )
+                assert_token_layout(img)
+        _, img = split_sample_sequences(img, num_samples, num_text_tokens_per_sample)
 
-        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+        with spmd.local():
+            img = self.final_layer(img, vec, num_samples)
+            assert_token_layout(img)
         return img

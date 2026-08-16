@@ -12,66 +12,88 @@ import spmd_types as spmd
 import torch
 from einops import rearrange
 from torch import nn, Tensor
-import torch.nn.functional as F
-from torch.nn.attention import sdpa_kernel
-from torchtitan.models.common.attention import ScaledDotProductAttention
+from torch.nn.attention.flex_attention import BlockMask
+
+from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common.attention import create_attention_mask, FlexAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm, SiLU
 from torchtitan.protocols.module import Module, Sequential
 
 
-class FluxScaledDotProductAttention(ScaledDotProductAttention):
-    """Scaled dot-product attention for Flux's batched diffusion sequences."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ScaledDotProductAttention.Config):
-        pass
-
-    def forward(
-        self,
-        q_BLNH: torch.Tensor,
-        k_BLNH: torch.Tensor,
-        v_BLNH: torch.Tensor,
-        *,
-        attention_masks=None,
-        scale: float | None = None,
-        enable_gqa: bool = False,
-        is_causal: bool = True,
-        **kwargs,
-    ) -> torch.Tensor:
-        if attention_masks is not None:
-            raise ValueError(
-                "FluxScaledDotProductAttention does not support attention_masks."
-            )
-        q_BNLH, k_BNLH, v_BNLH = (
-            q_BLNH.transpose(1, 2),
-            k_BLNH.transpose(1, 2),
-            v_BLNH.transpose(1, 2),
+def assert_token_layout(x: torch.Tensor) -> None:
+    if get_spmd_backend() == "spmd_types":
+        spmd.assert_type(
+            x,
+            {"dp": spmd.V, "cp": spmd.V},
+            spmd.PartitionSpec(("dp", "cp"), *((None,) * (x.ndim - 1))),
         )
-        with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            out_BNLH = F.scaled_dot_product_attention(
-                q_BNLH,
-                k_BNLH,
-                v_BNLH,
-                scale=scale,
-                is_causal=is_causal,
-                enable_gqa=enable_gqa,
-            )
-        return out_BNLH.transpose(1, 2)
 
 
-@spmd.local_map(
-    in_types=(spmd.PartitionSpec("dp", "cp", None), None),
-    out_types=(
-        spmd.PartitionSpec("dp", "cp", None),
-        spmd.PartitionSpec("dp", "cp", None),
-    ),
-)
-def local_split_text_image(
+def concat_sample_sequences(
+    text: torch.Tensor,
+    image: torch.Tensor,
+    num_samples: int,
+) -> torch.Tensor:
+    """Concatenate text and image tokens within each sample."""
+    with spmd.local():
+        text = text.view(num_samples, -1, *text.shape[1:])
+        image = image.view(num_samples, -1, *image.shape[1:])
+        combined = torch.cat((text, image), dim=1).flatten(0, 1)
+        assert_token_layout(combined)
+    return combined
+
+
+def split_sample_sequences(
     combined: torch.Tensor,
-    text_seq_len: int,
+    num_samples: int,
+    num_text_tokens_per_sample: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return combined[:, :text_seq_len], combined[:, text_seq_len:]
+    """Split a sample-interleaved stream into text and image streams."""
+    with spmd.local():
+        combined = combined.view(num_samples, -1, *combined.shape[1:])
+        text = combined[:, :num_text_tokens_per_sample].flatten(0, 1)
+        image = combined[:, num_text_tokens_per_sample:].flatten(0, 1)
+        assert_token_layout(text)
+        assert_token_layout(image)
+    return text, image
+
+
+def repeat_sample_conditioning(
+    x: torch.Tensor, num_tokens_per_sample: int
+) -> torch.Tensor:
+    """Repeat per-sample conditioning for each local token in that sample."""
+    with spmd.local():
+        x = x.repeat_interleave(num_tokens_per_sample, dim=0)
+        assert_token_layout(x)
+    return x
+
+
+def create_flux_attention_mask(
+    num_samples: int,
+    num_local_tokens_per_sample: int,
+    cp_degree: int,
+    device: torch.device,
+) -> BlockMask:
+    """Create sample-isolating attention for local Q and CP-gathered K/V."""
+    local_segment_ids = torch.arange(
+        num_samples, device=device, dtype=torch.int32
+    ).repeat_interleave(num_local_tokens_per_sample)
+    global_segment_ids = local_segment_ids.repeat(cp_degree)
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        return local_segment_ids[q_idx] == global_segment_ids[kv_idx]
+
+    num_local_tokens = local_segment_ids.shape[0]
+    with spmd.no_typecheck():
+        return create_attention_mask(
+            mask_mod,
+            1,
+            None,
+            num_local_tokens,
+            num_local_tokens * cp_degree,
+            device=device,
+        )
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -82,7 +104,7 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     out = torch.stack(
         [torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1
     )
-    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+    out = rearrange(out, "t d (i j) -> t d i j", i=2, j=2)
     return out.float()
 
 
@@ -114,7 +136,7 @@ class EmbedND(Module):
             dim=-3,
         )
 
-        return emb.unsqueeze(2)
+        return emb.unsqueeze(1)
 
 
 def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 1000.0):
@@ -191,8 +213,8 @@ class SelfAttention(Module):
         norm: QKNorm.Config
         num_heads: int = 8
         qkv_bias: bool = False
-        inner_attention: FluxScaledDotProductAttention.Config = field(
-            default_factory=FluxScaledDotProductAttention.Config
+        inner_attention: FlexAttention.Config = field(
+            default_factory=FlexAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -203,13 +225,13 @@ class SelfAttention(Module):
         self.proj = config.proj.build()
         self.inner_attention = config.inner_attention.build()
 
-    def forward(self, x: Tensor, pe: Tensor) -> Tensor:
+    def forward(self, x: Tensor, pe: Tensor, attention_mask: BlockMask) -> Tensor:
         qkv = self.qkv(x)
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
+        q, k, v = rearrange(qkv, "T (K N H) -> K T N H", K=3, N=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
-        x = self.inner_attention(q, k, v, is_causal=False)
-        x = rearrange(x, "B L H D -> B L (H D)")
+        x = self.inner_attention(q, k, v, attention_masks=attention_mask)
+        x = rearrange(x, "T N H -> T (N H)")
         x = self.proj(x)
         return x
 
@@ -219,6 +241,17 @@ class ModulationOut:
     shift: Tensor
     scale: Tensor
     gate: Tensor
+
+
+def expand_modulation(
+    modulation: ModulationOut, num_tokens_per_sample: int
+) -> ModulationOut:
+    """Expand per-sample modulation to token-major activations."""
+    return ModulationOut(
+        shift=repeat_sample_conditioning(modulation.shift, num_tokens_per_sample),
+        scale=repeat_sample_conditioning(modulation.scale, num_tokens_per_sample),
+        gate=repeat_sample_conditioning(modulation.gate, num_tokens_per_sample),
+    )
 
 
 class Modulation(Module):
@@ -234,9 +267,7 @@ class Modulation(Module):
         self.lin = config.lin.build()
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
-        out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(
-            self.multiplier, dim=-1
-        )
+        out = self.lin(nn.functional.silu(vec)).chunk(self.multiplier, dim=-1)
 
         return (
             ModulationOut(*out[:3]),
@@ -259,8 +290,8 @@ class DoubleStreamBlock(Module):
         txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
-        inner_attention: FluxScaledDotProductAttention.Config = field(
-            default_factory=FluxScaledDotProductAttention.Config
+        inner_attention: FlexAttention.Config = field(
+            default_factory=FlexAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -300,32 +331,31 @@ class DoubleStreamBlock(Module):
         self.inner_attention = config.inner_attention.build()
 
     def forward(
-        self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
+        self,
+        img: Tensor,
+        txt: Tensor,
+        vec: Tensor,
+        pe: Tensor,
+        attention_mask: BlockMask,
+        num_samples: int,
     ) -> tuple[Tensor, Tensor]:
-        @spmd.local_map(
-            in_types=(
-                spmd.PartitionSpec("dp", "cp", None, None),
-                spmd.PartitionSpec("dp", "cp", None, None),
-            ),
-            out_types=spmd.PartitionSpec("dp", "cp", None, None),
-        )
-        def _local_concat_text_image_attention_states(
-            text: torch.Tensor,
-            image: torch.Tensor,
-        ) -> torch.Tensor:
-            return torch.cat((text, image), dim=1)
-
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
         assert txt_mod2 is not None
         assert img_mod2 is not None
+        num_img_tokens_per_sample = img.shape[0] // num_samples
+        num_txt_tokens_per_sample = txt.shape[0] // num_samples
+        img_mod1 = expand_modulation(img_mod1, num_img_tokens_per_sample)
+        img_mod2 = expand_modulation(img_mod2, num_img_tokens_per_sample)
+        txt_mod1 = expand_modulation(txt_mod1, num_txt_tokens_per_sample)
+        txt_mod2 = expand_modulation(txt_mod2, num_txt_tokens_per_sample)
 
         # prepare image for attention
         img_modulated = self.img_norm1(img)
         img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
         img_qkv = self.img_attn.qkv(img_modulated)
         img_q, img_k, img_v = rearrange(
-            img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
+            img_qkv, "T (K N H) -> K T N H", K=3, N=self.num_heads
         )
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
@@ -334,20 +364,21 @@ class DoubleStreamBlock(Module):
         txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         txt_q, txt_k, txt_v = rearrange(
-            txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads
+            txt_qkv, "T (K N H) -> K T N H", K=3, N=self.num_heads
         )
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
-        q = _local_concat_text_image_attention_states(txt_q, img_q)
-        k = _local_concat_text_image_attention_states(txt_k, img_k)
-        v = _local_concat_text_image_attention_states(txt_v, img_v)
+        q = concat_sample_sequences(txt_q, img_q, num_samples)
+        k = concat_sample_sequences(txt_k, img_k, num_samples)
+        v = concat_sample_sequences(txt_v, img_v, num_samples)
 
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v, is_causal=False)
-        attn = rearrange(attn, "B L H D -> B L (H D)")
-
-        txt_attn, img_attn = local_split_text_image(attn, txt.shape[1])
+        attn = self.inner_attention(q, k, v, attention_masks=attention_mask)
+        attn = rearrange(attn, "T N H -> T (N H)")
+        txt_attn, img_attn = split_sample_sequences(
+            attn, num_samples, num_txt_tokens_per_sample
+        )
 
         # calculate the img blocks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
@@ -379,8 +410,8 @@ class SingleStreamBlock(Module):
         norm: QKNorm.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
-        inner_attention: FluxScaledDotProductAttention.Config = field(
-            default_factory=FluxScaledDotProductAttention.Config
+        inner_attention: FlexAttention.Config = field(
+            default_factory=FlexAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -409,23 +440,32 @@ class SingleStreamBlock(Module):
         self.modulation = config.modulation.build()
         self.inner_attention = config.inner_attention.build()
 
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        vec: Tensor,
+        pe: Tensor,
+        attention_mask: BlockMask,
+        num_samples: int,
+    ) -> Tensor:
         mod, _ = self.modulation(vec)
+        num_tokens_per_sample = x.shape[0] // num_samples
+        mod = expand_modulation(mod, num_tokens_per_sample)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         qkv, mlp = torch.split(
             self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
         )
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
+        q, k, v = rearrange(qkv, "T (K N H) -> K T N H", K=3, N=self.num_heads)
         q, k = self.norm(q, k, v)
 
         # compute attention
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v, is_causal=False)
-        attn = rearrange(attn, "B L H D -> B L (H D)")
+        attn = self.inner_attention(q, k, v, attention_masks=attention_mask)
+        attn = rearrange(attn, "T N H -> T (N H)")
 
         # compute activation in mlp stream, cat again and run second linear layer
-        output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+        output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), dim=-1))
         return x + mod.gate * output
 
 
@@ -451,8 +491,11 @@ class LastLayer(Module):
             config.adaln_linear.build(),
         )
 
-    def forward(self, x: Tensor, vec: Tensor) -> Tensor:
+    def forward(self, x: Tensor, vec: Tensor, num_samples: int) -> Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
-        x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
+        num_tokens_per_sample = x.shape[0] // num_samples
+        shift = repeat_sample_conditioning(shift, num_tokens_per_sample)
+        scale = repeat_sample_conditioning(scale, num_tokens_per_sample)
+        x = (1 + scale) * self.norm_final(x) + shift
         x = self.linear(x)
         return x
