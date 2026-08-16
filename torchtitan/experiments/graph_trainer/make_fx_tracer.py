@@ -6,6 +6,7 @@
 
 import contextlib
 import copy
+from bisect import bisect_left
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -160,8 +161,9 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
     Uses a two-pass approach over all submodule graphs (including HOP subgraphs
     like score_mod/mask_mod). Pass 1 collects forward nodes by seq_nr; pass 2
     copies custom/nn_module_stack/stack_trace from the matching forward node to
-    each backward node. Backward nodes are identified by the autograd engine's
-    ``autograd_backward`` tag on ``node.meta``.
+    each backward node. A single missing seq_nr bracketed by adjacent forward
+    values uses the following forward node. Backward nodes are identified by
+    the autograd engine's ``autograd_backward`` tag on ``node.meta``.
     """
 
     def _is_backward(node: torch.fx.Node) -> bool:
@@ -183,6 +185,27 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
             if seq_nr not in seq_nr_to_fwd_node:
                 seq_nr_to_fwd_node[seq_nr] = node
 
+    fwd_seq_nrs = sorted(seq_nr_to_fwd_node)
+
+    def _find_fwd_node(seq_nr: int) -> torch.fx.Node | None:
+        fwd_node = seq_nr_to_fwd_node.get(seq_nr)
+        if fwd_node is not None:
+            return fwd_node
+
+        # DTensor custom decompositions can create a high-level autograd node
+        # whose backward seq_nr has no visible forward FX node. In that case the
+        # visible forward decomposition nodes may be traced under the next seq_nr.
+        # Only fill a single missing value bracketed by adjacent forward values;
+        # a wider gap does not identify which forward operation owns the backward
+        # node.
+        insertion_index = bisect_left(fwd_seq_nrs, seq_nr)
+        if 0 < insertion_index < len(fwd_seq_nrs):
+            lower_seq_nr = fwd_seq_nrs[insertion_index - 1]
+            upper_seq_nr = fwd_seq_nrs[insertion_index]
+            if lower_seq_nr == seq_nr - 1 and upper_seq_nr == seq_nr + 1:
+                return seq_nr_to_fwd_node[upper_seq_nr]
+        return None
+
     for submod in fx_g.modules():
         if not isinstance(submod, torch.fx.GraphModule):
             continue
@@ -193,7 +216,7 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
                 or not _is_backward(node)
             ):
                 continue
-            fwd_node = seq_nr_to_fwd_node.get(node.meta["seq_nr"])
+            fwd_node = _find_fwd_node(node.meta["seq_nr"])
             if fwd_node is None or fwd_node is node:
                 continue
 
