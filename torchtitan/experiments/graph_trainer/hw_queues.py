@@ -4,13 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""ROCm GPU_MAX_HW_QUEUES sizing for graph_trainer.
+"""ROCm GPU_MAX_HW_QUEUES sizing helper for graph_trainer.
 
-HIP maps logical streams to hardware queues via ``stream_id % Q``. When
-``Q`` is smaller than the number of concurrently active streams, unrelated
-streams alias onto the same queue and lose overlap. This module estimates
-the stream count from the training config and sets ``GPU_MAX_HW_QUEUES`` to
-the next power of two before HIP init.
+Estimates the number of concurrently active GPU streams from the training config
+and recommends a ``GPU_MAX_HW_QUEUES`` value (the next power of two). Run as a
+module to print the value; see the README for usage.
 """
 
 from __future__ import annotations
@@ -57,20 +55,14 @@ def _next_pow2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
-def maybe_set_gpu_max_hw_queues(config: JobConfig) -> None:
-    """Set GPU_MAX_HW_QUEUES on ROCm before HIP init.
+def recommend_gpu_max_hw_queues(config: JobConfig) -> tuple[int, list[str]]:
+    """Estimate the GPU stream count and recommend a GPU_MAX_HW_QUEUES value.
 
-    No-op on CUDA and when the env var is already set.
+    Returns ``(queues, lanes)`` where ``queues`` is the next power of two at or
+    above the estimated number of concurrently active GPU streams, and ``lanes``
+    is the list of stream labels used for the estimate. Pure function: reads the
+    config only, sets no environment variables.
     """
-    import torch
-
-    from torchtitan.tools.logging import logger
-
-    if torch.version.hip is None:
-        return
-    if "GPU_MAX_HW_QUEUES" in os.environ:
-        return
-
     from torchtitan.models.common.moe import MoE
 
     p = config.parallelism
@@ -95,11 +87,29 @@ def maybe_set_gpu_max_hw_queues(config: JobConfig) -> None:
         fsdp_ag_rs_overlap=fsdp_ag_rs_overlap,
         cudagraph=cudagraph,
     )
-    q = _next_pow2(len(lanes))
-    os.environ["GPU_MAX_HW_QUEUES"] = str(q)
-    logger.info(
-        "GPU_MAX_HW_QUEUES auto-set to %d (estimated %d GPU streams: %s)",
-        q,
-        len(lanes),
-        ", ".join(lanes),
+    return _next_pow2(len(lanes)), lanes
+
+
+def main() -> None:
+    from torchtitan.config import ConfigManager
+
+    config = ConfigManager().parse_args()
+    queues, lanes = recommend_gpu_max_hw_queues(config)
+
+    import sys
+
+    print(
+        f"# estimated {len(lanes)} concurrent GPU streams: {', '.join(lanes)}",
+        file=sys.stderr,
     )
+    if "GPU_MAX_HW_QUEUES" in os.environ:
+        print(
+            f"# note: GPU_MAX_HW_QUEUES already set to "
+            f"{os.environ['GPU_MAX_HW_QUEUES']} in your environment",
+            file=sys.stderr,
+        )
+    print(f"export GPU_MAX_HW_QUEUES={queues}")
+
+
+if __name__ == "__main__":
+    main()

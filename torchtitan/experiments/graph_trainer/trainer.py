@@ -22,7 +22,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     trace_input_preparer_keys,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
-from torchtitan.experiments.graph_trainer.hw_queues import maybe_set_gpu_max_hw_queues
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -107,7 +106,6 @@ class GraphTrainer(Trainer):
         )
 
     def __init__(self, config):
-        maybe_set_gpu_max_hw_queues(config)
         super().__init__(config)
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)

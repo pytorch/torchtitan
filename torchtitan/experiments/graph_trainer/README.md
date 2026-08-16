@@ -29,6 +29,12 @@ pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu
 ```
 You can replace `cu130` with another version of CUDA.
 
+On ROCm, set `GPU_MAX_HW_QUEUES` before launching so concurrent streams do not alias onto the same hardware queue. Pass the same `--module`/`--config` you train with to set it to the optimal value for that run:
+```bash
+eval "$(python -m torchtitan.experiments.graph_trainer.hw_queues \
+    --module <module> --config <config> 2>/dev/null)"
+```
+
 ### Quick Start
 
 #### Training Llama3-8B
