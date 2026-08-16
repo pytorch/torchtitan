@@ -491,6 +491,7 @@ def _apply_attention_residual(
     norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32."""
+    assert norm.eps is not None
 
     values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
     values_float = values_TND.float()
