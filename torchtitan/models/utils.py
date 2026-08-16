@@ -16,18 +16,27 @@ from torchtitan.tools.logging import logger
 
 
 def validate_converter_order(converters: list) -> None:
-    """Validate that quantization/QAT converters precede LoRA.
+    """Validate converter ordering and mutual exclusivity.
 
-    Raises ``ValueError`` if a quantization converter appears after a LoRA
-    converter in the list.
+    Rules:
+    - Quantization converters must precede LoRA.
+    - QAT is mutually exclusive with other quantization converters
+      (Float8, MXFP8) since both replace Linear modules.
     """
     from torchtitan.components.lora import LoRAConverter
     from torchtitan.components.quantization import QuantizationConverter
+    from torchtitan.components.quantization.qat import QATConverter
 
     _BEFORE_LORA = (QuantizationConverter.Config,)
 
     seen_lora = False
+    has_qat = False
+    has_other_quant = False
     for converter in converters:
+        if isinstance(converter, QATConverter.Config):
+            has_qat = True
+        elif isinstance(converter, QuantizationConverter.Config):
+            has_other_quant = True
         if isinstance(converter, LoRAConverter.Config):
             seen_lora = True
         elif seen_lora and isinstance(converter, _BEFORE_LORA):
@@ -35,6 +44,12 @@ def validate_converter_order(converters: list) -> None:
                 f"{type(converter).__name__} must be applied before "
                 f"LoRAConverter. Reorder the converters list."
             )
+
+    if has_qat and has_other_quant:
+        raise ValueError(
+            "QATConverter is mutually exclusive with other quantization "
+            "converters (Float8, MXFP8). Use one or the other, not both."
+        )
 
 
 class MoEStateDictAdapter(StateDictAdapter):
