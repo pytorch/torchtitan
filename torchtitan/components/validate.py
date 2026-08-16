@@ -41,6 +41,8 @@ class BaseValidator(Configurable):
         config: Config,
         **kwargs,
     ):
+        if config.freq <= 0:
+            raise ValueError(f"validation frequency must be positive, got {config.freq}")
         self.config = config
 
     def validate(self, model_parts: list[nn.Module], step: int) -> None:
