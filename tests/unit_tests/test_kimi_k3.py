@@ -4,16 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
-from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed._composable.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
-from torchtitan.models.common import Embedding
-from torchtitan.protocols.module import Module
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed import ParallelDims
 
 # torchtitan.models.kimi_k3 imports FLA at module scope for the KDA kernel.
 # FLA is a per-model dependency (kimi_k3/requirements.txt), not part of the
@@ -21,19 +27,11 @@ from torchtitan.protocols.module import Module
 # when it is absent. Modules importing this one inherit the skip.
 try:
     from torchtitan.models.kimi_k3 import (
-        _feed_forward_config,
-        _kda_config,
-        _latent_moe_config,
-        _linear,
-        _mla_config,
-        _norm,
+        _kimi_k3_config,
         _vision_encoder_config,
+        parallelize_kimi_k3,
     )
-    from torchtitan.models.kimi_k3.model import (
-        KimiK3Model,
-        KimiK3TransformerBlock,
-        KimiKDAKernel,
-    )
+    from torchtitan.models.kimi_k3.model import KimiK3Model, KimiKDAKernel
     from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest(
@@ -41,167 +39,50 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 
-class ReferenceKimiKDAKernel(Module):
-    """Pure-PyTorch stand-in for KimiKDAKernel backed by an explicit recurrence.
+def _small_model_config(
+    *,
+    attn_res_block_size: int = 1,
+    full_attention_layers: set[int] | None = None,
+) -> KimiK3Model.Config:
+    """Build a reduced KDA+MLA, dense+MoE, multimodal Kimi K3 config."""
+    if full_attention_layers is None:
+        full_attention_layers = {1}
 
-    Mirrors ``KimiKDAKernel.forward``'s interface so tests can build a model
-    with it in place of the FLA kernel and exercise the surrounding model
-    on CPU. The loop is O(seqlen) and far too slow for training; it exists to
-    pin the kernel's math.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        head_dim: int
-        lower_bound: float | None = -5.0
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.head_dim = config.head_dim
-        self.lower_bound = config.lower_bound
-
-    def forward(
-        self,
-        q_BLHK: torch.Tensor,
-        k_BLHK: torch.Tensor,
-        v_BLHV: torch.Tensor,
-        gate_BLHK: torch.Tensor,
-        beta_BLH: torch.Tensor,
-        A_log_H: torch.Tensor,
-        dt_bias_HK: torch.Tensor,
-    ) -> torch.Tensor:
-        return _kda_recurrent_reference(
-            q_BLHK,
-            k_BLHK,
-            v_BLHV,
-            gate_BLHK,
-            beta_BLH,
-            A_log_H,
-            dt_bias_HK,
-            lower_bound=self.lower_bound,
-        )
-
-
-def _use_reference_kda_kernel(config: KimiK3Model.Config) -> KimiK3Model.Config:
-    """Point every KDA layer at the recurrent reference kernel.
-
-    Test configurations use head dimensions far below what FLA's chunked KDA
-    kernel can compile, and the CPU suite has no Triton runtime at all.
-    """
-    for layer in config.layers:
-        if layer.delta_attention is None:
-            continue
-        kernel = layer.delta_attention.kernel
-        assert isinstance(kernel, KimiKDAKernel.Config)
-        layer.delta_attention.kernel = ReferenceKimiKDAKernel.Config(
-            head_dim=kernel.head_dim,
-            lower_bound=kernel.lower_bound,
-        )
-    return config
-
-
-def _small_model_config(*, attn_res_block_size: int = 1) -> KimiK3Model.Config:
-    """Build the reduced two-layer model used across the Kimi K3 tests.
-
-    ``attn_res_block_size`` defaults to 1, which makes every layer extend the
-    attention residual. Pass 2 to make the second layer pass the residual
-    through instead, which is the shape the released cadence uses and which
-    routes the residual back out through the FSDP module boundary. Callers
-    comparing against frozen reference values must keep the default, since the
-    parameter shapes and ordering feed those values.
-    """
-    dim = 16
-
-    def block(
-        layer_id: int,
-        *,
-        use_mla: bool,
-        use_moe: bool,
-    ) -> KimiK3TransformerBlock.Config:
-        return KimiK3TransformerBlock.Config(
-            layer_id=layer_id,
-            attn_res_block_size=attn_res_block_size,
-            attention=(
-                _mla_config(
-                    dim=dim,
-                    num_heads=2,
-                    q_lora_rank=8,
-                    kv_lora_rank=8,
-                    qk_nope_head_dim=4,
-                    qk_rope_head_dim=4,
-                    v_head_dim=4,
-                    attn_backend="flex",
-                )
-                if use_mla
-                else None
-            ),
-            delta_attention=(
-                None
-                if use_mla
-                else _kda_config(
-                    dim=dim,
-                    num_heads=2,
-                    head_dim=4,
-                    conv_kernel_size=3,
-                )
-            ),
-            feed_forward=(
-                None if use_moe else _feed_forward_config(dim=dim, hidden_dim=32)
-            ),
-            moe=(
-                _latent_moe_config(
-                    dim=dim,
-                    latent_dim=8,
-                    expert_hidden_dim=8,
-                    num_experts=2,
-                    top_k=1,
-                    num_shared_experts=1,
-                )
-                if use_moe
-                else None
-            ),
-            attention_norm=_norm(dim),
-            ffn_norm=_norm(dim),
-            attention_res_norm=_norm(dim),
-            attention_res_proj=_linear(dim, 1),
-            ffn_res_norm=_norm(dim),
-            ffn_res_proj=_linear(dim, 1),
-        )
-
-    return _use_reference_kda_kernel(
-        KimiK3Model.Config(
-            dim=dim,
-            vocab_size=32,
-            tok_embeddings=Embedding.Config(
-                num_embeddings=32,
-                embedding_dim=dim,
-                param_init={
-                    "weight": lambda parameter: nn.init.normal_(parameter, std=0.02)
-                },
-            ),
-            layers=[
-                block(0, use_mla=False, use_moe=False),
-                block(1, use_mla=True, use_moe=True),
-            ],
-            norm=_norm(dim),
-            lm_head=_linear(dim, 32),
-            output_res_norm=_norm(dim),
-            output_res_proj=_linear(dim, 1),
-            vision_encoder=_vision_encoder_config(
-                text_dim=dim,
-                dim=16,
-                qkv_dim=24,
-                hidden_dim=32,
-                num_layers=1,
-                num_heads=3,
-                patch_size=2,
-                merge_kernel_size=(2, 2),
-                init_pos_emb_height=2,
-                init_pos_emb_width=2,
-                max_num_frames=1,
-            ),
-            spatial_merge_size=2,
-        )
+    dim = 64
+    return _kimi_k3_config(
+        dim=dim,
+        vocab_size=32,
+        num_layers=2,
+        full_attention_layers=full_attention_layers,
+        attn_res_block_size=attn_res_block_size,
+        num_heads=2,
+        q_lora_rank=32,
+        kv_lora_rank=32,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=16,
+        v_head_dim=16,
+        kda_head_dim=16,
+        conv_kernel_size=3,
+        dense_hidden_dim=128,
+        latent_dim=32,
+        expert_hidden_dim=32,
+        num_experts=2,
+        top_k=1,
+        num_shared_experts=1,
+        vision_encoder=_vision_encoder_config(
+            text_dim=dim,
+            dim=48,
+            qkv_dim=48,
+            hidden_dim=96,
+            num_layers=1,
+            num_heads=3,
+            patch_size=2,
+            merge_kernel_size=(2, 2),
+            init_pos_emb_height=2,
+            init_pos_emb_width=2,
+            max_num_frames=1,
+        ),
+        attn_backend="flex",
     )
 
 
@@ -304,36 +185,28 @@ class TestKimiK3(unittest.TestCase):
 
         for lower_bound in (-5.0, None):
             with self.subTest(lower_bound=lower_bound):
-                q_BLHK = parameter(2, 64, num_heads, head_dim)
-                k_BLHK = parameter(2, 64, num_heads, head_dim)
-                v_BLHV = parameter(2, 64, num_heads, head_dim)
-                gate_BLHK = parameter(2, 64, num_heads, head_dim)
-                beta_BLH = parameter(2, 64, num_heads)
                 A_log_H = torch.rand(num_heads, device="cuda")
                 A_log_H = A_log_H.uniform_(1.0, 16.0).log().requires_grad_()
-                dt_bias_HK = parameter(num_heads, head_dim)
+                actual_inputs = (
+                    parameter(2, 64, num_heads, head_dim),
+                    parameter(2, 64, num_heads, head_dim),
+                    parameter(2, 64, num_heads, head_dim),
+                    parameter(2, 64, num_heads, head_dim),
+                    parameter(2, 64, num_heads),
+                    A_log_H,
+                    parameter(num_heads, head_dim),
+                )
+                expected_inputs = tuple(
+                    tensor.detach().clone().requires_grad_() for tensor in actual_inputs
+                )
 
                 kernel = KimiKDAKernel.Config(
                     head_dim=head_dim,
                     lower_bound=lower_bound,
                 ).build()
-                actual_BLHV = kernel(
-                    q_BLHK,
-                    k_BLHK,
-                    v_BLHV,
-                    gate_BLHK,
-                    beta_BLH,
-                    A_log_H,
-                    dt_bias_HK,
-                )
+                actual_BLHV = kernel(*actual_inputs)
                 expected_BLHV = _kda_recurrent_reference(
-                    q_BLHK,
-                    k_BLHK,
-                    v_BLHV,
-                    gate_BLHK,
-                    beta_BLH,
-                    A_log_H,
-                    dt_bias_HK,
+                    *expected_inputs,
                     lower_bound=lower_bound,
                 )
 
@@ -346,19 +219,28 @@ class TestKimiK3(unittest.TestCase):
                     atol=2e-3,
                     rtol=2e-3,
                 )
-                actual_BLHV.square().mean().backward()
-                for tensor in (
-                    q_BLHK,
-                    k_BLHK,
-                    v_BLHV,
-                    gate_BLHK,
-                    beta_BLH,
-                    A_log_H,
-                    dt_bias_HK,
+                output_grad_BLHV = torch.randn_like(actual_BLHV)
+                actual_grads = torch.autograd.grad(
+                    actual_BLHV,
+                    actual_inputs,
+                    grad_outputs=output_grad_BLHV,
+                )
+                expected_grads = torch.autograd.grad(
+                    expected_BLHV,
+                    expected_inputs,
+                    grad_outputs=output_grad_BLHV,
+                )
+                for actual_grad, expected_grad in zip(
+                    actual_grads,
+                    expected_grads,
+                    strict=True,
                 ):
-                    self.assertIsNotNone(tensor.grad)
-                    assert tensor.grad is not None
-                    self.assertTrue(torch.isfinite(tensor.grad).all())
+                    torch.testing.assert_close(
+                        actual_grad,
+                        expected_grad,
+                        atol=2e-2,
+                        rtol=2e-2,
+                    )
 
     def test_state_dict_round_trips_through_hf_adapter(self):
         torch.manual_seed(2)
@@ -381,6 +263,120 @@ class TestKimiK3(unittest.TestCase):
         self.assertEqual(state_dict.keys(), roundtrip_state_dict.keys())
         for key, value in state_dict.items():
             torch.testing.assert_close(value, roundtrip_state_dict[key])
+
+
+class TestKimiK3FSDP(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 1
+
+    @unittest.skipIf(not torch.cuda.is_available(), "Kimi K3 FSDP requires CUDA.")
+    @with_comms
+    def test_fsdp_matches_non_distributed_forward_backward(self):
+        torch.manual_seed(3)
+        config = _small_model_config(
+            attn_res_block_size=2,
+            full_attention_layers={0, 1},
+        )
+        with torch.device("meta"):
+            model = config.build()
+        model.to_empty(device=self.device_type)
+        model.init_states()
+        with torch.no_grad():
+            for transformer_block in model.layers.values():
+                if transformer_block.moe is not None:
+                    transformer_block.moe.router.gate.weight.zero_()
+
+        reference = copy.deepcopy(model)
+        for parameter in reference.parameters():
+            parameter.data = parameter.data.to(torch.bfloat16)
+
+        parallelism = ParallelismConfig(
+            data_parallel_shard_degree=1,
+            tensor_parallel_degree=1,
+            pipeline_parallel_degree=1,
+            context_parallel_degree=1,
+            expert_parallel_degree=1,
+        )
+        parallel_dims = ParallelDims.from_config(parallelism, world_size=1)
+        with patch(
+            "torchtitan.distributed.parallel_dims.device_type",
+            self.device_type,
+        ):
+            parallel_dims.build_mesh()
+        model = parallelize_kimi_k3(
+            model,
+            parallel_dims=parallel_dims,
+            training=TrainingConfig(
+                local_batch_size=1,
+                seq_len=6,
+                steps=1,
+                dtype="bfloat16",
+            ),
+            parallelism=parallelism,
+            compile_config=CompileConfig(),
+            ac_config=None,
+            dump_folder="",
+        )
+
+        assert isinstance(model, KimiK3Model)
+        self.assertIsInstance(model, FSDPModule)
+        self.assertIsInstance(model.vision_encoder, FSDPModule)
+
+        positions_BL = torch.arange(
+            6,
+            dtype=torch.int32,
+            device=self.device_type,
+        ).unsqueeze(0)
+        attention_masks = reference.get_attention_masks(positions_BL)
+        inputs = {
+            "tokens": torch.tensor(
+                [[1, 7, 2, 3, 4, 5]],
+                dtype=torch.long,
+                device=self.device_type,
+            ),
+            "pixel_values": torch.randn(
+                1,
+                4,
+                3 * 2 * 2,
+                device=self.device_type,
+            ),
+            "grid_thw": torch.tensor(
+                [[1, 2, 2]],
+                dtype=torch.long,
+                device=self.device_type,
+            ),
+            "special_tokens": {"image_id": 7},
+            "positions": positions_BL,
+            "attention_masks": attention_masks,
+        }
+
+        actual_BLV = model(**inputs)  # pyrefly: ignore [not-callable]
+        expected_BLV = reference(**inputs)
+        torch.testing.assert_close(actual_BLV, expected_BLV, atol=0.0, rtol=0.0)
+
+        actual_BLV.float().square().mean().backward()
+        expected_BLV.float().square().mean().backward()
+
+        reference_parameters = dict(reference.named_parameters())
+        compared_gradients = 0
+        for name, parameter in model.named_parameters():
+            actual_grad = parameter.grad
+            expected_grad = reference_parameters[name].grad
+            self.assertEqual(actual_grad is None, expected_grad is None)
+            if actual_grad is None:
+                continue
+            if isinstance(actual_grad, DTensor):
+                actual_grad = actual_grad.to_local()
+            assert expected_grad is not None
+            torch.testing.assert_close(
+                actual_grad.float(),
+                expected_grad.float(),
+                atol=0.0,
+                rtol=0.0,
+            )
+            compared_gradients += 1
+        self.assertGreater(compared_gradients, 0)
 
 
 if __name__ == "__main__":
