@@ -13,7 +13,7 @@ import re
 import threading
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal
 
 import torch
@@ -24,6 +24,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
+from torch.distributed.checkpoint.planner import LoadPlan
 from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict_saver import (
@@ -128,6 +129,46 @@ class ModelWrapper(Stateful):
             model.load_state_dict(state_dict, strict=False)
         # Refresh the cache so state_dict() reflects the freshly loaded values.
         self.cached_state_dict = self._get_state_dict()
+
+
+class ModelPartialLoadPlanner(DefaultLoadPlanner):
+    """Allow missing model keys while keeping auxiliary state strict."""
+
+    missing_model_fqns: tuple[str, ...] = ()
+
+    def __init__(self, model_state_keys: set[str]) -> None:
+        super().__init__(allow_partial_load=True)
+        self._model_state_keys = model_state_keys
+
+    def create_local_plan(self) -> LoadPlan:
+        plan = super().create_local_plan()
+        assert self.metadata is not None
+        missing = set(self.state_dict) - set(self.metadata.state_dict_metadata)
+        # mappings[fqn][0] identifies the original top-level state-dict key.
+        missing_model = {
+            fqn
+            for fqn in missing
+            if self.mappings[fqn][0] in self._model_state_keys
+        }
+        missing_non_model = missing - missing_model
+        if missing_non_model:
+            raise RuntimeError(
+                "Missing non-model keys in checkpoint: "
+                f"{sorted(missing_non_model)}"
+            )
+        return replace(
+            plan, planner_data=tuple(sorted(missing_model))
+        )
+
+    def create_global_plan(self, plans: list[LoadPlan]) -> list[LoadPlan]:
+        missing: set[str] = set()
+        for plan in plans:
+            assert isinstance(plan.planner_data, tuple), (
+                  "StorageReader did not preserve planner_data"
+              )
+            missing.update(plan.planner_data)
+        self.missing_model_fqns = tuple(sorted(missing))
+        return super().create_global_plan(plans)
 
 
 class Terminate:
@@ -691,9 +732,15 @@ class CheckpointManager(Configurable):
             AssertionError: If `from_hf` is True but no `sd_adapter` is available.
         """
 
-        model_planner = DefaultLoadPlanner(
-            allow_partial_load=self.allow_partial_load_on_model
-        )
+        if from_hf:
+            model_state_keys = set(self.sd_adapter.to_hf(state_dict).keys()) if MODEL in self.states else set()
+        else:
+            model_state_keys = (
+                set(self.states[MODEL].state_dict().keys()) if MODEL in self.states else set()
+            )
+        model_planner = ModelPartialLoadPlanner(
+            model_state_keys=model_state_keys
+        ) if self.allow_partial_load_on_model else DefaultLoadPlanner()
 
         if from_hf:
             assert self.sd_adapter is not None, (
@@ -707,54 +754,35 @@ class CheckpointManager(Configurable):
             )
 
             dcp.load(
-                hf_state_dict, storage_reader=hf_storage_reader, planner=model_planner
+                hf_state_dict,
+                storage_reader=hf_storage_reader,
+                planner=model_planner,
             )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
-            if self.allow_partial_load_on_model:
-                model_sd = (
-                    self.states[MODEL].state_dict() if MODEL in self.states else {}
+            dcp.load(
+                state_dict,
+                checkpoint_id=checkpoint_id,
+                planner=model_planner,
+            )
+
+            # TODO: Since we flatten the model states in state_dict, we need to
+            # manually call load_state_dict() for the model. Need to fix this.
+            if MODEL in self.states:
+                self.states[MODEL].load_state_dict(state_dict)
+
+        skipped = getattr(model_planner, "missing_model_fqns", ())
+        if skipped:
+            if len(skipped) > 10:
+                logger.warning(
+                    f"Missing {len(skipped)} keys from checkpoint: {skipped}... (and {len(skipped) - 10} more)"
                 )
-                non_model_sd = {
-                    k: v for k, v in state_dict.items() if k not in model_sd
-                }
-
-                dcp.load(model_sd, checkpoint_id=checkpoint_id, planner=model_planner)
-                if non_model_sd:
-                    dcp.load(
-                        non_model_sd,
-                        checkpoint_id=checkpoint_id,
-                        planner=DefaultLoadPlanner(),
-                    )
-
-                if MODEL in self.states:
-                    self.states[MODEL].load_state_dict(model_sd)
             else:
-                dcp.load(state_dict, checkpoint_id=checkpoint_id)
-
-                # TODO: Since we flatten the model states in state_dict, we need to
-                # manually call load_state_dict() for the model. Need to fix this.
-                if MODEL in self.states:
-                    self.states[MODEL].load_state_dict(state_dict)
-
-        if self.allow_partial_load_on_model:
-            planner_metadata = model_planner.metadata
-            if planner_metadata is not None:
-                skipped = sorted(
-                    set(model_planner.state_dict)
-                    - set(planner_metadata.state_dict_metadata)
+                logger.warning(
+                    f"Missing {len(skipped)} keys from checkpoint: {skipped}"
                 )
-                if skipped:
-                    if len(skipped) > 10:
-                        logger.warning(
-                            f"Missing {len(skipped)} keys from checkpoint: {skipped[:10]}... (and {len(skipped) - 10} more)"
-                        )
-                    else:
-                        logger.warning(
-                            f"Missing {len(skipped)} keys from checkpoint: {skipped}"
-                        )
 
     @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
