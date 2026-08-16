@@ -13,7 +13,7 @@ import re
 import threading
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal
 
 import torch
@@ -24,6 +24,8 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
+from torch.distributed.checkpoint.planner import LoadPlan
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
@@ -127,6 +129,46 @@ class ModelWrapper(Stateful):
             model.load_state_dict(state_dict, strict=False)
         # Refresh the cache so state_dict() reflects the freshly loaded values.
         self.cached_state_dict = self._get_state_dict()
+
+
+class ModelPartialLoadPlanner(DefaultLoadPlanner):
+    """Allow missing model keys while keeping auxiliary state strict."""
+
+    missing_model_fqns: tuple[str, ...] = ()
+
+    def __init__(self, model_state_keys: set[str]) -> None:
+        super().__init__(allow_partial_load=True)
+        self._model_state_keys = model_state_keys
+
+    def create_local_plan(self) -> LoadPlan:
+        plan = super().create_local_plan()
+        assert self.metadata is not None
+        missing = set(self.state_dict) - set(self.metadata.state_dict_metadata)
+        # mappings[fqn][0] identifies the original top-level state-dict key.
+        missing_model = {
+            fqn
+            for fqn in missing
+            if self.mappings[fqn][0] in self._model_state_keys
+        }
+        missing_non_model = missing - missing_model
+        if missing_non_model:
+            raise RuntimeError(
+                "Missing non-model keys in checkpoint: "
+                f"{sorted(missing_non_model)}"
+            )
+        return replace(
+            plan, planner_data=tuple(sorted(missing_model))
+        )
+
+    def create_global_plan(self, plans: list[LoadPlan]) -> list[LoadPlan]:
+        missing: set[str] = set()
+        for plan in plans:
+            assert isinstance(plan.planner_data, tuple), (
+                  "StorageReader did not preserve planner_data"
+              )
+            missing.update(plan.planner_data)
+        self.missing_model_fqns = tuple(sorted(missing))
+        return super().create_global_plan(plans)
 
 
 class Terminate:
@@ -356,6 +398,17 @@ class CheckpointManager(Configurable):
         Keys shouldn't include 'model' key.
         """
 
+        allow_partial_load_on_model: bool = False
+        """
+        Enable loose checkpoint loading for the model portion of the state dict only.
+        When allow_partial_load_on_model=True, model keys present in the in-memory state
+        dict but absent from the checkpoint are skipped (left at their current / random init)
+        instead of raising a runtime error. Non-model state
+        (optimizer/lr_scheduler/dataloader/train_state) is still loaded strictly — a missing
+        key there still raises, matching today's behavior.
+        Skipped model keys are logged at `WARNING` level after the load completes.
+        """
+
         enable_first_step_checkpoint: bool = False
         """
         Enable the checkpoint save at first step. This will save a checkpoint
@@ -486,6 +539,7 @@ class CheckpointManager(Configurable):
         # Loading & Saving Policy
         self.load_only = config.load_only
         self.exclude_from_loading = config.exclude_from_loading
+        self.allow_partial_load_on_model = config.allow_partial_load_on_model
         self.initial_load_path = config.initial_load_path
         self.initial_load_model_only = config.initial_load_model_only
         self.initial_load_in_hf = config.initial_load_in_hf
@@ -679,6 +733,16 @@ class CheckpointManager(Configurable):
         """
 
         if from_hf:
+            model_state_keys = set(self.sd_adapter.to_hf(state_dict).keys()) if MODEL in self.states else set()
+        else:
+            model_state_keys = (
+                set(self.states[MODEL].state_dict().keys()) if MODEL in self.states else set()
+            )
+        model_planner = ModelPartialLoadPlanner(
+            model_state_keys=model_state_keys
+        ) if self.allow_partial_load_on_model else DefaultLoadPlanner()
+
+        if from_hf:
             assert self.sd_adapter is not None, (
                 "trying to load checkpoint in HF safetensors format, "
                 "but sd_adapter is not provided."
@@ -689,17 +753,36 @@ class CheckpointManager(Configurable):
                 checkpoint_id, from_quantized
             )
 
-            dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
+            dcp.load(
+                hf_state_dict,
+                storage_reader=hf_storage_reader,
+                planner=model_planner,
+            )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            dcp.load(
+                state_dict,
+                checkpoint_id=checkpoint_id,
+                planner=model_planner,
+            )
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in self.states:
                 self.states[MODEL].load_state_dict(state_dict)
+
+        skipped = getattr(model_planner, "missing_model_fqns", ())
+        if skipped:
+            if len(skipped) > 10:
+                logger.warning(
+                    f"Missing {len(skipped)} keys from checkpoint: {skipped}... (and {len(skipped) - 10} more)"
+                )
+            else:
+                logger.warning(
+                    f"Missing {len(skipped)} keys from checkpoint: {skipped}"
+                )
 
     @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()

@@ -887,6 +887,112 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager.maybe_wait_for_saving()
 
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_allow_partial_load_on_model_skips_new_model_keys(
+        self, mock_load, mock_rank
+    ):
+        """New model keys absent from checkpoint are skipped (left at init),
+        while existing model keys and optimizer state are loaded."""
+        persisted = {"weight": torch.full((2, 2), 5.0)}
+        loaded_keys = []
+
+        def side_effect(state_dict, *args, **kwargs):
+            planner = kwargs.get("planner")
+            for k in list(state_dict.keys()):
+                if k in persisted and k in state_dict:
+                    state_dict[k].copy_(persisted[k])
+                    loaded_keys.append(k)
+                elif not planner.allow_partial_load:
+                    raise RuntimeError(f"Missing key in checkpoint: {k}")
+            planner.state_dict = dict(state_dict)
+            planner.metadata = type(
+                "M", (), {"state_dict_metadata": dict.fromkeys(persisted)}
+            )()
+
+        mock_load.side_effect = side_effect
+
+        class ModelWithExtra(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(2, 2))
+                self.extra = nn.Parameter(torch.full((2, 2), 7.0))
+
+        model = ModelWithExtra()
+        cfg = self.trainer_config.checkpoint
+        cfg.allow_partial_load_on_model = True
+        cfg.exclude_from_loading = [
+            "trainer",
+            "optimizer",
+            "dataloader",
+            "lr_scheduler",
+        ]
+        step_dir = os.path.join(self.test_folder, "step-1")
+        os.makedirs(step_dir, exist_ok=True)
+        open(os.path.join(step_dir, ".metadata"), "w").close()
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=[model],
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        self.assertTrue(manager.load(step=1))
+        self.assertTrue(torch.equal(model.weight, torch.full((2, 2), 5.0)))
+        self.assertTrue(torch.equal(model.extra, torch.full((2, 2), 7.0)))
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_allow_partial_load_on_model_strict_for_missing_optimizer(
+        self, mock_load, mock_rank
+    ):
+        """Non-model keys missing from checkpoint still raise (strict gate)."""
+        persisted = {"weight": torch.full((2, 2), 5.0)}
+
+        def side_effect(state_dict, *args, **kwargs):
+            planner = kwargs.get("planner")
+            for k in list(state_dict.keys()):
+                if k in persisted and k in state_dict:
+                    state_dict[k].copy_(persisted[k])
+                elif not planner.allow_partial_load:
+                    raise RuntimeError(f"Missing key in checkpoint: {k}")
+            planner.state_dict = dict(state_dict)
+            planner.metadata = type(
+                "M", (), {"state_dict_metadata": dict.fromkeys(persisted)}
+            )()
+
+        mock_load.side_effect = side_effect
+
+        class SimpleModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(2, 2))
+
+        model = SimpleModel()
+        cfg = self.trainer_config.checkpoint
+        cfg.allow_partial_load_on_model = True
+        cfg.initial_load_model_only = False
+        step_dir = os.path.join(self.test_folder, "step-1")
+        os.makedirs(step_dir, exist_ok=True)
+        open(os.path.join(step_dir, ".metadata"), "w").close()
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=[model],
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        with self.assertRaises(RuntimeError):
+            manager.load(step=1)
+        manager.close()
+
 
 class TestConfigPostInit(unittest.TestCase):
     def test_valid_default_config(self):
