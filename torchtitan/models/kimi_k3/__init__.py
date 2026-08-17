@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Kimi K3 model registration and architecture configurations."""
-
 from collections.abc import Callable
 from functools import partial
 
@@ -469,14 +467,6 @@ def _kimi_k3_config(
 
 
 def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
-    """Return the topology-complete Kimi K3 debug model.
-
-    The depth is one past a multiple of both the full-attention period and the
-    attention-residual block size, so the last layer is a full-attention layer
-    directly after a scheduled one and the trailing residual block is short.
-    Both are properties of the released 93-layer stack, whose zero-based MLA
-    layer indices end ``..., 87, 91, 92``.
-    """
     dim = 256
     return _kimi_k3_config(
         dim=dim,
@@ -557,7 +547,6 @@ def model_registry(
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    """Build a Kimi K3 model specification."""
     config = kimi_k3_configs[flavor](attn_backend=attn_backend)
     if converters is not None:
         validate_converter_order(converters)

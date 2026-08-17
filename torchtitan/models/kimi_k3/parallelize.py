@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""FSDP2 parallelization for Kimi K3."""
-
 import torch.nn as nn
 
 from torchtitan.config import (
@@ -55,8 +53,8 @@ def parallelize_kimi_k3(
         raise NotImplementedError(
             "Kimi K3 FSDP2 currently supports the default SPMD backend only."
         )
-    if compile_config.enable:
-        raise NotImplementedError("Kimi K3 does not support torch.compile.")
+    if compile_config.enable and "model" in compile_config.components:
+        raise NotImplementedError("Kimi K3 does not support model compilation.")
     if ac_config is not None:
         raise NotImplementedError(
             "Kimi K3 FSDP2 does not support activation checkpointing yet."
@@ -74,6 +72,9 @@ def parallelize_kimi_k3(
     assert isinstance(model, KimiK3Model)
     vision_encoder = model.vision_encoder
     if vision_encoder is not None:
+        # TODO: An image batch on one DP rank and a text-only batch on another
+        # execute different FSDP collectives, deadlock, and hit a 90-second
+        # timeout. A general solution is needed.
         apply_fsdp_to_vision_encoder(
             vision_encoder,
             dp_mesh,
