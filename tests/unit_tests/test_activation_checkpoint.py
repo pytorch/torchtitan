@@ -15,7 +15,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 from torch.utils.flop_counter import FlopCounterMode
 from torchtitan.distributed.activation_checkpoint import (
     _full_ac_contexts,
-    _save_routing_and_forward_side_effects,
+    _save_routing_and_forward_mutations,
     FullAC,
     SelectiveAC,
 )
@@ -53,15 +53,15 @@ class TransformerBlock(Module):
 
 
 class TestApplyAC(unittest.TestCase):
-    def test_forward_side_effect_ops_allow_clean_import_order(self):
+    def test_forward_mutation_ops_allow_clean_import_order(self):
         code = """
 from torchtitan.distributed.activation_checkpoint import (
-    _registered_forward_side_effect_ops,
-    _save_routing_and_forward_side_effects,
+    _registered_forward_mutation_ops,
+    _save_routing_and_forward_mutations,
 )
 
-assert not _registered_forward_side_effect_ops()
-_save_routing_and_forward_side_effects()
+assert not _registered_forward_mutation_ops()
+_save_routing_and_forward_mutations()
 """
         subprocess.run([sys.executable, "-c", code], check=True)
 
@@ -78,7 +78,7 @@ _save_routing_and_forward_side_effects()
             "create_selective_checkpoint_contexts",
             side_effect=lambda policy: policies.append(policy) or contexts,
         ):
-            self.assertIs(_save_routing_and_forward_side_effects(), contexts)
+            self.assertIs(_save_routing_and_forward_mutations(), contexts)
 
         policy = policies[0]
         self.assertIs(

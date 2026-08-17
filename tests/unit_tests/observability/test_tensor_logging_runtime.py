@@ -5,11 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
 import torch.distributed as dist
+from functorch.compile import make_boxed_func
 from torch import nn
+from torch._dynamo.backends.common import aot_autograd
+from torch._dynamo.utils import counters
 from torch.distributed.tensor import DTensor, init_device_mesh, Replicate, Shard
 from torch.utils.checkpoint import CheckpointPolicy
 from torchtitan.components.metrics import MetricsProcessor
@@ -18,7 +23,12 @@ from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_pass
+from torchtitan.distributed.utils import get_spmd_context
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.cudagraph import (
+    cudagraph_pass,
+    is_cudagraph_compatible,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -27,6 +37,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import tag_sac_policy
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
+from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -41,8 +52,8 @@ from torchtitan.observability.tensor_logging import (
     set_enabled,
 )
 from torchtitan.observability.tensor_logging.runtime import (
-    _include_recording_calls,
-    should_run_producers,
+    _include_tensor_logging_calls_for_capture,
+    should_compute_logged_values,
 )
 from torchtitan.observability.tensor_logging.statistics import (
     accumulate_tensor_statistics,
@@ -180,9 +191,9 @@ def test_split_roots_share_logical_root_names_and_slots() -> None:
             register(self.layers[str(layer_id)], ["hidden"])
 
     parts = [PipelinePart(3), PipelinePart(7)]
-    runtime = init(parts, model_part_prefixes={part: "" for part in parts})
+    runtime = init(parts, public_prefix_by_model_part={part: "" for part in parts})
     try:
-        assert runtime.metric_names == [
+        assert runtime.public_metric_names == [
             "input",
             "layers.3.hidden",
             "layers.7.hidden",
@@ -199,21 +210,21 @@ def test_split_roots_share_logical_root_names_and_slots() -> None:
         runtime.close()
 
 
-def test_include_recording_calls_preserves_device_cadence(monkeypatch) -> None:
+def test_capture_context_preserves_device_cadence(monkeypatch) -> None:
     owner = nn.Module()
     register(owner, ["hidden"])
     runtime = init(owner)
     accumulated_names = []
     accumulate = runtime._accumulate
 
-    def track_accumulate(owner, name, value):
-        accumulated_names.append(name)
-        accumulate(owner, name, value)
+    def track_accumulate(slot, value):
+        accumulated_names.append("hidden")
+        accumulate(slot, value)
 
     monkeypatch.setattr(runtime, "_accumulate", track_accumulate)
     try:
-        with set_enabled(False), _include_recording_calls():
-            assert should_run_producers()
+        with set_enabled(False), _include_tensor_logging_calls_for_capture():
+            assert should_compute_logged_values()
             log_stats(owner, hidden=torch.ones(4))
 
         assert accumulated_names == ["hidden"]
@@ -231,7 +242,17 @@ def test_same_owner_duplicate_registration_raises() -> None:
     root = nn.Module()
     register(root, ["value", "value"])
     with pytest.raises(ValueError, match="registered twice: value"):
-        init([root], model_part_prefixes={root: ""})
+        init([root], public_prefix_by_model_part={root: ""})
+
+
+def test_registration_after_init_is_rejected() -> None:
+    root = nn.Module()
+    runtime = init(root)
+    try:
+        with pytest.raises(RuntimeError, match="register tensor names before"):
+            register(root, ["late"])
+    finally:
+        runtime.close()
 
 
 def test_decoder_input_is_emitted_only_by_the_first_pipeline_stage() -> None:
@@ -314,6 +335,15 @@ def _assert_snapshots_equal(actual: dict, expected: dict) -> None:
         torch.testing.assert_close(actual[key]["counts"], expected[key]["counts"])
         torch.testing.assert_close(actual[key]["sums"], expected[key]["sums"])
         torch.testing.assert_close(actual[key]["maximum"], expected[key]["maximum"])
+
+
+def _graph_argument_names(graph_module: torch.fx.GraphModule) -> set[str]:
+    # AOTAutograd may place effectful custom ops inside functionalization nodes.
+    return {
+        str(argument)
+        for node in graph_module.graph.nodes
+        for argument in (node.target, *node.args)
+    }
 
 
 def _run_torchtitan_ac(policy) -> tuple[dict, torch.Tensor, int]:
@@ -708,7 +738,7 @@ def test_generic_counts_follow_float32_integer_precision() -> None:
     register(owner, ["value"])
     runtime = init(owner)
     try:
-        runtime.buffers.sum_statistics[0, :4].copy_(
+        runtime.statistic_buffers.sum_statistics[0, :4].copy_(
             torch.tensor([2**24 + 1, 0, 0, 1], dtype=torch.float32)
         )
         metrics = runtime.collect()
@@ -772,7 +802,9 @@ def test_graph_trainer_trace_remat_replay_and_cadence_are_exact(
     module = TinyStatsModule(width=4, track_forward_calls=False).to(device)
     value = torch.randn(3, 4, device=device)
     runtime = init(module)
-    buffer_addresses = tuple(buffer.data_ptr() for buffer in runtime.buffers.buffers())
+    buffer_addresses = tuple(
+        buffer.data_ptr() for buffer in runtime.statistic_buffers.buffers()
+    )
 
     try:
         with set_enabled(True):
@@ -828,10 +860,64 @@ def test_graph_trainer_trace_remat_replay_and_cadence_are_exact(
         assert replay_snapshot["hidden"]["counts"].tolist() == [24, 0, 0, 2]
         assert replay_snapshot["output.x"]["counts"].tolist() == [24, 0, 0, 2]
         assert replay_snapshot["output.dx"]["counts"].tolist() == [24, 0, 0, 2]
-        assert tuple(buffer.data_ptr() for buffer in runtime.buffers.buffers()) == (
-            buffer_addresses
-        )
+        assert tuple(
+            buffer.data_ptr() for buffer in runtime.statistic_buffers.buffers()
+        ) == (buffer_addresses)
         assert all("_tensor_logging_state" not in key for key in module.state_dict())
+    finally:
+        runtime.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_graph_trainer_production_cache_traces_once_across_cadence() -> None:
+    module = TinyStatsModule(width=4, track_forward_calls=False).cuda()
+    value = torch.randn(3, 4, device="cuda")
+    labels = torch.randn_like(value)
+    runtime = init(module)
+    trainer = object.__new__(GraphTrainer)
+    trainer._traced_step = None
+    trainer.tensor_logging = runtime
+    trainer.loss_fn = (
+        lambda prediction, target, **_: (prediction - target).square().sum()
+    )
+    trainer.train_context = get_spmd_context()
+    trainer.config = SimpleNamespace(
+        compile=GraphTrainerCompileConfig(
+            enable=True,
+            mode="aot_fx_trace",
+            enable_passes=False,
+        )
+    )
+    params = list(module.parameters())
+    try:
+        with mock.patch(
+            "torchtitan.experiments.graph_trainer.trainer.minimal_fx_tracer",
+            wraps=minimal_fx_tracer,
+        ) as trace_call:
+            for step in range(1, 7):
+                for parameter in params:
+                    parameter.grad = None
+                with set_enabled(step % 2 == 0):
+                    trainer._make_fx_forward_backward_step(
+                        module,
+                        value,
+                        labels,
+                        torch.tensor(value.numel(), device="cuda"),
+                        params,
+                        {},
+                    )
+
+        assert trace_call.call_count == 1
+        assert trainer._traced_step is not None
+        targets = {node.target for node in trainer._traced_step.gm.graph.nodes}
+        assert torch.ops.torchtitan.accumulate_tensor_statistics.default in targets
+        assert (
+            torch.ops.torchtitan.record_tensor_statistics_cotangent.default in targets
+        )
+        assert is_cudagraph_compatible(trainer._traced_step.gm)
+        snapshot = runtime.snapshot_unreduced_statistics()
+        for public_name in ("hidden", "output.x", "output.dx"):
+            assert snapshot[public_name]["counts"].tolist() == [36, 0, 0, 3]
     finally:
         runtime.close()
 
@@ -848,23 +934,19 @@ def test_graph_trainer_cudagraph_replay_obeys_device_cadence() -> None:
     try:
         traced = _trace_forward_backward_step(module, value)
         _rematerialize_every_forward_node(traced)
+        assert is_cudagraph_compatible(traced.gm)
         traced.gm = cudagraph_pass(traced.gm, traced.example_inputs)
         runner = run_traced(traced, module=module, _validate_runtime=True)
 
-        with set_enabled(True):
+        # Capture may start between logging steps. The device flag must still
+        # make later selected replays mutate the captured fixed buffers.
+        with set_enabled(False):
             runner(value)  # warmup
             runner(value)  # capture
         captured_snapshot = runtime.snapshot_unreduced_statistics()
-        assert captured_snapshot["hidden"]["counts"].tolist() == [24, 0, 0, 2]
-        assert captured_snapshot["output.x"]["counts"].tolist() == [24, 0, 0, 2]
-        assert captured_snapshot["output.dx"]["counts"].tolist() == [24, 0, 0, 2]
-
-        runtime.collect()
-        with set_enabled(False):
-            runner(value)
         assert all(
             count == 0
-            for statistic in runtime.snapshot_unreduced_statistics().values()
+            for statistic in captured_snapshot.values()
             for count in statistic["counts"].tolist()
         )
 
@@ -874,6 +956,13 @@ def test_graph_trainer_cudagraph_replay_obeys_device_cadence() -> None:
         assert replay_snapshot["hidden"]["counts"].tolist() == [12, 0, 0, 1]
         assert replay_snapshot["output.x"]["counts"].tolist() == [12, 0, 0, 1]
         assert replay_snapshot["output.dx"]["counts"].tolist() == [12, 0, 0, 1]
+
+        with set_enabled(False):
+            runner(value)
+        _assert_snapshots_equal(
+            runtime.snapshot_unreduced_statistics(),
+            replay_snapshot,
+        )
     finally:
         runtime.close()
 
@@ -901,6 +990,64 @@ def test_compile_fullgraph_forward_cadence_has_one_stable_graph() -> None:
     finally:
         runtime.close()
         torch.compiler.reset()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_compile_fullgraph_cadence_keeps_one_forward_and_backward_graph() -> None:
+    forward_graphs: list[torch.fx.GraphModule] = []
+    backward_graphs: list[torch.fx.GraphModule] = []
+
+    def record_forward(graph_module, _example_inputs):
+        forward_graphs.append(graph_module)
+        return make_boxed_func(graph_module.forward)
+
+    def record_backward(graph_module, _example_inputs):
+        backward_graphs.append(graph_module)
+        return make_boxed_func(graph_module.forward)
+
+    torch.compiler.reset()
+    counters.clear()
+    module = CompileStatsModule(width=4).cuda()
+    runtime = init(module)
+    try:
+        compiled = torch.compile(
+            module,
+            backend=aot_autograd(
+                fw_compiler=record_forward,
+                bw_compiler=record_backward,
+            ),
+            fullgraph=True,
+        )
+        value = torch.randn(3, 4, device="cuda", requires_grad=True)
+
+        with set_enabled(False):
+            compiled(value).sum().backward()
+        forward_after_warmup = len(forward_graphs)
+        backward_after_warmup = len(backward_graphs)
+        unique_graphs_after_warmup = counters["stats"]["unique_graphs"]
+
+        for selected in (True, False, True, False):  # cadence 2
+            value.grad = None
+            with set_enabled(selected):
+                compiled(value).sum().backward()
+
+        assert len(forward_graphs) == forward_after_warmup == 1
+        assert len(backward_graphs) == backward_after_warmup == 1
+        assert counters["stats"]["unique_graphs"] == unique_graphs_after_warmup == 1
+        assert not counters["graph_break"]
+        assert "torchtitan.accumulate_tensor_statistics.default" in (
+            _graph_argument_names(forward_graphs[0])
+        )
+        assert "torchtitan.record_tensor_statistics_cotangent.default" in (
+            _graph_argument_names(backward_graphs[0])
+        )
+        snapshot = runtime.snapshot_unreduced_statistics()
+        for public_name in ("hidden", "output.x", "output.dx"):
+            assert snapshot[public_name]["counts"].tolist() == [24, 0, 0, 2]
+    finally:
+        runtime.close()
+        torch.compiler.reset()
+        counters.clear()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")

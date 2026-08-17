@@ -58,7 +58,9 @@ from torchtitan.models.common.token_dispatcher import (
     MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.observability import structured_logger as sl, tensor_logging
-from torchtitan.observability.tensor_logging.runtime import _include_recording_calls
+from torchtitan.observability.tensor_logging.runtime import (
+    _wrap_to_include_tensor_logging_calls,
+)
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -269,7 +271,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     validator: BaseValidator
     metrics_processor: MetricsProcessor
     tensor_logging: tensor_logging.TensorLoggingState | None
-    tensor_logging_freq: int
     checkpointer: BaseCheckpointManager
 
     # runtime utilities
@@ -558,26 +559,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tensor_logging = None
         tensor_logging_config = config.metrics.tensor_logging
         if tensor_logging_config.enabled:
-            self.tensor_logging_freq = tensor_logging_config.freq
             effective_freq = math.lcm(
-                self.tensor_logging_freq,
+                tensor_logging_config.freq,
                 config.metrics.log_freq,
             )
-            if effective_freq != self.tensor_logging_freq:
+            if effective_freq != tensor_logging_config.freq:
                 logger.info(
-                    "Tensor statistics will publish every %s steps so cadence %s "
-                    "aligns with metrics cadence %s",
-                    effective_freq,
-                    self.tensor_logging_freq,
-                    config.metrics.log_freq,
+                    f"Tensor statistics publish every {effective_freq} steps: the "
+                    f"least common multiple of tensor cadence "
+                    f"{tensor_logging_config.freq} and metrics.log_freq "
+                    f"{config.metrics.log_freq}"
                 )
 
-            # Model buffers and parallel wrappers are final before names are frozen.
+            # Model buffers and parallel wrappers are final before slots are assigned.
             self.tensor_logging = tensor_logging.init(
                 self.model_parts,
                 device=self.device,
                 publish_filter_regex=tensor_logging_config.publish_filter_regex,
-                model_part_prefixes=(
+                public_prefix_by_model_part=(
                     {model_part: "" for model_part in self.model_parts}
                     if parallel_dims.pp_enabled
                     else None
@@ -645,25 +644,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.fwd_bwd_fn = self._forward_backward_body
         if not config.training.disable_cuda_graphs:
             if self.tensor_logging is not None:
-                fwd_bwd_fn = self.fwd_bwd_fn
-
-                def fwd_bwd_with_tensor_logging_calls(
-                    inputs: torch.Tensor,
-                    labels: torch.Tensor,
-                    global_valid_tokens: torch.Tensor,
-                    extra_kwargs: dict[str, Any],
-                ) -> torch.Tensor:
-                    # Capture gated mutations even if the graph is first recorded
-                    # on a non-logging step; the device flag controls each replay.
-                    with _include_recording_calls():
-                        return fwd_bwd_fn(
-                            inputs,
-                            labels,
-                            global_valid_tokens,
-                            extra_kwargs,
-                        )
-
-                self.fwd_bwd_fn = fwd_bwd_with_tensor_logging_calls
+                # Capture can start on an unselected step. The device flag gates
+                # replay, so selected and unselected steps reuse the same graph.
+                self.fwd_bwd_fn = _wrap_to_include_tensor_logging_calls(self.fwd_bwd_fn)
             self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
 
         # Build validator if validation is configured
@@ -928,7 +911,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return self._train_step(data_iterator)
         is_tensor_log_step = (
             self.metrics_processor.should_log(self.step)
-            and self.step % self.tensor_logging_freq == 0
+            and self.step % self.config.metrics.tensor_logging.freq == 0
         )
         with tensor_logging.set_enabled(is_tensor_log_step):
             return self._train_step(data_iterator)

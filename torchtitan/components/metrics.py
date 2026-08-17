@@ -14,6 +14,7 @@ from typing import Any, cast
 import torch
 from tensorboard.compat.proto.summary_pb2 import Summary
 from torch.utils.tensorboard import SummaryWriter
+
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
@@ -278,7 +279,7 @@ class TensorLoggingConfig(Configurable.Config):
     publish_filter_regex: str = (
         r"\.(?:numel|nonfinite_count|abs_mean|square_mean|abs_max)$"
     )
-    """Regex selecting derived tensor-statistic keys sent to metrics sinks."""
+    """Allowlist for published keys; `r".*abs_max$"` accepts all maxima and `r".*"` accepts all statistics."""
 
     def __post_init__(self) -> None:
         if self.freq <= 0:

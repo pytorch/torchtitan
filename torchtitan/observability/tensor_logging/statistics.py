@@ -20,7 +20,7 @@ SUM_STATISTIC_FIELD_COUNT = 7
 
 
 class StatisticBuffers(nn.Module):
-    """Packed sufficient statistics with one row per registered metric.
+    """Packed sufficient statistics with one slot per registered metric.
 
     Example:
 
@@ -147,7 +147,7 @@ def accumulate_tensor_statistics(
 
     Example:
 
-        # The output tensors are one preallocated metric row.
+        # The output tensors are one preallocated metric slot.
         accumulate_tensor_statistics(value, sum_statistics, maximum, enabled)
     """
 
