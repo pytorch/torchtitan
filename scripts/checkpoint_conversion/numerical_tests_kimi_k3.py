@@ -133,7 +133,7 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         "vt_intermediate_size": vision.block.mlp.fc1.out_features,
         "merge_kernel_size": vision.merge_kernel_size,
         "mm_hidden_size": vision.dim,
-        "qkv_hidden_size": vision.block.attn.qkv_dim,
+        "qkv_hidden_size": vision.block.attn.dim,
         "text_hidden_size": tt_config.dim,
         "pos_emb_interpolation_mode": vision.interpolation_mode,
     }

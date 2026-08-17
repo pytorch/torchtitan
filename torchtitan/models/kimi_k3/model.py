@@ -38,7 +38,9 @@ from torchtitan.protocols.module import Module
 # Shape suffixes:
 # B = batch, L = sequence length, D = model dimension, H = heads,
 # K = key head dimension, V = value head dimension, E = experts,
-# T = flattened tokens, N = attention-residual entries.
+# C = projection channels, F = expert hidden dimension, R = routed tokens,
+# S = selected experts per token, T = flattened tokens,
+# N = attention-residual entries.
 
 
 class KimiShortConvolution(ShortConvolution, Module):
@@ -177,40 +179,40 @@ class KimiMLAAttention(BaseAttention):
         del positions
 
         B, L, _ = x_BLD.shape
-        q_BLNH = self.wq_b(self.q_norm(self.wq_a(x_BLD))).view(
+        q_BLHK = self.wq_b(self.q_norm(self.wq_a(x_BLD))).view(
             B, L, self.n_heads, self.q_head_dim
         )
 
-        compressed_kv = self.wkv_a(x_BLD)
-        kv_latent, k_rope = torch.split(
-            compressed_kv,
+        compressed_kv_BLC = self.wkv_a(x_BLD)
+        kv_latent_BLC, k_rope_BLK = torch.split(
+            compressed_kv_BLC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
-        kv_BLNH = self.wkv_b(self.kv_norm(kv_latent)).view(
+        kv_BLHC = self.wkv_b(self.kv_norm(kv_latent_BLC)).view(
             B,
             L,
             self.n_heads,
             self.qk_nope_head_dim + self.v_head_dim,
         )
-        k_nope, v_BLNH = torch.split(
-            kv_BLNH,
+        k_nope_BLHK, v_BLHV = torch.split(
+            kv_BLHC,
             [self.qk_nope_head_dim, self.v_head_dim],
             dim=-1,
         )
-        k_rope = k_rope.view(B, L, 1, self.qk_rope_head_dim).expand(
+        k_rope_BLHK = k_rope_BLK.view(B, L, 1, self.qk_rope_head_dim).expand(
             -1, -1, self.n_heads, -1
         )
-        k_BLNH = torch.cat((k_nope, k_rope), dim=-1)
+        k_BLHK = torch.cat((k_nope_BLHK, k_rope_BLHK), dim=-1)
 
-        out_BLNV = self.inner_attention(
-            q_BLNH,
-            k_BLNH,
-            v_BLNH,
+        out_BLHV = self.inner_attention(
+            q_BLHK,
+            k_BLHK,
+            v_BLHV,
             attention_masks=attention_masks,
             scale=self.scale,
         )
-        out_BLD = out_BLNV.reshape(B, L, self.n_heads * self.v_head_dim)
+        out_BLD = out_BLHV.reshape(B, L, self.n_heads * self.v_head_dim)
         out_BLD = out_BLD * torch.sigmoid(self.gate(x_BLD))
         return self.wo(out_BLD)
 
@@ -433,8 +435,6 @@ class KimiGroupedExperts(GroupedExperts):
 
 
 class KimiLatentMoE(Module):
-    """Eager trainable implementation of Kimi K3 latent MoE."""
-
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
@@ -477,9 +477,9 @@ class KimiLatentMoE(Module):
         )
 
     def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
-        weights_BLK, expert_ids_BLK, scores_BLE = self.router(x_BLD, self.expert_bias_E)
+        weights_BLS, expert_ids_BLS, scores_BLE = self.router(x_BLD, self.expert_bias_E)
         routing_map_BLE = torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
-            -1, expert_ids_BLK, True
+            -1, expert_ids_BLS, True
         )
         num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
         if self.training:
@@ -491,8 +491,8 @@ class KimiLatentMoE(Module):
         latent_BLD = self.routed_down(x_BLD)
         routed_BLD = self.routed_experts(
             latent_BLD,
-            weights_BLK,
-            expert_ids_BLK,
+            weights_BLS,
+            expert_ids_BLS,
             num_tokens_per_expert_E,
         )
         routed_BLD = self.routed_up(self.routed_norm(routed_BLD))
@@ -585,14 +585,7 @@ class KimiK3TransformerBlock(Module):
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Blocks that do not extend the attention residual return it unchanged.
-        # FSDP2 aliases module inputs to drive its backward hooks, so passing it
-        # back out makes this FSDP unit return a view, which draws PyTorch's
-        # warning about in-place ops dropping the pre-backward hook. Nothing
-        # mutates it in place, and routing it back through the module boundary
-        # is what keeps FSDP gradients bitwise equal to eager -- returning None
-        # here instead reassociates the residual's gradient accumulation and
-        # perturbs tok_embeddings.weight.grad by ~2e-3 relative.
+        # Keep the residual on every block output to preserve its FSDP gradient path.
         B, L, D = x_BLD.shape
         prefix_sum_BLD: torch.Tensor | None = x_BLD
 
