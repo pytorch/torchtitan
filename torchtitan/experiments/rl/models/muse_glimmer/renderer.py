@@ -7,14 +7,26 @@
 """Muse Glimmer renderer: chat messages <-> tokens for TorchTitan RL.
 
 RL needs two directions. ``render_ids`` turns messages + tool definitions into token
-ids via the model's chat template; ``parse_response`` turns generated tokens back into
-``(content, reasoning_content, tool_calls)`` so the rollout loop can tell "call a tool
-and continue" apart from "final answer, score it".
+ids; ``parse_response`` turns generated tokens back into ``(content,
+reasoning_content, tool_calls)`` so the rollout loop can tell "call a tool and
+continue" apart from "final answer, score it".
 
 Muse Glimmer uses the harmony chat format -- an assistant turn is a sequence of
 ``to=<recipient><|message|><body>`` channels, where ``to=self`` is private reasoning and
 other recipients carry user-visible content -- and expresses tool calls as ATEM XML
 inside those channels (see ``atem.py``).
+
+The format is built natively in Python rather than by calling
+``tokenizer.apply_chat_template``. That matches how the ``renderers`` library implements
+every model-specific renderer (only ``DefaultRenderer`` wraps Jinja), and it buys two
+things a template wrapper cannot: per-token loss attribution is exact rather than
+recovered by diffing prefixes, and ``bridge_to_next_turn`` can extend a sampled
+completion without re-rendering it.
+
+``_render_text`` is kept byte-exact against the published ``chat_template.jinja``; the
+renderer test asserts equality with ``apply_chat_template`` across roles, tool shapes and
+reasoning states. Treat that test as the spec -- if the template changes upstream, it
+fails first.
 
 Implements the ``renderers.Renderer`` Protocol. ``register()`` installs it into the
 ``renderers`` library's public registry (``RENDERER_REGISTRY`` / ``_CONFIG_BY_NAME``),
@@ -32,13 +44,15 @@ here leaves the core model package importable without it.
 
 from __future__ import annotations
 
+import datetime
+import json
 import re
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, NamedTuple
 
 from renderers.base import ParsedResponse, ParsedToolCall, RenderedTokens
 from renderers.configs import BaseRendererConfig
 
-from .atem import parse_atem_tool_calls, render_atem_tool_call  # noqa: F401
+from .atem import parse_atem_tool_calls, render_atem_tool_call
 
 RENDERER_NAME = "muse_glimmer"
 
@@ -52,40 +66,40 @@ class MuseGlimmerRendererConfig(BaseRendererConfig):
     # non-base field is classified as either a chat-template kwarg or a renderer-internal
     # knob; the two sets must be disjoint and together cover all of them. Declared
     # unconditionally -- versions without the validator ignore these ClassVars, so this
-    # is compatible with both. ``reasoning_strength`` belongs in _template_fields, not
-    # _internal_fields: it is forwarded to the chat template verbatim, so it is exactly
-    # the kind of field the library's template-parity matrix is meant to cover.
-    _template_fields: ClassVar[frozenset[str]] = frozenset({"reasoning_strength"})
+    # is compatible with both. The template fields mirror kwargs the published
+    # chat_template.jinja reads, which is what the library's parity matrix varies.
+    _template_fields: ClassVar[frozenset[str]] = frozenset(
+        {"reasoning_strength", "knowledge_cutoff", "current_date"}
+    )
     _internal_fields: ClassVar[frozenset[str]] = frozenset(
-        {
-            "chat_template",
-            "retain_reasoning_in_history",
-            "answer_from_reasoning_fallback",
-        }
+        {"retain_reasoning_in_history", "answer_from_reasoning_fallback"}
     )
 
-    chat_template: str | None = None
-    """Jinja chat template to render with: a path to a ``.jinja`` file, or the template
-    source inline. ``None`` (default) uses the template the tokenizer ships.
+    reasoning_strength: str | None = None
+    """Sizes the reasoning budget, rendered as ``Reasoning strength: <value>.``
 
-    Required when the tokenizer has no template of its own. Not every Muse Glimmer
-    checkpoint carries one -- see ``MuseGlimmerRenderer.__init__`` for why this is a
-    hard error rather than a fallback.
+    ``None`` (default) uses the template's own default of ``"high"``. Set ``"low"`` for
+    agentic tasks with a tight token budget: at high strength the model can spend the
+    whole budget reasoning and get truncated before it emits a tool call or an answer,
+    which scores as a failed rollout.
     """
 
-    reasoning_strength: str | None = None
-    """Passed through to the chat template to size the reasoning budget.
+    knowledge_cutoff: str | None = None
+    """Knowledge-cutoff date in the default system prompt. ``None`` uses the template's
+    own default. Only rendered when the caller supplies no system message."""
 
-    ``None`` (default) leaves the template's own default alone. Set ``"low"`` for
-    agentic tasks with a tight token budget: at the default strength the model can
-    spend the whole budget reasoning and get truncated before it emits a tool call or
-    an answer, which scores as a failed rollout.
+    current_date: str | None = None
+    """Pins ``Current date:`` in the default system prompt.
+
+    ``None`` reproduces the template's behaviour of substituting today's date, which
+    makes the rendered prompt change from one day to the next. Pin it for runs that need
+    to be reproducible across days.
     """
 
     retain_reasoning_in_history: bool = True
     """Whether prior assistant turns keep their ``reasoning_content`` when re-rendered.
 
-    The chat template emits a ``to=self`` channel for any assistant message carrying
+    A ``to=self`` channel is emitted for any assistant message carrying
     ``reasoning_content``, so history grows with every turn's reasoning. Harmony-style
     models are often trained with prior analysis *dropped* from context (gpt-oss does
     this via ``auto_drop_analysis``); set this False to match that convention and to
@@ -105,12 +119,19 @@ class MuseGlimmerRendererConfig(BaseRendererConfig):
     """
 
 
-# Muse Glimmer special-token ids (from the GGUF metadata)
+# Muse Glimmer special tokens. The ids are checked against the tokenizer in __init__
+# rather than trusted, since they are baked into parse_response and the loss mask.
+START_STR, MESSAGE_STR = "<|start|>", "<|message|>"
+EOM_STR, EOT_STR = "<|eom|>", "<|eot|>"
+
 START_ID = 200022  # <|start|> begins a harmony message header
 MESSAGE_ID = 200023  # <|message|> ends the header, body follows
 EOT_ID = 200008  # <|eot|> end of turn
 EOM_ID = 200007  # <|eom|> end of message
 EOS_ID = 200001  # <|end_of_text|>
+
+_DEFAULT_REASONING_STRENGTH = "high"
+_DEFAULT_KNOWLEDGE_CUTOFF = "2026-01-04"
 
 _FUNCTION_CALLS_BLOCK = re.compile(
     r"<atem:function_calls>.*?</atem:function_calls>", re.DOTALL
@@ -121,6 +142,122 @@ _CHANNEL = re.compile(
     r"(?=<\|eom\|>|<\|eot\|>|<\|end_of_text\|>|<\|start\|>|\Z)",
     re.DOTALL,
 )
+
+# The template normalises "reasoning effort" to "reasoning strength" in a caller-supplied
+# system prompt. Jinja has no case-insensitive replace, so it spells out four casings;
+# reproduce exactly those four, or renders diverge on any other casing.
+_EFFORT_TO_STRENGTH = (
+    ("Reasoning effort", "Reasoning strength"),
+    ("Reasoning Effort", "Reasoning Strength"),
+    ("reasoning effort", "reasoning strength"),
+    ("REASONING EFFORT", "REASONING STRENGTH"),
+)
+
+
+def _tojson(value) -> str:
+    """Jinja's ``tojson`` as transformers configures it: insertion order, raw unicode."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _render_content(content) -> str:
+    """A message body: a plain string, or a list of typed multimodal parts."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    out = []
+    for part in content:
+        kind = part.get("type")
+        if kind == "image":
+            out.append("<|patch|>")
+        elif kind == "video":
+            out.append("<|video|>")
+        elif kind == "text":
+            out.append(part["text"])
+    return "".join(out)
+
+
+def _tool_fn(tool) -> dict:
+    """Tools arrive either OpenAI-nested (``{"function": {...}}``) or flat."""
+    if isinstance(tool, dict) and tool.get("function") is not None:
+        return tool["function"]
+    return tool
+
+
+def _tool_namespaces(tools) -> list[str]:
+    """Leading dotted segment of each tool name, first-seen order, deduplicated."""
+    seen: list[str] = []
+    for tool in tools:
+        namespace = _tool_fn(tool)["name"].split(".")[0]
+        if namespace not in seen:
+            seen.append(namespace)
+    return seen
+
+
+def _render_tool_defs(tools) -> str:
+    """The tool-definition block injected into the system message."""
+    parts = [
+        "In this environment you have access to a set of tools you can use to answer "
+        "the user's question.\n\n",
+        'You can invoke a function by writing a "<atem:function_calls>" block like the '
+        "following:\n",
+        '<atem:function_calls>\n<atem:invoke name="$FUNCTION_NAME">\n'
+        '<atem:parameter name="$PARAMETER_NAME">$PARAMETER_VALUE</atem:parameter>\n'
+        "...\n</atem:invoke>\n</atem:function_calls>\n\n",
+        "String and scalar parameters should be specified as is, while lists and "
+        "objects should use JSON format. Note that spaces for string values are not "
+        "stripped. The output is not expected to be valid XML and is parsed with "
+        "regular expressions.\n",
+        "Here are the functions available in JSONSchema format:\n",
+        "// Tool metadata\n",
+    ]
+    for namespace in _tool_namespaces(tools):
+        parts.append(
+            f'{{"name": {_tojson(namespace)}, "description": {_tojson("")}}}\n'
+        )
+    parts.append("// Function schemas")
+    for tool in tools:
+        fn = _tool_fn(tool)
+        parts.append(
+            f'\n{{"name": {_tojson(fn["name"])}, '
+            f'"description": {_tojson(fn.get("description"))}, '
+            f'"parameters": {_tojson(fn.get("parameters"))}}}'
+        )
+    parts.append(
+        "\n\nHere's an example of how to call a function in the tool set:\n"
+        "(If the tool namespace is not specified, invoke the function directly as "
+        "`example_function_name` rather than "
+        "`example_tool_name.example_function_name`)\n\n"
+        "to=example_tool_name.example_function_name\n\n"
+        "<atem:function_calls>\n"
+        '<atem:invoke name="example_tool_name.example_function_name">\n'
+        '<atem:parameter name="example_parameter_1">value_1</atem:parameter>\n'
+        '<atem:parameter name="example_parameter_2">This is the value for the second '
+        'parameter\nthat can span\n"multiple" lines\n</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+    return "".join(parts)
+
+
+def _render_system_meta(tools) -> str:
+    """The ``# Valid recipients:`` line closing every system message."""
+    recipients = ['"self"']
+    if tools:
+        recipients += [f'"{ns}.*"' for ns in _tool_namespaces(tools)]
+    recipients.append('"user"')
+    return "# Valid recipients: " + ", ".join(recipients) + "."
+
+
+def _render_atem(tool_call) -> str:
+    """An assistant tool call as an ATEM block."""
+    fn = tool_call["function"]
+    args = fn.get("arguments")
+    if not isinstance(args, dict):
+        raise ValueError(
+            "Muse Glimmer tool_call.function.arguments must be a dict, got "
+            f"{type(args).__name__}. A JSON string cannot be rendered."
+        )
+    return render_atem_tool_call(fn["name"], args)
 
 
 def _strip_reasoning_history(messages):
@@ -138,9 +275,7 @@ def _strip_reasoning_history(messages):
 
 
 def _normalize_tool_calls(messages):
-    """Muse Glimmer's chat template renders assistant tool_calls as `tc.function.name/.arguments`
-    (OpenAI-nested). Our ParsedToolCall is flat (.name/.arguments) -> convert so re-rendering
-    prior turns doesn't crash the template."""
+    """Our ParsedToolCall is flat (.name/.arguments); rendering expects OpenAI-nested."""
     out = []
     for m in messages:
         tcs = m.get("tool_calls") if isinstance(m, dict) else None
@@ -167,10 +302,24 @@ def _normalize_tool_calls(messages):
 
 def _parse_channels(text: str) -> list[tuple[str, str]]:
     """Split a Muse Glimmer assistant completion into (recipient, body) harmony channels."""
-    out = []
-    for m in _CHANNEL.finditer(text):
-        out.append((m.group("rcpt") or "user", m.group("body").strip()))
-    return out
+    return [
+        (m.group("rcpt") or "user", m.group("body").strip())
+        for m in _CHANNEL.finditer(text)
+    ]
+
+
+class _Piece(NamedTuple):
+    """One span of the render: either a literal special token or text to encode.
+
+    ``sampled`` marks spans the model itself produced, which is what the trainer's loss
+    mask keys off. Template scaffolding (``<|start|>``, the role header, ``<|message|>``)
+    is never sampled, even inside an assistant turn.
+    """
+
+    text: str
+    token_id: int | None
+    sampled: bool
+    msg_idx: int
 
 
 class MuseGlimmerRenderer:
@@ -181,54 +330,200 @@ class MuseGlimmerRenderer:
         self._config = config or MuseGlimmerRendererConfig()
         # The controller reads renderer._tokenizer (e.g. for pad_id=eos_token_id).
         self._tokenizer = tokenizer
-        self._chat_template = self._resolve_chat_template()
+        self._bos = tokenizer.bos_token or ""
+        self._verify_special_ids()
 
-    def _resolve_chat_template(self) -> str | None:
-        """Return the template source to render with, or None to use the tokenizer's.
+    def _verify_special_ids(self) -> None:
+        """The special-token ids are baked into parse_response and the loss mask.
 
-        Raises when neither is available. Muse Glimmer checkpoints do not all ship a
-        chat template -- some carry it as a separate ``chat_template.jinja``, others
-        have none at all -- and without one ``apply_chat_template`` raises deep inside
-        the first rollout, which the rollout loop reports as a generic per-rollout
-        ERROR. Failing here instead turns "every rollout errors" into one actionable
-        message before training starts.
+        A tokenizer that disagrees would mask the wrong spans and mis-split channels,
+        both of which corrupt training silently, so check rather than assume.
         """
-        configured = self._config.chat_template
-        if configured is not None:
-            if configured.endswith(".jinja") or configured.endswith(".j2"):
-                with open(configured) as f:
-                    return f.read()
-            return configured
-        if getattr(self._tok, "chat_template", None):
-            return None  # tokenizer has one; let apply_chat_template find it
-        raise ValueError(
-            f"The tokenizer at {getattr(self._tok, 'name_or_path', '<unknown>')!r} has "
-            "no chat template, so the muse_glimmer renderer cannot render prompts. Not "
-            "every Muse Glimmer checkpoint ships one. Point the renderer at the "
-            "template for your checkpoint, e.g. "
-            "MuseGlimmerRendererConfig(chat_template='/path/to/chat_template.jinja'), "
-            "or use a checkpoint whose tokenizer carries a chat template."
-        )
+        for token, expected in (
+            (START_STR, START_ID),
+            (MESSAGE_STR, MESSAGE_ID),
+            (EOM_STR, EOM_ID),
+            (EOT_STR, EOT_ID),
+        ):
+            actual = self._tok.convert_tokens_to_ids(token)
+            if actual != expected:
+                raise ValueError(
+                    f"Tokenizer maps {token} to id {actual}, but the muse_glimmer "
+                    f"renderer expects {expected}. This tokenizer is not compatible."
+                )
 
-    def _template_arg(self) -> dict:
-        """``chat_template=`` kwarg, omitted when deferring to the tokenizer's."""
-        return (
-            {}
-            if self._chat_template is None
-            else {"chat_template": self._chat_template}
-        )
+    # ---------------------------------------------------------------- rendering
 
     def _prepare(self, messages):
-        """Apply history policy, then the tool-call shape the template expects."""
+        """Apply the history policy, then the tool-call shape rendering expects."""
         if not self._config.retain_reasoning_in_history:
             messages = _strip_reasoning_history(messages)
         return _normalize_tool_calls(messages)
 
-    def _template_kwargs(self) -> dict:
-        """Extra kwargs for ``apply_chat_template``, omitting unset knobs."""
-        if self._config.reasoning_strength is None:
-            return {}
-        return {"reasoning_strength": self._config.reasoning_strength}
+    def _reasoning_line(self) -> str:
+        strength = self._config.reasoning_strength or _DEFAULT_REASONING_STRENGTH
+        return f"Reasoning strength: {strength}."
+
+    def _default_system_body(self, tools) -> str:
+        """System block synthesised when the caller supplies no system message."""
+        cutoff = self._config.knowledge_cutoff or _DEFAULT_KNOWLEDGE_CUTOFF
+        date = self._config.current_date or datetime.datetime.now().strftime("%Y-%m-%d")
+        body = (
+            "You are a helpful AI assistant."
+            f"\nKnowledge cutoff: {cutoff}."
+            f"\nCurrent date: {date}."
+            f"\n\n{self._reasoning_line()}"
+        )
+        if tools:
+            body += "\n\n" + _render_tool_defs(tools)
+        return body + "\n\n" + _render_system_meta(tools)
+
+    def _explicit_system_body(self, message, tools) -> str:
+        text = _render_content(message.get("content"))
+        for old, new in _EFFORT_TO_STRENGTH:
+            text = text.replace(old, new)
+        body = text
+        if "reasoning strength" not in text.lower():
+            body += "\n\n" + self._reasoning_line()
+        if tools:
+            body += "\n\n" + _render_tool_defs(tools)
+        return body + "\n\n" + _render_system_meta(tools)
+
+    @staticmethod
+    def _tool_name(message, messages) -> str:
+        """Tool messages name their tool directly, or via the call id that produced them."""
+        name = message.get("name")
+        if name:
+            return name
+        call_id = message.get("tool_call_id")
+        resolved = call_id if call_id else ""
+        for m in messages:
+            for tc in m.get("tool_calls") or ():
+                if call_id is not None and tc.get("id") == call_id:
+                    resolved = tc["function"]["name"]
+        return resolved
+
+    def _build(self, messages, *, tools, add_generation_prompt) -> list[_Piece]:
+        """Render to spans. Concatenating ``.text`` reproduces the chat template exactly.
+
+        One assistant message can expand into several harmony blocks -- a ``to=self``
+        reasoning channel plus one per tool call -- which is why attribution is tracked
+        per span rather than per message.
+        """
+        pieces: list[_Piece] = []
+
+        def emit(text: str, *, token_id: int | None = None, sampled=False, idx=0):
+            if text:
+                pieces.append(_Piece(text, token_id, sampled, idx))
+
+        def block(header: str, body: str, end: str, *, idx: int, sampled: bool):
+            emit(START_STR, token_id=START_ID, idx=idx)
+            emit(header, idx=idx)
+            emit(MESSAGE_STR, token_id=MESSAGE_ID, idx=idx)
+            emit(body, sampled=sampled, idx=idx)
+            emit(
+                end,
+                token_id=EOT_ID if end == EOT_STR else EOM_ID,
+                sampled=sampled,
+                idx=idx,
+            )
+
+        emit(self._bos, token_id=self._tok.bos_token_id)
+
+        if not any(m.get("role") == "system" for m in messages):
+            block(
+                "system",
+                self._default_system_body(tools),
+                EOT_STR,
+                idx=0,
+                sampled=False,
+            )
+
+        for i, message in enumerate(messages):
+            role = message.get("role")
+            # The template picks the terminator by looking at the NEXT message's role:
+            # two consecutive same-role messages are joined with <|eom|>.
+            same_role_next = (
+                i + 1 < len(messages) and messages[i + 1].get("role") == role
+            )
+            end_token = EOM_STR if same_role_next else EOT_STR
+
+            if role == "system":
+                block(
+                    "system",
+                    self._explicit_system_body(message, tools),
+                    EOT_STR,
+                    idx=i,
+                    sampled=False,
+                )
+            elif role == "user":
+                block(
+                    "user",
+                    _render_content(message.get("content")),
+                    EOT_STR,
+                    idx=i,
+                    sampled=False,
+                )
+            elif role == "tool":
+                name = self._tool_name(message, messages)
+                body = (
+                    f'<tool_output name="{name}">\n'
+                    f'{_render_content(message.get("content"))}\n</tool_output>'
+                )
+                block(f"tool {name}", body, EOT_STR, idx=i, sampled=False)
+            elif role == "assistant":
+                if message.get("reasoning_content"):
+                    block(
+                        "assistant to=self",
+                        message["reasoning_content"],
+                        EOM_STR,
+                        idx=i,
+                        sampled=True,
+                    )
+                tool_calls = message.get("tool_calls")
+                if tool_calls:
+                    for j, tc in enumerate(tool_calls):
+                        last = j == len(tool_calls) - 1
+                        block(
+                            f'assistant to={tc["function"]["name"]}',
+                            _render_atem(tc),
+                            end_token if last else EOM_STR,
+                            idx=i,
+                            sampled=True,
+                        )
+                else:
+                    recipient = message.get("recipient") or "user"
+                    end_turn = message.get("end_turn")
+                    if end_turn is None:
+                        end_turn = recipient == "user"
+                    block(
+                        f"assistant to={recipient}",
+                        _render_content(message.get("content")),
+                        EOT_STR if end_turn else EOM_STR,
+                        idx=i,
+                        sampled=True,
+                    )
+
+        if add_generation_prompt:
+            idx = max(len(messages) - 1, 0)
+            emit(START_STR, token_id=START_ID, idx=idx)
+            emit("assistant", idx=idx)
+
+        return pieces
+
+    def _render_text(self, messages, *, tools=None, add_generation_prompt=False) -> str:
+        """The rendered prompt as text. Byte-exact against chat_template.jinja."""
+        pieces = self._build(
+            self._prepare(messages),
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+        )
+        return "".join(p.text for p in pieces)
+
+    def _encode(self, piece: _Piece) -> list[int]:
+        if piece.token_id is not None:
+            return [piece.token_id]
+        return self._tok.encode(piece.text, add_special_tokens=False)
 
     def get_stop_token_ids(self) -> list[int]:
         # NOT <|eom|> (200007): it ends the *reasoning* channel, after which the model emits
@@ -238,16 +533,91 @@ class MuseGlimmerRenderer:
     def render_ids(
         self, messages, *, tools=None, add_generation_prompt: bool = False
     ) -> list[int]:
-        # apply_chat_template already emits <|begin_of_text|>, so don't re-add specials.
-        text = self._tok.apply_chat_template(
+        pieces = self._build(
             self._prepare(messages),
             tools=tools,
             add_generation_prompt=add_generation_prompt,
-            tokenize=False,
-            **self._template_arg(),
-            **self._template_kwargs(),
         )
-        return self._tok.encode(text, add_special_tokens=False)
+        ids: list[int] = []
+        for piece in pieces:
+            ids += self._encode(piece)
+        return ids
+
+    def render(
+        self, messages, *, tools=None, add_generation_prompt: bool = False
+    ) -> RenderedTokens:
+        """Render with per-token attribution for the trainer loss mask.
+
+        Attribution is exact: spans are emitted already labelled, so assistant bodies and
+        their terminators are marked sampled while the surrounding scaffolding is not.
+        Splits only ever fall on special-token boundaries, which are atomic in the
+        tokenizer, so encoding per span concatenates to the same ids as encoding the
+        whole string at once.
+        """
+        pieces = self._build(
+            self._prepare(messages),
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+        )
+
+        token_ids: list[int] = []
+        message_indices: list[int] = []
+        sampled_mask: list[bool] = []
+        for piece in pieces:
+            encoded = self._encode(piece)
+            token_ids += encoded
+            message_indices += [piece.msg_idx] * len(encoded)
+            sampled_mask += [piece.sampled] * len(encoded)
+
+        return RenderedTokens(
+            token_ids=token_ids,
+            message_indices=message_indices,
+            sampled_mask=sampled_mask,
+            is_content=list(sampled_mask),
+            message_roles=[m.get("role") for m in messages],
+            message_tool_names=[m.get("name") for m in messages],
+            multi_modal_data=None,
+        )
+
+    def bridge_to_next_turn(
+        self,
+        previous_prompt_ids: list[int],
+        previous_completion_ids: list[int],
+        new_messages,
+        *,
+        tools=None,
+    ) -> list[int] | None:
+        """Extend prompt + sampled completion with the next turn, without re-rendering.
+
+        Re-rendering the previous turn would round-trip the completion through parse and
+        back, which can change its tokenization. Keeping the sampled ids verbatim and
+        appending only the new messages avoids that drift, so the completion the trainer
+        sees stays bitwise what the generator produced.
+
+        The appended blocks close with ``<|eot|>``, which assumes consecutive same-role
+        messages do not straddle the bridge -- the template would otherwise join them
+        with ``<|eom|>``. The tool-call loop alternates roles, so it is unaffected.
+        """
+        prepared = self._prepare(list(new_messages))
+        # _build always synthesises the leading bos, and a default system block when the
+        # messages carry no system role. A bridge continues an existing prompt, so both
+        # of those are already present upstream and must be dropped from the suffix.
+        pieces = self._build(prepared, tools=tools, add_generation_prompt=True)
+        drop_system = not any(m.get("role") == "system" for m in prepared)
+
+        suffix: list[int] = []
+        blocks_seen = 0
+        for piece in pieces:
+            if piece.token_id == START_ID:
+                blocks_seen += 1
+            if piece.token_id == self._tok.bos_token_id and piece.text == self._bos:
+                continue
+            if drop_system and blocks_seen == 1:
+                continue
+            suffix += self._encode(piece)
+        return previous_prompt_ids + previous_completion_ids + suffix
+
+    # ------------------------------------------------------------------ parsing
 
     def parse_response(self, token_ids, *, tools=None) -> ParsedResponse:
         """Parse a Muse Glimmer completion into (content, reasoning_content, tool_calls).
@@ -297,125 +667,6 @@ class MuseGlimmerRenderer:
             reasoning_content=reasoning,
             tool_calls=tool_calls,
         )
-
-    @staticmethod
-    def _lcp_len(a: list[int], b: list[int]) -> int:
-        n = 0
-        for x, y in zip(a, b):
-            if x != y:
-                break
-            n += 1
-        return n
-
-    def _encode_template(self, messages, *, tools, add_generation_prompt) -> list[int]:
-        text = self._tok.apply_chat_template(
-            self._prepare(messages),
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
-            tokenize=False,
-            **self._template_arg(),
-            **self._template_kwargs(),
-        )
-        return self._tok.encode(text, add_special_tokens=False)
-
-    def render(
-        self, messages, *, tools=None, add_generation_prompt: bool = False
-    ) -> RenderedTokens:
-        """Render with per-token attribution for the trainer loss mask.
-
-        Attribution is computed by growing the prefix one message at a time and
-        diffing token ids. Assistant tokens are marked sampled + content (trainable);
-        everything else (system/user/tool envelope + generation prompt) is not.
-
-        Known limitation: Muse Glimmer's template picks the message end token by looking at
-        the *next* message's role (<|eom|> vs <|eot|>), so two consecutive same-role
-        messages (e.g. multiple tool outputs in one step) shift one boundary token.
-        Handled via longest-common-prefix diffing; validate byte-exactness against a
-        real multi-tool generation before trusting the mask there.
-        """
-        message_roles = [m["role"] for m in messages]
-        message_tool_names = [m.get("name") for m in messages]
-
-        token_ids: list[int] = []
-        message_indices: list[int] = []
-        sampled_mask: list[bool] = []
-        is_content: list[bool] = []
-
-        prev: list[int] = []
-        for i in range(len(messages)):
-            cur = self._encode_template(
-                messages[: i + 1], tools=tools, add_generation_prompt=False
-            )
-            cpl = self._lcp_len(prev, cur)
-            # Re-attribute any prev tail that changed (end-token flip) to message i.
-            for _ in range(len(token_ids) - cpl):
-                token_ids.pop()
-                message_indices.pop()
-                sampled_mask.pop()
-                is_content.pop()
-            sampled = message_roles[i] == "assistant"
-            # Split this message's span into template scaffolding vs body. A harmony
-            # block is ``<|start|> role [to=recipient] <|message|> body <|eom|>/<|eot|>``;
-            # everything up to and including ``<|message|>`` is header the template
-            # injects, which the model never sampled -- marking it sampled would put
-            # gradient on scaffolding. One assistant message can expand into SEVERAL
-            # blocks (a to=self reasoning channel plus one per tool call), so track
-            # header state across the whole span instead of splitting once.
-            in_header = False
-            for tok_id in cur[cpl:]:
-                if tok_id == START_ID:
-                    in_header = True
-                is_scaffold = in_header
-                if tok_id == MESSAGE_ID:
-                    in_header = False  # header ends *including* this token
-                token_ids.append(tok_id)
-                message_indices.append(i)
-                sampled_mask.append(sampled and not is_scaffold)
-                is_content.append(sampled and not is_scaffold)
-            prev = cur
-
-        if add_generation_prompt:
-            full = self._encode_template(
-                messages, tools=tools, add_generation_prompt=True
-            )
-            for tok_id in full[len(prev) :]:
-                token_ids.append(tok_id)
-                message_indices.append(len(messages) - 1 if messages else 0)
-                sampled_mask.append(False)  # generation prompt is not sampled/content
-                is_content.append(False)
-
-        return RenderedTokens(
-            token_ids=token_ids,
-            message_indices=message_indices,
-            sampled_mask=sampled_mask,
-            is_content=is_content,
-            message_roles=message_roles,
-            message_tool_names=message_tool_names,
-            multi_modal_data=None,
-        )
-
-    def bridge_to_next_turn(
-        self,
-        previous_prompt_ids: list[int],
-        previous_completion_ids: list[int],
-        new_messages,
-        *,
-        tools=None,
-    ):
-        """Extend prev_prompt + sampled_completion with the next turn's tokens.
-
-        Returns None (safe fallback -> caller re-renders) when the sampled completion
-        can't be extended byte-exactly: Muse Glimmer wraps each turn in <|start|>...<|eot|>
-        and injects <|start|>tool ...<tool_output>..., and getting that continuation
-        byte-identical to a fresh full render requires the full message history +
-        validation against a real generation. Returning None keeps training correct
-        (re-render) at the cost of the extension optimization.
-
-        TODO: implement the byte-exact extension (append turn-close + rendered
-        new_messages + next generation prompt) and verify the prefix contract
-        against a real generation, then drop the None fallback.
-        """
-        return None
 
 
 def register() -> None:
