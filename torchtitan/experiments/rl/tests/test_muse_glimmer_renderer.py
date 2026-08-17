@@ -377,14 +377,65 @@ def test_bridge_extends_without_retokenizing_the_completion(tokenizer):
         tools=TOOLS,
     )
     assert bridged is not None
-    assert bridged[: len(prompt_ids) + len(completion_ids)] == (
-        prompt_ids + completion_ids
-    )
-    suffix = tokenizer.decode(bridged[len(prompt_ids) + len(completion_ids) :])
+    # The caller reads `.token_ids`, so the bridge must return RenderedTokens, not a list.
+    carried = len(prompt_ids) + len(completion_ids)
+    assert bridged.token_ids[:carried] == prompt_ids + completion_ids
+    suffix = tokenizer.decode(bridged.token_ids[carried:])
     assert suffix.startswith("<|start|>tool search<|message|>")
     assert suffix.endswith("<|start|>assistant")
     # The bridge must not re-emit the system preamble already in prompt_ids.
     assert "Valid recipients" not in suffix
+
+    # A bridge produces a prompt, so nothing in it is trainable, and every parallel
+    # array must line up with token_ids or the trainer will index past the end.
+    n = len(bridged.token_ids)
+    assert len(bridged.sampled_mask) == n
+    assert len(bridged.message_indices) == n
+    assert len(bridged.is_content) == n
+    assert not any(bridged.sampled_mask)
+    # -1 over the carried prefix and the trailing generation prompt; 0 for new_messages[0].
+    assert bridged.message_indices[:carried] == [-1] * carried
+    assert set(bridged.message_indices[carried:]) <= {0, -1}
+    assert bridged.message_indices[-1] == -1
+    assert bridged.message_roles == ["tool"]
+
+
+def test_bridge_returns_none_when_it_cannot_extend_safely(tokenizer):
+    """Cases the bridge must decline so the caller re-renders instead."""
+    renderer = _renderer(tokenizer, current_date="2026-02-03")
+    prompt_ids = renderer.render_ids(
+        [{"role": "user", "content": "q"}], add_generation_prompt=True
+    )
+    tool_msg = [{"role": "tool", "name": "search", "content": "x"}]
+
+    assert renderer.bridge_to_next_turn([], [EOT_ID], tool_msg) is None
+    assert renderer.bridge_to_next_turn(prompt_ids, [EOT_ID], []) is None
+    # An assistant turn's terminator depends on the *next* message's role, which the
+    # bridge cannot see, so it must decline rather than guess.
+    assert (
+        renderer.bridge_to_next_turn(
+            prompt_ids, [EOT_ID], [{"role": "assistant", "content": "hi"}]
+        )
+        is None
+    )
+
+
+def test_bridge_synthesizes_a_close_for_a_truncated_completion(tokenizer):
+    """A completion cut off at max_tokens has no terminator; the bridge adds one."""
+    renderer = _renderer(tokenizer, current_date="2026-02-03")
+    prompt_ids = renderer.render_ids(
+        [{"role": "user", "content": "q"}], add_generation_prompt=True
+    )
+    truncated = tokenizer.encode(
+        " to=user<|message|>cut off mid", add_special_tokens=False
+    )
+    bridged = renderer.bridge_to_next_turn(
+        prompt_ids, truncated, [{"role": "tool", "name": "search", "content": "x"}]
+    )
+    assert bridged is not None
+    carried = len(prompt_ids) + len(truncated)
+    assert bridged.token_ids[:carried] == prompt_ids + truncated
+    assert bridged.token_ids[carried] == EOT_ID  # synthesized turn close
 
 
 def test_rejects_incompatible_tokenizer(tokenizer):

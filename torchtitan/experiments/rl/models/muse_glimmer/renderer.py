@@ -49,7 +49,14 @@ import json
 import re
 from typing import ClassVar, Literal, NamedTuple
 
-from renderers.base import ParsedResponse, ParsedToolCall, RenderedTokens
+from renderers.base import (
+    extract_message_tool_names,
+    ParsedResponse,
+    ParsedToolCall,
+    reject_assistant_in_extension,
+    RenderedTokens,
+    trim_to_turn_close,
+)
 from renderers.configs import BaseRendererConfig
 
 from .atem import parse_atem_tool_calls, render_atem_tool_call
@@ -314,12 +321,18 @@ class _Piece(NamedTuple):
     ``sampled`` marks spans the model itself produced, which is what the trainer's loss
     mask keys off. Template scaffolding (``<|start|>``, the role header, ``<|message|>``)
     is never sampled, even inside an assistant turn.
+
+    ``is_body`` marks the message body specifically, which the bridge reports as content
+    even on non-assistant roles that are never sampled. ``is_generation_prompt`` marks
+    the trailing ``<|start|>assistant``, which belongs to no message.
     """
 
     text: str
     token_id: int | None
     sampled: bool
     msg_idx: int
+    is_body: bool = False
+    is_generation_prompt: bool = False
 
 
 class MuseGlimmerRenderer:
@@ -412,15 +425,25 @@ class MuseGlimmerRenderer:
         """
         pieces: list[_Piece] = []
 
-        def emit(text: str, *, token_id: int | None = None, sampled=False, idx=0):
+        def emit(
+            text: str,
+            *,
+            token_id: int | None = None,
+            sampled=False,
+            idx=0,
+            is_body=False,
+            is_generation_prompt=False,
+        ):
             if text:
-                pieces.append(_Piece(text, token_id, sampled, idx))
+                pieces.append(
+                    _Piece(text, token_id, sampled, idx, is_body, is_generation_prompt)
+                )
 
         def block(header: str, body: str, end: str, *, idx: int, sampled: bool):
             emit(START_STR, token_id=START_ID, idx=idx)
             emit(header, idx=idx)
             emit(MESSAGE_STR, token_id=MESSAGE_ID, idx=idx)
-            emit(body, sampled=sampled, idx=idx)
+            emit(body, sampled=sampled, idx=idx, is_body=True)
             emit(
                 end,
                 token_id=EOT_ID if end == EOT_STR else EOM_ID,
@@ -506,8 +529,8 @@ class MuseGlimmerRenderer:
 
         if add_generation_prompt:
             idx = max(len(messages) - 1, 0)
-            emit(START_STR, token_id=START_ID, idx=idx)
-            emit("assistant", idx=idx)
+            emit(START_STR, token_id=START_ID, idx=idx, is_generation_prompt=True)
+            emit("assistant", idx=idx, is_generation_prompt=True)
 
         return pieces
 
@@ -586,7 +609,7 @@ class MuseGlimmerRenderer:
         new_messages,
         *,
         tools=None,
-    ) -> list[int] | None:
+    ) -> RenderedTokens | None:
         """Extend prompt + sampled completion with the next turn, without re-rendering.
 
         Re-rendering the previous turn would round-trip the completion through parse and
@@ -594,28 +617,66 @@ class MuseGlimmerRenderer:
         appending only the new messages avoids that drift, so the completion the trainer
         sees stays bitwise what the generator produced.
 
-        The appended blocks close with ``<|eot|>``, which assumes consecutive same-role
-        messages do not straddle the bridge -- the template would otherwise join them
-        with ``<|eom|>``. The tool-call loop alternates roles, so it is unaffected.
-        """
-        prepared = self._prepare(list(new_messages))
-        # _build always synthesises the leading bos, and a default system block when the
-        # messages carry no system role. A bridge continues an existing prompt, so both
-        # of those are already present upstream and must be dropped from the suffix.
-        pieces = self._build(prepared, tools=tools, add_generation_prompt=True)
-        drop_system = not any(m.get("role") == "system" for m in prepared)
+        Returns ``None`` -- the caller then re-renders -- when the extension cannot be
+        appended safely: no prior prompt, nothing to add, an assistant turn in the
+        extension (its terminator depends on the following message's role, which the
+        bridge cannot see), or a prior turn with no ``<|eot|>`` to attach to.
 
-        suffix: list[int] = []
+        The output is a prompt, so nothing in it is sampled. ``message_indices`` follows
+        the library convention: -1 over the carried-forward prefix and the trailing
+        generation prompt, and the index into ``new_messages`` elsewhere.
+        """
+        if not previous_prompt_ids or not new_messages:
+            return None
+        if reject_assistant_in_extension(new_messages):
+            return None
+
+        # A completion truncated at max_tokens has no terminator; synthesizing <|eot|>
+        # closes the turn the same way the template would.
+        previous_ids = trim_to_turn_close(
+            previous_prompt_ids,
+            previous_completion_ids,
+            {EOT_ID},
+            synthesize_close=EOT_ID,
+        )
+        if previous_ids is None:
+            return None
+
+        prepared = self._prepare(list(new_messages))
+        # _build always emits the leading bos, and synthesises a default system block
+        # when no system message is present. Both already exist in previous_ids, so the
+        # extension starts after them.
+        pieces = self._build(prepared, tools=tools, add_generation_prompt=True)
+        skip_synthesized_system = not any(m.get("role") == "system" for m in prepared)
+
+        ext: list[int] = []
+        ext_indices: list[int] = []
+        ext_content: list[bool] = []
         blocks_seen = 0
         for piece in pieces:
             if piece.token_id == START_ID:
                 blocks_seen += 1
             if piece.token_id == self._tok.bos_token_id and piece.text == self._bos:
                 continue
-            if drop_system and blocks_seen == 1:
+            if skip_synthesized_system and blocks_seen == 1:
                 continue
-            suffix += self._encode(piece)
-        return previous_prompt_ids + previous_completion_ids + suffix
+            encoded = self._encode(piece)
+            ext += encoded
+            ext_indices += [-1 if piece.is_generation_prompt else piece.msg_idx] * len(
+                encoded
+            )
+            ext_content += [piece.is_body] * len(encoded)
+
+        total = len(previous_ids) + len(ext)
+        return RenderedTokens(
+            token_ids=previous_ids + ext,
+            message_indices=[-1] * len(previous_ids) + ext_indices,
+            sampled_mask=[False] * total,
+            is_content=[False] * len(previous_ids) + ext_content,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+            multi_modal_data=None,
+        )
 
     # ------------------------------------------------------------------ parsing
 
