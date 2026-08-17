@@ -1,9 +1,7 @@
 # Kimi K3
 
-Kimi K3 combines a hybrid **Kimi Delta Attention (KDA) + Multi-head Latent
-Attention (MLA)** decoder, **LatentMoE**, and a **MoonViT3d** vision encoder.
-TorchTitan currently provides a topology-complete reduced model for architecture
-validation, single-device training, and FSDP2 training.
+Kimi K3 combines a hybrid Kimi Delta Attention (KDA) and Multi-head Latent
+Attention (MLA) decoder with LatentMoE and a MoonViT-V2 vision encoder.
 
 ## Prerequisites
 
@@ -15,95 +13,45 @@ pip install av einops pillow torchvision flash-linear-attention
 
 ## Architecture
 
-- **Decoder** -- hybrid KDA and MLA layers. The MLA layers follow the released
-  model's explicit 1-based layer list, including consecutive MLA layers at the
-  end of the decoder.
-- **Feed-forward layers** -- one dense SiTU feed-forward layer followed by
-  LatentMoE layers with sigmoid top-k routing, correction bias, routed experts,
-  and shared experts.
-- **Attention residuals** -- block-level attention residual connections,
-  including the final output residual.
-- **KDA backend** -- FLA's chunked Triton kernel, with a pure PyTorch recurrent
-  implementation in the unit tests as the numerical reference.
-- **Vision encoder** -- MoonViT3d with learned spatial positions, 2D RoPE,
-  non-causal attention, temporal pooling, 2x2 spatial merge, and a two-layer
-  projector to the decoder dimension.
-- **Multimodal forward** -- projected vision embeddings are scattered into runs
-  of the shared media placeholder token.
+Kimi K3 is built on Kimi Delta Attention (KDA) and Attention Residuals
+(AttnRes), with 69 KDA layers and 24 Gated MLA layers. Stable LatentMoE selects
+16 of 896 experts per token, and MoonViT-V2 provides native vision input.
 
-## Model variants
+## Released Model Configuration
 
-Only `debugmodel` is currently registered. The released Kimi K3 row is included
-for architectural comparison and is not a runnable TorchTitan flavor.
+The values below follow the
+[official Kimi K3 model card](https://huggingface.co/moonshotai/Kimi-K3) and
+describe the released model.
 
-| Variant | Parameters | LLM dim | Layers | MLA layers (1-based) | KDA layers | Heads | Experts (top-k) | ViT dim / layers / heads |
-|---------|------------|---------|--------|----------------------|------------|-------|-----------------|--------------------------|
-| Released Kimi K3 (reference) | 2.8T | 7168 | 93 | 4, 8, ..., 92, 93 | 69 | 96 | 896 (top-16) | 1024 / 27 / 12 |
-| debugmodel | 100M | 256 | 13 | 4, 8, 12, 13 | 9 | 4 | 8 (top-2) | 256 / 4 / 3 |
-
-`debugmodel` retains the released vocabulary size of 163840. Its depth also
-preserves two structural edge cases from the released model: consecutive final
-MLA layers and a short trailing attention-residual block.
+| Component | Configuration |
+|-----------|---------------|
+| Architecture | Mixture-of-Experts (MoE) |
+| Parameters | 2.8T total, 104B activated |
+| Decoder | 93 layers, 1 dense layer, hidden size 7168, 96 attention heads |
+| Attention | 69 KDA layers and 24 Gated MLA layers, context length 1048576 |
+| LatentMoE | Dimension 3584, hidden size 3072 per expert, 896 experts, top-16 routing, 2 shared experts |
+| Vocabulary | 160K |
+| Activation | SiTU-GLU |
+| Vision encoder | MoonViT-V2, 401M parameters |
+| Quantization | MXFP4 weights and MXFP8 activations with quantization-aware training |
+| Modality | Text and image |
 
 ## Supported Parallelisms
 
 | Feature | Notes |
 |---------|-------|
-| FSDP / HSDP | Supported with the default SPMD backend. The decoder is sharded per layer and the vision encoder is a separate FSDP unit |
-| Tensor Parallelism (TP) | Not supported |
-| Expert Parallelism (EP) | Not supported |
-| Pipeline Parallelism (PP) | Not supported |
-| Context Parallelism (CP) | Not supported |
+| FSDP2 / HSDP | Decoder sharded per layer; vision encoder sharded as a separate unit |
 
-`torch.compile`, activation checkpointing, and parameter CPU offload are not
-supported by the current Kimi K3 parallelization path.
+## Numerical Parity
 
-Run the debug model on one GPU:
+End-to-end KL divergence against the Hugging Face implementation: 
+**2.0644e-6**, with **100% top-1 and top-5match**.
 
-```bash
-NGPU=1 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel ./run_train.sh
-```
+Vision parity: pixel preprocessing max difference `1.192e-7`; projected vision
+features cosine similarity `1.000000` and max difference `3.152e-3`.
 
-Run it with two-way FSDP2:
+Test scripts:
 
-```bash
-NGPU=2 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel ./run_train.sh \
-  --parallelism.data_parallel_shard_degree 2
-```
-
-## Numerical Checks
-
-`scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` loads the released
-HuggingFace config, modeling code, processor, and tokenizer from a local model
-directory. It reduces the HuggingFace model to the `debugmodel` topology and
-transfers the randomly initialized TorchTitan state dict, without loading the
-released weights. Each side performs its own image preprocessing before the
-full vision-projector-decoder forward. Float32 is the default correctness mode,
-and the script does not override the framework's TF32 settings.
-
-The current float32 CUDA validation result is:
-
-- pixel preprocessing: max difference `1.192e-7`, with no values differing
-  above `1e-6`;
-- projected vision features: cosine similarity `1.000000`, max difference
-  `3.152e-3`;
-- expert routing: all `3936 / 3936` choices match;
-- end-to-end last-token logits: KL `1.8215e-8`, cosine similarity `1.000002`,
-  max difference `4.1358e-3`, top-1 match, and top-5 5/5.
-
-Run the comparison with:
-
-```bash
-python -m scripts.checkpoint_conversion.numerical_tests_kimi_k3 \
-  --hf_model_path ~/hf_assets/moonshotai/Kimi-K3
-```
-
-## TODO
-
-- Add the full 2.8T model flavor.
-- Add MXFP4 compressed checkpoint loading.
-- Add TP, EP, PP, and CP support.
-- Add packed-document attention support.
-- Add video inputs and a video dataset training pipeline.
-- Add `torch.compile`, activation checkpointing, and parameter CPU offload.
-- Add generation-cache support.
+- `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face
+  versus TorchTitan end-to-end comparison
+- `tests/unit_tests/test_kimi_k3.py` -- KDA kernel versus the PyTorch reference

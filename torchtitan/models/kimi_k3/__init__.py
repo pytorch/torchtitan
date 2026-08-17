@@ -510,8 +510,45 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
     )
 
 
+def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
+    dim = 7168
+    return _kimi_k3_config(
+        dim=dim,
+        vocab_size=163840,
+        num_layers=93,
+        full_attention_layers=set(range(3, 92, 4)) | {92},
+        attn_res_block_size=12,
+        num_heads=96,
+        q_lora_rank=1536,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        kda_head_dim=128,
+        conv_kernel_size=4,
+        dense_hidden_dim=33792,
+        latent_dim=3584,
+        expert_hidden_dim=3072,
+        num_experts=896,
+        top_k=16,
+        num_shared_experts=2,
+        vision_encoder=_vision_encoder_config(
+            text_dim=dim,
+            dim=1024,
+            qkv_dim=1536,
+            hidden_dim=4096,
+            num_layers=27,
+            num_heads=12,
+            init_pos_emb_height=64,
+            init_pos_emb_width=64,
+        ),
+        attn_backend=attn_backend,
+    )
+
+
 kimi_k3_configs = {
     "debugmodel": _debugmodel,
+    "Kimi-K3": _kimi_k3,
 }
 
 
