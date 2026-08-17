@@ -32,8 +32,8 @@ from torchtitan.distributed.fsdp import (
 from torchtitan.distributed.full_dtensor import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
+    validate_config,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 
 
 def parallelize_kimi_k2_5(
@@ -48,9 +48,9 @@ def parallelize_kimi_k2_5(
 ):
     """Apply TP/EP, activation checkpointing, ``torch.compile``, and FSDP.
 
-    Order: config-based TP/EP (``model.parallelize``) -> async-TP ->
-    activation checkpointing -> compile -> FSDP (vision encoder as a single
-    unit, then the MoE-aware decoder).
+    Order: config-based TP/EP (``model.parallelize``) -> activation
+    checkpointing -> compile (including async TP setup) -> FSDP (vision encoder
+    as a single unit, then the MoE-aware decoder).
 
     NOTE: the passed-in model should preferably be on meta device; otherwise it
     must fit in GPU or CPU memory.
@@ -68,17 +68,11 @@ def parallelize_kimi_k2_5(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if (
-        parallelism.spmd_backend == "spmd_types"
-        or parallel_dims.tp_enabled
-        or parallel_dims.ep_enabled
-    ):
-        if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
-            raise RuntimeError("Async TP requires torch.compile")
+    if parallelism.spmd_backend == "spmd_types":
+        validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
-
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+    elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
 
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
@@ -87,10 +81,17 @@ def parallelize_kimi_k2_5(
             ac_policy.apply(model.vision_encoder)
 
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
+        )
         if model.vision_encoder is not None:
-            # pyrefly: ignore [bad-argument-type]
-            apply_compile(model.vision_encoder, compile_config)
+            apply_compile(
+                model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
+                compile_config=compile_config,
+                parallel_dims=parallel_dims,
+            )
 
     if parallelism.spmd_backend == "spmd_types":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)

@@ -124,7 +124,7 @@ class PolicyTrainer(Actor, Configurable):
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
-        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        self.device = utils.get_local_device()
         device_module.set_device(self.device)
 
         # Enable batch-invariant mode BEFORE init_distributed

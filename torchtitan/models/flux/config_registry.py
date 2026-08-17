@@ -45,6 +45,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             local_batch_size=4,
             max_norm=2.0,
             steps=10,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             prompt_dropout_prob=0.447,
@@ -106,6 +107,7 @@ def flux_dev() -> FluxTrainer.Config:
         training=TrainingConfig(
             local_batch_size=32,
             steps=30000,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             dataset="cc12m-wds",
@@ -156,6 +158,7 @@ def flux_schnell() -> FluxTrainer.Config:
         training=TrainingConfig(
             local_batch_size=64,
             steps=30000,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             dataset="cc12m-wds",

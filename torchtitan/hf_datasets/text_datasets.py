@@ -103,6 +103,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         self._sample_idx = 0
         self._epoch: int = 0
         self._inputs_buffer: list[int] = []
+        self._labels_buffer: list[int] = []
         self._positions_buffer: list[int] = []
 
     def _get_data_iter(self):
@@ -126,8 +127,6 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         return positions
 
     def __iter__(self):
-        max_buffer_token_len = 1 + self.seq_len
-
         while True:
             for sample in self._get_data_iter():
                 # Use the dataset-specific text processor
@@ -136,33 +135,35 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     sample_text, add_bos=True, add_eos=True
                 )
 
-                self._inputs_buffer.extend(sample_tokens)
+                # Shift inputs and labels within the document, so the target of
+                # a document's last token is never the next document's first
+                # token. The buffers are therefore already next-token aligned
+                # and a full sample is exactly seq_len tokens.
+                self._inputs_buffer.extend(sample_tokens[:-1])
+                self._labels_buffer.extend(sample_tokens[1:])
                 # Per-document positions reset at document boundaries,
                 # matching inference frameworks (e.g. vLLM) that start
                 # positions at 0 per request.  Positions wrap at seq_len
                 # to stay within the RoPE cache, effectively chunking
                 # long documents into seq_len-sized segments.
                 # TODO: make overflow policy configurable (chunk / truncate / drop).
-                self._positions_buffer.extend(range(len(sample_tokens)))
+                self._positions_buffer.extend(range(len(sample_tokens) - 1))
                 self._sample_idx += 1
 
-                while len(self._inputs_buffer) >= max_buffer_token_len:
-                    x = torch.LongTensor(self._inputs_buffer[:max_buffer_token_len])
-                    pos = torch.LongTensor(
+                while len(self._inputs_buffer) >= self.seq_len:
+                    input_ids = torch.LongTensor(self._inputs_buffer[: self.seq_len])
+                    label_ids = torch.LongTensor(self._labels_buffer[: self.seq_len])
+                    positions = torch.LongTensor(
                         self._normalize_positions(
-                            self._positions_buffer[:max_buffer_token_len]
+                            self._positions_buffer[: self.seq_len]
                         )
                     )
                     # update buffers to the remaining tokens
-                    self._inputs_buffer = self._inputs_buffer[max_buffer_token_len:]
-                    self._positions_buffer = self._positions_buffer[
-                        max_buffer_token_len:
-                    ]
+                    self._inputs_buffer = self._inputs_buffer[self.seq_len :]
+                    self._labels_buffer = self._labels_buffer[self.seq_len :]
+                    self._positions_buffer = self._positions_buffer[self.seq_len :]
 
-                    input = x[:-1]
-                    label = x[1:]
-                    positions = pos[:-1]
-                    yield {"input": input, "positions": positions}, label
+                    yield {"input": input_ids, "positions": positions}, label_ids
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
@@ -187,6 +188,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._inputs_buffer = state_dict["inputs_buffer"]
+        self._labels_buffer = state_dict["labels_buffer"]
         if "positions_buffer" not in state_dict:
             logger.warning(
                 "Checkpoint missing 'positions_buffer'. Falling back to empty buffer. "
@@ -218,6 +220,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
     def state_dict(self):
         _state_dict: dict[str, Any] = {
             "inputs_buffer": self._inputs_buffer,
+            "labels_buffer": self._labels_buffer,
             "positions_buffer": self._positions_buffer,
         }
 
