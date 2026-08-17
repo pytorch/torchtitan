@@ -73,8 +73,13 @@ jobs:
         end=$(date +%s)
         echo "pip install torch took $((end - start)) seconds"
 
-        export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
-        echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+        HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+        if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
+          export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
+          echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+        fi
+
+        export PYTORCH_ALLOC_CONF="expandable_segments:False"
 
         start=$(date +%s)
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}

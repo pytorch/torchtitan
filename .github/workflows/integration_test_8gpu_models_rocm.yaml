@@ -64,10 +64,17 @@ jobs:
           TORCH_SPEC="torch==${{ matrix.torch-version }}"
         fi
         python -m pip install --force-reinstall --pre \
-          "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
+          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
 
-        export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
-        echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+        python -m pip install --pre --no-deps torchvision --index-url ${{ matrix.index-url }}
+
+        HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+        if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
+          export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
+          echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+        fi
+
+        export PYTORCH_ALLOC_CONF="expandable_segments:False"
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
