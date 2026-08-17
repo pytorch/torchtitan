@@ -14,8 +14,9 @@ Configuration (via HybridEPTokenDispatcher.Config):
         None = blocking mode (default).  HybridEP calls cudaStreamSynchronize
         after dispatch and computes the exact num_permuted_tokens on the host.
         float in (0, 1] = non-blocking mode; num_permuted_tokens is estimated as
-        num_tokens × ep_size × min(num_local_experts, top_k) × cf, aligned for
-        MXFP8.  See _num_permuted_tokens_for_non_blocking().
+        num_tokens * ep_size *
+        min(num_local_experts, top_k) * capacity_factor, aligned for MXFP8.
+        See _num_permuted_tokens_for_non_blocking().
 """
 
 from dataclasses import dataclass
@@ -86,8 +87,9 @@ def _num_permuted_tokens_for_non_blocking(
 ) -> int:
     """Pre-allocated output buffer size for non-blocking dispatch.
 
-    Formula: num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-    aligned to pad_multiple if set.
+    Formula: num_tokens * ep_size *
+    min(num_local_experts, top_k) * capacity_factor, aligned to pad_multiple
+    if set.
 
     capacity_factor=1.0 sizes for the worst case (every token routed to
     every local expert) — no tokens are dropped but memory usage is highest.
@@ -132,16 +134,13 @@ def _dispatch_impl(
       then reads tokens_per_expert from pinned CPU memory to compute the
       exact num_permuted_tokens on the host.
     """
-    num_local_experts = num_experts // ep_size
-
+    global _buffer
     # pyrefly: ignore [bad-argument-type]
     group = dist.distributed_c10d._resolve_process_group(group_name)
-    get_buffer(
-        group=group,
-        hidden_dim=x.shape[1],
-        num_tokens=x.shape[0],
-        num_local_experts=num_local_experts,
-    )
+    assert _buffer is not None, "HybridEP buffer must be initialized before dispatch"
+    assert _buffer.group == group
+    assert x.shape[0] <= _buffer.configurer.buffer_config.max_num_of_tokens_per_rank
+    num_local_experts = num_experts // ep_size
 
     from deep_ep.hybrid_ep_buffer import indices_to_map
 
@@ -395,17 +394,16 @@ _NUM_SMS_COMBINE = 16
 def get_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
-    num_tokens: int,
+    num_max_tokens_per_rank: int,
     num_local_experts: int,
     fp8_dispatch: bool = False,
 ) -> None:
     """Ensure the global HybridEP buffer is initialized, reinitializing if config changed.
 
     Allocates the all-to-all communication buffers (RDMA inter-node + NVLink IPC
-    intra-node), sized by num_tokens as max_num_of_tokens_per_rank.  No capacity
-    factor is applied here — these buffers hold the per-rank input tokens, not the
-    fan-out permuted output.  HybridEP auto-grows via update_template_config if a
-    later dispatch has more tokens than the initial allocation.
+    intra-node) for ``num_max_tokens_per_rank``. No capacity factor is applied
+    here -- these buffers hold per-rank input tokens, not the fan-out permuted
+    output. Dispatch only creates logical views within this fixed allocation.
     """
     global _buffer
 
@@ -420,7 +418,7 @@ def get_buffer(
             "Install from: https://github.com/deepseek-ai/DeepEP, branch: hybrid-ep"
         ) from e
 
-    max_tokens_per_rank = num_tokens
+    max_tokens_per_rank = num_max_tokens_per_rank
 
     needs_reinit = (
         _buffer is None
@@ -461,6 +459,7 @@ def dispatch_tokens(
     num_local_experts: int,
     num_experts: int,
     group: dist.ProcessGroup,
+    *,
     non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
@@ -478,8 +477,9 @@ def dispatch_tokens(
         group: EP ProcessGroup
         non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
-            tensor as num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-            aligned to pad_multiple.
+            tensor as num_tokens * ep_size *
+            min(num_local_experts, top_k) * capacity_factor, aligned to
+            pad_multiple.
         pad_multiple: Pad per-expert token groups to this multiple (e.g. 32 for
             MXFP8). None means no padding.
 
