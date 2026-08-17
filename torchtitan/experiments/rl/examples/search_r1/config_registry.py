@@ -288,7 +288,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
 
     return Controller.Config(
         model_spec=model_spec,
-        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/MuseGlimmer-30B",
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Muse-Glimmer-30B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
             num_prompts_per_train_step=8,
