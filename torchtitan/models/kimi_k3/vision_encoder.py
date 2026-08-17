@@ -6,27 +6,32 @@
 
 """MoonViT3d vision encoder used by Kimi K3.
 
-Vision attention is an eager PyTorch loop over each visual item, which
-preserves the block-diagonal attention semantics of the HuggingFace
-implementation without requiring FlashAttention or a device-specific kernel.
-
 Shape suffixes:
 - N = number of visual items
 - P = maximum patches per item (padded)
 - D = vision hidden dimension
 - H = number of attention heads
 - K = attention head dimension
+- C = number of complex-valued head-dimension pairs
 - M = maximum merged tokens per item (padded)
+- F = merged feature dimension
+- O = projected text dimension
 """
 
 from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
-from torchtitan.models.common.vision_encoder import VisionMLP
+from torchtitan.models.common.vision_encoder import (
+    compiled_create_block_mask,
+    get_vision_block_mask_mod,
+    VisionAttention,
+    VisionMLP,
+)
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -229,69 +234,6 @@ class VisionRotaryEmbedding2D(Module):
         return torch.outer(positions, self.inv_freq)
 
 
-class KimiK3VisionAttention(Module):
-    """Eager, block-diagonal MoonViT attention reference."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        qkv_dim: int
-        num_heads: int
-        wq: Linear.Config
-        wk: Linear.Config
-        wv: Linear.Config
-        proj: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        if config.qkv_dim % config.num_heads != 0:
-            raise ValueError(
-                f"qkv_dim ({config.qkv_dim}) must be divisible by "
-                f"num_heads ({config.num_heads})."
-            )
-        self.num_heads = config.num_heads
-        self.head_dim = config.qkv_dim // config.num_heads
-        self.scale = self.head_dim**-0.5
-        self.wq = config.wq.build()
-        self.wk = config.wk.build()
-        self.wv = config.wv.build()
-        self.proj = config.proj.build()
-
-    def forward(
-        self,
-        x_NPD: torch.Tensor,
-        *,
-        rope_cache: torch.Tensor,
-        num_patches: list[int],
-    ) -> torch.Tensor:
-        num_items, max_num_patches, _ = x_NPD.shape
-        q_NPHK = self.wq(x_NPD).view(
-            num_items, max_num_patches, self.num_heads, self.head_dim
-        )
-        k_NPHK = self.wk(x_NPD).view(
-            num_items, max_num_patches, self.num_heads, self.head_dim
-        )
-        v_NPHK = self.wv(x_NPD).view(
-            num_items, max_num_patches, self.num_heads, self.head_dim
-        )
-        q_NPHK, k_NPHK = _apply_2d_rope(q_NPHK, k_NPHK, rope_cache)
-
-        padded_outputs = []
-        for item_idx, item_length in enumerate(num_patches):
-            q_HPK = q_NPHK[item_idx, :item_length].transpose(0, 1)
-            k_HPK = k_NPHK[item_idx, :item_length].transpose(0, 1)
-            v_HPK = v_NPHK[item_idx, :item_length].transpose(0, 1)
-            scores_HPP = torch.matmul(q_HPK, k_HPK.transpose(-2, -1))
-            scores_HPP = scores_HPP * self.scale
-            probs_HPP = torch.softmax(scores_HPP, dim=-1, dtype=torch.float32).to(
-                q_HPK.dtype
-            )
-            output_PHK = torch.matmul(probs_HPP, v_HPK).transpose(0, 1)
-            padded_outputs.append(_pad_sequence(output_PHK, max_num_patches))
-
-        output_NPHK = torch.stack(padded_outputs)
-        return self.proj(output_NPHK.flatten(start_dim=-2))
-
-
 class KimiK3VisionBlock(Module):
     """MoonViT pre-norm attention and MLP block."""
 
@@ -299,7 +241,7 @@ class KimiK3VisionBlock(Module):
     class Config(Module.Config):
         norm1: RMSNorm.Config
         norm2: RMSNorm.Config
-        attn: KimiK3VisionAttention.Config
+        attn: VisionAttention.Config
         mlp: VisionMLP.Config
 
     def __init__(self, config: Config):
@@ -314,12 +256,13 @@ class KimiK3VisionBlock(Module):
         x_NPD: torch.Tensor,
         *,
         rope_cache: torch.Tensor,
-        num_patches: list[int],
+        attention_mask: BlockMask,
     ) -> torch.Tensor:
         x_NPD = x_NPD + self.attn(
             self.norm1(x_NPD),
             rope_cache=rope_cache,
-            num_patches=num_patches,
+            rope_apply=_apply_2d_rope,
+            attention_mask=attention_mask,
         )
         return x_NPD + self.mlp(self.norm2(x_NPD))
 
@@ -343,19 +286,17 @@ class KimiK3VisionProjector(Module):
         self.post_norm = config.post_norm.build()
         self.activation = config.activation.build()
 
-    def forward(self, merged_NMK: torch.Tensor) -> torch.Tensor:
-        if merged_NMK.shape[-1] != self.merged_dim:
+    def forward(self, merged_NMF: torch.Tensor) -> torch.Tensor:
+        if merged_NMF.shape[-1] != self.merged_dim:
             raise ValueError(
                 f"Expected merged vision dim {self.merged_dim}, got "
-                f"{merged_NMK.shape[-1]}."
+                f"{merged_NMF.shape[-1]}."
             )
-        projected = self.linear_2(self.activation(self.linear_1(merged_NMK)))
-        return self.post_norm(projected)
+        projected_NMO = self.linear_2(self.activation(self.linear_1(merged_NMF)))
+        return self.post_norm(projected_NMO)
 
 
 class KimiK3VisionEncoder(Module):
-    """Device-neutral MoonViT3d encoder and PatchMergerMLPV2 projector."""
-
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
@@ -442,7 +383,7 @@ class KimiK3VisionEncoder(Module):
             )
 
         kernel_h, kernel_w = self.merge_kernel_size
-        num_patches = []
+        num_patches_N = grid_thw.prod(dim=-1).to(torch.long)
         for num_frames, grid_h, grid_w in grids:
             if grid_h % kernel_h != 0 or grid_w % kernel_w != 0:
                 raise ValueError(
@@ -455,18 +396,27 @@ class KimiK3VisionEncoder(Module):
                     f"Vision grid requires {item_num_patches} patches, but "
                     f"pixel_values only provides {max_num_patches}."
                 )
-            num_patches.append(item_num_patches)
 
         learned_pos, rope_cache = self._compute_position_embeddings(
             grids, max_num_patches
         )
         hidden_NPD = self.patch_embed(pixel_values) + learned_pos
+
+        mask_mod = get_vision_block_mask_mod(num_patches_N)
+        attention_mask = compiled_create_block_mask(
+            mask_mod,
+            num_items,
+            None,
+            max_num_patches,
+            max_num_patches,
+            device=hidden_NPD.device,
+        )
         for block in self.layers.values():
             hidden_NPD = block(
                 hidden_NPD,
                 rope_cache=rope_cache,
-                num_patches=num_patches,
+                attention_mask=attention_mask,
             )
         hidden_NPD = self.final_norm(hidden_NPD)
-        merged_NMK = _temporal_pool_and_merge(hidden_NPD, grids, self.merge_kernel_size)
-        return self.projector(merged_NMK)
+        merged_NMF = _temporal_pool_and_merge(hidden_NPD, grids, self.merge_kernel_size)
+        return self.projector(merged_NMF)

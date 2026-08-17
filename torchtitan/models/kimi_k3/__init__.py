@@ -16,7 +16,7 @@ from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
-from torchtitan.models.common.vision_encoder import VisionMLP
+from torchtitan.models.common.vision_encoder import VisionAttention, VisionMLP
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -35,7 +35,6 @@ from .model import (
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import (
-    KimiK3VisionAttention,
     KimiK3VisionBlock,
     KimiK3VisionEncoder,
     KimiK3VisionProjector,
@@ -298,8 +297,8 @@ def _vision_encoder_config(
     block = KimiK3VisionBlock.Config(
         norm1=vision_norm,
         norm2=vision_norm,
-        attn=KimiK3VisionAttention.Config(
-            qkv_dim=qkv_dim,
+        attn=VisionAttention.Config(
+            dim=qkv_dim,
             num_heads=num_heads,
             wq=_linear(dim, qkv_dim),
             wk=_linear(dim, qkv_dim),
