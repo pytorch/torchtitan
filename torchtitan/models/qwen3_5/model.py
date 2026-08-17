@@ -14,7 +14,6 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from fla.modules.conv.triton.ops import CausalConv1dFunction
-
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
@@ -105,6 +104,14 @@ def unflatten_to_bld(
     tensor: torch.Tensor, batch_size: int, seq_len: int
 ) -> torch.Tensor:
     return tensor.reshape(batch_size, seq_len, -1)
+
+
+@spmd.local_map(
+    in_types=({"dp": spmd.S(0), "tp": spmd.S(2)}, None, None),
+    out_types={"dp": spmd.S(1), "tp": spmd.S(2)},
+)
+def fold_bl_dim(tensor: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
+    return tensor.reshape(1, batch_size * seq_len, *tensor.shape[2:])
 
 
 class OffsetRMSNorm(Module):
@@ -421,41 +428,38 @@ class GatedDeltaNet(Module):
                 # device offsets when it is materialized as a new tensor.
                 spmd.mutate_type(cu_seqlens_cpu, "dp", src=spmd.R, dst=spmd.V)
 
-        def fold_bl_dim(tensor: torch.Tensor) -> torch.Tensor:
-            return tensor.reshape(1, B * L, *tensor.shape[2:])
-
         # Folded recurrence shapes:
         #   xq_BLNK, xk_BLNK: (1, B * L, n_key_heads, key_head_dim)
         #   xv_BLNV, xz_BLNV: (1, B * L, n_value_heads, value_head_dim)
         #   xa_BLN, xb_BLN: (1, B * L, n_value_heads)
         xq_BLNK = self._causal_conv(
-            fold_bl_dim(self.in_proj_q(x_BLD)),
+            fold_bl_dim(self.in_proj_q(x_BLD), B, L),
             self.conv_q,
             cu_seqlens,
             cu_seqlens_cpu,
         )
         xq_BLNK = local_head_split(xq_BLNK, self.key_head_dim, dp_shard_dim=1)
         xk_BLNK = self._causal_conv(
-            fold_bl_dim(self.in_proj_k(x_BLD)),
+            fold_bl_dim(self.in_proj_k(x_BLD), B, L),
             self.conv_k,
             cu_seqlens,
             cu_seqlens_cpu,
         )
         xk_BLNK = local_head_split(xk_BLNK, self.key_head_dim, dp_shard_dim=1)
         xv_BLNV = self._causal_conv(
-            fold_bl_dim(self.in_proj_v(x_BLD)),
+            fold_bl_dim(self.in_proj_v(x_BLD), B, L),
             self.conv_v,
             cu_seqlens,
             cu_seqlens_cpu,
         )
         xv_BLNV = local_head_split(xv_BLNV, self.value_head_dim, dp_shard_dim=1)
         xz_BLNV = local_head_split(
-            fold_bl_dim(self.in_proj_z(x_BLD)),
+            fold_bl_dim(self.in_proj_z(x_BLD), B, L),
             self.value_head_dim,
             dp_shard_dim=1,
         )
-        xa_BLN = fold_bl_dim(self.in_proj_a(x_BLD))
-        xb_BLN = fold_bl_dim(self.in_proj_b(x_BLD))
+        xa_BLN = fold_bl_dim(self.in_proj_a(x_BLD), B, L)
+        xb_BLN = fold_bl_dim(self.in_proj_b(x_BLD), B, L)
 
         # Gating signals have shape (1, B * L, n_value_heads):
         #   g_BLN:    decay rate per head, always negative
