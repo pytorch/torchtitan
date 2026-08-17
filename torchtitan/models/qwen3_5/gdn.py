@@ -20,12 +20,10 @@ from fla.ops.gated_delta_rule import (
 from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction
 from fla.ops.gated_delta_rule.fused_recurrent import FusedRecurrentFunction
 from torch import nn
-from torch.distributed.tensor import DTensor, Replicate
-from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
+from torchtitan.models.common.attention import local_head_split, VarlenMetadata
 from torchtitan.protocols.module import Module
 
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
@@ -329,132 +327,114 @@ class GatedDeltaKernel(Module):
 
 
 class InnerGatedDeltaNet(Module):
-    """Dense inner GDN implementation shared with the paged vLLM boundary.
+    """Dense GDN computation behind the vLLM replacement boundary.
 
-    This module owns the depthwise convolution and gated-delta recurrence. Varlen
-    execution follows PR #3801 metadata, while batch-invariant execution selects
-    the recurrent-forward/chunk-backward kernel used by the generator.
+    The trainer keeps Q, K, and V separate, matching the main-branch GDN flow.
+    The vLLM replacement may fuse them internally for its paged convolution
+    cache without changing this dense path.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        key_head_dim: int
-        value_head_dim: int
-        key_dim: int
-        value_dim: int
-        conv_kernel_size: int = 4
-        activation: str = "silu"
         kernel: GatedDeltaKernel.Config
 
     def __init__(self, config: Config):
         super().__init__()
-        self.key_head_dim = config.key_head_dim
-        self.value_head_dim = config.value_head_dim
-        self.key_dim = config.key_dim
-        self.value_dim = config.value_dim
-        self.conv_kernel_size = config.conv_kernel_size
-        self.activation = config.activation
         self.kernel = config.kernel.build()
 
     def forward(
         self,
-        mixed_qkv_BLC: torch.Tensor,
+        query_BLC: torch.Tensor,
+        key_BLC: torch.Tensor,
+        value_BLC: torch.Tensor,
         a_BLN: torch.Tensor,
         b_BLN: torch.Tensor,
-        conv_weight_CW: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
         A_log_N: torch.Tensor,
         dt_bias_N: torch.Tensor,
         cu_seqlens: torch.Tensor,
         *,
+        key_head_dim: int,
+        value_head_dim: int,
         cu_seqlens_host: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
-        """Run convolution and recurrence on rank-local head shards."""
-        batch_size, seq_len, conv_dim = mixed_qkv_BLC.shape
-        local_key_dim = conv_dim * self.key_dim // (2 * self.key_dim + self.value_dim)
+        """Run separate Q/K/V convolutions and recurrence on local heads."""
+        batch_size, seq_len, _ = query_BLC.shape
+        num_tokens = batch_size * seq_len
 
         if cu_seqlens_host is not None:
-            num_tokens = batch_size * seq_len
             cu_seqlens_cpu = torch.tensor(
                 cu_seqlens_host,
                 dtype=cu_seqlens.dtype,
                 device="cpu",
             )
-            mixed_qkv_1TC = mixed_qkv_BLC.reshape(1, num_tokens, conv_dim)
-            conv_output_1TC = _causal_conv1d_varlen(
-                mixed_qkv_1TC,
-                conv_weight_CW.unsqueeze(1),
-                cu_seqlens,
-                cu_seqlens_cpu,
-            )
-            query_1TNK = conv_output_1TC[..., :local_key_dim].reshape(
-                1, num_tokens, -1, self.key_head_dim
-            )
-            key_1TNK = conv_output_1TC[..., local_key_dim : 2 * local_key_dim].reshape(
-                1, num_tokens, -1, self.key_head_dim
-            )
-            value_1TNV = conv_output_1TC[..., 2 * local_key_dim :].reshape(
-                1, num_tokens, -1, self.value_head_dim
-            )
-            decay_1TN = (
-                -torch.exp(A_log_N.float())
-                * F.softplus(a_BLN.reshape(num_tokens, -1).float() + dt_bias_N)
-            ).unsqueeze(0)
-            update_gate_1TN = torch.sigmoid(b_BLN.reshape(num_tokens, -1)).unsqueeze(0)
-            output_1TNV = self.kernel(
-                query_1TNK,
-                key_1TNK,
-                value_1TNV,
-                decay_1TN,
-                update_gate_1TN,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_cpu=cu_seqlens_cpu,
-            )
-            return output_1TNV.reshape(batch_size, seq_len, -1, self.value_head_dim)
+        else:
+            cu_seqlens_cpu = None
 
-        # Dense unpacked training path. Each batch row owns an independent state.
-        conv_input_BCL = F.pad(
-            mixed_qkv_BLC.transpose(1, 2),
-            [self.conv_kernel_size - 1, 0],
-        )
-        conv_output_BLC = F.silu(
-            F.conv1d(
-                conv_input_BCL,
-                conv_weight_CW.unsqueeze(1),
-                None,
-                groups=conv_dim,
+        def causal_conv(
+            x_BLC: torch.Tensor,
+            weight_C1W: torch.Tensor,
+        ) -> torch.Tensor:
+            x_1TC = x_BLC.reshape(1, num_tokens, x_BLC.shape[-1])
+            if cu_seqlens_host is not None:
+                return _causal_conv1d_varlen(
+                    x_1TC,
+                    weight_C1W,
+                    cu_seqlens,
+                    cu_seqlens_cpu,
+                )
+
+            x_1CT = F.pad(
+                x_1TC.transpose(1, 2),
+                [weight_C1W.shape[-1] - 1, 0],
             )
-        ).transpose(1, 2)
-        query_BLNK = conv_output_BLC[..., :local_key_dim].reshape(
-            batch_size, seq_len, -1, self.key_head_dim
+            return F.silu(
+                F.conv1d(
+                    x_1CT,
+                    weight_C1W,
+                    None,
+                    groups=weight_C1W.shape[0],
+                )
+            ).transpose(1, 2)
+
+        xq_BLNK = causal_conv(query_BLC, conv_q_weight_C1W).reshape(
+            1, num_tokens, -1, key_head_dim
         )
-        key_BLNK = conv_output_BLC[..., local_key_dim : 2 * local_key_dim].reshape(
-            batch_size, seq_len, -1, self.key_head_dim
+        xk_BLNK = causal_conv(key_BLC, conv_k_weight_C1W).reshape(
+            1, num_tokens, -1, key_head_dim
         )
-        value_BLNV = conv_output_BLC[..., 2 * local_key_dim :].reshape(
-            batch_size, seq_len, -1, self.value_head_dim
+        xv_BLNV = causal_conv(value_BLC, conv_v_weight_C1W).reshape(
+            1, num_tokens, -1, value_head_dim
         )
-        decay_BLN = -torch.exp(A_log_N.float()) * F.softplus(a_BLN.float() + dt_bias_N)
-        update_gate_BLN = torch.sigmoid(b_BLN)
-        output_BLNV = self.kernel(
-            query_BLNK,
-            key_BLNK,
-            value_BLNV,
-            decay_BLN,
-            update_gate_BLN,
+        g_BLN = (
+            -torch.exp(A_log_N.float())
+            * F.softplus(a_BLN.reshape(num_tokens, -1).float() + dt_bias_N)
+        ).unsqueeze(0)
+        beta_BLN = torch.sigmoid(b_BLN.reshape(num_tokens, -1)).unsqueeze(0)
+        out_BLNV = self.kernel(
+            xq_BLNK,
+            xk_BLNK,
+            xv_BLNV,
+            g_BLN,
+            beta_BLN,
+            cu_seqlens=cu_seqlens if cu_seqlens_host is not None else None,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
-        return output_BLNV.reshape(batch_size, seq_len, -1, self.value_head_dim)
+        return out_BLNV.reshape(batch_size, seq_len, -1, value_head_dim)
 
 
 class GatedDeltaNet(Module):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
-    No RoPE, different head structure from standard attention. When varlen
-    metadata (``VarlenMetadata``) is provided -- i.e. under the ``varlen``
-    attention backend -- conv and recurrent state are reset at document
-    boundaries. Under other backends (e.g. ``flex``, which passes a
-    ``BlockMask``) no reset occurs and the packed sequence is processed as a
-    single continuous stream.
+    No RoPE, different head structure from standard attention. Conv and
+    recurrent state are reset at document boundaries whenever document
+    offsets (``VarlenMetadata``) are provided -- the transformer block picks
+    them out of the model's attention-mask dict under the ``"deltanet"`` key
+    (both attention backends). With no offsets (``None``) the packed sequence
+    is processed as a single continuous stream.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -481,8 +461,6 @@ class GatedDeltaNet(Module):
         super().__init__()
         self.key_head_dim = config.key_head_dim
         self.value_head_dim = config.value_head_dim
-        self.conv_kernel_size = config.conv_kernel_size
-
         value_dim = config.in_proj_v.out_features
 
         self.in_proj_q = config.in_proj_q.build()
@@ -502,65 +480,16 @@ class GatedDeltaNet(Module):
 
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
-
-        self.n_value_heads = n_value_heads
-        self.key_dim = config.in_proj_q.out_features
-        self.value_dim = value_dim
-        # The dense training implementation is replaced by a paged-cache
-        # implementation inside vLLM. Both share this call signature.
         self.inner_gated_delta_net = config.inner_gated_delta_net.build()
-
-    def _fused_conv_weight_bias(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Fuse the depthwise Q/K/V convolution parameters by channel."""
-        weight_q_C1W = self.conv_q.weight
-        weight_k_C1W = self.conv_k.weight
-        weight_v_C1W = self.conv_v.weight
-        if isinstance(weight_q_C1W, DTensor):
-            placements = weight_q_C1W.placements
-            weight_CW = local_map(
-                lambda q_C1W, k_C1W, v_C1W: torch.cat(
-                    [q_C1W, k_C1W, v_C1W], dim=0
-                ).squeeze(1),
-                out_placements=(placements,),
-                in_placements=(
-                    placements,
-                    weight_k_C1W.placements,
-                    weight_v_C1W.placements,
-                ),
-                in_grad_placements=(
-                    placements,
-                    weight_k_C1W.placements,
-                    weight_v_C1W.placements,
-                ),
-                device_mesh=weight_q_C1W.device_mesh,
-            )(
-                weight_q_C1W,
-                weight_k_C1W,  # pyrefly: ignore[bad-argument-count]
-                weight_v_C1W,
-            )
-        else:
-            weight_CW = torch.cat(
-                [weight_q_C1W, weight_k_C1W, weight_v_C1W], dim=0
-            ).squeeze(1)
-
-        biases = [self.conv_q.bias, self.conv_k.bias, self.conv_v.bias]
-        bias_C = (
-            torch.cat(biases, dim=0)
-            if all(bias is not None for bias in biases)
-            else None
-        )
-        return weight_CW, bias_C
 
     def forward(
         self,
         x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: VarlenMetadata | None = None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x_BLD.shape
         cu_seqlens_host = None
-        if isinstance(attention_masks, VarlenMetadata):
+        if attention_masks is not None:
             # FLA caches varlen index helpers by tensor identity. A fresh
             # tensor ensures forward and activation-checkpoint recompute both
             # execute the helpers instead of taking different cache paths.
@@ -586,54 +515,27 @@ class GatedDeltaNet(Module):
         query_BLC = self.in_proj_q(x_BLD)
         key_BLC = self.in_proj_k(x_BLD)
         value_BLC = self.in_proj_v(x_BLD)
-        if isinstance(query_BLC, DTensor):
-            placements = query_BLC.placements
-            mixed_qkv_BLC = local_map(
-                lambda query_LC, key_LC, value_LC: torch.cat(
-                    [query_LC, key_LC, value_LC], dim=-1
-                ),
-                out_placements=(placements,),
-                in_placements=(
-                    placements,
-                    key_BLC.placements,
-                    value_BLC.placements,
-                ),
-                in_grad_placements=(
-                    placements,
-                    key_BLC.placements,
-                    value_BLC.placements,
-                ),
-                device_mesh=query_BLC.device_mesh,
-            )(
-                query_BLC,
-                key_BLC,  # pyrefly: ignore[bad-argument-count]
-                value_BLC,
-            )
-        else:
-            mixed_qkv_BLC = torch.cat([query_BLC, key_BLC, value_BLC], dim=-1)
-
         gate_BLC = self.in_proj_z(x_BLD)
         a_BLN = self.in_proj_a(x_BLD)
         b_BLN = self.in_proj_b(x_BLD)
-        conv_weight_CW, _ = self._fused_conv_weight_bias()
-        if isinstance(mixed_qkv_BLC, DTensor):
-            cu_seqlens = DTensor.from_local(
-                cu_seqlens,
-                mixed_qkv_BLC.device_mesh,
-                [Replicate()] * mixed_qkv_BLC.device_mesh.ndim,
-            )
 
         output_BLNV = self.inner_gated_delta_net(
-            mixed_qkv_BLC,
+            query_BLC,
+            key_BLC,
+            value_BLC,
             a_BLN,
             b_BLN,
-            conv_weight_CW,
+            self.conv_q.weight,
+            self.conv_k.weight,
+            self.conv_v.weight,
             self.A_log,
             self.dt_bias,
             cu_seqlens,
+            key_head_dim=self.key_head_dim,
+            value_head_dim=self.value_head_dim,
             cu_seqlens_host=cu_seqlens_host,
         )
-        gate_BLNV = gate_BLC.reshape(batch_size, seq_len, -1, self.value_head_dim)
+        gate_BLNV = local_head_split(gate_BLC, self.value_head_dim)
         output_BLNV = self.norm(output_BLNV, gate_BLNV)
         out_BLD = output_BLNV.reshape(batch_size, seq_len, -1)
         return self.out_proj(out_BLD)

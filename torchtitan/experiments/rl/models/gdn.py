@@ -74,7 +74,6 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         head_k_dim: int
         head_v_dim: int
         conv_kernel_size: int = 4
-        activation: str = "silu"
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -93,7 +92,6 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         self.head_k_dim = config.head_k_dim
         self.head_v_dim = config.head_v_dim
         self.conv_kernel_size = config.conv_kernel_size
-        self.activation = config.activation
 
         # vLLM's state-shape calculator takes global head counts, while the
         # computation and allocated cache use local head counts.
@@ -307,7 +305,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
                 conv_cache,
                 weight=conv_weight,
                 bias=conv_bias,
-                activation=self.activation,
+                activation="silu",
             )
             conv_state[decode_slots] = conv_cache[..., 1:].to(conv_state.dtype)
             conv_output[:num_decode_tokens] = decode_conv_output
@@ -355,7 +353,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
                 mixed_qkv[prefill_start:num_actual_tokens].unsqueeze(0),
                 weight=conv_weight,
                 bias=conv_bias,
-                activation=self.activation,
+                activation="silu",
                 cu_seqlens=prefill_cu_seqlens,
                 initial_state=conv_initial_state,
                 output_final_state=True,
@@ -428,18 +426,33 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
 
     def forward(
         self,
-        mixed_qkv_BLC: torch.Tensor,
+        query_BLC: torch.Tensor,
+        key_BLC: torch.Tensor,
+        value_BLC: torch.Tensor,
         a_BLN: torch.Tensor,
         b_BLN: torch.Tensor,
-        conv_weight_CW: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
         A_log_N: torch.Tensor,
         dt_bias_N: torch.Tensor,
         cu_seqlens: torch.Tensor,
         *,
+        key_head_dim: int,
+        value_head_dim: int,
         cu_seqlens_host: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
         """Run the flattened vLLM cache operation on rank-local tensors."""
         del cu_seqlens, cu_seqlens_host
+
+        assert key_head_dim == self.head_k_dim
+        assert value_head_dim == self.head_v_dim
+        mixed_qkv_BLC = torch.cat([query_BLC, key_BLC, value_BLC], dim=-1)
+        conv_weight_CW = torch.cat(
+            [conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W],
+            dim=0,
+        ).squeeze(1)
+        assert conv_weight_CW.shape[-1] == self.conv_kernel_size
 
         batch_size, seq_len, num_channels = mixed_qkv_BLC.shape
         num_tokens = batch_size * seq_len

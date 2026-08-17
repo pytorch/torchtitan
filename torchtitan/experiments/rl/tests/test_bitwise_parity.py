@@ -196,18 +196,8 @@ def _set_generator_determinism(debug) -> None:
         torch.manual_seed(debug.seed)
 
 
-def build_inference_engine(
-    config: Controller.Config, *, enable_prefix_caching: bool = False
-) -> LLMEngine:
-    """Create a vLLM LLMEngine with torchtitan model from the RL config.
-
-    ``enable_prefix_caching`` turns on vLLM prefix caching. For hybrid GDN models
-    this selects the "align" mamba cache mode (framework-managed block-boundary
-    state snapshots) and lets vLLM auto-align ``mamba_block_size`` to the
-    attention block size; otherwise ``mamba_block_size`` is pinned to
-    ``max_model_len`` (one block per sequence, prefix caching inert), which is the
-    layout the default parity checks use.
-    """
+def build_inference_engine(config: Controller.Config) -> LLMEngine:
+    """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
     attention_backend = config.model_spec.model.first_full_attention_backend
@@ -256,8 +246,6 @@ def build_inference_engine(
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
-        # GDN preserves its accumulated paged SSM state in fp32 under
-        # batch-invariant mode inside VLLMInnerGatedDeltaNet.
     )
 
     from torchtitan.tools.utils import has_cuda_capability
@@ -266,22 +254,6 @@ def build_inference_engine(
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
-    if enable_prefix_caching:
-        # Prefix caching on: for hybrid GDN this needs the "align" mamba cache
-        # mode, which requires chunked prefill and derives mamba_block_size from
-        # the attention block size. Leave mamba_block_size unset so vLLM aligns it
-        # (models/config.py MambaModelConfig); pinning it to max_model_len would
-        # keep one block per sequence and make prefix caching inert.
-        engine_kwargs["enable_prefix_caching"] = True
-        engine_kwargs["enable_chunked_prefill"] = True
-    else:
-        # Hybrid (attention + GDN/mamba) models: vLLM only auto-derives
-        # mamba_block_size for HF-recognized hybrid architectures, which the
-        # torchtitan custom config bypasses. Set it explicitly, mirroring vLLM's
-        # default (models/config.py): one block per sequence (max_model_len).
-        # (Leaving enable_prefix_caching at the vLLM default keeps this path
-        # byte-identical to the previously validated one-block parity run.)
-        engine_kwargs["mamba_block_size"] = config.model_spec.model.max_seq_len
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop

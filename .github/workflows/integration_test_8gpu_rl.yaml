@@ -69,10 +69,8 @@ jobs:
         pip install uv
 
         # 1. Install Monarch, TorchStore, and Renderers
-        uv pip install torchmonarch
+        uv pip install -r .ci/docker/requirements-rl.txt
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-        uv pip install pygtrie portpicker
-        uv pip install "git+https://github.com/PrimeIntellect-ai/renderers.git@main"
 
         # 2. Install batch-invariant ops
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
@@ -85,7 +83,6 @@ jobs:
           --index-strategy unsafe-best-match
 
         # 4. Install the pinned GDN kernels without replacing nightly PyTorch.
-        uv pip install einops
         uv pip install --no-deps \
           "git+https://github.com/fla-org/flash-linear-attention.git@v0.5.2"
 

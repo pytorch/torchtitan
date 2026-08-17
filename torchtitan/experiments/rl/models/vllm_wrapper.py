@@ -96,7 +96,6 @@ def _replace_vllm_layer_configs(model_config):
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
-                activation=delta_net_cfg.inner_gated_delta_net.activation,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
