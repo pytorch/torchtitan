@@ -188,7 +188,7 @@ class CheckpointManager(Configurable):
 
         The solution to this problem is optimizer flattening.
         TorchTitan's OptimizersContainer flattens optimizer state dicts to FQN-keyed
-        flat dicts using the utilities in torchtitan/components/checkpoint_utils.py.
+        flat dicts using the utilities in torchtitan/components/optimizer/utils.py.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This
     compounds challenge (1) by also requiring us to reason about multiple 'optim'
