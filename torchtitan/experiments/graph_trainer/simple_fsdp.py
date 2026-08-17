@@ -10,10 +10,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import spmd_types as spmd
-
 import torch
 import torch.nn as nn
 
+from spmd_types.runtime import get_partition_spec, has_local_type
+from spmd_types.types import partition_spec_get_shard
 from torch.distributed._tensor import (
     distribute_tensor,
     DTensor,
@@ -26,6 +27,7 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 _active_parametrization = True
@@ -45,6 +47,34 @@ def disable_active_parametrization() -> Generator[None, None, None]:
 class MixedPrecisionPolicy:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
+
+
+def _spmd_local_tensor_to_dtensor(
+    tensor: torch.Tensor,
+    non_dp_mesh: DeviceMesh | None,
+) -> torch.Tensor:
+    """Reconstruct model-parallel DTensor metadata from an SPMD local tensor."""
+    if get_spmd_backend() != "spmd_types" or not has_local_type(tensor):
+        return tensor
+
+    assert non_dp_mesh is not None
+    assert non_dp_mesh.mesh_dim_names is not None
+    partition_spec = get_partition_spec(tensor)
+    with spmd.set_current_mesh(non_dp_mesh):
+        placements = tuple(
+            spmd.spmd_type_to_dtensor_placement(
+                partition_spec_get_shard(partition_spec, axis_name)
+                or spmd.get_axis_local_type(tensor, axis_name)
+            )
+            for axis_name in non_dp_mesh.mesh_dim_names
+        )
+
+    return DTensor.from_local(
+        tensor,
+        non_dp_mesh,
+        placements,
+        run_check=False,
+    )
 
 
 def _distribute_dtensor(
@@ -148,7 +178,7 @@ def _register_parametrization(
     param_name_to_property = {
         param_name: property(
             lambda self, pn=param_name: self._simple_fsdp_parametrization(
-                self._parameters[pn], pn
+                self._parameters[pn]
             )
         )
         for param_name in param_names
@@ -177,8 +207,6 @@ class ReplicateComputation(Module):
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
         full_dtensor: bool = False,
-        local_compute: bool = False,
-        compute_types: dict[str, tuple[dict, object | None]] | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -192,8 +220,6 @@ class ReplicateComputation(Module):
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
         self.full_dtensor = full_dtensor
-        self.local_compute = local_compute
-        self.compute_types = compute_types
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -236,7 +262,7 @@ class ReplicateComputation(Module):
 
             output = (
                 replicated_local_tensor
-                if self.local_compute
+                if get_spmd_backend() == "spmd_types"
                 else DTensor.from_local(
                     replicated_local_tensor, non_dp_mesh, non_dp_placements
                 )
@@ -257,7 +283,7 @@ class ReplicateComputation(Module):
 
         return output
 
-    def forward(self, x: DTensor, param_name: str) -> torch.Tensor:
+    def forward(self, x: DTensor) -> torch.Tensor:
         global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
@@ -267,16 +293,7 @@ class ReplicateComputation(Module):
         if not _active_parametrization:
             return x
 
-        if self.local_compute:
-            with spmd.no_typecheck():
-                output = self.replicate_compute(x)
-            if spmd.is_type_checking():
-                assert self.compute_types is not None
-                local_type, partition_spec = self.compute_types[param_name]
-                spmd.assert_type(output, local_type, partition_spec=partition_spec)
-        else:
-            output = self.replicate_compute(x)
-        return output
+        return self.replicate_compute(x)
 
 
 def data_parallel(
@@ -286,8 +303,7 @@ def data_parallel(
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
     full_dtensor: bool = False,
-    local_compute: bool = False,
-    compute_mesh: DeviceMesh | None = None,
+    non_dp_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
@@ -304,7 +320,6 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     modules = list(model.modules())
-
     for mod in modules:
         params_dict = dict(mod.named_parameters(recurse=False))
         # we shouldn't apply data parallel to the modules that are already
@@ -312,52 +327,17 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
-        compute_types = (
-            {
-                p_name: (dict(spmd.get_local_type(p)), spmd.get_partition_spec(p))
-                for p_name, p in params_dict.items()
-                if p is not None and p.numel() > 0
-            }
-            if local_compute
-            else None
-        )
-
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
-                if (
-                    local_compute
-                    and compute_mesh is not None
-                    and compute_mesh["tp"].size() > 1
-                    and not isinstance(p, DTensor)
-                ):
-                    tp_mesh = compute_mesh["tp"]
-                    tp_axis = spmd.normalize_axis(tp_mesh.get_group())
-                    tp_type = spmd.get_axis_local_type(p, tp_axis)
-                    if tp_type is spmd.V:
-                        partition_spec = spmd.get_partition_spec(p)
-                        assert partition_spec is not None
-                        tp_type = next(
-                            spmd.S(dim)
-                            for dim, entry in enumerate(partition_spec)
-                            if tp_axis
-                            in (entry if isinstance(entry, tuple) else (entry,))
-                        )
-                    p = DTensor.from_local(
-                        p,
-                        tp_mesh,
-                        (spmd.spmd_type_to_dtensor_placement(tp_type),),
-                        run_check=False,
-                    )
+                p = _spmd_local_tensor_to_dtensor(p, non_dp_mesh)
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
-                distributed_param = distribute_tensor_func(
-                    p, device_mesh, param_sharding
-                )
-                registered_param = nn.Parameter(distributed_param)
                 mod.register_parameter(
                     p_name,
-                    registered_param,
+                    nn.Parameter(
+                        distribute_tensor_func(p, device_mesh, param_sharding)
+                    ),
                 )
 
                 # to be compatible with DCP, we use a customized _register_parametrization
@@ -383,8 +363,6 @@ def data_parallel(
                 mode,
                 mp_policy=mp_policy,
                 full_dtensor=full_dtensor,
-                local_compute=local_compute,
-                compute_types=compute_types,
             ),
         )
     return model

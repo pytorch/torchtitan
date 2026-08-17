@@ -11,12 +11,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-import spmd_types as spmd
-
 import torch
 import torch.nn as nn
 import torch.utils._pytree as pytree
-from spmd_types.checker import typecheck as spmd_typecheck
 from torch._guards import tracing, TracingContext
 from torch._subclasses import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
@@ -432,14 +429,12 @@ def minimal_fx_tracer(
             allow_non_fake_inputs=True,
             shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
         )
-        typecheck_trace = spmd.is_type_checking()
-        with spmd.no_typecheck():
-            fake_args = tuple(
-                _fakeify_input(fake_mode, a, input_name=f"input_{i}")
-                if isinstance(a, torch.Tensor)
-                else a
-                for i, a in enumerate(unwrapped_args)
-            )
+        fake_args = tuple(
+            _fakeify_input(fake_mode, a, input_name=f"input_{i}")
+            if isinstance(a, torch.Tensor)
+            else a
+            for i, a in enumerate(unwrapped_args)
+        )
 
         output_layouts: dict[int, SubclassLayout] = {}
         num_flat_outputs: int = 0
@@ -464,16 +459,9 @@ def minimal_fx_tracer(
                 if prepared is not None:
                     user_args, user_kwargs = prepared
 
-            typecheck_context = (
-                spmd_typecheck() if typecheck_trace else contextlib.nullcontext()
-            )
-            with (
-                _reparametrize_train_state(
-                    module, optimizer, model_state_t, optim_state_t
-                ),
-                torch.compiler._patch_engine_backward(),
-                typecheck_context,
-            ):
+            with _reparametrize_train_state(
+                module, optimizer, model_state_t, optim_state_t
+            ), torch.compiler._patch_engine_backward():
                 result = fn(*user_args, **user_kwargs)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
@@ -504,7 +492,6 @@ def minimal_fx_tracer(
             _skip_nested_compile(),
             torch.autograd.set_multithreading_enabled(False),
             torch.compiler._non_strict_tracing_context(),
-            spmd.no_typecheck(),
         ):
             traced = make_fx(
                 fn_with_subclass_handling,
