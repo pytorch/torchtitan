@@ -13,6 +13,7 @@ from concurrent.futures import Future
 from unittest import mock
 
 import torch
+import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
@@ -110,8 +111,10 @@ class TestFTCheckpointManager(unittest.TestCase):
         time.sleep(0.1)
 
     @mock.patch("torch.cuda.Stream")
-    @mock.patch(
-        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
+    @mock.patch.object(
+        dist_checkpoint,
+        "async_save",
+        side_effect=fake_async_save,
     )
     def test_torchft_async_save_calls_maybe_wait_for_saving(
         self,

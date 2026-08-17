@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Compatibility imports for the relocated DCP checkpoint manager."""
-
-from .checkpointer.base import (
+from .base import (
+    BaseCheckpointManager,
     DATALOADER,
     LR_SCHEDULER,
     MODEL,
@@ -14,10 +13,11 @@ from .checkpointer.base import (
     OPTIMIZER,
     TRAIN_STATE,
 )
-from .checkpointer.dcp import AsyncMode, CheckpointManager
+from .dcp import AsyncMode, CheckpointManager
 
 __all__ = [
     "AsyncMode",
+    "BaseCheckpointManager",
     "CheckpointManager",
     "DATALOADER",
     "LR_SCHEDULER",
