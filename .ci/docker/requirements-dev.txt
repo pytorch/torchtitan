@@ -4,5 +4,6 @@ pytest==7.3.2
 pytest-cov
 pre-commit
 pyrefly==0.45.1
+torch_remat>=0.2.0
 transformers
 numpy
