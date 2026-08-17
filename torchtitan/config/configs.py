@@ -16,6 +16,14 @@ Some configs live near their owner instead of here:
 
 Configs without a clear single owner (or with circular-import constraints)
 live here.
+
+Most knobs belong to a component or to the model, not here. But some options
+have no suitable home, e.g. ``local_batch_size``, and those can be placed here.
+Discuss with the maintainers first if you intend to add one.
+
+The command-line surface is frozen either way, so annotate a new field with
+``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
+``torchtitan/config/README.md``.
 """
 
 from dataclasses import dataclass, field
@@ -152,9 +160,9 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    spmd_backend: Literal["partial_dtensor", "full_dtensor", "spmd_types"] = (
-        "spmd_types"
-    )
+    spmd_backend: Literal[
+        "partial_dtensor", "full_dtensor", "spmd_types"
+    ] = "spmd_types"
     """
     SPMD backend selector.
 

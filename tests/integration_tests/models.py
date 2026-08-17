@@ -306,6 +306,4 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
     ]
 
-    return [
-        _configure_spmd_backend_and_typecheck(t) for t in model_tests
-    ]
+    return [_configure_spmd_backend_and_typecheck(t) for t in model_tests]
