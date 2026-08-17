@@ -28,12 +28,8 @@ def _configure_spmd_backend_and_typecheck(
 
     # Compile, PP, and explicit AC modes are not compatible with SPMD
     # typechecking yet; keep those as backend-only coverage.
-    test_name = f"{t.test_name}_spmd_types"
     new_args = []
     for variant in t.override_args:
-        variant = tuple(
-            arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
-        )
         prefix = []
         suffix = []
         if not any(
@@ -52,7 +48,6 @@ def _configure_spmd_backend_and_typecheck(
     return dataclasses.replace(
         t,
         override_args=tuple(new_args),
-        test_name=test_name,
     )
 
 
