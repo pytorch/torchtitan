@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -9,6 +10,7 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -26,6 +28,14 @@ def _hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tenso
 
 
 class Compressor(Module):
+    """Compress local hidden states into lower-rate KV tokens.
+
+    The compressor scores each token inside a compression group, forms a
+    weighted sum, normalizes the result, and applies RoPE to the rope slice.
+    For ``compress_ratio == 4`` it also includes the previous group's value as
+    the overlapping candidate used by CSA.
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         rope: RoPE.Config
@@ -48,11 +58,18 @@ class Compressor(Module):
         self.wkv = cfg.wkv.build()
         self.wgate = cfg.wgate.build()
         self.norm = cfg.norm.build()
-        self.ape = nn.Parameter(
-            torch.empty(cfg.compress_ratio, self.wkv.out_features)
-        )
+        self.ape = nn.Parameter(torch.empty(cfg.compress_ratio, self.wkv.out_features))
 
     def _overlap_transform(self, tensor, value=0):
+        """Append previous-token overlap candidates along the ratio dimension.
+
+        Args:
+            tensor: Grouped tensor of shape ``[B, L // R, R, D]``.
+            value: Fill value for the first group's missing previous candidate.
+
+        Returns:
+            Tensor of shape ``[B, L // R, 2 * R, D]``.
+        """
         ratio, d = self.compress_ratio, self.head_dim
         prev = torch.cat(
             [
@@ -65,6 +82,15 @@ class Compressor(Module):
         return torch.cat([prev, curr], dim=2)
 
     def forward(self, x, positions):
+        """Compress hidden states into compressed KV states.
+
+        Args:
+            x: Hidden states of shape ``[B, L, D_model]``.
+            positions: Position IDs of shape ``[B, L]``.
+
+        Returns:
+            Compressed KV tensor of shape ``[B, L // compress_ratio, head_dim]``.
+        """
         _, seqlen, _ = x.size()
         rd = self.rope_head_dim
         ratio = self.compress_ratio
@@ -91,6 +117,8 @@ class Compressor(Module):
 
 
 class Indexer(Module):
+    """Produce low-dimensional query/key features for CSA top-k selection."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         rope: RoPE.Config
@@ -99,9 +127,7 @@ class Indexer(Module):
         compressor: "Compressor.Config"
         num_index_heads: int = 64
         index_head_dim: int = 128
-        index_topk: int = 512
         rope_head_dim: int = 64
-        compress_ratio: int = 4
 
     def __init__(self, config: Config):
         super().__init__()
@@ -109,9 +135,7 @@ class Indexer(Module):
         self.num_index_heads = cfg.num_index_heads
         self.head_dim = cfg.index_head_dim
         self.rope_head_dim = cfg.rope_head_dim
-        self.index_topk = cfg.index_topk
         self.softmax_scale = cfg.index_head_dim**-0.5
-        self.compress_ratio = cfg.compress_ratio
         self.rope = cfg.rope.build()
 
         self.wq_b = cfg.wq_b.build()
@@ -122,6 +146,13 @@ class Indexer(Module):
     def _rotate_activation(x):
         dim = x.size(-1)
         hadamard_mat = _hadamard(dim, dtype=x.dtype, device=x.device)
+        if isinstance(x, DTensor):
+            hadamard_mat = DTensor.from_local(
+                hadamard_mat,
+                x.device_mesh,
+                [Replicate()] * x.device_mesh.ndim,
+                run_check=False,
+            )
         return F.linear(x, hadamard_mat) * (dim**-0.5)
 
     def forward(
@@ -130,8 +161,21 @@ class Indexer(Module):
         qr,
         *,
         positions,
-        offset: int,
     ):
+        """Project raw indexer queries, keys, and per-head weights.
+
+        Args:
+            x: Hidden states of shape ``[B, L, D_model]``.
+            qr: Query LoRA states of shape ``[B, L, q_lora_rank]``.
+            positions: Position IDs of shape ``[B, L]``.
+
+        Returns:
+            idx_q: Indexer queries ``[B, L, num_index_heads, index_head_dim]``
+                with RoPE applied and Hadamard-rotated.
+            idx_k: Indexer compressed keys ``[B, L // ratio, index_head_dim]``
+                (from the indexer's own compressor), Hadamard-rotated.
+            idx_w: Per-head indexer weights ``[B, L, num_index_heads]``.
+        """
         bsz, seqlen, _ = x.size()
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -142,25 +186,51 @@ class Indexer(Module):
         q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)
         k = self._rotate_activation(k)
-        weights = self.weights_proj(x) * (self.softmax_scale * self.num_index_heads**-0.5)
-        index_score = torch.einsum("bshd,btd->bsht", q, k)
-        index_score = index_score.relu_() * weights.unsqueeze(-1)
+        weights = self.weights_proj(x) * (
+            self.softmax_scale * self.num_index_heads**-0.5
+        )
+        return q, k, weights
+
+    @staticmethod
+    def select(
+        idx_q,
+        idx_k,
+        idx_w,
+        *,
+        seqlen: int,
+        ratio: int,
+        topk: int,
+    ) -> torch.Tensor:
+        """Select the top-k compressed positions per query from indexer scores.
+
+        Args:
+            idx_q: Indexer queries of shape ``[B, L, Ih, Id]``.
+            idx_k: Indexer compressed keys of shape ``[B, C, Id]``.
+            idx_w: Per-head indexer weights of shape ``[B, L, Ih]``.
+            seqlen: Query sequence length ``L``.
+            ratio: Compression ratio used to map query positions to compressed
+                causal limits.
+            topk: Maximum number of compressed positions to select per query.
+
+        Returns ``topk_indices`` of shape ``[B, L, K]``, ``K = min(topk,
+        seqlen // ratio)``, with 0-based indices into the compressed region
+        (compressed token ``c`` lives at KV position ``seqlen + c``).
+        Non-causal positions are excluded by the causal score mask before the
+        ``topk``, so all returned indices are attendable.
+        """
+        index_score = torch.einsum("bshd,btd->bsht", idx_q, idx_k)
+        index_score = index_score.relu_() * idx_w.unsqueeze(-1)
         index_score = index_score.sum(dim=2)
 
-        ratio = self.compress_ratio
         compress_causal_limit = (
-            torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
+            torch.arange(1, seqlen + 1, device=idx_q.device).unsqueeze(1) // ratio
         )
         compress_causal_mask = (
-            torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1)
+            torch.arange(seqlen // ratio, device=idx_q.device).repeat(seqlen, 1)
             >= compress_causal_limit
         )
         index_score = index_score + torch.where(
-            compress_causal_mask, torch.finfo(q.dtype).min, 0
+            compress_causal_mask, torch.finfo(idx_q.dtype).min, 0
         )
-        index_score, topk_idxs = index_score.topk(
-            min(self.index_topk, seqlen // ratio), dim=-1
-        )
-        mask = topk_idxs >= compress_causal_limit
-        compress_topk_idxs = torch.where(mask, -1, topk_idxs + offset)
-        return compress_topk_idxs, index_score
+        _, topk_indices = index_score.topk(min(topk, seqlen // ratio), dim=-1)
+        return topk_indices

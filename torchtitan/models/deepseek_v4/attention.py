@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -7,15 +8,10 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
-from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.models.common.attention import (
-    BaseAttention,
-    create_attention_mask,
-    FlexAttention,
-)
+from torchtitan.models.common.attention import BaseAttention, FlexAttention
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
@@ -31,246 +27,353 @@ def _assert_spmd_attention_type(tensor, *, tp):
         )
 
 
-def get_window_topk_idxs(
-    window_size: int,
-    bsz: int,
-    seqlen: int,
-    device,
-) -> torch.Tensor:
-    window = min(seqlen, window_size)
-    base = torch.arange(seqlen, device=device).unsqueeze(1)
-    idxs = (base - window + 1).clamp(0) + torch.arange(window, device=device)
-    idxs = torch.where(idxs > base, -1, idxs)
-    return idxs.unsqueeze(0).expand(bsz, -1, -1)
+class DSV4FlexAttention(FlexAttention):
+    """DeepSeek sparse attention core for DeepSeek-V4.
 
+    The core attends over the concatenated KV sequence ``[0, L + n_cmp + 1)``,
+    where the first ``L`` positions are the uncompressed sliding-window KV
+    (``swa_k``), the next ``n_cmp`` positions are the compressed KV
+    (``cmp_k``), and the last position is a learned attention sink token:
 
-def get_compress_topk_idxs(
-    compress_ratio: int,
-    bsz: int,
-    seqlen: int,
-    device,
-    *,
-    offset: int,
-) -> torch.Tensor:
-    compress_len = seqlen // compress_ratio
-    if compress_len == 0:
-        return torch.empty((bsz, seqlen, 0), dtype=torch.int64, device=device)
+    - sliding window: fixed pattern over ``swa_k``, expressed as a
+      ``mask_mod`` predicate (no indices);
+    - compressed blocks: for HCA (``compress_ratio=128``) all causal blocks
+      are attendable, also a fixed ``mask_mod`` pattern; for CSA
+      (``compress_ratio=4``) each query attends only its top-k selected
+      compressed positions, which is the only dynamic (index-based) part;
+    - attention sink: always attendable via ``score_mod``.
 
-    idxs = torch.arange(compress_len, device=device).repeat(seqlen, 1)
-    causal_limit = torch.arange(1, seqlen + 1, device=device).unsqueeze(1)
-    causal_limit = causal_limit // compress_ratio
-    idxs = torch.where(idxs >= causal_limit, -1, idxs + offset)
-    return idxs.unsqueeze(0).expand(bsz, -1, -1)
+    The ``mask_mod`` is evaluated at token granularity inside flex_attention;
+    the per-query-block KV block listing (``BlockMask.from_kv_blocks``) only
+    restricts which blocks the kernel loads.
 
-class DSAIndexerAuxLoss(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        num_heads: int
-        softmax_scale: float
-        window_size: int
-        coeff: float = 1.0
-        eps: float = 1e-10
+    Overrides can replace ``_build_block_mask`` (e.g. NPU varlen kernels) or
+    the whole ``forward`` (e.g. fused SMLA/CSA kernels, which consume the raw
+    ``q / swa_k / cmp_k / idx_q / idx_k / idx_w`` tensors). Under context
+    parallelism, all-gathering ``idx_k`` and ``cmp_k`` at this module boundary
+    enables global sparse selection.
 
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-        self.num_heads = config.num_heads
-        self.softmax_scale = config.softmax_scale
-        self.window_size = config.window_size
-        self.coeff = config.coeff
-        self.eps = config.eps
+    TODO: the indexer auxiliary loss is intentionally dropped for now; it will
+    be re-added as a carrier-injected aux loss (see the NPU fork) once the
+    general aux-loss mechanism lands.
+    """
 
-    def _selected_main_attn_dist(
-        self,
-        q,
-        kv_compress,
-        compress_topk_idxs,
-        attn_lse,
-    ) -> torch.Tensor:
-        _, seqlen, _, head_dim = q.size()
-        gather_idxs = compress_topk_idxs.clamp(min=0)
-        selected_kv = torch.gather(
-            kv_compress.unsqueeze(1).expand(-1, seqlen, -1, -1),
-            dim=2,
-            index=gather_idxs.unsqueeze(-1).expand(-1, -1, -1, head_dim),
-        )
-
-        selected_score = (
-            torch.einsum("bshd,bskd->bhsk", q, selected_kv) * self.softmax_scale
-        )
-        selected_prob = torch.exp(
-            selected_score.float() - attn_lse.transpose(1, 2).unsqueeze(-1).float()
-        )
-        selected_prob = selected_prob.masked_fill(
-            compress_topk_idxs.unsqueeze(1) < 0, 0.0
-        )
-        return selected_prob.sum(dim=1) / self.num_heads
-
-    def _indexer_loss(
-        self,
-        selected_main_attn_dist,
-        index_score,
-        compress_topk_idxs,
-    ) -> torch.Tensor:
-        selected_main_attn_dist = selected_main_attn_dist.float().clamp_min(0)
-        target_sum = selected_main_attn_dist.sum(dim=-1, keepdim=True)
-        valid_target = target_sum > self.eps
-
-        index_score = torch.where(
-            valid_target,
-            index_score,
-            torch.zeros_like(index_score),
-        )
-        index_score = F.log_softmax(index_score, dim=-1, dtype=torch.float32)
-
-        selected_main_attn_dist = selected_main_attn_dist / target_sum.clamp_min(
-            self.eps
-        )
-        positive_target = selected_main_attn_dist > 0
-        index_score = torch.where(
-            positive_target,
-            index_score,
-            torch.zeros_like(index_score),
-        )
-        log_selected_main_attn_dist = selected_main_attn_dist.clamp_min(
-            self.eps
-        ).log()
-        loss = (
-            selected_main_attn_dist * (log_selected_main_attn_dist - index_score)
-        ).sum(dim=-1)
-        loss = (target_sum.squeeze(-1) * loss).mean()
-        return loss * self.softmax_scale
-
-    def forward(
-        self,
-        q,
-        kv_compress,
-        compress_topk_idxs,
-        index_score,
-        attn_lse,
-    ):
-        if index_score.numel() == 0:
-            return index_score.new_zeros(())
-        compress_topk_idxs = torch.where(
-            compress_topk_idxs < 0,
-            compress_topk_idxs,
-            compress_topk_idxs - q.size(1),
-        )
-        selected_main_attn_dist = self._selected_main_attn_dist(
-            q,
-            kv_compress,
-            compress_topk_idxs,
-            attn_lse,
-        )
-        loss = self._indexer_loss(
-            selected_main_attn_dist,
-            index_score,
-            compress_topk_idxs,
-        )
-        return loss * self.coeff
-
-
-class DSAFlexAttention(FlexAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(FlexAttention.Config):
         window_size: int
         compress_ratio: int
         softmax_scale: float
-        return_lse: bool = False
+        index_topk: int
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.window_size = config.window_size
         self.compress_ratio = config.compress_ratio
         self.softmax_scale = config.softmax_scale
+        self.index_topk = config.index_topk
         self.block_size = config.block_size
-        self.return_lse = config.return_lse
 
-    def _create_topk_mask(
+    def get_window_topk_idxs(
         self,
         *,
-        topk_idxs: torch.Tensor,
+        bsz: int,
+        seqlen: int,
+        device,
+    ) -> torch.Tensor:
+        """Return sliding-window KV indices in the concatenated KV space.
+
+        Args:
+            bsz: Batch size.
+            seqlen: Query sequence length and uncompressed KV length.
+            device: Device used for the generated index tensor.
+
+        Returns:
+            Tensor of shape ``[B, L, W]``. Valid entries are uncompressed KV
+            positions in ``[0, L)`` and padded entries are ``-1``.
+        """
+        window = min(seqlen, self.window_size)
+        q_idx = torch.arange(seqlen, device=device).unsqueeze(1)
+        idxs = (q_idx - window + 1).clamp_min(0) + torch.arange(
+            window, device=device
+        )
+        idxs = torch.where(idxs <= q_idx, idxs, -1)
+        return idxs.unsqueeze(0).expand(bsz, -1, -1)
+
+    def get_compress_topk_idxs(
+        self,
+        *,
+        bsz: int,
+        seqlen: int,
+        n_cmp: int,
+        device,
+    ) -> torch.Tensor:
+        """Return causal compressed KV indices in the concatenated KV space.
+
+        Args:
+            bsz: Batch size.
+            seqlen: Query sequence length and uncompressed KV length.
+            n_cmp: Number of compressed KV tokens.
+            device: Device used for the generated index tensor.
+
+        Returns:
+            Tensor of shape ``[B, L, n_cmp]``. Valid entries are compressed KV
+            positions offset by ``seqlen`` and padded entries are ``-1``.
+        """
+        if n_cmp == 0:
+            return torch.empty((bsz, seqlen, 0), dtype=torch.int64, device=device)
+
+        cmp_idx = torch.arange(n_cmp, device=device).repeat(seqlen, 1)
+        causal_limit = torch.arange(1, seqlen + 1, device=device).unsqueeze(1)
+        causal_limit = causal_limit // self.compress_ratio
+        cmp_idx = torch.where(cmp_idx < causal_limit, seqlen + cmp_idx, -1)
+        return cmp_idx.unsqueeze(0).expand(bsz, -1, -1)
+
+    def _build_block_mask(
+        self,
         bsz: int,
         seqlen: int,
         kv_len: int,
+        selected_indices: torch.Tensor,
         device,
-    ):
-        sink_idx = kv_len
-        selected_count = torch.zeros(
-            bsz,
-            seqlen,
-            kv_len + 1,
-            dtype=torch.int32,
-            device=device,
-        )
-        valid = topk_idxs >= 0
-        selected_count.scatter_add_(
-            -1,
-            topk_idxs.clamp(min=0, max=sink_idx),
-            valid.to(torch.int32),
-        )
-        selected_mask = selected_count > 0
-        selected_mask[:, :, sink_idx] = True
+    ) -> BlockMask:
+        """Build a FlexAttention block mask from selected KV indices.
 
-        def v4_sparse_mask_mod(b, h, q_idx, kv_idx):
+        Args:
+            bsz: Batch size.
+            seqlen: Query sequence length.
+            kv_len: Length of the concatenated KV sequence.
+            selected_indices: Tensor of shape ``[B, L, K]`` containing final KV
+                positions in ``[0, kv_len)``; ``-1`` entries are ignored.
+            device: Device used for mask tensors.
+
+        Returns:
+            ``BlockMask`` whose block list and token-level predicate encode
+            exactly the selected KV positions.
+        """
+        bs = self.block_size
+        bq, bk = bs if isinstance(bs, tuple) else (bs, bs)
+        assert (
+            seqlen % bq == 0
+        ), f"seqlen ({seqlen}) must be divisible by Q block size ({bq})"
+        n_kv_blocks = (kv_len + bk - 1) // bk
+        n_q_blocks = seqlen // bq
+
+        valid = selected_indices >= 0
+        safe_indices = selected_indices.clamp(0, kv_len - 1)
+
+        selected_blocks = (safe_indices // bk).reshape(
+            bsz, n_q_blocks, bq * selected_indices.size(-1)
+        )
+        block_values = valid.reshape(selected_blocks.shape).to(torch.int32)
+        bm = torch.zeros(
+            bsz, 1, n_q_blocks, n_kv_blocks, dtype=torch.int32, device=device
+        )
+        bm[:, 0].scatter_add_(-1, selected_blocks, block_values)
+        bm = (bm > 0).to(torch.int32)
+        kv_num_blocks = bm.sum(dim=-1).to(torch.int32)
+        kv_indices = torch.argsort(bm, dim=-1, descending=True, stable=True).to(
+            torch.int32
+        )
+
+        selected_count = torch.zeros(
+            bsz, seqlen, kv_len, dtype=torch.int32, device=device
+        )
+        selected_count.scatter_add_(2, safe_indices, valid.to(torch.int32))
+        selected_mask = selected_count > 0
+
+        def dsa_mask_mod(b, h, q_idx, kv_idx):
             return selected_mask[b, q_idx, kv_idx]
 
-        with spmd.no_typecheck():
-            return create_attention_mask(
-                v4_sparse_mask_mod,
-                bsz,
-                None,
-                seqlen,
-                kv_len + 1,
-                device=device,
-                BLOCK_SIZE=self.block_size,
-                separate_full_blocks=False,
+        return BlockMask.from_kv_blocks(
+            kv_num_blocks,
+            kv_indices,
+            BLOCK_SIZE=(bq, bk),
+            mask_mod=dsa_mask_mod,
+            seq_lengths=(seqlen, kv_len),
+        )
+
+    def _forward_impl(
+        self,
+        q,
+        swa_k,
+        attn_sink,
+        *,
+        cmp_k=None,
+        idx_q=None,
+        idx_k=None,
+        idx_w=None,
+        attention_masks=None,
+    ) -> torch.Tensor:
+        """Run DeepSeek V4 sparse attention over window, compressed, and sink KV.
+
+        Args:
+            q: Query tensor of shape ``[B, L, H, D]``.
+            swa_k: Sliding-window KV tensor of shape ``[B, L, D]``.
+            cmp_k: Optional compressed KV tensor of shape ``[B, C, D]``.
+            idx_q: Optional CSA indexer query tensor ``[B, L, Ih, Id]``.
+            idx_k: Optional CSA indexer key tensor ``[B, C, Id]``.
+            idx_w: Optional CSA per-head weight tensor ``[B, L, Ih]``.
+            attn_sink: Per-query-head sink scores of shape ``[H]``.
+            attention_masks: Must be ``None``; this module builds its own mask.
+
+        Returns:
+            Attention output of shape ``[B, L, H, D]``.
+        """
+        if attention_masks is not None:
+            raise ValueError(
+                "DSV4FlexAttention does not accept attention_masks; "
+                "the DSA block mask is built internally."
             )
+        if attn_sink is None:
+            raise ValueError("DSV4FlexAttention requires attn_sink")
+
+        bsz, seqlen, _, head_dim = q.size()
+        n_cmp = 0 if cmp_k is None else cmp_k.size(1)
+        sink_idx = seqlen + n_cmp
+
+        kv = swa_k.unsqueeze(2)
+        if cmp_k is not None:
+            kv = torch.cat([kv, cmp_k.unsqueeze(2)], dim=1)
+        sink_kv = kv.new_zeros((bsz, 1, 1, head_dim))
+        kv = torch.cat([kv, sink_kv], dim=1)
+
+        with spmd.no_typecheck():
+            selected_indices = [
+                self.get_window_topk_idxs(bsz=bsz, seqlen=seqlen, device=q.device)
+            ]
+            if self.compress_ratio == 4:
+                if idx_q is None or idx_k is None or idx_w is None:
+                    raise ValueError(
+                        "DSV4FlexAttention requires idx_q, idx_k, "
+                        "and idx_w when compress_ratio=4"
+                    )
+                cmp_topk = Indexer.select(
+                    idx_q,
+                    idx_k,
+                    idx_w,
+                    seqlen=seqlen,
+                    ratio=self.compress_ratio,
+                    topk=self.index_topk,
+                )
+                causal_limit = (
+                    torch.arange(1, seqlen + 1, device=q.device).unsqueeze(1)
+                    // self.compress_ratio
+                )
+                cmp_topk = torch.where(
+                    cmp_topk < causal_limit, seqlen + cmp_topk, -1
+                )
+                selected_indices.append(cmp_topk)
+            elif self.compress_ratio > 1:
+                selected_indices.append(
+                    self.get_compress_topk_idxs(
+                        bsz=bsz, seqlen=seqlen, n_cmp=n_cmp, device=q.device
+                    )
+                )
+            sink_indices = torch.full(
+                (bsz, seqlen, 1), sink_idx, dtype=torch.int64, device=q.device
+            )
+            selected_indices.append(sink_indices)
+            selected_indices = torch.cat(selected_indices, dim=-1)
+
+            block_mask = self._build_block_mask(
+                bsz, seqlen, kv.size(1), selected_indices, q.device
+            )
+
+            def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
+                return torch.where(kv_idx == sink_idx, attn_sink[h], score)
+
+            return super().forward(
+                q,
+                kv,
+                kv,
+                attention_masks=block_mask,
+                score_mod=v4_sink_score_mod,
+                scale=self.softmax_scale,
+                enable_gqa=True,
+            )
+
+
+class SlidingWindowAttention(DSV4FlexAttention):
+    @dataclass(kw_only=True, slots=True)
+    class Config(DSV4FlexAttention.Config):
+        pass
 
     def forward(
         self,
-        query_states,
-        kv_states,
+        q,
+        swa_k,
         attn_sink,
-        topk_idxs,
-    ):
-        if topk_idxs is None:
-            raise ValueError("DSAFlexAttention requires topk_idxs")
-
-        bsz, seqlen, _, head_dim = query_states.size()
-        kv_len = kv_states.size(1)
-
-        sink_kv = kv_states.new_zeros((bsz, 1, head_dim))
-        kv_states = torch.cat([kv_states, sink_kv], dim=1)
-        key_value_states = kv_states.unsqueeze(2)
-
-        block_mask = self._create_topk_mask(
-            topk_idxs=topk_idxs,
-            bsz=bsz,
-            seqlen=seqlen,
-            kv_len=kv_len,
-            device=query_states.device,
+        *,
+        attention_masks=None,
+    ) -> torch.Tensor:
+        return self._forward_impl(
+            q,
+            swa_k,
+            attn_sink,
+            attention_masks=attention_masks,
         )
-        sink_idx = kv_len
 
-        def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
-            return torch.where(kv_idx == sink_idx, attn_sink[h], score)
 
-        def maybe_return_lse(out, lse):
-            return out, lse
+class HeavilyCompressedAttention(DSV4FlexAttention):
+    @dataclass(kw_only=True, slots=True)
+    class Config(DSV4FlexAttention.Config):
+        pass
 
-        return super().forward(
-            query_states,
-            key_value_states,
-            key_value_states,
-            attention_masks=block_mask,
-            score_mod=v4_sink_score_mod,
-            scale=self.softmax_scale,
-            enable_gqa=True,
-            out_transform=maybe_return_lse if self.return_lse else None,
+    def forward(
+        self,
+        q,
+        swa_k,
+        cmp_k,
+        attn_sink,
+        *,
+        attention_masks=None,
+    ) -> torch.Tensor:
+        return self._forward_impl(
+            q,
+            swa_k,
+            attn_sink,
+            cmp_k=cmp_k,
+            attention_masks=attention_masks,
+        )
+
+
+class CompressedSparseAttention(DSV4FlexAttention):
+    @dataclass(kw_only=True, slots=True)
+    class Config(DSV4FlexAttention.Config):
+        pass
+
+    def forward(
+        self,
+        q,
+        swa_k,
+        cmp_k,
+        idx_q,
+        idx_k,
+        idx_w,
+        attn_sink,
+        *,
+        attention_masks=None,
+    ) -> torch.Tensor:
+        return self._forward_impl(
+            q,
+            swa_k,
+            attn_sink,
+            cmp_k=cmp_k,
+            idx_q=idx_q,
+            idx_k=idx_k,
+            idx_w=idx_w,
+            attention_masks=attention_masks,
         )
 
 
 class Attention(BaseAttention):
+    """DeepSeek V4 attention wrapper around sparse inner attention.
+
+    The module projects Q/KV, applies pre- and post-phase RoPE, prepares
+    optional compressed/indexer tensors, and delegates sparse attention to
+    ``DSV4FlexAttention``.
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         dim: int
@@ -283,11 +386,9 @@ class Attention(BaseAttention):
         o_lora_rank: int = 1024
         n_groups: int = 8
         compress_ratio: int = 1
-        window_size: int = 128
         norm_eps: float = 1e-6
         index_n_heads: int = 64
         index_head_dim: int = 128
-        index_topk: int = 512
         n_layers: int = 4
         layer_id: int = 0
         mask_type: str = "causal"
@@ -307,7 +408,6 @@ class Attention(BaseAttention):
         compressor: Compressor.Config | None = None
         compressor_128: Compressor.Config | None = None
         indexer: Indexer.Config | None = None
-        indexer_aux_loss: DSAIndexerAuxLoss.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -319,7 +419,6 @@ class Attention(BaseAttention):
         self.o_lora_rank = cfg.o_lora_rank
         self.n_groups = cfg.n_groups
         self.compress_ratio = cfg.compress_ratio
-        self.window_size = cfg.window_size
         self.norm_eps = cfg.norm_eps
         self.softmax_scale = cfg.head_dim**-0.5
         self.layer_id = cfg.layer_id
@@ -340,23 +439,27 @@ class Attention(BaseAttention):
             self.compressor = cfg.compressor.build()
         if cfg.indexer is not None:
             self.indexer = cfg.indexer.build()
-        if cfg.indexer_aux_loss is not None:
-            self.indexer_aux_loss = cfg.indexer_aux_loss.build()
         if cfg.compressor_128 is not None:
             self.compressor_128 = cfg.compressor_128.build()
 
         self.inner_attention = cfg.inner_attention.build()
-        self._dsa_loss_tracker = None
-
-    def set_dsa_loss_tracker(self, tracker):
-        self._dsa_loss_tracker = tracker
 
     def forward(self, x, attention_masks=None, positions=None):
+        """Apply one DeepSeek V4 attention layer.
+
+        Args:
+            x: Hidden states of shape ``[B, L, D]``.
+            attention_masks: Optional mask argument kept for the decoder API;
+                sparse attention builds its own mask internally.
+            positions: Position IDs of shape ``[B, L]`` used by RoPE.
+
+        Returns:
+            Hidden states of shape ``[B, L, D]``.
+        """
         bsz, seqlen, _ = x.size()
         rd = self.rope_head_dim
 
         qr = self.q_norm(self.wq_a(x))
-        _assert_spmd_attention_type(qr, tp=spmd.R)
         q = self.wq_b(qr)
         with spmd.local():
             q = q.view(bsz, seqlen, -1, self.head_dim)
@@ -366,96 +469,53 @@ class Attention(BaseAttention):
 
         kv = self.wkv(x)
         kv = self.kv_norm(kv)
-        _assert_spmd_attention_type(kv, tp=spmd.R)
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
 
         q_rope, kv_rope = self.rope(q_rope, kv_rope.unsqueeze(2), positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
-        _assert_spmd_attention_type(q, tp=spmd.S(2))
-        _assert_spmd_attention_type(kv, tp=spmd.R)
 
-        kv_compress = compress_topk_idxs = index_score = None
-        topk_idxs = get_window_topk_idxs(
-            self.window_size,
-            bsz,
-            seqlen,
-            x.device,
-        )
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            # Window top-k indices are local metadata generated from arange, so
-            # they start as R. They still index the local [B, S] token shard and
-            # must match indexer-produced compressed top-k metadata before cat.
-            for axis in ("dp", "cp"):
-                spmd.mutate_type(topk_idxs, axis, src=spmd.R, dst=spmd.V)
-            spmd.assert_type(
-                topk_idxs,
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},
-            )
-
+        cmp_k = idx_q = idx_k = idx_w = None
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
-            compress_topk_idxs, index_score = self.indexer(
-                x.detach(), qr.detach(),
-                positions=positions,
-                offset=kv.size(1),
+            idx_q, idx_k, idx_w = self.indexer(
+                x.detach(), qr.detach(), positions=positions
             )
-        elif self.compress_ratio > 1:
-            compress_topk_idxs = get_compress_topk_idxs(
-                self.compress_ratio,
-                bsz,
-                seqlen,
-                x.device,
-                offset=kv.size(1),
-            )
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                for axis in ("dp", "cp"):
-                    spmd.mutate_type(
-                        compress_topk_idxs, axis, src=spmd.R, dst=spmd.V
-                    )
-                spmd.assert_type(
-                    compress_topk_idxs,
-                    {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},
-                )
-
         if self.compress_ratio == 4:
-            kv_compress = self.compressor(x, positions=positions)
+            cmp_k = self.compressor(x, positions=positions)
         elif self.compress_ratio > 1:
-            kv_compress = self.compressor_128(x, positions=positions)
+            cmp_k = self.compressor_128(x, positions=positions)
 
         attn_sink_param = self.attn_sink.weight.squeeze(-1)
-        if compress_topk_idxs is not None:
-            topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
-        _assert_spmd_attention_type(topk_idxs, tp=spmd.R)
-
-        if kv_compress is not None:
-            kv = torch.cat([kv, kv_compress], dim=1)
-            _assert_spmd_attention_type(kv, tp=spmd.R)
-
-        attn_out = self.inner_attention(
-            q, kv, attn_sink_param, topk_idxs,
-        )
-        if isinstance(attn_out, tuple):
-            o, attn_lse = attn_out
+        if self.compress_ratio == 4:
+            o = self.inner_attention(
+                q,
+                kv,
+                cmp_k,
+                idx_q,
+                idx_k,
+                idx_w,
+                attn_sink_param,
+                attention_masks=attention_masks,
+            )
+        elif self.compress_ratio > 1:
+            o = self.inner_attention(
+                q,
+                kv,
+                cmp_k,
+                attn_sink_param,
+                attention_masks=attention_masks,
+            )
         else:
-            o, attn_lse = attn_out, None
-        if (
-            self.training
-            and hasattr(self, "indexer_aux_loss")
-            and index_score is not None
-            and attn_lse is not None
-        ):
-            self.indexer_aux_loss(
-                q.detach(),
-                kv_compress.detach(),
-                compress_topk_idxs,
-                index_score,
-                attn_lse.detach(),
+            o = self.inner_attention(
+                q,
+                kv,
+                attn_sink_param,
+                attention_masks=attention_masks,
             )
 
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
         o_rope = self.rope(o_rope, positions=positions, inverse=True)
         o = torch.cat([o_nope, o_rope], dim=-1)
-        _assert_spmd_attention_type(o, tp=spmd.S(2))
 
         with spmd.local():
             n_local_groups = self.n_groups // (self.n_heads // o.shape[2])

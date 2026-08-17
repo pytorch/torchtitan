@@ -205,7 +205,7 @@ class TokenChoiceTopKRouter(Module):
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
-        score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+        score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
         _debug_force_load_balance: bool = False
@@ -281,8 +281,26 @@ class TokenChoiceTopKRouter(Module):
 
         return scores_for_choice_BLE
 
+    def _select_experts(
+        self,
+        scores_BLE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        scores_for_choice_BLE = (
+            scores_BLE if expert_bias_E is None else scores_BLE + expert_bias_E
+        )
+        if self.num_expert_groups is not None:
+            scores_for_choice_BLE = self._get_node_limited_routing_scores(
+                scores_for_choice_BLE
+            )
+        return torch.topk(
+            scores_for_choice_BLE, k=self.top_k, dim=-1, sorted=False
+        ).indices
+
     def forward(
-        self, x_BLD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
+        self, x_BLD: torch.Tensor, expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -304,19 +322,13 @@ class TokenChoiceTopKRouter(Module):
             scores_BLE = torch.sigmoid(scores_BLE)
         elif self.score_func == "softmax":
             scores_BLE = F.softmax(scores_BLE, dim=-1)
+        elif self.score_func == "sqrtsoftplus":
+            scores_BLE = F.softplus(scores_BLE).sqrt()
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice_BLE = (
-            scores_BLE if expert_bias_E is None else scores_BLE + expert_bias_E
-        )
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice_BLE = self._get_node_limited_routing_scores(
-                scores_for_choice_BLE
-            )
-        _, topk_expert_ids_BLK = torch.topk(
-            scores_for_choice_BLE, k=self.top_k, dim=-1, sorted=False
+        topk_expert_ids_BLK = self._select_experts(
+            scores_BLE, expert_bias_E, **router_kwargs
         )
 
         # NOTE: The expert_bias is only used for routing. The gating value
