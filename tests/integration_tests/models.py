@@ -269,7 +269,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--training.disable_cuda_graphs",
                     # Consolidate the former 2-GPU FSDP smoke and 8-GPU
                     # FSDP+TP+EP+PP test into one supported FSDP+EP path. Kimi
-                    # DistributedMuon rejects TP because it produces _StridedShard
+                    # DistMuon rejects TP because it produces _StridedShard
                     # storage. PP support follows in the next stack change.
                     # Do not enable --debug.spmd_typechecking: multimodal pixel
                     # tensors from the dataloader are not SPMD-annotated yet.
@@ -280,7 +280,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--training.steps 1",
                 ],
             ],
-            "Kimi K2.7 DistributedMuon spmd_types FSDP+EP",
+            "Kimi K2.7 DistMuon spmd_types FSDP+EP",
             "kimi_k2_5_muon_fsdp+ep_spmd_types",
             ngpu=4,
         ),
