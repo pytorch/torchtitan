@@ -981,7 +981,6 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        B, L, _ = x_BLD.shape
         xq_BLNH, xk_BLNH, xv_BLNH = self.qkv_linear(x_BLD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
@@ -1002,5 +1001,10 @@ class GQAttention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        out_BLD = out_BLNH.view(B, L, -1)
+        # Fold from out_BLNH's own shape. The stock block declares an input
+        # all-gather, so x_BLD's L is already the full sequence; a qkv_linear that
+        # gathers the sequence itself declares none, leaving x_BLD SP-sharded while
+        # out_BLNH is full-length. A view(B, L, -1) would not raise there -- the
+        # element counts still match -- it would fold sequence into features.
+        out_BLD = out_BLNH.flatten(2)
         return self.wo(out_BLD)

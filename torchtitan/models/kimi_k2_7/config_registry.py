@@ -68,7 +68,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=_mm_dataloader("cc12m-test"),
-        optimizer=_distributed_muon_optimizer(model_spec, lr=8e-4),
+        optimizer=_dist_muon_optimizer(model_spec, lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -102,7 +102,7 @@ def moonlight_16b_a3b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Moonlight-16B-A3B",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_distributed_muon_optimizer(model_spec, lr=3e-4),
+        optimizer=_dist_muon_optimizer(model_spec, lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -143,7 +143,7 @@ def kimi_vl_a3b() -> Trainer.Config:
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
         dataloader=_mm_dataloader("cc12m"),
-        optimizer=_distributed_muon_optimizer(model_spec, lr=3e-4),
+        optimizer=_dist_muon_optimizer(model_spec, lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -179,7 +179,7 @@ def kimi_k2_5() -> Trainer.Config:
         hf_assets_path="./assets/hf/Kimi-K2.5",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_distributed_muon_optimizer(model_spec, lr=2.2e-4),
+        optimizer=_dist_muon_optimizer(model_spec, lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -203,7 +203,7 @@ def kimi_k2_5() -> Trainer.Config:
     )
 
 
-def _distributed_muon_optimizer(
+def _dist_muon_optimizer(
     model_spec: ModelSpec,
     *,
     lr: float,
@@ -350,7 +350,7 @@ def _distributed_muon_optimizer(
         param_groups=[
             ParamGroupConfig(
                 pattern=muon_pattern,
-                optimizer_name="DistributedMuon",
+                optimizer_name="DistMuon",
                 optimizer_kwargs=muon_kwargs,
             ),
             # The remaining parameters are embeddings, norms, biases, LM head,
@@ -362,7 +362,7 @@ def _distributed_muon_optimizer(
             ),
         ],
         optimizer_factory_kwargs_by_name={
-            "DistributedMuon": {
+            "DistMuon": {
                 "bucket_configs": bucket_configs,
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
             }
@@ -374,8 +374,8 @@ def _distributed_muon_optimizer(
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        # TODO(#3353): Support TP-produced _StridedShard layouts in DistributedMuon.
-        # TODO(#4102): Build DistributedMuon from PP stage-local parameter groups.
+        # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
+        # TODO(#4102): Build DistMuon from PP stage-local parameter groups.
         if (
             self.parallelism.tensor_parallel_degree > 1
             or self.parallelism.pipeline_parallel_degree > 1
@@ -383,7 +383,7 @@ class _KimiTrainerConfig(Trainer.Config):
             # Fail during config parsing, before TP/FSDP creates _StridedShard
             # storage or PP constructs optimizers from stage-local parameters.
             raise ValueError(
-                "Kimi DistributedMuon currently requires "
+                "Kimi DistMuon currently requires "
                 "tensor_parallel_degree=1 and pipeline_parallel_degree=1: "
                 "tensor parallelism can produce unsupported _StridedShard "
                 "parameter layouts, and pipeline parallelism gives each stage "
