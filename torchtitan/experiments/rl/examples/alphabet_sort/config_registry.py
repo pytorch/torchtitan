@@ -16,6 +16,7 @@ import dataclasses
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.quantization import MXFP8GroupedExpertsQATConverter
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
@@ -40,11 +41,6 @@ from torchtitan.experiments.rl.controller import (
     ValidationConfig,
 )
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
-from torchtitan.components.quantization import (
-    MXFP8GroupedExpertsQATConverter,
-    MXFP8LinearConverter,
-    MXFP8LinearQATConverter,
-)
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -140,28 +136,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
             ),
         ),
     )
-
-
-def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
-    """GRPO config for Qwen3-0.6B varlen with MXFP8 (Blackwell/SM100 only).
-
-    Mirrors ``rl_grpo_qwen3_0_6b_varlen`` but quantizes the transformer-block
-    Linear layers (attention + feed-forward) to MXFP8 on both the trainer and
-    the generator. ``lm_head``/embeddings are left high precision (the
-    ``fqns=["layers"]`` filter also avoids clashing with LMHeadCastConverter).
-    """
-    config = rl_grpo_qwen3_0_6b_varlen()
-    config.model_spec = _qwen3_rl_model_registry(
-        "0.6B",
-        attn_backend="varlen",
-        converters=[
-            MXFP8LinearConverter.Config(fqns=["layers"], model_compile_enabled=True)
-        ],
-    )
-    # DIAGNOSTIC: generator TP=1 to test whether the MXFP8 _scaled_mm col-major
-    # failure is caused by TP weight sharding (Shard(dim=1)) in the generator.
-    config.generator.parallelism.tensor_parallel_degree = 1
-    return config
 
 
 def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
@@ -625,6 +599,28 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     )
 
 
+def _apply_deepep_cudagraph_generator(
+    config: Controller.Config, *, max_num_batched_tokens: int
+) -> None:
+    # Generator-only overrides -> cudagraph-able DeepEP EXPAND dispatch; trainer keeps compact.
+    config.generator.override = OverrideConfig(
+        imports=[
+            "torchtitan.overrides.fused_swiglu.fused_swiglu",
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+            (
+                "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+                {"cudagraphable": True},
+            ),
+        ]
+    )
+    config.generator.cudagraph = VLLMCudagraphConfig(
+        enable=True, mode="FULL_AND_PIECEWISE"
+    )
+    # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
+    # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
+    config.generator.max_num_batched_tokens = max_num_batched_tokens
+
+
 def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     """Debug MoE config on the DeepEP v2 backend with a cudagraph-capturable generator
     (8 GPUs: 4 gen + 4 train).
@@ -646,23 +642,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     config.model_spec = model_registry(
         "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
     )
-    # Generator-only overrides -> cudagraph-able DeepEP EXPAND dispatch; trainer keeps compact.
-    config.generator.override = OverrideConfig(
-        imports=[
-            "torchtitan.overrides.fused_swiglu.fused_swiglu",
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-            (
-                "torchtitan.overrides.moe_token_dispatcher.deepep_override",
-                {"cudagraphable": True},
-            ),
-        ]
-    )
-    config.generator.cudagraph = VLLMCudagraphConfig(
-        enable=True, mode="FULL_AND_PIECEWISE"
-    )
-    # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
-    # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
-    config.generator.max_num_batched_tokens = 2048
+    _apply_deepep_cudagraph_generator(config, max_num_batched_tokens=2048)
     return config
 
 
@@ -815,49 +795,207 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_qwen3_30b_a3b_varlen_mxfp8() -> Controller.Config:
-    """GRPO config for Qwen3-30B-A3B MoE with MXFP8 QAT (8 GPUs: 4 gen + 4 train).
+def _qwen3_30b_a3b_varlen_pg(
+    num_prompts_per_train_step: int,
+    num_samples_per_prompt: int,
+    *,
+    mxfp8_experts: bool = False,
+    tp1: bool = False,
+    deepep: bool = False,
+    sync: bool = False,
+    gen_gpus: int | None = None,
+) -> Controller.Config:
+    """``rl_grpo_qwen3_30b_a3b_varlen`` with an overridden rollout batch size (P, G)
+    and, optionally, MXFP8 QAT on the MoE grouped experts only, TP=1, and/or the
+    DeepEP v2 comm backend with a cudagraph-capturable generator.
 
-    Applies MXFP8 QAT -- a real mxfp8 forward with a high-precision (bf16) backward --
-    to the dense transformer-block linears and the MoE expert GEMMs.
+    ``P = num_prompts_per_train_step`` and ``G = num_samples_per_prompt``.
 
-    Note: requires Blackwell/SM100. Runs with TP=1 (see below).
+    When ``mxfp8_experts`` is set, only the grouped-expert GEMMs are quantized
+    (real mxfp8 forward, bf16 backward); the dense attention/feed-forward linears
+    stay bf16. Quantizing experts only keeps the same TP/EP layout, so the mxfp8
+    variant differs from its bf16 pair only in expert quantization.
+
+    When ``tp1`` is set, both trainer and generator drop tensor parallelism
+    (TP=2 -> TP=1) and grow data parallelism to fill the freed ranks: trainer
+    DPS=4/DPR=1/TP=1/EP=4, generator DP=4/TP=1/EP=4. EP=4 is unchanged, so the
+    MoE grouped GEMMs match the TP=2 variants; only the dense attention matmul
+    shapes differ (full un-sharded QKV/O weights, no TP all-reduce, but half the
+    per-rank tokens since DP doubles).
+
+    When ``deepep`` is set, the MoE uses the DeepEP v2 comm backend instead of the
+    standard all-to-all, and the generator captures CUDA graphs over the DeepEP
+    EXPAND dispatch (see ``_apply_deepep_cudagraph_generator`` and
+    ``rl_grpo_qwen3_moe_debug_deepep``).
+
+    When ``gen_gpus`` is set, the generator is shrunk to that many GPUs with
+    ``data_parallel_degree = expert_parallel_degree = gen_gpus`` and TP=1, while the
+    trainer keeps its own 4-GPU layout. Fewer generator GPUs means more experts per
+    rank (``num_experts / gen_gpus``), so the grouped-GEMM token groups get thinner
+    for the same total decode concurrency. Applied after ``tp1`` so it wins.
+
+    When ``sync`` is set, ``max_offpolicy_steps`` is forced to 0 (fully on-policy):
+    the generator and trainer alternate in lockstep instead of the generator
+    running up to ``max_offpolicy_steps`` train-steps ahead. Everything else is
+    identical to the async variant.
+
+    ``deepep`` + ``mxfp8_experts`` compose: the mxfp8 converter swaps the DeepEP
+    token dispatcher's ``pad_multiple`` so each expert's token group is padded to
+    a multiple of 32 for the mxfp8 grouped GEMM -- the compact (training) path pads
+    in Python, the expand (generator) path uses DeepEP's native ``expert_alignment``.
     """
     config = rl_grpo_qwen3_30b_a3b_varlen()
-    config.model_spec = model_registry(
-        "30B-A3B",
-        attn_backend="varlen",
+    config.async_loop.num_prompts_per_train_step = num_prompts_per_train_step
+    config.async_loop.num_samples_per_prompt = num_samples_per_prompt
+    if sync:
+        # 0 off-policy steps = fully on-policy: generator and trainer alternate in
+        # lockstep (see AsyncLoopConfig.max_offpolicy_steps). Everything else stays
+        # identical to the async variant.
+        config.async_loop.max_offpolicy_steps = 0
+    if tp1:
+        train_par = config.trainer.parallelism
+        train_par.data_parallel_shard_degree = 4
+        train_par.data_parallel_replicate_degree = 1
+        train_par.tensor_parallel_degree = 1
+        train_par.expert_parallel_degree = 4
+        gen_par = config.generator.parallelism
+        gen_par.data_parallel_degree = 4
+        gen_par.tensor_parallel_degree = 1
+        gen_par.expert_parallel_degree = 4
+    if gen_gpus is not None:
+        # Generator-only resize; the trainer layout above is untouched.
+        gen_par = config.generator.parallelism
+        gen_par.data_parallel_degree = gen_gpus
+        gen_par.tensor_parallel_degree = 1
+        gen_par.expert_parallel_degree = gen_gpus
+    if mxfp8_experts or deepep:
         # model_compile_enabled=False matches the inherited compile=False: the
-        # MoE EP all-to-all path issues unpinned D2H copies that block
-        # torch.compile and CUDA graph capture.
-        converters=[
-            MXFP8LinearQATConverter.Config(
-                fqns=["attention"], model_compile_enabled=False
-            ),
-            MXFP8GroupedExpertsQATConverter.Config(
-                pad_multiple=32, model_compile_enabled=False
-            ),
-        ],
-    )
-    # mxfp8 linear fails with TP > 1 currently with this error:
-    #    ValueError: MXFP8Linear: output DTensor has placements (Shard(dim=0),),
-    #    but out_src_shardings expects (Partial(sum),).
-    # Here we force TP=1 for both the trainer and the generator, and update
-    # the remaining values accordingly.
-    # Base values: generator DP=2/TP=2/EP=4, trainer FSDP=2/TP=2/EP=4
-    # New values: generator DP=4/TP=1/EP=4, trainer FSDP=4/TP=1/EP=4
-    config.generator.parallelism = InferenceParallelismConfig(
-        data_parallel_degree=4,
-        tensor_parallel_degree=1,
-        expert_parallel_degree=4,
-    )
-    config.trainer.parallelism = ParallelismConfig(
-        data_parallel_shard_degree=4,
-        data_parallel_replicate_degree=1,
-        tensor_parallel_degree=1,
-        expert_parallel_degree=4,
-    )
+        # trainer's compact DeepEP / standard all-to-all path issues unpinned D2H
+        # copies that block torch.compile and CUDA graph capture.
+        converters = (
+            [
+                MXFP8GroupedExpertsQATConverter.Config(
+                    pad_multiple=32, model_compile_enabled=False
+                ),
+            ]
+            if mxfp8_experts
+            else None
+        )
+        config.model_spec = model_registry(
+            "30B-A3B",
+            attn_backend="varlen",
+            moe_comm_backend="deepep" if deepep else None,
+            converters=converters,
+        )
+    if deepep:
+        # seq_len is 2048 (async_loop.batcher). With SP disabled in the generator,
+        # a rank feeds the full budget into the EXPAND dispatch -> dropless.
+        _apply_deepep_cudagraph_generator(config, max_num_batched_tokens=2048)
     return config
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=32/G=32 rollout batch, bf16 (mxfp8-experts baseline)."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_mxfp8_experts() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=32/G=32, MXFP8 QAT on MoE grouped experts only."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, mxfp8_experts=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p64g32() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=64/G=32 rollout batch, bf16 (mxfp8-experts baseline)."""
+    return _qwen3_30b_a3b_varlen_pg(64, 32)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p64g32_mxfp8_experts() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=64/G=32, MXFP8 QAT on MoE grouped experts only."""
+    return _qwen3_30b_a3b_varlen_pg(64, 32, mxfp8_experts=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=32/G=32, TP=1 (trainer DPS=4/EP=4, gen DP=4/EP=4), bf16."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_mxfp8_experts() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=32/G=32, TP=1, MXFP8 QAT on MoE grouped experts only."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, mxfp8_experts=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_gen2() -> Controller.Config:
+    """P=32/G=32, trainer 4 GPUs (DPS=4/EP=4), generator shrunk to 2 GPUs (DP=2/EP=2).
+
+    6 GPUs total. Halving the generator doubles experts per rank (128/2 = 64), so the
+    grouped-GEMM groups are half as thick at equal decode concurrency.
+    """
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, gen_gpus=2)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_gen1() -> Controller.Config:
+    """P=32/G=32, trainer 4 GPUs (DPS=4/EP=4), generator shrunk to 1 GPU (DP=1/EP=1).
+
+    5 GPUs total. With EP=1 the single generator rank holds all 128 experts, so the
+    MoE all-to-all degenerates to a no-op and token groups are at their thinnest.
+    """
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, gen_gpus=1)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=32/G=32, TP=1, DeepEP v2 backend + cudagraph generator, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, deepep=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=32/G=32, TP=1, DeepEP v2 backend + MXFP8 QAT on MoE experts."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, deepep=True, mxfp8_experts=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_sync() -> Controller.Config:
+    """Sync (on-policy, max_offpolicy_steps=0) variant of
+    ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1``; otherwise identical."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, sync=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_mxfp8_experts_sync() -> Controller.Config:
+    """Sync (on-policy, max_offpolicy_steps=0) variant of
+    ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_mxfp8_experts``; otherwise identical."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, mxfp8_experts=True, sync=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_sync() -> Controller.Config:
+    """Sync (on-policy, max_offpolicy_steps=0) variant of
+    ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep``; otherwise identical."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, deepep=True, sync=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts_sync() -> Controller.Config:
+    """Sync (on-policy, max_offpolicy_steps=0) variant of
+    ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts``; otherwise identical."""
+    return _qwen3_30b_a3b_varlen_pg(
+        32, 32, tp1=True, deepep=True, mxfp8_experts=True, sync=True
+    )
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p64g32_tp1() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=64/G=32, TP=1 (trainer DPS=4/EP=4, gen DP=4/EP=4), bf16."""
+    return _qwen3_30b_a3b_varlen_pg(64, 32, tp1=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p64g32_tp1_mxfp8_experts() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=64/G=32, TP=1, MXFP8 QAT on MoE grouped experts only."""
+    return _qwen3_30b_a3b_varlen_pg(64, 32, tp1=True, mxfp8_experts=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p96g32_tp1() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=96/G=32, TP=1 (trainer DPS=4/EP=4, gen DP=4/EP=4), bf16."""
+    return _qwen3_30b_a3b_varlen_pg(96, 32, tp1=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p96g32_tp1_mxfp8_experts() -> Controller.Config:
+    """Qwen3-30B-A3B varlen, P=96/G=32, TP=1, MXFP8 QAT on MoE grouped experts only."""
+    return _qwen3_30b_a3b_varlen_pg(96, 32, tp1=True, mxfp8_experts=True)
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
