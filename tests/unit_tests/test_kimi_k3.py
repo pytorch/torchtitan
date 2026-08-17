@@ -21,22 +21,13 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 
-# torchtitan.models.kimi_k3 imports FLA at module scope for the KDA kernel.
-# FLA is a per-model dependency (kimi_k3/requirements.txt), not part of the
-# core requirements, so skip the Kimi suites instead of failing collection
-# when it is absent. Modules importing this one inherit the skip.
-try:
-    from torchtitan.models.kimi_k3 import (
-        _kimi_k3_config,
-        _vision_encoder_config,
-        parallelize_kimi_k3,
-    )
-    from torchtitan.models.kimi_k3.model import KimiK3Model, KimiKDAKernel
-    from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
-except ModuleNotFoundError as exc:
-    raise unittest.SkipTest(
-        f"Kimi K3 optional dependency unavailable: {exc.name}"
-    ) from exc
+from torchtitan.models.kimi_k3 import (
+    _kimi_k3_config,
+    _vision_encoder_config,
+    parallelize_kimi_k3,
+)
+from torchtitan.models.kimi_k3.model import KimiK3Model, KimiKDAKernel
+from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
 
 def _small_model_config(
