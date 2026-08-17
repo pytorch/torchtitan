@@ -140,7 +140,7 @@ def _register_parametrization(
     state_dict accesses parameters directly from self._parameters, not from getters
     https://github.com/pytorch/pytorch/blob/main/torch/nn/modules/module.py#L2141
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
-    get_model_state_dict func in torchtitan's torchtitan/components/checkpoint.py.
+    get_model_state_dict func in torchtitan/components/checkpointer/dcp.py.
     """
     param_name_to_property = {
         param_name: property(

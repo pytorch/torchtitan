@@ -51,7 +51,7 @@ checkpoint=CheckpointManager.Config(
 ),
 ```
 
-A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpoint.py` (`CheckpointManager.Config`).
+A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/dcp.py` (`CheckpointManager.Config`).
 
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.
