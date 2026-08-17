@@ -62,7 +62,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = [""]
-include = ["torchtitan*"]
+# torchtitan_recipes is a second top-level package, listed so that
+# tightening the first pattern to "torchtitan.*" cannot silently drop it.
+include = ["torchtitan*", "torchtitan_recipes*"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks
