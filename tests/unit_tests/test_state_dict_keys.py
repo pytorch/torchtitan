@@ -23,6 +23,8 @@ ground-truth keys from the unwrapped model plus a few hard-coded structural
 anchors that catch unexpected model refactors.
 """
 
+import subprocess
+import sys
 import unittest
 
 import torch
@@ -100,6 +102,31 @@ def _debugmodel_optimizer_config() -> OptimizersContainer.Config:
 
 
 class TestStateDictKeys(unittest.TestCase):
+    def test_legacy_checkpoint_utils_can_be_imported_first(self):
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from torchtitan.components.checkpoint_utils import "
+                "canonical_fqn, get_flat_optim_state_dict, init_optim_state, "
+                "load_flat_optim_state_dict",
+            ],
+            check=True,
+        )
+
+    def test_legacy_checkpoint_utils_imports(self):
+        from torchtitan.components.optimizer import utils as optimizer_utils
+
+        self.assertIs(optimizer_utils.init_optim_state, init_optim_state)
+        self.assertIs(
+            optimizer_utils.get_flat_optim_state_dict,
+            get_flat_optim_state_dict,
+        )
+        self.assertIs(
+            optimizer_utils.load_flat_optim_state_dict,
+            load_flat_optim_state_dict,
+        )
+
     def setUp(self) -> None:
         # Ground-truth canonical keys come from the unwrapped model.
         model = _build_debugmodel()
