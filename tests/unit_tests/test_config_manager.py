@@ -244,6 +244,23 @@ class TestConfigManager(unittest.TestCase):
             "lr_scheduler",
         ]
 
+    def test_concrete_checkpoint_fields_remain_overridable(self):
+        from torchtitan.components.checkpointer import CheckpointManager
+
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--checkpoint.async_mode",
+                "async",
+            ]
+        )
+
+        assert isinstance(config.checkpoint, CheckpointManager.Config)
+        assert config.checkpoint.async_mode == "async"
+
     def test_trainer_config_quantization_default(self):
         from torchtitan.components.quantization.utils import has_quantization
 
