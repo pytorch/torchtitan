@@ -107,6 +107,25 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_mxfp8_grouped_mlp() -> Trainer.Config:
+    # Fused arm of deepseek_v3_debugmodel_mxfp8: the override swaps the
+    # converter-produced MXFP8 inner experts for the fused grouped-MLP
+    # composite (torchtitan/overrides/mxfp8_grouped_mlp.py) when its gates
+    # pass; the converter keeps the dense MXFP8Linear swap and the
+    # pad_multiple=128 token dispatcher. disable_cuda_graphs is required by
+    # the TorchAOTokenDispatcher under EP>1; moe_force_load_balance keeps the
+    # per-rank routed row count fixed (round-robin before the all-to-all,
+    # exact at debugmodel shapes) so loss-parity runs against the unfused arm
+    # compare a constant R.
+    config = deepseek_v3_debugmodel_mxfp8()
+    config.override.imports.append(
+        "torchtitan.overrides.mxfp8_grouped_mlp.mxfp8_grouped_experts"
+    )
+    config.training.disable_cuda_graphs = True
+    config.debug.moe_force_load_balance = True
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry(
@@ -201,6 +220,50 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
         enable_sequence_parallel=False,
     )
     config.training.disable_cuda_graphs = False
+    return config
+
+
+def deepseek_v3_16b_mxfp8() -> Trainer.Config:
+    # MXFP8 16B baseline for the fused grouped-MLP A/B campaign on a 4-GPU
+    # node: offline assets (in-repo test tokenizer + c4_test), EP=4 (expert
+    # TP stays 1), 50 steps, CUDA graphs off (TorchAOTokenDispatcher under
+    # EP>1), forced load balance for a fixed per-rank R, checkpointing off
+    # (the default). Converters mirror the debugmodel MXFP8 config: dense
+    # MXFP8Linear on attention/shared_experts/feed_forward plus the grouped
+    # experts converter with the kernels' required pad_multiple=128.
+    config = deepseek_v3_16b()
+    config.hf_assets_path = "./tests/assets/tokenizer"
+    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4_test")
+    config.training.steps = 50
+    config.training.disable_cuda_graphs = True
+    config.parallelism.expert_parallel_degree = 4
+    config.debug.moe_force_load_balance = True
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "16B",
+        attn_backend="flex",
+        converters=[
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                fqns=["attention", "shared_experts", "feed_forward"],
+            ),
+            MXFP8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                pad_multiple=128,
+            ),
+        ],
+    )
+    return config
+
+
+def deepseek_v3_16b_mxfp8_grouped_mlp() -> Trainer.Config:
+    # Fused arm of deepseek_v3_16b_mxfp8; differs ONLY in the override import.
+    config = deepseek_v3_16b_mxfp8()
+    config.override.imports.append(
+        "torchtitan.overrides.mxfp8_grouped_mlp.mxfp8_grouped_experts"
+    )
     return config
 
 
