@@ -13,6 +13,9 @@ dependencies = [
     # Stateful Dataloader
     "torchdata>=0.8.0",
 
+    # Checkpointing
+    "torch_checkpointing>=0.1.0",
+
     # Hugging Face integrations
     "datasets>=3.6.0,<4.8.0",
     "tokenizers>=0.15.0",
@@ -40,9 +43,6 @@ dev = [
     "pytest-cov",
     "expecttest", # test_tokenizer
     "pyrefly==0.45.1",
-]
-torch-checkpointing = [
-    "torch_checkpointing>=0.1.0",
 ]
 remat = [
     "torch_remat>=0.2.0",
