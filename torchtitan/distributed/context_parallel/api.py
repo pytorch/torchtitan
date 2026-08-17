@@ -35,6 +35,8 @@ from torchtitan.tools.logging import logger
 def apply_cp_to_forward(
     attention_modules: Sequence[nn.Module],
     cp_mesh: DeviceMesh,
+    *,
+    attention_seq_dim: int = 0,
 ) -> None:
     """Wrap inner attention ``forward`` with CP logic.
 
@@ -52,6 +54,9 @@ def apply_cp_to_forward(
     Args:
         attention_modules: Sequence of inner attention modules to apply CP to.
         cp_mesh: Device mesh for context parallel dimension.
+        attention_seq_dim: Sequence dimension of the tensors passed to the
+            attention module. Defaults to 0. Can be changed if the attention
+            tensors use a different sequence dimension layout.
     """
     first = attention_modules[0]
     if isinstance(first, FlexAttention):
@@ -70,7 +75,9 @@ def apply_cp_to_forward(
                         )
                     k = k.contiguous()
                     v = v.contiguous()
-                    global_k, global_v = flex_cp_allgather(k, v, 0, pg_name)
+                    global_k, global_v = flex_cp_allgather(
+                        k, v, attention_seq_dim, pg_name
+                    )
                     return orig_fn(q, global_k, global_v, **kwargs)
 
                 return cp_forward
@@ -84,7 +91,7 @@ def apply_cp_to_forward(
             original_forward = mod.forward
 
             def _make_cp_forward(orig_fn, mesh):
-                placement = [Shard(0)]
+                placement = [Shard(attention_seq_dim)]
 
                 def cp_forward(q, k, v, **kwargs):
                     if not isinstance(q, DTensor):

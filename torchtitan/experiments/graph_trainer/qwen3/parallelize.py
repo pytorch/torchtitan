@@ -55,13 +55,6 @@ def parallelize_qwen3(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.max_seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.max_seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
-        """
-
     if parallel_dims.cp_enabled:
         apply_cp_to_attention(model, parallel_dims)
 

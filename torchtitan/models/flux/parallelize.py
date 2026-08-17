@@ -218,8 +218,8 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         # pyrefly: ignore [missing-attribute]
         attention_modules.append(single_block.inner_attention)
 
-    # Apply CP using direct forward wrapping (always uses SDPA for Flux)
-    apply_cp_to_forward(attention_modules, cp_mesh)
+    # Flux attention inputs are [B, L, N, H], so CP shards L.
+    apply_cp_to_forward(attention_modules, cp_mesh, attention_seq_dim=1)
 
 
 def parallelize_encoders(
