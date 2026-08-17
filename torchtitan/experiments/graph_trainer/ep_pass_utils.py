@@ -313,9 +313,9 @@ def chunk_symbol_hints_for_mode(
             or (val := tensor_meta(node)) is None
         ):
             continue
-        dim = {"batch": 0, "seq": 1}.get(mode)
-        if dim is None:
+        if mode not in ("batch", "seq"):
             raise ValueError(f"Unknown chunk mode: {mode!r}")
+        dim = 0
         if dim < len(val.shape):
             _record_symbols_from_extent(
                 hints, val.shape[dim], source=f"{node.name}.shape[{dim}]"

@@ -1065,13 +1065,13 @@ class HFTransformerModel(BaseModel):
             )
         else:
             mask_mod = get_causal_mask_mod()
-        batch_size, seq_len = positions.shape
+        num_tokens = positions.shape[0]
         return create_attention_mask(
             mask_mod,
-            batch_size,
+            1,
             None,
-            seq_len,
-            seq_len,
+            num_tokens,
+            num_tokens,
             device=positions.device,
             BLOCK_SIZE=128,
             separate_full_blocks=not is_in_batch_invariant_mode(),
@@ -1082,30 +1082,30 @@ class HFTransformerModel(BaseModel):
 
         DSA (DeepSeek sparse attention) models cannot use a flex BlockMask (see
         ``_uses_dsa``); they need a dense additive tensor mask. Build a
-        ``[B, 1, S, S]`` mask with ``0.0`` on allowed positions and ``-inf``
+        ``[1, 1, num_tokens, num_tokens]`` mask with ``0.0`` on allowed positions and ``-inf``
         elsewhere. "causal" allows key ``j <= query i``; "block_causal"
         additionally requires same-document (positions reset to 0 at each packed
         sample boundary), mirroring ``get_causal_mask_mod`` /
-        ``get_document_mask_mod``. The batch dim is materialized (not broadcast)
-        so flex's ``score_mod`` can index it per batch element.
+        ``get_document_mask_mod``.
         """
-        batch_size, seq_len = positions.shape
+        num_tokens = positions.shape[0]
         device = positions.device
         dtype = self.tok_embeddings.weight.dtype
-        idx = torch.arange(seq_len, device=device)
-        # [S, S] causal: query i (row) may attend to key j (col) when j <= i.
-        allowed = (idx[:, None] >= idx[None, :]).unsqueeze(0).expand(batch_size, -1, -1)
+        idx = torch.arange(num_tokens, device=device)
+        # Query i may attend to key j when j <= i.
+        allowed = idx[:, None] >= idx[None, :]
         if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
-            doc_ids = torch.cumsum((positions == 0).int(), dim=1) - 1  # [B, S]
-            same_doc = doc_ids[:, :, None] == doc_ids[:, None, :]  # [B, S, S]
+            doc_ids = torch.cumsum((positions == 0).int(), dim=0) - 1
+            same_doc = doc_ids[:, None] == doc_ids[None, :]
             allowed = allowed & same_doc
-        mask = torch.zeros((batch_size, seq_len, seq_len), device=device, dtype=dtype)
+        mask = torch.zeros((num_tokens, num_tokens), device=device, dtype=dtype)
         mask.masked_fill_(~allowed, float("-inf"))
-        return mask.unsqueeze(1)  # [B, 1, S, S]
+        return mask.unsqueeze(0).unsqueeze(0)
 
     def forward(self, *args, **kwargs):
         positions = kwargs.pop("positions", None)
         attention_masks = kwargs.pop("attention_masks", None)
+        model_args = (args[0].unsqueeze(0), *args[1:])
 
         if positions is not None:
             # Per-document positions (reset at packed-sample boundaries) drive
@@ -1113,7 +1113,10 @@ class HFTransformerModel(BaseModel):
             # the sequence-sharded global positions (load-balancer permuted),
             # which is exactly what RoPE needs for each local shard -- a plain
             # arange would use the wrong positions.
-            kwargs["position_ids"] = positions
+            # Transformers still requires a batch dimension for RoPE and
+            # attention. Keep it local to this backend boundary; TorchTitan's
+            # dataloader and model-facing contract remain flat.
+            kwargs["position_ids"] = positions.unsqueeze(0)
             # Build the BlockMask here rather than in the core
             # trainer: the trainer only builds masks for Decoder.Config models,
             # so this backend opts in by building its own (keeps trainer.py free
@@ -1123,12 +1126,7 @@ class HFTransformerModel(BaseModel):
             if attention_masks is None:
                 attention_masks = self.get_attention_masks(positions)
         else:
-            local_seq_len = self.max_seq_len
-            local_seq_len //= (
-                self.cp_mesh.size()
-                if self.cp_mesh is not None and self.cp_mesh.size() > 1
-                else 1
-            )
+            local_seq_len = args[0].shape[0]
             kwargs["position_ids"] = torch.arange(
                 local_seq_len, device=args[0].device
             ).unsqueeze(0)
@@ -1139,11 +1137,12 @@ class HFTransformerModel(BaseModel):
             # BlockMask flows straight through to the flex attention function.
             kwargs["attention_mask"] = attention_masks
 
-        output = self.model.model(*args, **kwargs)
+        output = self.model.model(*model_args, **kwargs)
+        hidden_states = output.last_hidden_state.squeeze(0)
 
         if self._skip_lm_head:
-            return output.last_hidden_state
-        output = self.model.lm_head(output.last_hidden_state)
+            return hidden_states
+        output = self.model.lm_head(hidden_states)
 
         # Numerical-test hook: when HF_BACKEND_LOGIT_DUMP=<dir> is set, append
         # this rank's per-forward logits (+ CP coordinate) to a file. Used by

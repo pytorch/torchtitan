@@ -167,12 +167,12 @@ def annotate_input_spmd_types(
 
     mesh = parallel_dims.spmd_dense_mesh()
     with set_current_spmd_mesh(mesh):
-        spmd.assert_type(inputs, token_type)
-        spmd.assert_type(labels, label_type)
+        spmd.assert_type(inputs, *token_type)
+        spmd.assert_type(labels, *label_type)
         if "positions" in extra_kwargs and isinstance(
             extra_kwargs["positions"], torch.Tensor
         ):
-            spmd.assert_type(extra_kwargs["positions"], token_type)
+            spmd.assert_type(extra_kwargs["positions"], *token_type)
     return inputs, labels, extra_kwargs
 
 
