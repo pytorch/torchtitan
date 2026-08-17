@@ -219,8 +219,8 @@ def _set_qwen35_layer_sharding(
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
-        # pyrefly: ignore [missing-attribute]
         _set_shared_expert_gate_sharding(
+            # pyrefly: ignore [missing-attribute]
             layer_cfg.moe.shared_experts,
             enable_sp=enable_sp,
         )

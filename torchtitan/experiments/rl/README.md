@@ -112,7 +112,7 @@ source titan-rl/bin/activate
 
 1. Install Monarch, TorchStore, and Renderers from main:
 ```bash
-uv pip install -r .ci/docker/requirements-rl.txt
+uv pip install -r torchtitan/experiments/rl/requirements.txt
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 ```
 
