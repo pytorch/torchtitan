@@ -111,7 +111,7 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
 
     Trains the ``debugmodel_mm`` flavor (debug text decoder that owns a
     scaled-down vision encoder + adapter) end-to-end on the ``cc12m-test`` local
-    tar fixture. The shared :class:`MMDataLoader` emits padded ``pixel_values`` +
+    tar fixture. The shared :class:`MMDataLoader` emits packed ``pixel_values`` +
     ``grid_thw`` + ``special_tokens``; the model derives the vision-placeholder
     mask from ``special_tokens``. Vision-placeholder positions are already
     ``IGNORE_INDEX`` in the labels, so a standard ``CrossEntropyLoss`` (wrapped in

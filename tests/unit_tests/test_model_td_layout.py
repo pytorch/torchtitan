@@ -11,9 +11,7 @@ import torch.nn as nn
 
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
-from torchtitan.models.flux.model.layers import create_flux_attention_mask
 from torchtitan.models.gpt_oss import gptoss_configs
-from torchtitan.models.kimi_k2_7 import kimi_k2_5_configs
 from torchtitan.models.muse_glimmer import muse_glimmer_configs
 from torchtitan.models.qwen3_5 import qwen3_5_configs
 
@@ -32,17 +30,6 @@ class _AttentionOutput(nn.Module):
 
 
 class TestModelTDLayout(unittest.TestCase):
-    def test_flux_mask_isolates_flattened_samples(self):
-        mask = create_flux_attention_mask(
-            num_samples=2,
-            num_local_tokens_per_sample=4,
-            cp_degree=1,
-            device=torch.device("cpu"),
-        )
-        zero = torch.tensor(0)
-        self.assertTrue(mask.mask_mod(zero, zero, torch.tensor(1), torch.tensor(3)))
-        self.assertFalse(mask.mask_mod(zero, zero, torch.tensor(1), torch.tensor(5)))
-
     def test_sdpa_preserves_tnh_shape(self):
         attention = ScaledDotProductAttention.Config().build()
         q_TNH = torch.randn(8, 4, 16)
@@ -64,21 +51,16 @@ class TestModelTDLayout(unittest.TestCase):
 
         self.assertEqual(out_TD.shape, x_TD.shape)
 
-    def test_deepseek_and_kimi_attention_preserve_td_shape(self):
-        configs = (
-            deepseekv3_configs["debugmodel"]("flex", "standard"),
-            kimi_k2_5_configs["debugmodel"]("flex", "standard"),
-        )
-        for config in configs:
-            with self.subTest(model=type(config).__name__):
-                attention = config.layers[0].attention.build()
-                attention.inner_attention = _AttentionOutput()
-                x_TD = torch.randn(8, config.dim)
-                positions_T = torch.arange(8)
+    def test_deepseek_attention_preserves_td_shape(self):
+        config = deepseekv3_configs["debugmodel"]("flex", "standard")
+        attention = config.layers[0].attention.build()
+        attention.inner_attention = _AttentionOutput()
+        x_TD = torch.randn(8, config.dim)
+        positions_T = torch.arange(8)
 
-                out_TD = attention(x_TD, None, positions_T)
+        out_TD = attention(x_TD, None, positions_T)
 
-                self.assertEqual(out_TD.shape, x_TD.shape)
+        self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_muse_attention_preserves_td_shape(self):
         config = muse_glimmer_configs["debugmodel"]("varlen")

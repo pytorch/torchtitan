@@ -22,7 +22,6 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
-from torchtitan.models.flux.utils import get_num_transformer_tokens_per_sample
 from torchtitan.tools.logging import logger
 
 
@@ -392,6 +391,7 @@ class FluxDataLoader(ParallelAwareDataloader):
         *,
         dp_world_size: int,
         dp_rank: int,
+        max_seq_len: int,
         num_tokens_per_batch: int,
         tokenizer: BaseTokenizer | None = None,
         **kwargs,
@@ -403,17 +403,14 @@ class FluxDataLoader(ParallelAwareDataloader):
                 "Set tokenizer=FluxTokenizerContainer.Config(...) in your trainer config."
             )
 
-        num_tokens_per_sample = get_num_transformer_tokens_per_sample(
-            config.img_size, tokenizer.max_t5_encoding_len
-        )
         num_samples_per_batch, remainder = divmod(
-            num_tokens_per_batch, num_tokens_per_sample
+            num_tokens_per_batch, max_seq_len
         )
         if remainder or num_samples_per_batch == 0:
             raise ValueError(
                 "num_tokens_per_batch must be a positive multiple of Flux's "
-                "fixed transformer token count per sample "
-                f"({num_tokens_per_sample}), but got {num_tokens_per_batch}."
+                f"fixed sequence length ({max_seq_len}), but got "
+                f"{num_tokens_per_batch}."
             )
 
         if config.generate_timesteps:

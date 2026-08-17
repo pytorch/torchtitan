@@ -132,9 +132,6 @@ class VarlenAttention(Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        # Some operators can upcast under AMP, but varlen attention currently only
-        # supports bf16/fp16 inputs. If this changes, or fp16 training support
-        # is added, this may need to be revisited.
         varlen_kwargs: dict[str, Any] = {}
 
         # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
@@ -160,6 +157,9 @@ class VarlenAttention(Module):
         # FA3 varlen attention takes rank-local metadata tensors.
         # TODO(pianpwk): Move this op contract into pytorch/spmd_types.
         with spmd.no_typecheck():
+            # Some operators can upcast under AMP, but varlen attention currently only
+            # supports bf16/fp16 inputs. If this changes, or fp16 training support
+            # is added, this may need to be revisited.
             result = varlen_attn(
                 q_TNH.to(torch.bfloat16),
                 k_TNH.to(torch.bfloat16),

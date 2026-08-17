@@ -42,8 +42,9 @@ def set_muse_glimmer_sharding_config(
       straight into the decoder layers.
     * **Multimodal** (``config.vision_encoder is not None``): ``MuseGlimmerModel.forward``
       scatters vision features into the token embeddings over the full
-      ``[T]`` sequence *between* ``tok_embeddings`` and the decoder layers, so the
-      embedding output must be TP-replicated -- not TP sequence-sharded.
+      ``[num_tokens]`` sequence *between* ``tok_embeddings`` and the decoder
+      layers, so the embedding output must be ``Replicate`` -- not
+      ``Shard(0)``/SP.
       :func:`_set_multimodal_sharding` overrides the embedding + norm (and the
       vision-injection modules) to ``Replicate``, and the layer loop gives the
       first decoder layer a ``Replicate`` input that its attention reduce-scatters
@@ -102,9 +103,9 @@ def _set_multimodal_sharding(
     """Override the text-path sharding for the multimodal (vision) model.
 
     ``MuseGlimmerModel.forward`` scatters vision features into the token embeddings
-    (masked index over ``[T]``) between ``tok_embeddings`` and the decoder
-    layers, so that activation must be TP-replicated. This re-points the
-    embedding children at TP-replicated
+    (masked index over the full ``[num_tokens]``) between ``tok_embeddings`` and
+    the decoder layers, so that activation must be ``Replicate`` -- not
+    ``Shard(0)``/SP. This re-points the embedding children at ``Replicate``
     outputs, marks the vision-injection modules ``Replicate`` so the whole vision
     path stays DTensor-consistent, and (under SP) re-shards the first decoder
     layer to take that ``Replicate`` input -- its rowwise ``wo`` reduce-scatters
@@ -220,10 +221,7 @@ def _set_muse_glimmer_layer_sharding(
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
     assert attention.sharding_config is not None
     attn_in_src = attention.sharding_config.in_src_shardings
-    attn_in_dst = attention.sharding_config.in_dst_shardings
-    assert attn_in_src is not None and attn_in_dst is not None
-    attn_in_src["x"] = attn_in_src.pop("x_TD")
-    attn_in_dst["x"] = attn_in_dst.pop("x_TD")
+    assert attn_in_src is not None
     set_gqa_inner_attention_local_map(attention.inner_attention)
     # Re-point the attention's activation input to this layer's input layout.
     # set_gqa_attention_sharding declares exactly the activation arg in in_src, so

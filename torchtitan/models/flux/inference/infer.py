@@ -20,24 +20,20 @@ def inference(config: FluxTrainer.Config):
     # Reuse trainer to perform forward passes
     trainer = FluxTrainer(config)
 
-    # Each batch-parallel rank handles a subset of prompts. CP/TP ranks within
-    # that batch rank must process the same prompts for model collectives.
+    # Distributed processing setup: Each GPU/process handles a subset of prompts
+    world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
-    batch_mesh = trainer.parallel_dims.get_mesh("batch")
-    batch_world_size = batch_mesh.size()
-    batch_rank = batch_mesh.get_local_rank()
     original_prompts = open(config.inference.prompts_path).readlines()
     total_prompts = len(original_prompts)
 
-    if total_prompts < batch_world_size:
+    if total_prompts < world_size:
         raise ValueError(
-            f"Number of prompts ({total_prompts}) must be >= number of batch "
-            f"ranks ({batch_world_size}). FSDP all-gather will hang if some "
-            f"ranks have no prompts to process."
+            f"Number of prompts ({total_prompts}) must be >= number of ranks ({world_size}). "
+            f"FSDP all-gather will hang if some ranks have no prompts to process."
         )
 
     # Distribute prompts across processes using round-robin assignment
-    prompts = original_prompts[batch_rank::batch_world_size]
+    prompts = original_prompts[global_rank::world_size]
 
     trainer.checkpointer.load(step=config.checkpoint.load_step)
 
@@ -49,7 +45,7 @@ def inference(config: FluxTrainer.Config):
 
     if prompts:
         # Generate images for this process's assigned prompts
-        bs = config.inference.num_samples_per_batch
+        bs = config.inference.local_batch_size
         img_size = config.inference.img_size
 
         output_dir = os.path.join(
@@ -57,7 +53,7 @@ def inference(config: FluxTrainer.Config):
             config.inference.save_img_folder,
         )
         # Create mapping from local indices to global prompt indices
-        global_ids = list(range(batch_rank, total_prompts, batch_world_size))
+        global_ids = list(range(global_rank, total_prompts, world_size))
 
         for i in range(0, len(prompts), bs):
             images = generate_image(
@@ -75,11 +71,6 @@ def inference(config: FluxTrainer.Config):
                 tokenizer=tokenizer,
                 t5_encoder=trainer.t5_encoder,
                 clip_encoder=trainer.clip_encoder,
-                cp_mesh=(
-                    trainer.parallel_dims.get_mesh("cp")
-                    if trainer.parallel_dims.cp_enabled
-                    else None
-                ),
             )
             for j in range(images.shape[0]):
                 # Extract single image while preserving batch dimension [1, C, H, W]

@@ -104,8 +104,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     num_flops_per_token: float
     model_param_count: int
     num_tokens_per_step: int
-    local_batch_size: int
-    pp_microbatch_size: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -197,14 +195,9 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.num_tokens_per_step = num_tokens_per_step
 
-        self.local_batch_size = config.training.get_num_sequences(
-            config.training.num_tokens_per_dp_rank,
-            field_name="training.num_tokens_per_dp_rank",
-        )
         num_pp_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-        self.pp_microbatch_size = self.local_batch_size // num_pp_microbatches
 
         # calculate gradient accumulation steps
         self.gradient_accumulation_steps = num_tokens_per_step // (

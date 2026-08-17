@@ -80,7 +80,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
         inference=Inference(
             save_img_folder="inference_results",
             prompts_path="./torchtitan/models/flux/inference/prompts.txt",
-            num_samples_per_batch=2,
+            local_batch_size=2,
         ),
     )
 

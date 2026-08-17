@@ -31,8 +31,7 @@ class MultiModalCollator:
     and preparing text for model input.
     """
 
-    batch_size: int
-    seq_len: int
+    num_tokens_per_batch: int
     max_images_per_batch: int
     patch_size: int
     temporal_patch_size: int
@@ -78,42 +77,32 @@ class MultiModalCollator:
         self,
         batch: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Build one flat token sequence from fixed-size sample segments."""
-        segment_len = self.seq_len + 1
-
-        def _fixed_length(x: torch.Tensor, value: int) -> torch.Tensor:
-            x = x[:segment_len]
-            return torch.nn.functional.pad(
-                x, (0, segment_len - x.shape[0]), value=value
-            )
-
+        """Concatenate whole samples and pad only the token-batch tail."""
         inputs: list[torch.Tensor] = []
         labels: list[torch.Tensor] = []
         positions: list[torch.Tensor] = []
         for sample in batch:
-            input_ids = _fixed_length(
-                sample["input_ids"],
+            inputs.append(sample["input_ids"][:-1])
+            labels.append(sample["labels"][1:])
+            positions.append(sample["positions"][:-1])
+
+        input_ids = torch.cat(inputs)
+        label_ids = torch.cat(labels)
+        position_ids = torch.cat(positions)
+        pad_len = self.num_tokens_per_batch - input_ids.shape[0]
+        if pad_len > 0:
+            input_ids = torch.nn.functional.pad(
+                input_ids,
+                (0, pad_len),
                 # pyrefly: ignore [missing-attribute]
-                self.tokenizer.pad_id,
+                value=self.tokenizer.pad_id,
             )
-            sample_labels = _fixed_length(sample["labels"], IGNORE_INDEX)
-            sample_positions = _fixed_length(sample["positions"], 0)
-            inputs.append(input_ids[:-1])
-            labels.append(sample_labels[1:])
-            positions.append(sample_positions[:-1])
+            label_ids = torch.nn.functional.pad(
+                label_ids, (0, pad_len), value=IGNORE_INDEX
+            )
+            position_ids = torch.cat([position_ids, torch.arange(pad_len)])
 
-        num_padding_segments = self.batch_size - len(batch)
-        if num_padding_segments > 0:
-            inputs.extend(
-                [torch.full_like(inputs[0], self.tokenizer.pad_id)]
-                * num_padding_segments
-            )
-            labels.extend(
-                [torch.full_like(labels[0], IGNORE_INDEX)] * num_padding_segments
-            )
-            positions.extend([torch.zeros_like(positions[0])] * num_padding_segments)
-
-        return torch.cat(inputs), torch.cat(labels), torch.cat(positions)
+        return input_ids, label_ids, position_ids
 
     def _build_mrope_positions(
         self,
@@ -127,20 +116,21 @@ class MultiModalCollator:
     ) -> torch.Tensor:
         """Build 3D (temporal, height, width) MRoPE position IDs per token.
 
-        Returns ``(T, 3)`` with temporal/height/width coordinates in the final
-        dimension. Runs here on CPU data workers, off the GPU training path.
+        Returns ``(num_tokens, 3)`` with temporal/height/width coordinates in
+        the final dimension. Runs here on CPU data workers, off the GPU
+        training path.
 
         Args:
-            tokens: ``(T,)`` token IDs.
+            tokens: ``(num_tokens,)`` token IDs.
             grid_thw: (num_images, 3) image grid dims, or None.
             grid_thw_videos: (num_videos, 3) video grid dims, or None.
-            positions: ``(T,)`` per-token positions; document
+            positions: ``(num_tokens,)`` per-token positions; document
                 boundaries are detected where positions reset.
             image_token_id: Placeholder token ID marking image positions.
             video_token_id: Placeholder token ID marking video positions.
 
         Returns:
-            ``(T, 3)`` MRoPE position IDs.
+            ``(num_tokens, 3)`` MRoPE position IDs.
         """
         # MRoPE position IDs are laid out in block order; a raster patch order
         # would desync them from the patch sequence.

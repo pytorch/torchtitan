@@ -699,11 +699,6 @@ def _clip_grad_norm_with_ep(
     if isinstance(non_ep_grads_total_norm, DTensor):
         non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
 
-    if not ep_grads:
-        ep_grads_total_norm = non_ep_grads_total_norm.new_zeros(())
-    if not non_ep_grads:
-        non_ep_grads_total_norm = ep_grads_total_norm.new_zeros(())
-
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:

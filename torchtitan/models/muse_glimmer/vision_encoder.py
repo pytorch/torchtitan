@@ -324,7 +324,7 @@ class MuseGlimmerVisionEncoder(Module):
         )
 
     def _pixel_shuffle_downsample(
-        self, x_TD: torch.Tensor, grid_h: int, grid_w: int
+        self, x: torch.Tensor, grid_h: int, grid_w: int
     ) -> torch.Tensor:
         """Downsample via pixel shuffle: (h r1 w r2) -> (h w r1 r2).
 
@@ -335,10 +335,10 @@ class MuseGlimmerVisionEncoder(Module):
         plain tensors single-device.
         """
         f = self.downsample_factor
-        d = x_TD.shape[-1]
+        d = x.shape[-1]
         n_out = (grid_h // f) * (grid_w // f)
         return (
-            x_TD.view(grid_h // f, f, grid_w // f, f, d)
+            x.view(grid_h // f, f, grid_w // f, f, d)
             .permute(0, 2, 1, 3, 4)
             .reshape(n_out, f * f, d)
             .permute(0, 2, 1)

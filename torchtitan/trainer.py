@@ -255,14 +255,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
 
-        # validate dense activation sequence length evenness
+        # Validate dense activation token-count evenness.
+        num_pp_microbatches = (
+            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+        )
+        num_tokens_per_pp_microbatch = (
+            config.training.num_tokens_per_dp_rank // num_pp_microbatches
+        )
         seq_len_divisor = (
             parallel_dims.tp if config.parallelism.enable_sequence_parallel else 1
         ) * (2 * parallel_dims.cp if parallel_dims.cp > 1 else 1)
-        if config.training.max_seq_len % seq_len_divisor != 0:
+        if num_tokens_per_pp_microbatch % seq_len_divisor != 0:
             raise ValueError(
-                f"Training maximum sequence length ({config.training.max_seq_len}) "
-                "must be "
+                "The number of tokens per pipeline microbatch "
+                f"({num_tokens_per_pp_microbatch}) must be "
                 f"divisible by {seq_len_divisor} for the configured "
                 "sequence/context parallelism."
             )
@@ -698,11 +704,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
-                load_balancer_type=(
-                    self.config.parallelism.context_parallel_load_balancer
-                ),
-                ptrr_mask_key=(self.config.parallelism.context_parallel_ptrr_mask_key),
-                max_seq_len=self.config.training.max_seq_len,
+                self.config.parallelism.context_parallel_load_balancer,
+                self.config.parallelism.context_parallel_ptrr_mask_key,
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual

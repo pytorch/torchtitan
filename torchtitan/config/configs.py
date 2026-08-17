@@ -42,28 +42,6 @@ class TrainingConfig:
     max_seq_len: int = 2048
     """Maximum logical sequence length and RoPE position range."""
 
-    def get_num_sequences(self, num_tokens: int, *, field_name: str) -> int:
-        """Convert a token budget to the current rectangular sequence count.
-
-        This compatibility helper is temporary while model inputs still use
-        ``[batch, seq]``. It can be removed once the token-major ``[tokens]``
-        input migration is complete.
-        """
-        if self.max_seq_len <= 0:
-            raise ValueError(
-                "training.max_seq_len must be greater than 0, got "
-                f"{self.max_seq_len}."
-            )
-        if num_tokens <= 0:
-            raise ValueError(f"{field_name} must be greater than 0, got {num_tokens}.")
-        if num_tokens % self.max_seq_len != 0:
-            raise ValueError(
-                f"{field_name} ({num_tokens}) must be evenly divisible by "
-                f"training.max_seq_len ({self.max_seq_len}) while model inputs "
-                "use the rectangular [batch, seq] layout."
-            )
-        return num_tokens // self.max_seq_len
-
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
 

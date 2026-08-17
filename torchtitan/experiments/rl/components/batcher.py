@@ -63,7 +63,7 @@ class BatchConfig:
 
 class Batcher(Configurable):
     """Accumulate `num_prompts_per_train_step` groups and packs
-    `[num_microbatches][dp_degree]` token-major `TrainingMicrobatch`es.
+    `[num_microbatches][dp_degree]` flat `TrainingMicrobatch`es.
 
     Example:
         # num_prompts_per_train_step=2, dp_degree=2, local_batch_size=2
@@ -356,7 +356,7 @@ class Batcher(Configurable):
     # needs one.
     @staticmethod
     def collate(rows: list[dict]) -> TrainingMicrobatch:
-        """Concatenate packed rows into a single token-major microbatch."""
+        """Concatenate packed rows into a single flat microbatch."""
         return TrainingMicrobatch(
             token_ids=torch.cat([row["input_ids"] for row in rows]),
             labels=torch.cat([row["labels"] for row in rows]),

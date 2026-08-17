@@ -17,8 +17,9 @@ class MRoPE(CosSinRoPE):
 
     Standard per-layer RoPE: each full-attention layer owns an ``MRoPE`` and
     applies it through ``RoPE.forward`` -> ``_reshape_cache`` -> ``apply_rotary_emb``.
-    The only override is ``_reshape_cache``: for 2D ``(T, 3)`` MRoPE positions
-    it builds an interleaved cos/sin cache; for 1D ``(T,)`` text
+    The only override is ``_reshape_cache``: for 2D ``(num_tokens, 3)`` MRoPE
+    positions it builds an interleaved cos/sin cache; for 1D
+    ``(num_tokens,)`` text
     positions it falls back to the plain ``CosSinRoPE`` per-token lookup.
     """
 
@@ -40,9 +41,9 @@ class MRoPE(CosSinRoPE):
     ) -> torch.Tensor:
         """Build a query-broadcastable cos/sin cache.
 
-        Dispatches on position rank: 2D ``(T, 3)`` MRoPE positions take the
-        interleaved scatter; everything else (1D text positions or ``None``)
-        falls back to the plain ``CosSinRoPE`` lookup.
+        Dispatches on position rank: 2D ``(num_tokens, 3)`` MRoPE positions
+        take the interleaved scatter; everything else (1D text positions or
+        ``None``) falls back to the plain ``CosSinRoPE`` lookup.
         """
         if positions is not None and positions.ndim == 2:
             return self._compute_mrope_cache(positions)
@@ -52,12 +53,14 @@ class MRoPE(CosSinRoPE):
         """Build the interleaved cos/sin cache for 3D MRoPE positions.
 
         Args:
-            position_ids: ``(T, 3)`` temporal/height/width positions. Plain, or a DTensor
-                under TP matching the rope ``cache`` buffer's Replicate placement.
+            position_ids: ``(num_tokens, 3)`` temporal/height/width positions.
+                Plain, or a DTensor under TP matching the rope ``cache``
+                buffer's Replicate placement.
 
         Returns:
-            ``(T, 1, dim * 2)`` cache, broadcastable to the
-            ``(T, n_heads, rotary_dim)`` query/key in ``apply_rotary_emb``.
+            ``(num_tokens, 1, dim * 2)`` cache, broadcastable to the
+            ``(num_tokens, n_heads, rotary_dim)`` query/key in
+            ``apply_rotary_emb``.
 
         The scatter runs on plain local tensors. Under TP the ``cache`` buffer is a
         Replicate DTensor, so it is unwrapped to local here and the result is
@@ -86,7 +89,8 @@ class MRoPE(CosSinRoPE):
 
         # Start from temporal positions for all dimensions, then overwrite the
         # height/width interleaved sections with their own position IDs.
-        # ``pos`` is (T, 3); the last axis selects temporal/height/width.
+        # ``pos`` is (num_tokens, 3); the last axis selects
+        # temporal/height/width.
         t_pos = pos[..., 0].long()
         mrope_cos = cos_cache[t_pos]
         mrope_sin = sin_cache[t_pos]

@@ -200,9 +200,8 @@ class Validator(BaseValidator):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 inputs.device,
-                load_balancer_type=self.parallelism.context_parallel_load_balancer,
-                ptrr_mask_key=self.parallelism.context_parallel_ptrr_mask_key,
-                max_seq_len=self.seq_len,
+                self.parallelism.context_parallel_load_balancer,
+                self.parallelism.context_parallel_ptrr_mask_key,
             )
 
         if self.parallelism.spmd_backend == "full_dtensor":

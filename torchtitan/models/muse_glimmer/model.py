@@ -89,11 +89,10 @@ class Attention(GQAttention):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x_TD = x
         num_tokens = x_TD.shape[0]
         xq, xk, xv = self.qkv_linear(x_TD)
 
@@ -358,11 +357,16 @@ class MuseGlimmerModel(Decoder):
         """Find contiguous vision spans as ``(start, num_tokens)``.
 
         Scans ``vision_mask`` (``[T]``) and returns contiguous runs of True
-        entries in token order.
+        entries in token order -- the same order in which the flat
+        ``vision_features`` tokens are laid out.
         """
+        # Compute start/end transitions for the whole token sequence on-device,
+        # then do one .tolist() sync for starts and one for lengths.
         zero = torch.zeros(1, dtype=torch.bool, device=vision_mask.device)
         prev = torch.cat([zero, vision_mask[:-1]])
         nxt = torch.cat([vision_mask[1:], zero])
+        # nonzero returns indices in token order, matching the flat
+        # vision_features token layout; start/end entries align pairwise.
         starts = (vision_mask & ~prev).nonzero(as_tuple=True)[0]
         ends = (vision_mask & ~nxt).nonzero(as_tuple=True)[0]
         return list(zip(starts.tolist(), (ends - starts + 1).tolist(), strict=True))

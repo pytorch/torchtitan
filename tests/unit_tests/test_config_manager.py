@@ -97,7 +97,7 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.training.steps == 5
 
-    def test_num_pp_microbatches_must_divide_rectangular_batch_size(self):
+    def test_num_pp_microbatches_must_divide_num_tokens_per_dp_rank(self):
         config_manager = ConfigManager()
         with pytest.raises(ValueError, match="must be evenly divisible"):
             config_manager.parse_args(
@@ -115,7 +115,7 @@ class TestConfigManager(unittest.TestCase):
                 ]
             )
 
-    def test_num_pp_microbatches_is_ignored_without_pipeline_parallelism(self):
+    def test_num_pp_microbatches_does_not_constrain_non_pp_training(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [

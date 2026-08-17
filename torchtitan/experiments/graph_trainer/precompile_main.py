@@ -202,30 +202,22 @@ def _precompile_aot_fx_trace(
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
-    seq_len = config.training.max_seq_len
-    local_batch_size = config.training.get_num_sequences(
-        config.training.num_tokens_per_dp_rank,
-        field_name="training.num_tokens_per_dp_rank",
-    )
+    num_tokens = config.training.num_tokens_per_dp_rank
     vocab_size = model_config.vocab_size
 
-    dummy_inputs = torch.randint(
-        0, vocab_size, (local_batch_size, seq_len), device=device
-    )
-    dummy_labels = torch.randint(
-        0, vocab_size, (local_batch_size, seq_len), device=device
-    )
+    dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
+    dummy_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
     # The trainer computes global_valid_tokens via dist_sum (an
     # all-reduce + .item()), which returns a Python float. Use the
     # same type here so make_fx bakes it as a graph constant — not a
     # graph input — identical to the non-precompile runtime trace.
-    global_batch_size = (
-        local_batch_size
+    global_num_tokens = (
+        num_tokens
         * parallel_dims.dp_shard
         * parallel_dims.dp_replicate
         * parallel_dims.cp
     )
-    dummy_global_valid_tokens = float(global_batch_size * seq_len)
+    dummy_global_valid_tokens = float(global_num_tokens)
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
@@ -233,8 +225,8 @@ def _precompile_aot_fx_trace(
         inner_attention = attn_config.inner_attention
 
         positions = torch.arange(
-            0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-        ).expand(dummy_inputs.shape)
+            num_tokens, dtype=torch.int32, device=dummy_inputs.device
+        ) % config.training.max_seq_len
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(

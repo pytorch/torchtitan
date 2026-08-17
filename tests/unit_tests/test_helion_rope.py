@@ -201,10 +201,7 @@ class TestHelionRoPEOverride(unittest.TestCase):
         torch.testing.assert_close(out_k, ref_k, rtol=0, atol=0)
 
 
-@unittest.skipUnless(
-    torch.cuda.is_available() and helion_rope_module._HELION_IMPORT_ERROR is None,
-    "requires CUDA and helion",
-)
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestHelionRoPEKernel(unittest.TestCase):
     """Fused-kernel numerics vs the PyTorch RoPE modules (helion + CUDA only)."""
 
@@ -217,6 +214,11 @@ class TestHelionRoPEKernel(unittest.TestCase):
         self.complex = ComplexRoPE.Config(
             dim=self.dim,
             max_seq_len=self.seqlen * 2,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=self.seqlen,
         ).build()
         self.helion = HelionCosSinRoPE.Config(
             dim=self.dim, max_seq_len=self.seqlen
@@ -224,6 +226,11 @@ class TestHelionRoPEKernel(unittest.TestCase):
         self.helion_complex = HelionComplexRoPE.Config(
             dim=self.dim,
             max_seq_len=self.seqlen * 2,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=self.seqlen,
         ).build()
         self.cossin.to(self.device)
         self.complex.to(self.device)

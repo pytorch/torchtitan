@@ -386,14 +386,8 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.spmd_context():
-            # Convert vLLM interface to TorchTitan interface
-            # vLLM: [total_tokens] -> TorchTitan: [batch_size, seq_len]
-            tokens_2d = input_ids.unsqueeze(0)
-
             # Get embeddings
-            h = self.model.tok_embeddings(tokens_2d)
-
-            positions = positions.unsqueeze(0)
+            h = self.model.tok_embeddings(input_ids)
 
             # Pass through transformer layers
             for layer in self.model.layers.values():
@@ -405,11 +399,6 @@ class VLLMModelWrapper(Module):
         if isinstance(h, DTensor):
             assert all(isinstance(p, Replicate) for p in h.placements)
             h = h._local_tensor
-
-        # Convert to vLLM format: [total_tokens, hidden_size]
-        if h.dim() == 3:
-            hidden_size = h.size(-1)
-            h = h.view(-1, hidden_size)
         return h
 
     def compute_logits(

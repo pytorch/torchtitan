@@ -424,10 +424,9 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
 
 
 class TestChatDataLoaderPackedTokens(unittest.TestCase):
-    def test_each_batch_is_one_pp_microbatch(self):
+    def test_returns_one_flat_token_batch(self):
         max_seq_len = 128
-        num_tokens_per_dp_rank = 512
-        num_pp_microbatches = 2
+        num_tokens_per_batch = 256
         config = ChatDataLoader.Config(
             dataset_path="json",
             load_dataset_kwargs={"data_files": _DATA_PATH, "split": "train"},
@@ -440,21 +439,15 @@ class TestChatDataLoaderPackedTokens(unittest.TestCase):
             dp_rank=0,
             tokenizer=_load_tokenizer(),
             max_seq_len=max_seq_len,
-            num_tokens_per_batch=(num_tokens_per_dp_rank // num_pp_microbatches),
+            num_tokens_per_batch=num_tokens_per_batch,
         )
-        data_iterator = iter(dataloader)
-        batches = [next(data_iterator) for _ in range(num_pp_microbatches)]
+        input_dict, labels = next(iter(dataloader))
 
         self.assertIsNone(dataloader.batch_size)
-        num_tokens_per_batch = num_tokens_per_dp_rank // num_pp_microbatches
-        for input_dict, labels in batches:
-            self.assertEqual(input_dict["input"].shape, (num_tokens_per_batch,))
-            self.assertEqual(input_dict["positions"].shape, (num_tokens_per_batch,))
-            self.assertEqual(labels.shape, (num_tokens_per_batch,))
-            self.assertEqual(input_dict["positions"][0].item(), 0)
-        self.assertEqual(
-            sum(labels.numel() for _, labels in batches), num_tokens_per_dp_rank
-        )
+        self.assertEqual(input_dict["input"].shape, (num_tokens_per_batch,))
+        self.assertEqual(input_dict["positions"].shape, (num_tokens_per_batch,))
+        self.assertEqual(labels.shape, (num_tokens_per_batch,))
+        self.assertEqual(input_dict["positions"][0].item(), 0)
 
 
 class TestChatDatasetInfiniteLooping(unittest.TestCase):

@@ -32,11 +32,9 @@ class MMSamplePacker:
         self,
         max_seq_length: int,
         buffer_size: int = 100,
-        batch_size: int = 8,
     ):
         self.max_seq_length = max_seq_length
         self.buffer_size = buffer_size
-        self.batch_size = batch_size
 
         self._sample_buffer: dict[int, dict[str, Any]] = {}
         self._next_id: int = 0
@@ -98,15 +96,6 @@ class MMSamplePacker:
         self._sample_buffer[sid] = sample
         if len(self._sample_buffer) >= self.buffer_size:
             self._pack_buffered_samples()
-
-    def has_batch_ready(self) -> bool:
-        return len(self.packed_samples) >= self.batch_size
-
-    def get_next_batch(self) -> list[dict[str, Any]] | None:
-        """Get next batch of packed samples if a full batch is available."""
-        if not self.has_batch_ready():
-            return None
-        return [self.packed_samples.popleft() for _ in range(self.batch_size)]
 
     def flush(self) -> None:
         """Pack and yield all remaining samples, including leftovers."""

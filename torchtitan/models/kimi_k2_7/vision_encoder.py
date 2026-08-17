@@ -123,7 +123,7 @@ def _compute_2d_rope_cache(
     grids: list[list[int]],
     head_dim: int,
 ) -> torch.Tensor:
-    """Compute packed 2D-RoPE complex frequencies in raster order.
+    """Compute the packed 2D-RoPE complex ``freqs_cis`` cache in raster order.
 
     For head-dim pair index ``k`` (``k`` in ``[0, head_dim/4)``), even output
     pairs are rotated by the *column* (x) position and odd pairs by the *row*
@@ -174,7 +174,7 @@ def _compute_2d_rope_cache(
 
 
 def _tpool_patch_merger(
-    hidden: torch.Tensor,
+    hidden_TD: torch.Tensor,
     grids: list[list[int]],
     merge_kernel_size: tuple[int, int],
 ) -> torch.Tensor:
@@ -186,7 +186,7 @@ def _tpool_patch_merger(
     ``(h/kh * w/kw)`` merged tokens of dim ``kh*kw*D``.
 
     Args:
-        hidden: ``(total_num_patches, D)`` packed patch features.
+        hidden_TD: ``(total_num_patches, D)`` packed patch features.
         grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
             read to CPU once by the caller, so the per-item loop adds no syncs).
         merge_kernel_size: ``(kh, kw)`` spatial merge factors.
@@ -196,7 +196,7 @@ def _tpool_patch_merger(
         ``(sum_i((h_i/kh)*(w_i/kw)), kh*kw*D)``. Each item's token count is
         ``(h/kh) * (w/kw)``.
     """
-    d_model = hidden.shape[-1]
+    d_model = hidden_TD.shape[-1]
     kh, kw = merge_kernel_size
     merged_dim = kh * kw * d_model
 
@@ -204,7 +204,7 @@ def _tpool_patch_merger(
     offset = 0
     for t, h, w in grids:
         num_patches = t * h * w
-        seq = hidden[offset : offset + num_patches]
+        seq = hidden_TD[offset : offset + num_patches]
         offset += num_patches
         new_h, new_w = h // kh, w // kw
         # (t, new_h, kh, new_w, kw, D) -> mean over t -> group spatial kernel.
@@ -292,14 +292,14 @@ class VisionProjector(Module):
         self.linear_2 = config.linear_2.build()
         self.act_fn = config.act_fn.build()
 
-    def forward(self, merged: torch.Tensor) -> torch.Tensor:
+    def forward(self, merged_MK: torch.Tensor) -> torch.Tensor:
         """Project packed merged tokens ``(M, kh*kw*vt_hidden_size)``.
 
         The pre-norm runs per-patch on ``vt_hidden_size``; the merged kernel
         features are then flattened for the projection MLP.
         """
-        num_merged_tokens = merged.shape[0]
-        x = merged.view(num_merged_tokens, -1, self.vt_hidden_size)
+        num_merged_tokens = merged_MK.shape[0]
+        x = merged_MK.view(num_merged_tokens, -1, self.vt_hidden_size)
         x = self.pre_norm(x).view(num_merged_tokens, self.merged_dim)
         x = self.linear_1(x)
         x = self.act_fn(x)

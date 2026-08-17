@@ -952,13 +952,13 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             ref_loss = ref_model_bf16(tokens).sum()
             ref_loss.backward()
             for p_fp32, p_bf16 in zip(
-                ref_model.parameters(), ref_model_bf16.parameters(), strict=True
+                ref_model.parameters(), ref_model_bf16.parameters()
             ):
                 p_fp32.grad = p_bf16.grad.to(p_fp32.dtype)
                 p_bf16.grad = None
             ref_optim.step()
             for p_fp32, p_bf16 in zip(
-                ref_model.parameters(), ref_model_bf16.parameters(), strict=True
+                ref_model.parameters(), ref_model_bf16.parameters()
             ):
                 p_bf16.detach().copy_(p_fp32)
 

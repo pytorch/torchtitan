@@ -22,8 +22,10 @@ from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
-    get_num_transformer_tokens_per_sample,
+    IMAGE_LATENT_SIZE_RATIO,
     pack_latents,
+    PATCH_HEIGHT,
+    PATCH_WIDTH,
     preprocess_data,
 )
 from torchtitan.trainer import Trainer
@@ -41,9 +43,16 @@ class FluxTrainer(Trainer):
         inference: Inference = field(default_factory=Inference)
 
         def __post_init__(self):
-            self.training.max_seq_len = get_num_transformer_tokens_per_sample(
-                self.dataloader.img_size, self.tokenizer.max_t5_encoding_len
-            )
+            # Compute image token count: autoencoder downscales the image,
+            # then pack_latents tiles the latent into 2x2 patches.
+            # pyrefly: ignore [missing-attribute]
+            img_size = self.dataloader.img_size
+            latent_side_width = img_size // IMAGE_LATENT_SIZE_RATIO // PATCH_WIDTH
+            latent_side_height = img_size // IMAGE_LATENT_SIZE_RATIO // PATCH_HEIGHT
+            seq_len_img = latent_side_width * latent_side_height
+
+            seq_len_txt = self.tokenizer.max_t5_encoding_len
+            self.training.max_seq_len = seq_len_img + seq_len_txt
             Trainer.Config.__post_init__(self)
 
     def __init__(self, config: Config):
@@ -234,31 +243,22 @@ class FluxTrainer(Trainer):
             latents = pack_latents(latents)
             target = pack_latents(noise - labels)
 
-        num_image_tokens_per_sample = latents.shape[1]
-        num_text_tokens_per_sample = t5_encodings.shape[1]
-        latents = latents.flatten(0, 1)
-        latent_pos_enc = latent_pos_enc.flatten(0, 1)
-        t5_encodings = t5_encodings.flatten(0, 1)
-        text_pos_enc = text_pos_enc.flatten(0, 1)
-        target = target.flatten(0, 1)
-
         # Apply CP sharding if enabled
         if self.parallel_dims.cp_enabled:
             from torchtitan.distributed.context_parallel import cp_shard
 
-            (latents, latent_pos_enc, target), _ = cp_shard(
+            (
+                latents,
+                latent_pos_enc,
+                t5_encodings,
+                text_pos_enc,
+                target,
+            ), _ = cp_shard(
                 self.parallel_dims.get_mesh("cp"),
-                (latents, latent_pos_enc, target),
+                (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                 None,  # No attention masks for Flux
-                load_balancer_type="headtail",
-                headtail_segment_size=num_image_tokens_per_sample,
-            )
-            (t5_encodings, text_pos_enc), _ = cp_shard(
-                self.parallel_dims.get_mesh("cp"),
-                (t5_encodings, text_pos_enc),
-                None,
-                load_balancer_type="headtail",
-                headtail_segment_size=num_text_tokens_per_sample,
+                load_balancer_type=None,
+                input_seq_dim=1,
             )
 
         # Accumulate after CP sharding so the count reflects the actual
@@ -284,11 +284,11 @@ class FluxTrainer(Trainer):
                 txt_ids=text_pos_enc,
                 y=clip_encodings,
                 timesteps=timesteps,
-                cp_degree=self.parallel_dims.cp,
             )
 
             # Scale loss as we used SUM reduction for mse loss function
             loss, _ = self.loss_fn(latent_noise_pred, target, global_valid_tokens)
+            # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[unsupported-delete]
             del (latent_noise_pred, noise, target)

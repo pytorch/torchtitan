@@ -356,34 +356,6 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
         return 4
 
     @with_comms
-    def test_token_major_cross_entropy_with_vocab_sharded_dtensor(self):
-        mesh = init_device_mesh(
-            self.device_type,
-            (self.world_size,),
-            mesh_dim_names=("tp",),
-        )
-        generator = torch.Generator(device=self.device_type).manual_seed(42)
-        logits = torch.randn(
-            8,
-            32,
-            device=self.device_type,
-            generator=generator,
-        )
-        labels = torch.randint(
-            0,
-            32,
-            (8,),
-            device=self.device_type,
-            generator=generator,
-        )
-        logits_dtensor = distribute_tensor(logits, mesh, (Shard(1),))
-
-        actual = cross_entropy_loss(logits_dtensor, labels)
-        expected = F.cross_entropy(logits.float(), labels, reduction="sum")
-
-        torch.testing.assert_close(actual, expected)
-
-    @with_comms
     def test_loss_parallel_cross_entropy_parity(self):
         """
         Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
@@ -549,7 +521,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
         for h_chunk, label_chunk in zip(
             torch.chunk(hidden_states, num_chunks, dim=0),
             torch.chunk(labels, num_chunks, dim=0),
-            strict=True,
         ):
             chunk_loss = cross_entropy_loss(
                 lm_head(h_chunk.contiguous()),
@@ -593,7 +564,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
             for h_chunk, label_chunk in zip(
                 torch.chunk(hidden_states, num_chunks, dim=0),
                 torch.chunk(labels, num_chunks, dim=0),
-                strict=True,
             ):
                 total = total + cross_entropy_loss(
                     model_ref.output(h_chunk.contiguous()),

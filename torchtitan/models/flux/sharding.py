@@ -27,36 +27,31 @@ CP = MeshAxisName.CP
 def flux_activation_placement(
     *,
     cp: spmd.PerMeshAxisSpmdType,
-    num_tensor_dims: int = 2,
 ) -> SpmdLayout:
-    cp_shards_tokens = isinstance(cp, spmd.Shard)
     return SpmdLayout(
         {
-            DP: spmd.V if cp_shards_tokens else spmd.S(0),
-            CP: spmd.V if cp_shards_tokens else cp,
-        },
-        partition_spec=(
-            ((DP, CP), *((None,) * (num_tensor_dims - 1))) if cp_shards_tokens else None
-        ),
+            DP: spmd.S(0),
+            CP: cp,
+        }
     )
 
 
 def set_flux_inner_attention_local_map(inner_attention_cfg) -> None:
-    q_layout = flux_activation_placement(cp=spmd.S(0), num_tensor_dims=3)
-    kv_src_layout = flux_activation_placement(cp=spmd.S(0), num_tensor_dims=3)
-    kv_dst_layout = flux_activation_placement(cp=spmd.R, num_tensor_dims=3)
-    kv_grad_layout = flux_activation_placement(cp=spmd.P, num_tensor_dims=3)
+    q_layout = flux_activation_placement(cp=spmd.S(1))
+    kv_src_layout = flux_activation_placement(cp=spmd.S(1))
+    kv_dst_layout = flux_activation_placement(cp=spmd.R)
+    kv_grad_layout = flux_activation_placement(cp=spmd.P)
 
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "q_TNH": q_layout,
-            "k_TNH": kv_src_layout,
-            "v_TNH": kv_src_layout,
+            "q_BLNH": q_layout,
+            "k_BLNH": kv_src_layout,
+            "v_BLNH": kv_src_layout,
         },
         in_dst_shardings={
-            "q_TNH": q_layout,
-            "k_TNH": kv_dst_layout,
-            "v_TNH": kv_dst_layout,
+            "q_BLNH": q_layout,
+            "k_BLNH": kv_dst_layout,
+            "v_BLNH": kv_dst_layout,
         },
         out_src_shardings=q_layout,
         local_map=LocalMapConfig(
@@ -67,6 +62,8 @@ def set_flux_inner_attention_local_map(inner_attention_cfg) -> None:
 
 def set_flux_sharding_config(config: "FluxModel.Config") -> None:
     for block_cfg in config.double_blocks:
+        set_flux_inner_attention_local_map(block_cfg.img_attn.inner_attention)
+        set_flux_inner_attention_local_map(block_cfg.txt_attn.inner_attention)
         set_flux_inner_attention_local_map(block_cfg.inner_attention)
 
     for block_cfg in config.single_blocks:
@@ -94,16 +91,15 @@ def annotate_flux_forward_inputs(
         return
 
     sequence_type = {
-        DP: spmd.V,
-        CP: spmd.V,
+        DP: spmd.S(0),
+        CP: spmd.S(1),
     }
-    sequence_spec = spmd.PartitionSpec((DP, CP), None)
     batch_type = {
         DP: spmd.S(0),
         CP: spmd.R,
     }
 
     for tensor in (latents, latent_pos_enc, t5_encodings, text_pos_enc, target):
-        spmd.assert_type(tensor, sequence_type, sequence_spec)
+        spmd.assert_type(tensor, sequence_type)
     for tensor in (clip_encodings, timesteps):
         spmd.assert_type(tensor, batch_type)

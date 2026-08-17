@@ -198,13 +198,18 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         cp_mesh: Device mesh for context parallel dimension
 
     Note:
-        Applies to the joint FlexAttention modules in double and single blocks.
+        - Uses SDPA attention type
+        - Applies to all inner_attention modules in double_blocks and single_blocks
     """
     # Collect all inner_attention modules from the Flux model
     attention_modules = []
 
     # pyrefly: ignore [not-iterable]
     for double_block in model.double_blocks:
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(double_block.img_attn.inner_attention)
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(double_block.txt_attn.inner_attention)
         # pyrefly: ignore [missing-attribute]
         attention_modules.append(double_block.inner_attention)
 
@@ -213,6 +218,7 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         # pyrefly: ignore [missing-attribute]
         attention_modules.append(single_block.inner_attention)
 
+    # Apply CP using direct forward wrapping (always uses SDPA for Flux)
     apply_cp_to_forward(attention_modules, cp_mesh)
 
 

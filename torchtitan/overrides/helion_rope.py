@@ -842,7 +842,7 @@ if _HELION_IMPORT_ERROR is None:
                 logger,
                 "HelionCosSinRoPE: inputs unsupported by the fused kernel (need "
                 "CUDA q/k/cache/positions on one device, a 2D cache of width "
-                "2 * head_dim, and integer (T,) position ids); "
+                "2 * head_dim, and integer (num_tokens,) position ids); "
                 "falling back to the PyTorch cos/sin RoPE.",
             )
             return None
@@ -906,7 +906,7 @@ if _HELION_IMPORT_ERROR is None:
                 logger,
                 "HelionComplexRoPE: inputs unsupported by the fused kernel "
                 "(need CUDA q/k/cache/positions on one device, a complex cache of "
-                "width head_dim / 2, and integer (T,) position ids); "
+                "width head_dim / 2, and integer (num_tokens,) position ids); "
                 "falling back to the PyTorch complex RoPE.",
             )
             return None

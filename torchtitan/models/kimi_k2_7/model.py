@@ -129,7 +129,7 @@ class KimiK25Model(DeepSeekV3Model):
         if vision_positions:
             inputs_embeds = scatter_vision_embeds(
                 inputs_embeds,
-                vision_embeds_TD=vision_embeds,
+                vision_embeds=vision_embeds,
                 vision_positions=vision_positions,
             )
         return inputs_embeds
@@ -151,7 +151,7 @@ class KimiK25Model(DeepSeekV3Model):
         Images and videos share one unified ``<|media_pad|>`` placeholder.
 
         Args:
-            tokens: ``(T,)`` packed token IDs.
+            tokens: ``(num_tokens,)`` packed token IDs.
             pixel_values: ``(total_num_patches, patch_dim)`` packed image
                 patches, or None for text-only / video-only batches.
             grid_thw: (num_images, 3) patch counts ``[t, h, w]`` per image.
@@ -164,7 +164,7 @@ class KimiK25Model(DeepSeekV3Model):
             positions: Per-token position IDs for packed sequences.
 
         Returns:
-            ``(T, vocab_size)`` logits.
+            ``(num_tokens, vocab_size)`` logits.
         """
         if self.tok_embeddings is not None:
             x = self._prepare_multimodal_embeds(

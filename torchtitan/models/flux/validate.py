@@ -187,11 +187,6 @@ class FluxValidator(Validator):
                     tokenizer=self.tokenizer,
                     t5_encoder=self.t5_encoder,
                     clip_encoder=self.clip_encoder,
-                    cp_mesh=(
-                        parallel_dims.get_mesh("cp")
-                        if parallel_dims.cp_enabled
-                        else None
-                    ),
                 )
 
                 save_image(
@@ -259,31 +254,22 @@ class FluxValidator(Validator):
                 latents = pack_latents(latents)
                 target = pack_latents(noise - labels)
 
-            num_image_tokens_per_sample = latents.shape[1]
-            num_text_tokens_per_sample = t5_encodings.shape[1]
-            latents = latents.flatten(0, 1)
-            latent_pos_enc = latent_pos_enc.flatten(0, 1)
-            t5_encodings = t5_encodings.flatten(0, 1)
-            text_pos_enc = text_pos_enc.flatten(0, 1)
-            target = target.flatten(0, 1)
-
             # Apply CP sharding if enabled
             if parallel_dims.cp_enabled:
                 from torchtitan.distributed.context_parallel import cp_shard
 
-                (latents, latent_pos_enc, target), _ = cp_shard(
+                (
+                    latents,
+                    latent_pos_enc,
+                    t5_encodings,
+                    text_pos_enc,
+                    target,
+                ), _ = cp_shard(
                     parallel_dims.get_mesh("cp"),
-                    (latents, latent_pos_enc, target),
+                    (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                     None,  # No attention masks for Flux
-                    load_balancer_type="headtail",
-                    headtail_segment_size=num_image_tokens_per_sample,
-                )
-                (t5_encodings, text_pos_enc), _ = cp_shard(
-                    parallel_dims.get_mesh("cp"),
-                    (t5_encodings, text_pos_enc),
-                    None,
-                    load_balancer_type="headtail",
-                    headtail_segment_size=num_text_tokens_per_sample,
+                    load_balancer_type=None,
+                    input_seq_dim=1,
                 )
 
             with self.validation_context():
@@ -294,7 +280,6 @@ class FluxValidator(Validator):
                     txt_ids=text_pos_enc,
                     y=clip_encodings,
                     timesteps=timesteps,
-                    cp_degree=parallel_dims.cp,
                 )
 
                 loss, _ = self.loss_fn(latent_noise_pred, target)

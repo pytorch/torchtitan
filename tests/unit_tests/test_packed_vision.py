@@ -7,15 +7,11 @@
 import unittest
 from unittest.mock import patch
 
-import spmd_types as spmd
 import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import create_mask
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.models.common.attention import FlexAttention
-from torchtitan.models.common.decoder_sharding import set_gqa_inner_attention_local_map
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import scatter_vision_embeds
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -24,7 +20,6 @@ from torchtitan.models.kimi_k2_7.vision_encoder import (
     _compute_2d_rope_cache as _compute_kimi_2d_rope_cache,
     _compute_learned_pos_embeds as _compute_kimi_learned_pos_embeds,
     _tpool_patch_merger,
-    VisionProjector,
 )
 from torchtitan.models.qwen3_5.vision_encoder import (
     _compute_2d_rope_cache,
@@ -37,8 +32,7 @@ class TestPackedVision(unittest.TestCase):
     def test_collator_flattens_text_segments(self) -> None:
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         collator = MultiModalCollator(
-            batch_size=2,
-            seq_len=4,
+            num_tokens_per_batch=8,
             max_images_per_batch=0,
             patch_size=1,
             temporal_patch_size=1,
@@ -61,11 +55,11 @@ class TestPackedVision(unittest.TestCase):
 
         inputs_T, labels_T, positions_T = collator.collate_text(batch)
 
-        torch.testing.assert_close(inputs_T, torch.tensor([1, 2, 3, 4, 6, 7, 8, 99]))
+        torch.testing.assert_close(inputs_T, torch.tensor([1, 2, 3, 4, 6, 7, 99, 99]))
         torch.testing.assert_close(
             labels_T, torch.tensor([2, 3, 4, 5, 7, 8, -100, -100])
         )
-        torch.testing.assert_close(positions_T, torch.tensor([0, 1, 2, 3, 0, 1, 2, 0]))
+        torch.testing.assert_close(positions_T, torch.tensor([0, 1, 2, 3, 0, 1, 0, 1]))
 
     def test_collator_concatenates_patches(self) -> None:
         patches_0 = torch.arange(12).view(3, 4)
@@ -73,8 +67,7 @@ class TestPackedVision(unittest.TestCase):
         grid_0 = torch.tensor([1, 1, 3])
         grid_1 = torch.tensor([1, 1, 2])
         collator = MultiModalCollator(
-            batch_size=1,
-            seq_len=8,
+            num_tokens_per_batch=8,
             max_images_per_batch=2,
             patch_size=1,
             temporal_patch_size=1,
@@ -115,23 +108,6 @@ class TestPackedVision(unittest.TestCase):
             dtype=torch.bool,
         )
         torch.testing.assert_close(dense_mask, expected)
-
-    def test_packed_flex_attention_shards_heads(self) -> None:
-        config = FlexAttention.Config()
-
-        set_gqa_inner_attention_local_map(config)
-
-        sharding = config.sharding_config
-        assert sharding is not None
-        self.assertEqual(
-            set(sharding.in_src_shardings or {}),
-            {"q_TNH", "k_TNH", "v_TNH"},
-        )
-        q_layout = (sharding.in_src_shardings or {})["q_TNH"]
-        k_dst_layout = (sharding.in_dst_shardings or {})["k_TNH"]
-        self.assertEqual(q_layout.per_axis_spmd_types()[MeshAxisName.TP], spmd.S(1))
-        self.assertEqual(q_layout.per_axis_spmd_types()[MeshAxisName.CP], spmd.S(0))
-        self.assertEqual(k_dst_layout.per_axis_spmd_types()[MeshAxisName.CP], spmd.R)
 
     def test_qwen_position_embeddings_are_packed(self) -> None:
         grids = [[1, 2, 2], [2, 2, 2]]
@@ -194,33 +170,13 @@ class TestPackedVision(unittest.TestCase):
         expected_MK = torch.tensor([[0.0, 1.0, 2.0, 3.0], [6.0, 7.0, 8.0, 9.0]])
         torch.testing.assert_close(merged_MK, expected_MK)
 
-    def test_kimi_projector_accepts_packed_tokens(self) -> None:
-        projector = VisionProjector(
-            VisionProjector.Config(
-                vt_hidden_size=1,
-                merged_dim=4,
-                pre_norm=LayerNorm.Config(normalized_shape=1),
-                linear_1=Linear.Config(in_features=4, out_features=4),
-                linear_2=Linear.Config(in_features=4, out_features=4),
-            )
-        )
-        projector.pre_norm = nn.Identity()
-        projector.linear_1 = nn.Identity()
-        projector.act_fn = nn.Identity()
-        projector.linear_2 = nn.Identity()
-        merged_MK = torch.arange(8).view(2, 4)
-
-        projected_MO = projector(merged_MK)
-
-        torch.testing.assert_close(projected_MO, merged_MK)
-
     def test_scatter_vision_embeds_uses_packed_layout(self) -> None:
         inputs_TD = torch.zeros(5, 2)
         vision_TD = torch.arange(8, dtype=torch.float32).view(4, 2)
 
         result_TD = scatter_vision_embeds(
             inputs_TD,
-            vision_embeds_TD=vision_TD,
+            vision_embeds=vision_TD,
             vision_positions=[(0, 0, 2), (1, 3, 2)],
         )
 

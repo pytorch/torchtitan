@@ -75,26 +75,26 @@ def get_vision_positions(
 def scatter_vision_embeds(
     inputs_embeds: torch.Tensor,
     *,
-    vision_embeds_TD: torch.Tensor,
+    vision_embeds: torch.Tensor,
     vision_positions: list[tuple[int, int, int]],
 ) -> torch.Tensor:
     """Copy packed vision features into the text sequence at placeholder runs.
 
     Args:
         inputs_embeds: ``(T, D)`` text embeddings, modified in place.
-        vision_embeds_TD: Packed vision features ``(total_tokens, dim)``.
+        vision_embeds: Packed vision features ``(total_tokens, dim)``.
         vision_positions: from ``get_vision_positions``.
     """
     vision_offset = 0
     for _, vision_start, num_tokens in vision_positions:
-        inputs_embeds[vision_start : vision_start + num_tokens] = vision_embeds_TD[
+        inputs_embeds[vision_start : vision_start + num_tokens] = vision_embeds[
             vision_offset : vision_offset + num_tokens
         ].to(inputs_embeds.dtype)
         vision_offset += num_tokens
 
-    if vision_offset != vision_embeds_TD.shape[0]:
+    if vision_offset != vision_embeds.shape[0]:
         raise ValueError(
             f"Vision placeholder runs consume {vision_offset} embeddings but "
-            f"the packed vision output contains {vision_embeds_TD.shape[0]}."
+            f"the packed vision output contains {vision_embeds.shape[0]}."
         )
     return inputs_embeds

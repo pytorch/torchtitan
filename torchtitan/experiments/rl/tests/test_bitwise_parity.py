@@ -312,15 +312,13 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_padded_varlen_metadata(batch_size, max_len, device):
-    """Build VarlenMetadata for packed fixed-width sequences.
-
-    Each logical sequence occupies ``max_len`` contiguous tokens. Causal
-    masking prevents padding tokens from affecting valid positions.
-    """
-    cu_seqs = torch.arange(
-        0, (batch_size + 1) * max_len, max_len, dtype=torch.int32, device=device
-    )
+def _build_varlen_metadata(seq_lens, device):
+    """Build VarlenMetadata for contiguous variable-length sequences."""
+    cumulative_seq_lens = [0]
+    for seq_len in seq_lens:
+        cumulative_seq_lens.append(cumulative_seq_lens[-1] + seq_len)
+    cu_seqs = torch.tensor(cumulative_seq_lens, dtype=torch.int32, device=device)
+    max_len = max(seq_lens)
     return VarlenMetadata(
         cu_seq_q=cu_seqs, cu_seq_k=cu_seqs, max_q=max_len, max_k=max_len
     )
@@ -391,19 +389,13 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
 
 def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
-    """Compute per-sequence logprobs using packed fixed-width varlen segments."""
-    max_len = max(seq_lens)
-    padded_parts = []
-    position_parts = []
-    for t in input_tensors:
-        padded = torch.zeros(max_len, dtype=torch.long, device=device)
-        padded[: t.shape[0]] = t
-        padded_parts.append(padded)
-        position_parts.append(torch.arange(max_len, device=device))
-    packed_ids = torch.cat(padded_parts)
-    positions = torch.cat(position_parts)
+    """Compute per-sequence logprobs using packed variable-length segments."""
+    packed_ids = torch.cat(input_tensors)
+    positions = torch.cat(
+        [torch.arange(seq_len, device=device) for seq_len in seq_lens]
+    )
 
-    attention_masks = _build_padded_varlen_metadata(len(input_tensors), max_len, device)
+    attention_masks = _build_varlen_metadata(seq_lens, device)
 
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which can break torch.compile with symbolic shapes.
@@ -416,7 +408,7 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     for t in input_tensors:
         seq_len = t.shape[0]
         labels[offset : offset + seq_len - 1] = t[1:seq_len]
-        offset += max_len
+        offset += seq_len
 
     logprobs = compute_logprobs(logits, labels)
 
@@ -425,7 +417,7 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     for t in input_tensors:
         seq_len = t.shape[0]
         results.append(logprobs[offset : offset + seq_len - 1])
-        offset += max_len
+        offset += seq_len
     return results
 
 
@@ -434,8 +426,8 @@ def compute_trainer_prefill_logprobs(model, token_ids, device, attn_backend="var
 
     Args:
         token_ids: A single sequence (list[int]) or a batch of sequences
-            (list[list[int]]). Batched sequences are padded to max length
-            with appropriate attention metadata.
+            (list[list[int]]). Batched sequences are packed with appropriate
+            attention metadata.
         attn_backend: 'varlen' or 'flex'.
 
     Returns:

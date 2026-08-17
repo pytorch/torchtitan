@@ -600,7 +600,7 @@ class Qwen35Model(Decoder):
       text batches use the plain 1D positions
     - MoE variant: routed experts + shared expert with sigmoid gate
 
-    MRoPE positions (``mrope_positions``, shape ``(T, 3)``) are built by
+    MRoPE positions (``mrope_positions``, shape ``(num_tokens, 3)``) are built by
     the dataloader and forwarded to every pipeline stage, so RoPE stays consistent
     across stages even though the raw vision inputs (``pixel_values``/``grid_thw``)
     only reach the first stage. Text batches carry no ``mrope_positions`` and use
@@ -614,7 +614,7 @@ class Qwen35Model(Decoder):
           │    ├─ tok_embeddings(tokens)              → text embeddings
           │    ├─ _get_vision_embeds(pixel_values)     → vision embeddings
           │    │    └─ vision_encoder(pixel_values)     → merge patches
-          │    ├─ _get_vision_positions             → locate vision regions
+          │    ├─ get_vision_positions              → locate vision regions
           │    └─ _scatter_vision_embeds                → scatter into text sequence
           │
           └─ transformer layers (hybrid), each given (mrope_positions or positions)
@@ -768,7 +768,7 @@ class Qwen35Model(Decoder):
         """Embed tokens, run vision encoder, scatter vision into text.
 
         Args:
-            tokens: Input token IDs ``(T,)``.
+            tokens: Input token IDs ``(num_tokens,)``.
             pixel_values: Image patches or None
             pixel_values_videos: Video patches or None
             grid_thw: Grid dimensions for images or None
@@ -776,7 +776,7 @@ class Qwen35Model(Decoder):
             special_tokens: Special token definitions
 
         Returns:
-            ``(T, D)`` embeddings with vision tokens scattered in.
+            ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
         """
         image_token_id = special_tokens["image_id"]
         video_token_id = special_tokens["video_id"]
@@ -793,7 +793,7 @@ class Qwen35Model(Decoder):
             if image_positions:
                 inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
-                    vision_embeds_TD=vision_embeds,
+                    vision_embeds=vision_embeds,
                     vision_positions=image_positions,
                 )
 
@@ -805,7 +805,7 @@ class Qwen35Model(Decoder):
             if video_positions:
                 inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
-                    vision_embeds_TD=vision_embeds,
+                    vision_embeds=vision_embeds,
                     vision_positions=video_positions,
                 )
 

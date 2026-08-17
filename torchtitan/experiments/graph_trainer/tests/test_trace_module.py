@@ -2065,33 +2065,26 @@ class TestTraceContextParallel(FSDPTest):
                 config.model_spec.model.layers = config.model_spec.model.layers[:1]
 
                 trainer = GraphTrainer(config)
-                local_batch_size = config.training.get_num_sequences(
-                    config.training.num_tokens_per_dp_rank,
-                    field_name="training.num_tokens_per_dp_rank",
-                )
+                num_tokens = config.training.num_tokens_per_dp_rank
                 tokens = torch.randint(
                     0,
                     trainer.model_config.vocab_size,
-                    (local_batch_size, config.training.max_seq_len),
+                    (num_tokens,),
                     device=trainer.device,
                 )
                 labels = torch.randint(
                     0,
                     trainer.model_config.vocab_size,
-                    (local_batch_size, config.training.max_seq_len),
+                    (num_tokens,),
                     device=trainer.device,
                 )
                 # The dataloader always supplies per-document positions, which
                 # drive RoPE (SDPA itself is maskless and uses is_causal).
-                positions = (
-                    torch.arange(
-                        config.training.max_seq_len,
-                        device=trainer.device,
-                        dtype=torch.int32,
-                    )
-                    .unsqueeze(0)
-                    .expand(local_batch_size, config.training.max_seq_len)
-                )
+                positions = torch.arange(
+                    num_tokens,
+                    device=trainer.device,
+                    dtype=torch.int32,
+                ) % config.training.max_seq_len
                 trainer.forward_backward_step(
                     input_dict={"input": tokens, "positions": positions},
                     labels=labels,

@@ -105,12 +105,9 @@ class TestMaybeCheckMaxPos(unittest.TestCase):
 
     def test_positions_out_of_bounds_raises(self):
         positions = torch.tensor([0, 1, 2, 16])
-
-        def check_positions():
+        with self.assertRaises(RuntimeError):
             _maybe_check_max_pos(positions, max_valid_pos=15)
             torch.cuda.synchronize() if torch.cuda.is_available() else None
-
-        self.assertRaises(RuntimeError, check_positions)
 
 
 class TestRoPEPositionBoundsComplex(unittest.TestCase):
@@ -165,26 +162,6 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         positions = torch.tensor([0, 1, self.max_seq_len, self.max_seq_len + 1])
         with self.assertRaises(RuntimeError):
             self.rope(xq, xk, positions)
-
-
-class TestPackedRoPE(unittest.TestCase):
-    def test_preserves_tnh_shape(self):
-        torch.manual_seed(42)
-        num_tokens, num_heads, head_dim = 7, 3, 8
-        positions_T = torch.tensor([0, 1, 2, 0, 1, 2, 3])
-        q_TNH = torch.randn(num_tokens, num_heads, head_dim)
-        k_TNH = torch.randn(num_tokens, num_heads, head_dim)
-
-        for rope_cls in (ComplexRoPE, CosSinRoPE):
-            with self.subTest(rope=rope_cls.__name__):
-                rope = rope_cls.Config(
-                    dim=head_dim,
-                    max_seq_len=num_tokens,
-                ).build()
-                q_out_TNH, k_out_TNH = rope(q_TNH, k_TNH, positions_T)
-
-                self.assertEqual(q_out_TNH.shape, q_TNH.shape)
-                self.assertEqual(k_out_TNH.shape, k_TNH.shape)
 
 
 class TestMRoPECache(unittest.TestCase):

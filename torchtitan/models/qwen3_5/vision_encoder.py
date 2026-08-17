@@ -427,22 +427,22 @@ class Qwen35VisionEncoder(Module):
                 f"describes {expected_tokens}."
             )
 
-        x_TD = self.patch_embed(pixel_values)
-        learned_pos_TD, rope_cache = self.compute_position_embeddings(grids)
-        x_TD = x_TD + learned_pos_TD
+        x = self.patch_embed(pixel_values)
+        learned_pos, rope_cache = self.compute_position_embeddings(grids)
+        x = x + learned_pos
 
         attention_mask = create_block_diagonal_mask(
             segment_lengths,
             total_tokens,
-            x_TD.device,
+            x.device,
         )
 
         for layer in self.layers.values():
-            x_TD = layer(
-                x_TD,
+            x = layer(
+                x,
                 rope_cache=rope_cache,
                 rope_apply=CosSinRoPE.apply_rotary_emb,
                 attention_mask=attention_mask,
             )
 
-        return self.merger(x_TD)
+        return self.merger(x)

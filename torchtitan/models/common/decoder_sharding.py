@@ -40,7 +40,7 @@ def dense_activation_placement(
     tp: spmd.PerMeshAxisSpmdType,
     cp: spmd.PerMeshAxisSpmdType = spmd.S(0),
 ) -> SpmdLayout:
-    """Placement for token-leading activations.
+    """Placement for dense-path activations.
 
     DP is token-sharded. CP defaults to token-sharded S(0); override to R/I
     for K/V after all-gather or P for K/V gradients. TP placement is

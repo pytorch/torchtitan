@@ -15,16 +15,6 @@ PATCH_HEIGHT, PATCH_WIDTH = 2, 2
 LATENT_CHANNELS, IMAGE_LATENT_SIZE_RATIO = 16, 8
 
 
-def get_num_transformer_tokens_per_sample(
-    img_size: int, max_t5_encoding_len: int
-) -> int:
-    """Return the fixed text-plus-image token count for one Flux sample."""
-    latent_height = img_size // IMAGE_LATENT_SIZE_RATIO
-    latent_width = img_size // IMAGE_LATENT_SIZE_RATIO
-    num_image_tokens = (latent_height // PATCH_HEIGHT) * (latent_width // PATCH_WIDTH)
-    return max_t5_encoding_len + num_image_tokens
-
-
 def preprocess_data(
     # arguments from the recipe
     device: torch.device,

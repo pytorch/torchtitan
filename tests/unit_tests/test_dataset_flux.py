@@ -88,6 +88,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
+                    max_seq_len=512,
                     num_tokens_per_batch=batch_size * 512,
                     tokenizer=tokenizer,
                 )
@@ -116,6 +117,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl_resumed = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
+                    max_seq_len=512,
                     num_tokens_per_batch=batch_size * 512,
                     tokenizer=tokenizer,
                 )

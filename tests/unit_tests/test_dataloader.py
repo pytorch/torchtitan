@@ -201,32 +201,6 @@ class TestParallelAwareDataloader(unittest.TestCase):
                 if tok == tokenizer.bos_id and i > 0:
                     self.assertEqual(pos.item(), 0)
 
-    def test_each_batch_is_one_pp_microbatch(self):
-        num_tokens_per_dp_rank = 4096
-        num_pp_microbatches = 4
-        dataloader = HuggingFaceTextDataLoader(
-            HuggingFaceTextDataLoader.Config(
-                dataset="c4_test", num_workers=0, infinite=False
-            ),
-            dp_world_size=1,
-            dp_rank=0,
-            tokenizer=DummyTokenizer(),
-            max_seq_len=512,
-            num_tokens_per_batch=(num_tokens_per_dp_rank // num_pp_microbatches),
-        )
-
-        data_iterator = iter(dataloader)
-        batches = [next(data_iterator) for _ in range(num_pp_microbatches)]
-        num_tokens_per_batch = num_tokens_per_dp_rank // num_pp_microbatches
-        for input_dict, labels in batches:
-            self.assertEqual(input_dict["input"].shape, (num_tokens_per_batch,))
-            self.assertEqual(input_dict["positions"].shape, (num_tokens_per_batch,))
-            self.assertEqual(labels.shape, (num_tokens_per_batch,))
-        self.assertEqual(
-            sum(labels.numel() for _, labels in batches), num_tokens_per_dp_rank
-        )
-
-
 class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
     def _make_config(self, **kwargs) -> InterleavedHuggingFaceTextDataLoader.Config:
         defaults = dict(

@@ -39,13 +39,6 @@ def parallelize_muse_glimmer(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    assert (
-        training.max_seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.max_seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
-
     # When the model owns the vision stack (multimodal flavor), the encoder +
     # adapter are submodules: TP is applied by ``model.parallelize`` (driven by
     # the sharding configs set in update_from_config), and AC/compile/FSDP are

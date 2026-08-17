@@ -371,7 +371,7 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
         if num_tokens_per_batch % max_seq_len != 0:
             raise ValueError(
                 "num_tokens_per_batch must be evenly divisible by max_seq_len "
-                "while interleaved text inputs use [batch, seq]."
+                "because interleaved sources produce fixed max_seq_len token chunks."
             )
         # Each weighted draw contributes max_seq_len token slots, so source
         # weights remain token-mixture ratios after flattening the draws.

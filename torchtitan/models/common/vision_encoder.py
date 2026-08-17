@@ -24,12 +24,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
-from torch.nn.attention.flex_attention import BlockMask
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.attention import create_attention_mask, FlexAttention
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.protocols.module import Module
+
+compiled_create_block_mask = torch.compile(create_block_mask)
 
 # Applies rotary position embedding: (query, key, rope_cache) -> (query, key).
 RopeApply = Callable[
@@ -54,7 +56,7 @@ def create_block_diagonal_mask(
     def mask_mod(b, h, q_idx, kv_idx):
         return segment_ids[q_idx] == segment_ids[kv_idx]
 
-    return create_attention_mask(
+    return compiled_create_block_mask(
         mask_mod,
         1,
         None,
@@ -120,19 +122,19 @@ class VisionAttention(Module):
 
     def forward(
         self,
-        x_TD: torch.Tensor,
+        x: torch.Tensor,
         *,
         rope_cache: torch.Tensor,
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        num_tokens = x_TD.shape[0]
+        num_tokens = x.shape[0]
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_THDh = self.wq(x_TD).view(num_tokens, -1, self.head_dim)
-        k_THDh = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
-        v_THDh = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        q_THDh = self.wq(x).view(num_tokens, -1, self.head_dim)
+        k_THDh = self.wk(x).view(num_tokens, -1, self.head_dim)
+        v_THDh = self.wv(x).view(num_tokens, -1, self.head_dim)
 
         q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
 
@@ -162,17 +164,17 @@ class VisionTransformerBlock(Module):
 
     def forward(
         self,
-        x_TD: torch.Tensor,
+        x: torch.Tensor,
         *,
         rope_cache: torch.Tensor,
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        x_TD = x_TD + self.attn(
-            self.norm1(x_TD),
+        x = x + self.attn(
+            self.norm1(x),
             rope_cache=rope_cache,
             rope_apply=rope_apply,
             attention_mask=attention_mask,
         )
-        x_TD = x_TD + self.mlp(self.norm2(x_TD))
-        return x_TD
+        x = x + self.mlp(self.norm2(x))
+        return x

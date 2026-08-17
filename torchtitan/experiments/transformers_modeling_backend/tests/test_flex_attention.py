@@ -43,7 +43,7 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
 
         # Packed positions: two documents, position resets to 0 at the boundary.
         positions = torch.tensor(
-            [list(range(len_a)) + list(range(len_b))], device=device
+            list(range(len_a)) + list(range(len_b)), device=device
         )
         # The same document-causal BlockMask the model builds in get_attention_masks.
         mask_mod = and_masks(
