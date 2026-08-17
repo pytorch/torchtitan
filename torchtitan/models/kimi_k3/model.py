@@ -4,13 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Kimi K3 language model components.
-
-MLA delegates to TorchTitan's configured inner-attention backend. KDA runs on
-FLA's chunked Triton kernel; the pure-PyTorch recurrence used to check it lives
-in ``tests/unit_tests/test_kimi_k3.py`` and is far too slow for training.
-"""
-
 from dataclasses import dataclass, field
 
 import torch
@@ -283,8 +276,6 @@ class KimiKDAKernel(Module):
 
 
 class KimiDeltaAttention(Module):
-    """Kimi Delta Attention with causal convolutions and reference recurrence."""
-
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
@@ -491,10 +482,11 @@ class KimiLatentMoE(Module):
             -1, expert_ids_BLK, True
         )
         num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
-        with torch.no_grad():
-            # In place so the load-balancing hook registered on the optimizer
-            # keeps referring to this buffer across steps.
-            self.tokens_per_expert_E.add_(num_tokens_per_expert_E.float())
+        if self.training:
+            with torch.no_grad():
+                # In place so the load-balancing hook registered on the optimizer
+                # keeps referring to this buffer across steps.
+                self.tokens_per_expert_E.add_(num_tokens_per_expert_E.float())
 
         latent_BLD = self.routed_down(x_BLD)
         routed_BLD = self.routed_experts(
@@ -649,8 +641,6 @@ class KimiK3TransformerBlock(Module):
 
 
 class KimiK3Model(Decoder):
-    """Reduced Kimi K3 multimodal model used for first-version validation."""
-
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         layers: list[KimiK3TransformerBlock.Config]

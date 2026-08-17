@@ -44,14 +44,14 @@ describe the released model.
 
 ## Numerical Parity
 
-End-to-end KL divergence against the Hugging Face implementation: 
-**2.0644e-6**, with **100% top-1 and top-5match**.
+End-to-end KL divergence against the Hugging Face implementation (multimodal
+inputs): **2.0644e-6**, with **100% top-1 and top-5 match**.
 
-Vision parity: pixel preprocessing max difference `1.192e-7`; projected vision
-features cosine similarity `1.000000` and max difference `3.152e-3`.
+Vision parity: pixel preprocessing max difference **1.192e-7**; projected vision
+features cosine similarity **1.000000** and max difference **3.152e-3**.
 
 Test scripts:
 
-- `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face
-  versus TorchTitan end-to-end comparison
-- `tests/unit_tests/test_kimi_k3.py` -- KDA kernel versus the PyTorch reference
+- `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face vs.
+  TorchTitan comparison
+- `tests/unit_tests/test_kimi_k3.py` -- KDA and FSDP2 correctness

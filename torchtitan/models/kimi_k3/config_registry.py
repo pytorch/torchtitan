@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Trainer configurations for Kimi K3."""
-
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -60,6 +58,7 @@ def kimi_k3_debugmodel() -> Trainer.Config:
             seq_len=256,
             steps=10,
             dtype="bfloat16",
+            disable_cuda_graphs=True,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,

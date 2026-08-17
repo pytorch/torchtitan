@@ -390,7 +390,7 @@ class KimiK3VisionEncoder(Module):
             )
         )
         self.rotary_pos_emb = config.rotary_pos_emb.build()
-        self._cached_freq_table: torch.Tensor | None = None
+        self.register_buffer("_cached_freq_table", None, persistent=False)
         self.layers = ModuleDict(
             {
                 str(layer_idx): config.block.build()
