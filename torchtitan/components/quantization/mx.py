@@ -215,6 +215,13 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
     cache is fresh: the cached forward mirrors ``GroupedExperts.forward`` and the
     torchao helpers reproduce exactly the forward quant of ``_compute_fwd_sm100``.
 
+    Under a CUDA graph the cache is also what makes generation apply real mxfp8 to
+    the experts: the dynamic grouped path skips quant and runs bf16 under
+    ``torch.inference_mode()``, and a graph captures whichever branch is live at
+    capture time. So the generator populates the cache once before capture (see
+    the vLLM wrapper) and refreshes it in place afterward -- the buffers keep
+    their addresses so graph replay sees each weight update.
+
     Applied via MRO (``class X(_MXFP8GroupedExpertsWeightCacheMixin, parent)``) so
     the cached ``forward`` overrides the parent's and ``super().forward(...)``
     still reaches the parent's dynamic path.
@@ -231,24 +238,43 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
         )
         from torchao.prototype.moe_training.utils import unwrap_weight
 
-        cache = {}
+        # Reuse the existing cache tensors in place when present so their storage
+        # (and thus device pointers) stays stable across weight syncs. A CUDA graph
+        # captured over the cached forward bakes in these addresses; replay reads
+        # from them, so copy_ is what makes a post-capture weight update visible in
+        # the graph. The first call allocates; later calls overwrite in place. The
+        # weight shapes are static across syncs, so the quantized shapes match.
+        cache = self._mxfp8_weight_cache if self._mxfp8_weight_cache is not None else {}
         kernel_preference = None
         scale_calculation_mode = None
-        for name in ("w1_EFD", "w2_EDF", "w3_EFD"):
-            param = getattr(self, name)
-            # DTensor (outer) wraps the mxfp8 weight-wrapper (local) under EP/TP;
-            # mirror GroupedExperts.forward, which uses the local tensor.
-            wrapper = param.to_local() if isinstance(param, DTensor) else param
-            # The mxfp8 op config (kernel preference, scale mode) lives on the
-            # weight wrapper; read it so the cached forward matches the dynamic one.
-            kernel_preference = wrapper.config.kernel_preference  # type: ignore[missing-attribute]
-            scale_calculation_mode = wrapper.config.scale_calculation_mode  # type: ignore[missing-attribute]
-            hp = unwrap_weight(wrapper)
-            # (E, F, D) -> (E, D, F) == (E, K, N), the weight_t passed to grouped_mm.
-            weight_t = hp.bfloat16().transpose(-2, -1)
-            cache[name] = quantize_grouped_weight_for_cache(
-                weight_t, scale_calculation_mode
-            )
+        # The cache is a quantized weight buffer, never part of autograd. Run the
+        # whole update under no_grad so allocation and the in-place copy_ share the
+        # same grad mode regardless of the caller's context: the pre-capture
+        # population (vLLM wrapper) and the per-sync refresh (generator) run with
+        # different grad states, and mixing them would trip the "view created in
+        # no_grad modified in grad mode" guard on the in-place copy_.
+        with torch.no_grad():
+            for name in ("w1_EFD", "w2_EDF", "w3_EFD"):
+                param = getattr(self, name)
+                # DTensor (outer) wraps the mxfp8 weight-wrapper (local) under EP/TP;
+                # mirror GroupedExperts.forward, which uses the local tensor.
+                wrapper = param.to_local() if isinstance(param, DTensor) else param
+                # The mxfp8 op config (kernel preference, scale mode) lives on the
+                # weight wrapper; read it so the cached forward matches the dynamic one.
+                kernel_preference = wrapper.config.kernel_preference  # type: ignore[missing-attribute]
+                scale_calculation_mode = wrapper.config.scale_calculation_mode  # type: ignore[missing-attribute]
+                hp = unwrap_weight(wrapper)
+                # (E, F, D) -> (E, D, F) == (E, K, N), the weight_t passed to grouped_mm.
+                weight_t = hp.bfloat16().transpose(-2, -1)
+                weight_e4m3, weight_scales_blocked = quantize_grouped_weight_for_cache(
+                    weight_t, scale_calculation_mode
+                )
+                if name in cache:
+                    cached_e4m3, cached_scales = cache[name]
+                    cached_e4m3.copy_(weight_e4m3)
+                    cached_scales.copy_(weight_scales_blocked)
+                else:
+                    cache[name] = (weight_e4m3, weight_scales_blocked)
         self._mxfp8_weight_cache = cache
         self._mxfp8_kernel_preference = kernel_preference
         self._mxfp8_scale_calculation_mode = scale_calculation_mode

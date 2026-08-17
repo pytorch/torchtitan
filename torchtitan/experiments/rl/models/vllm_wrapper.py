@@ -294,6 +294,7 @@ class VLLMModelWrapper(Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         override: OverrideConfig,
+        mxfp8_cache_weights: bool = False,
     ):
         super().__init__()
 
@@ -410,6 +411,22 @@ class VLLMModelWrapper(Module):
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
+
+        # Populate the mxfp8 inference weight cache now, before vLLM captures its
+        # CUDA graphs. The cache makes the mxfp8 grouped-experts forward use the
+        # pre-quantized weights; capturing that path is what applies real mxfp8 to
+        # experts during generation (the dynamic path runs bf16 experts under
+        # inference_mode). The cache is filled here from the init weights so the
+        # captured graph reads from stable cache buffers; the generator refreshes
+        # them in place after each weight sync (see refresh_mxfp8_weight_caches).
+        # No-op-safe when the model has no mxfp8 modules.
+        if mxfp8_cache_weights:
+            from torchtitan.components.quantization.mx import (
+                refresh_mxfp8_weight_caches,
+            )
+
+            with torch.no_grad():
+                refresh_mxfp8_weight_caches(self.model)
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:

@@ -852,6 +852,7 @@ class VLLMGenerator(Actor, Configurable):
             compile_config=compile_config,
             checkpoint_config=config.checkpoint,
             override=config.override,
+            mxfp8_cache_weights=config.mxfp8_cache_weights,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
