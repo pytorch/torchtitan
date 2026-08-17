@@ -12,7 +12,7 @@ Some configs live near their owner instead of here:
   - OptimizersContainer.Config      (in components/optimizer/optimizer.py)
   - LRSchedulersContainer.Config    (in components/optimizer/lr_scheduler.py)
   - MetricsProcessor.Config         (in components/metrics.py)
-  - CheckpointManager.Config        (in components/checkpoint.py)
+  - CheckpointManager.Config        (in components/checkpointer/dcp.py)
 
 Configs without a clear single owner (or with circular-import constraints)
 live here.
