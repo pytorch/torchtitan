@@ -44,6 +44,9 @@ dev = [
 torch-checkpointing = [
     "torch_checkpointing>=0.1.0",
 ]
+remat = [
+    "torch_remat>=0.2.0",
+]
 
 [tool.setuptools.dynamic]
 version = {file = "assets/version.txt"}
