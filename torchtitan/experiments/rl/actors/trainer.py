@@ -356,16 +356,18 @@ class PolicyTrainer(Actor, Configurable):
     async def forward_backward(
         self,
         training_data: list[TrainingMicrobatch],
-        num_global_valid_tokens: int,
+        num_global_loss_tokens: int,
+        num_global_response_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
             training_data: List of TrainingMicrobatch, one per DP rank. Local rank
                 picks training_data[self.dp_rank].
-            num_global_valid_tokens: Total response tokens across all DP
-                ranks for this step. The controller computes this before
-                sharding training_samples.
+            num_global_loss_tokens: Total response tokens with finite generator
+                logprobs across all DP ranks and microbatches for this step.
+            num_global_response_tokens: Total response tokens before filtering
+                non-finite generator logprobs.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -406,10 +408,11 @@ class PolicyTrainer(Actor, Configurable):
                 loss, loss_metrics = self.loss_fn(
                     pred,
                     labels,
-                    num_global_valid_tokens,
+                    num_global_loss_tokens,
                     generator_logprobs=generator_logprobs,
                     advantages=advantages,
                     loss_mask=loss_mask,
+                    global_response_tokens=num_global_response_tokens,
                 )
 
             with sl.log_trace_span("model_backward"):

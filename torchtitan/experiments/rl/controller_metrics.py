@@ -57,11 +57,11 @@ def combine_microbatch_metrics(
     microbatch_metrics: list[dict[str, float]],
 ) -> dict[str, float]:
     """Combine per-microbatch loss metrics over the grad-accumulation: mean/frac keys are pre-normalized
-    by num_global_valid_tokens so summing them reconstructs the global value. For keys ending in "max",
+    by their global token counts so summing them reconstructs the global value. For keys ending in "max",
     the max value is taken.
 
     Example:
-        # already normalized by num_global_valid_tokens
+        # already normalized by the appropriate global token count
         combine_microbatch_metrics([{"loss/ratio_clipped_frac": 0.1, "x/max": 2.0},
                                     {"loss/ratio_clipped_frac": 0.2, "x/max": 5.0}])
         # output
@@ -80,7 +80,7 @@ def combine_microbatch_metrics(
 
 
 def compute_perf_ratio_metrics(
-    *, num_global_valid_tokens: int, time_metrics: list[m.Metric]
+    *, num_global_response_tokens: int, time_metrics: list[m.Metric]
 ) -> list[m.Metric]:
     """Trainer-side timing ratios from the flushed step timers. A ratio is emitted only if every span
     it needs was recorded this step (no fallback zeros)."""
@@ -115,7 +115,8 @@ def compute_perf_ratio_metrics(
 
     # Throughput over the whole step (includes the idle wait for the next batch).
     _add_metric(
-        "perf/trainer/tokens_per_second_full_step", num_global_valid_tokens / step_s
+        "perf/trainer/tokens_per_second_full_step",
+        num_global_response_tokens / step_s,
     )
 
     # Each span's share of the step wall-clock (skip a span that was not recorded).
@@ -139,7 +140,7 @@ def compute_perf_ratio_metrics(
         if compute_s:
             _add_metric(
                 "perf/trainer/tokens_per_second_fwd_bwd",
-                num_global_valid_tokens / compute_s,
+                num_global_response_tokens / compute_s,
             )
 
     # Step time the measured spans don't cover -- only when every span is present, else it misleads.
