@@ -159,6 +159,7 @@ Full activation checkpointing                                   ✓
 CUDA graphs                                                     ✓
 Gradient accumulation                                           ✓
 Graph Trainer, in-process and PP disabled                       ✓
+FaultTolerantTrainer / TorchFT                                  ✗
 
 DP × CP × TP / EP + FullAC + spmd_types                         ✓
 DP × PP × TP / EP + compile + FullAC + spmd_types               ✓
@@ -209,6 +210,8 @@ No. The compiled or captured function contains forward, backward, and the device
 
 `log_fwd_bwd_stats()` records `<name>.x` immediately and attaches an autograd hook. During backward, the hook receives the incoming cotangent and an ordered custom operation records `<name>.dx` in that metric's buffer row.
 
+If the tensor does not require gradients, the forward `.x` statistics are still recorded but no `.dx` metric is observed.
+
 ### Why does activation checkpointing not double-count statistics?
 
 Eager FullAC records the original forward. Its recompute context sets a flag that makes `log_stats()` and `log_fwd_bwd_stats()` return before recording the second forward. Under compiled FullAC, the checkpoint policy preserves the mutation operation, so recomputation does not execute the update again.
@@ -240,4 +243,5 @@ Separately generated or loaded precompiled artifacts are also rejected: their sa
 - The publication filter does not skip GPU collection.
 - Publication is synchronous with the training step.
 - Unsupported PP schedules, GraphPP, and separately precompiled Graph Trainer artifacts fail during setup.
+- FaultTolerantTrainer rejects tensor logging during setup.
 - Optional visualizations, asynchronous publication, and additional built-in metrics are follow-up work.

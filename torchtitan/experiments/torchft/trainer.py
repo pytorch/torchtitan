@@ -41,6 +41,11 @@ class FaultTolerantTrainer(Trainer):
 
     @record
     def __init__(self, config: Config):
+        if config.metrics.tensor_logging.enabled:
+            raise NotImplementedError(
+                "tensor logging is not supported by FaultTolerantTrainer"
+            )
+
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config

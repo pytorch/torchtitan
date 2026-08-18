@@ -682,7 +682,7 @@ def log_fwd_bwd_stats(
 
     Args:
         metric_source: Module used during `register_fwd_bwd`.
-        **named_tensors: Registered base names mapped to differentiable tensors.
+        **named_tensors: Registered base names mapped to tensors.
 
     Example:
 
@@ -721,4 +721,5 @@ def log_fwd_bwd_stats(
                     )
                     return cotangent
 
-            value.register_hook(record_cotangent)
+            if value.requires_grad:
+                value.register_hook(record_cotangent)

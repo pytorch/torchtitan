@@ -806,6 +806,21 @@ def test_generic_counts_follow_float32_integer_precision() -> None:
         runtime.close()
 
 
+def test_frozen_tensor_records_forward_without_backward_hook() -> None:
+    owner = nn.Module()
+    register_fwd_bwd(owner, ["value"])
+    runtime = init(owner)
+    try:
+        with set_enabled(True):
+            log_fwd_bwd_stats(owner, value=torch.ones(2, 3))
+
+        snapshot = runtime.snapshot_unreduced_statistics()
+        assert snapshot["value.x"]["counts"].tolist() == [6, 0, 0, 1]
+        assert snapshot["value.dx"]["counts"].tolist() == [0, 0, 0, 0]
+    finally:
+        runtime.close()
+
+
 @pytest.mark.parametrize("placement", [Replicate(), Shard(0)])
 def test_dtensor_records_local_forward_and_cotangent(
     cpu_device_mesh,
