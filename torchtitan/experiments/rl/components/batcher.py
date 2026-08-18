@@ -155,19 +155,21 @@ class Batcher(Configurable):
         # Next-fit all taken training_samples into rows.
         rows = self._assign_training_samples_to_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
+        num_global_response_tokens = sum(
+            int(row["loss_mask"].sum().item()) for row in packed_rows
+        )
+        num_global_valid_tokens = sum(
+            int(
+                (row["loss_mask"] & torch.isfinite(row["generator_logprobs"]))
+                .sum()
+                .item()
+            )
+            for row in packed_rows
+        )
         return TrainingBatch(
             microbatches=self._build_microbatch_grid(packed_rows),
-            num_global_response_tokens=sum(
-                int(row["loss_mask"].sum().item()) for row in packed_rows
-            ),
-            num_global_loss_tokens=sum(
-                int(
-                    (row["loss_mask"] & torch.isfinite(row["generator_logprobs"]))
-                    .sum()
-                    .item()
-                )
-                for row in packed_rows
-            ),
+            num_global_valid_tokens=num_global_valid_tokens,
+            num_global_response_tokens=num_global_response_tokens,
             metrics=[
                 *metrics,
                 *self._packing_metrics(

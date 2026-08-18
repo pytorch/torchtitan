@@ -142,13 +142,13 @@ class TrainingBatch:
         # -> 2 microbatches (3 rows padded to 4 with one pad-only row):
         #    microbatches = [[TrainingMicrobatch(token_ids=[2, 10])],
         #                    [TrainingMicrobatch(token_ids=[2, 10])]]   # mb1 = 1 real row + 1 pad row
+        # num_global_valid_tokens = response tokens with finite generator logprobs
         # num_global_response_tokens = count of loss_mask=True tokens across the 5 samples
-        # num_global_loss_tokens = response tokens with finite generator logprobs
     """
 
     microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
+    num_global_valid_tokens: int
     num_global_response_tokens: int
-    num_global_loss_tokens: int
     metrics: list[m.Metric]
     # one per packed training_sample; trainer computes policy_age at consume time
     min_policy_versions: list[int]

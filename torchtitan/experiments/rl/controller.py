@@ -1078,7 +1078,7 @@ class Controller(Configurable):
                 )
 
                 # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
-                #   packed.num_global_loss_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
+                #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optim.
                 with sl.log_trace_span("forward_backward"), step_timer.record(
                     "timing/step/forward_backward"
@@ -1088,7 +1088,7 @@ class Controller(Configurable):
                         self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
                                 microbatch,
-                                packed.num_global_loss_tokens,
+                                packed.num_global_valid_tokens,
                                 packed.num_global_response_tokens,
                             )
                         )
@@ -1154,7 +1154,7 @@ class Controller(Configurable):
                         *push_metrics,
                         *pull_metrics,
                         *compute_perf_ratio_metrics(
-                            num_global_valid_tokens=packed.num_global_loss_tokens,
+                            num_global_valid_tokens=packed.num_global_valid_tokens,
                             time_metrics=time_metrics,
                         ),
                     ],

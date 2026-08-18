@@ -30,7 +30,7 @@ class DAPOLoss(BaseLoss):
     loss rather than trained as if it were on-policy.
 
     The scalar loss is the sum of per-token losses over positions with a finite
-    old-policy logprob divided by ``global_loss_tokens``, so gradient accumulation
+    old-policy logprob divided by ``global_valid_tokens``, so gradient accumulation
     matches a single large batch. ``logits`` is the current-policy output passed to
     ``compute_logprobs``.
     """
@@ -58,7 +58,7 @@ class DAPOLoss(BaseLoss):
         self,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        global_loss_tokens: float | None = None,
+        global_valid_tokens: float | None = None,
         *,
         generator_logprobs: torch.Tensor,
         advantages: torch.Tensor,
@@ -73,8 +73,8 @@ class DAPOLoss(BaseLoss):
             generator_logprobs: [B, L] logprobs from the sampling policy.
             loss_mask: [B, L] bool mask; True for response tokens.
             advantages: [B, L] per-token advantages (0.0 for prompt/padding).
-            global_loss_tokens: total response tokens with finite generator logprobs
-                across all microbatches and DP ranks; the policy-loss denominator.
+            global_valid_tokens: total response tokens with finite generator logprobs
+                across all microbatches and DP ranks; the loss denominator.
             global_response_tokens: total response tokens before filtering non-finite
                 generator logprobs; the entropy and NaN-fraction denominator.
 
@@ -105,7 +105,7 @@ class DAPOLoss(BaseLoss):
 
         masked_loss = token_loss * effective_loss_mask
         loss_denominator = (
-            max(global_loss_tokens, 1) if global_loss_tokens is not None else 1
+            max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
         )
         response_denominator = (
             max(global_response_tokens, 1)

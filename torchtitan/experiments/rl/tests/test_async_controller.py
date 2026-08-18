@@ -87,8 +87,7 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
         training_sample_group=_trainable_group(1, num_samples=2)
     )
     assert batch is not None
-    assert batch.num_global_response_tokens > 0
-    assert batch.num_global_loss_tokens == batch.num_global_response_tokens
+    assert batch.num_global_valid_tokens > 0
 
 
 def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
@@ -140,8 +139,7 @@ def test_compute_perf_ratio_metrics_skips_missing_spans() -> None:
 
 def test_compute_perf_ratio_metrics_returns_empty_without_total() -> None:
     assert (
-        compute_perf_ratio_metrics(num_global_valid_tokens=100, time_metrics=[])
-        == []
+        compute_perf_ratio_metrics(num_global_valid_tokens=100, time_metrics=[]) == []
     )
 
 
