@@ -22,6 +22,7 @@ jobs:
     with:
       docker-image: torchtitan-ubuntu-22.04-clang12
       repository: pytorch/torchtitan
+      upload-artifact: cpu-unit-test-timings
       script: |
         set -eux
 
@@ -38,4 +39,36 @@ jobs:
         # Write coverage data/report to /tmp (world-writable): the mounted workspace and
         # RUNNER_TEMP are owned by the host uid, which the container user (ci-user) can't write.
         export COVERAGE_FILE=/tmp/.coverage
-        pytest tests/unit_tests --cov=. --cov-report=xml:/tmp/coverage.xml --durations=20 -vv
+        mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        pytest tests/unit_tests \
+          --cov=. \
+          --cov-report=xml:/tmp/coverage.xml \
+          --durations=20 \
+          --junitxml="$RUNNER_TEMP/artifacts-to-be-uploaded/cpu-unit-tests.xml" \
+          -vv
+
+  test-time-budget:
+    name: New test time budget
+    needs: build-test
+    if: ${{ always() && needs.build-test.result == 'success' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: cpu-unit-test-timings
+          path: test-timings
+
+      - name: Check added test time
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 scripts/ci/check_new_test_time_budget.py \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --junit-xml test-timings/cpu-unit-tests.xml \
+            --threshold-seconds 11.1
