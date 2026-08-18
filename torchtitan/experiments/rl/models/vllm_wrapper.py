@@ -20,7 +20,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import (
     apply_overrides,
     CompileConfig,
