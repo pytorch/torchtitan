@@ -14,18 +14,6 @@ def _configure_spmd_backend_and_typecheck(
     t: OverrideDefinitions,
 ) -> OverrideDefinitions:
     """Configure the SPMD backend and enable typechecking where supported."""
-    if any(
-        "--module muse_glimmer" in arg for variant in t.override_args for arg in variant
-    ):
-        # Muse Glimmer does not support the spmd_types backend yet.
-        return dataclasses.replace(
-            t,
-            override_args=tuple(
-                ("--parallelism.spmd_backend partial_dtensor", *variant)
-                for variant in t.override_args
-            ),
-        )
-
     # Compile, PP, and explicit AC modes are not compatible with SPMD
     # typechecking yet; keep those as backend-only coverage.
     new_args = []
