@@ -10,17 +10,23 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-from .sharding import set_kimi_k2_5_sharding_config
+from .sharding import (
+    annotate_multimodal_input_spmd_types,
+    set_kimi_k2_5_sharding_config,
+)
 from .vision_encoder import KimiK25VisionEncoder
 
 
@@ -166,17 +172,31 @@ class KimiK25Model(DeepSeekV3Model):
         Returns:
             (batch, seq_len, vocab_size) logits.
         """
-        if self.tok_embeddings is not None:
-            x = self._prepare_multimodal_embeds(
-                tokens,
-                pixel_values=pixel_values,
-                grid_thw=grid_thw,
-                pixel_values_videos=pixel_values_videos,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
-            )
-        else:
-            x = tokens
+        with multimodal_context():
+            if get_spmd_backend() == "spmd_types":
+                annotate_multimodal_input_spmd_types(
+                    pixel_values=pixel_values,
+                    grid_thw=grid_thw,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw_videos=grid_thw_videos,
+                )
+
+            if self.tok_embeddings is not None:
+                x = self._prepare_multimodal_embeds(
+                    tokens,
+                    pixel_values=pixel_values,
+                    grid_thw=grid_thw,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw_videos=grid_thw_videos,
+                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                )
+            else:
+                x = tokens
+
+        if get_spmd_backend() == "spmd_types":
+            # The scatter restores a token-aligned tensor, so text-model DP
+            # resumes as global batch sharding after the multimodal region.
+            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
             x = layer(x, attention_masks, positions)

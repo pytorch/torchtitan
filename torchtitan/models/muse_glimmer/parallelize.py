@@ -17,13 +17,11 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
 )
 from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
 from .model import MuseGlimmerModel
@@ -38,7 +36,14 @@ def parallelize_muse_glimmer(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
+    if parallelism.spmd_backend != "spmd_types":
+        raise NotImplementedError(
+            "Muse Glimmer only supports spmd_backend='spmd_types'; "
+            f"got '{parallelism.spmd_backend}'."
+        )
+
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -53,43 +58,20 @@ def parallelize_muse_glimmer(
     has_vision = model.vision_encoder is not None
     if has_vision:
         assert model.vision_adapter is not None
-
-    if parallelism.spmd_backend == "full_dtensor":
-        if has_vision:
-            raise NotImplementedError(
-                "full_dtensor is not supported for the Muse Glimmer vision encoder."
-            )
-        validate_config(parallel_dims, model)
-        model.parallelize(parallel_dims)
-    else:
-        # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-        # runs inside the local_map boundary on local tensors.
         if parallel_dims.cp_enabled:
-            if has_vision:
-                # Vision must be injected on the full sequence before CP shards
-                # it, so CP + multimodal is not supported (mirrors qwen3_5).
-                raise NotImplementedError(
-                    "context parallel is not supported for the Muse Glimmer vision encoder."
-                )
-            apply_cp_to_forward(
-                # pyrefly: ignore [missing-attribute]
-                [block.attention.inner_attention for block in model.layers.values()],
-                parallel_dims.get_mesh("cp"),
+            raise NotImplementedError(
+                "context parallel is not supported for the Muse Glimmer vision encoder."
             )
         if parallel_dims.tp_enabled:
-            if has_vision:
-                # Head-sharded q/k/v + inner-attention local_map require
-                # divisibility (same constraint as the LLM attention).
-                # pyrefly: ignore [missing-attribute]
-                vision_num_heads = model.vision_encoder.num_heads
-                assert vision_num_heads % parallel_dims.tp == 0, (
-                    f"vision num_heads ({vision_num_heads}) must be "
-                    f"divisible by TP degree ({parallel_dims.tp})"
-                )
-            model.parallelize(parallel_dims)
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+            # pyrefly: ignore [missing-attribute]
+            vision_num_heads = model.vision_encoder.num_heads
+            assert vision_num_heads % parallel_dims.tp == 0, (
+                f"vision num_heads ({vision_num_heads}) must be "
+                f"divisible by TP degree ({parallel_dims.tp})"
+            )
 
+    validate_config(parallel_dims, model)
+    model.parallelize(parallel_dims)
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -105,21 +87,30 @@ def parallelize_muse_glimmer(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config)
-        if has_vision:
-            # pyrefly: ignore [bad-argument-type]
-            apply_compile(model.vision_encoder, compile_config)
-            # pyrefly: ignore [bad-argument-type]
-            apply_compile(model.vision_adapter, compile_config)
-
-    if parallelism.spmd_backend == "full_dtensor":
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
         )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
-        dp_mesh_dims = None
+        if has_vision:
+            apply_compile(
+                model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
+                compile_config=compile_config,
+                parallel_dims=parallel_dims,
+            )
+            apply_compile(
+                model.vision_adapter,  # pyrefly: ignore [bad-argument-type]
+                compile_config=compile_config,
+                parallel_dims=parallel_dims,
+            )
+
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
+        return model
+
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
 
     # FSDP the vision encoder + adapter as single units BEFORE the decoder
     # (qwen3_5 documents this ordering): one AllGather per module is cheaper than

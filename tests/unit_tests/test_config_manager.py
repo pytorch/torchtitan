@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import sys
 import unittest
 from unittest import mock
@@ -57,6 +58,21 @@ class TestConfigManager(unittest.TestCase):
         config_manager = ConfigManager()
         with pytest.raises(ValueError, match="--module is required"):
             config_manager.parse_args([])
+
+    def test_torchtitan_recipes_package_resolves(self):
+        """torchtitan_recipes is importable and its configs load."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "torchtitan_recipes.tests",
+                "--config",
+                "llama3_debugmodel_fsdp2_cp2",
+            ]
+        )
+        assert config.model_spec.name == "llama3"
+        assert config.model_spec.flavor == "debugmodel"
+        assert config.parallelism.context_parallel_degree == 2
 
     def test_invalid_model_errors(self):
         """--module with unknown module name raises ImportError."""
@@ -115,6 +131,87 @@ class TestConfigManager(unittest.TestCase):
                 ]
             )
 
+    def test_cuda_graphs_reject_pipeline_parallelism(self):
+        config_manager = ConfigManager()
+        with pytest.raises(ValueError, match="do not support pipeline parallelism"):
+            config_manager.parse_args(
+                [
+                    "--module",
+                    "llama3",
+                    "--config",
+                    "llama3_debugmodel",
+                    "--parallelism.pipeline_parallel_degree",
+                    "2",
+                ]
+            )
+
+    def test_cuda_graphs_enabled_by_default(self):
+        config = ConfigManager().parse_args(
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
+        )
+        assert not config.training.disable_cuda_graphs
+
+    def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
+        config_manager = ConfigManager()
+        with pytest.raises(ValueError, match="without CPU synchronization"):
+            config_manager.parse_args(
+                [
+                    "--module",
+                    "deepseek_v3",
+                    "--config",
+                    "deepseek_v3_debugmodel",
+                    "--parallelism.expert_parallel_degree",
+                    "2",
+                ]
+            )
+
+    def test_cuda_graphs_allow_non_blocking_hybridep(self):
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "deepseek_v3",
+                "--config",
+                "deepseek_v3_debugmodel_hybridep",
+                "--parallelism.expert_parallel_degree",
+                "2",
+            ]
+        )
+        assert not config.training.disable_cuda_graphs
+
+    def test_disable_cuda_graphs_allows_pipeline_parallelism(self):
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--training.disable_cuda_graphs",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+            ]
+        )
+        assert config.training.disable_cuda_graphs
+
+    def test_cuda_graphs_reject_blocking_hybridep(self):
+        from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_hybridep,
+        )
+
+        config = deepseek_v3_debugmodel_hybridep()
+        dispatcher_configs = list(
+            config.model_spec.model.traverse(HybridEPTokenDispatcher.Config)
+        )
+        assert dispatcher_configs
+        for _, dispatcher_config, _, _ in dispatcher_configs:
+            dispatcher_config.non_blocking_capacity_factor = None
+        config.parallelism.expert_parallel_degree = 2
+
+        with pytest.raises(ValueError, match="non_blocking_capacity_factor"):
+            dataclasses.replace(config)
+
     def test_cli_override_dump_folder(self):
         """CLI args override config defaults for nested fields."""
         config_manager = ConfigManager()
@@ -161,6 +258,23 @@ class TestConfigManager(unittest.TestCase):
             "optimizer",
             "lr_scheduler",
         ]
+
+    def test_concrete_checkpoint_fields_remain_overridable(self):
+        from torchtitan.components.checkpointer import CheckpointManager
+
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--checkpoint.async_mode",
+                "async",
+            ]
+        )
+
+        assert isinstance(config.checkpoint, CheckpointManager.Config)
+        assert config.checkpoint.async_mode == "async"
 
     def test_trainer_config_quantization_default(self):
         from torchtitan.components.quantization.utils import has_quantization

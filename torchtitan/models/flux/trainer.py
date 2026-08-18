@@ -166,7 +166,7 @@ class FluxTrainer(Trainer):
         *,
         input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
         labels: torch.Tensor | list[torch.Tensor],
-        global_valid_tokens: float | None = None,
+        global_valid_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Perform a single forward and backward pass through the model.
@@ -174,7 +174,7 @@ class FluxTrainer(Trainer):
         Args:
             input_dict: Dictionary containing input data including prompts and other metadata
             labels: Target tensor containing the ground truth image data
-            global_valid_tokens: Optional float tracking the total number of
+            global_valid_tokens: Optional tensor tracking the total number of
                 valid tokens across all processes.
                 This field is a placeholder for now as we rescale the loss within forward_backward_step for FLUX.
 
@@ -207,9 +207,11 @@ class FluxTrainer(Trainer):
 
         if self.parallel_dims.dp_enabled:
             batch_mesh = self.parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+            global_valid_tokens = dist_utils.dist_sum_tensor(
+                local_valid_tokens, batch_mesh
+            )
         else:
-            global_valid_tokens = float(local_valid_tokens.item())
+            global_valid_tokens = local_valid_tokens
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.

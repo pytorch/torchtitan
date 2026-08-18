@@ -89,6 +89,10 @@ jobs:
         end=$(date +%s)
         echo "pip install torchao took $((end - start)) seconds"
 
+        # Run the GPU-only DistMuon test that CPU unit CI skips.
+        python -m pytest tests/unit_tests/flex_shard/test_dist_muon.py \
+          --durations=20 -vv
+
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
@@ -135,10 +139,13 @@ jobs:
         fi
 
         echo "Checking Qwen3 MoE FSDP+TP+EP loss parity against reference"
+        # qwen3_moe_debug uses EP=1, where CUDA graphs are supported. This test
+        # overrides EP to 4 without changing the AllToAll token dispatcher,
+        # whose CPU synchronization is incompatible with CUDA graph capture.
         python3 scripts/loss_compare.py . . \
           --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
-          --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
-          --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
+          --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --parallelism.spmd_backend spmd_types --training.disable_cuda_graphs" \
+          --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --parallelism.spmd_backend spmd_types --training.disable_cuda_graphs" \
           --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
           --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*

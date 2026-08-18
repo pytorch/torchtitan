@@ -12,10 +12,10 @@ from typing import Any, Literal
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
-
-from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
+
+from .optimizer import OptimizersContainer
 
 __all__ = [
     "LRSchedulersContainer",

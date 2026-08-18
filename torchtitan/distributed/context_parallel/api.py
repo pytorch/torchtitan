@@ -278,12 +278,19 @@ def cp_shard(
     MASK_Q_SEQ_DIM = 2
     if attention_masks is not None:
         assert isinstance(attention_masks, (BlockMask, dict))
-        masks = (
+        masks: list[BlockMask] = []
+        for mask in (
             [attention_masks]
             if isinstance(attention_masks, BlockMask)
-            else list(attention_masks.values())
-        )
-        masks = _context_parallel_shard(
+            else attention_masks.values()
+        ):
+            if not isinstance(mask, BlockMask):
+                raise ValueError(
+                    "Context parallelism can only shard BlockMask attention "
+                    f"masks, got {type(mask).__name__} in the mask dict."
+                )
+            masks.append(mask)
+        sharded_masks = _context_parallel_shard(
             mesh=cp_mesh,
             buffers=masks,
             seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
@@ -292,9 +299,9 @@ def cp_shard(
         attention_masks = cast(
             (BlockMask | dict[str, BlockMask]),
             (
-                masks[0]
+                sharded_masks[0]
                 if isinstance(attention_masks, BlockMask)
-                else {k: v for k, v in zip(attention_masks.keys(), masks)}
+                else {k: v for k, v in zip(attention_masks.keys(), sharded_masks)}
             ),
         )
 

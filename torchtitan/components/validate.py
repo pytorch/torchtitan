@@ -225,8 +225,11 @@ class Validator(BaseValidator):
 
         parallel_dims = self.parallel_dims
 
-        accumulated_losses = []
+        accumulated_loss: torch.Tensor | None = None
         device_type = utils.device_type
+        total_global_valid_tokens = torch.zeros(
+            (), dtype=torch.int64, device=device_type
+        )
         num_steps = 0
         num_microbatches = (
             self.local_batch_size // self.parallelism.pipeline_parallel_microbatch_size
@@ -268,14 +271,14 @@ class Validator(BaseValidator):
             except StopIteration:
                 break
 
-            # All-reduce token count across DP ranks to get global token count
+            # All-reduce token count across DP ranks while keeping it on device.
             if parallel_dims.dp_enabled:
                 batch_mesh = parallel_dims.get_mesh("batch")
-                global_valid_tokens = dist_utils.dist_sum(
+                global_valid_tokens = dist_utils.dist_sum_tensor(
                     local_valid_tokens, batch_mesh, None
                 )
             else:
-                global_valid_tokens = float(local_valid_tokens.item())
+                global_valid_tokens = local_valid_tokens
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
@@ -327,18 +330,23 @@ class Validator(BaseValidator):
                     predictions = model_parts[0](inputs, **extra_kwargs)
                     loss_sum, _ = self.loss_fn(predictions, labels)
 
-            accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
+            loss_sum = loss_sum.detach()
+            if accumulated_loss is None:
+                accumulated_loss = loss_sum.clone()
+            else:
+                accumulated_loss.add_(loss_sum)
+            total_global_valid_tokens.add_(global_valid_tokens)
             num_steps += 1
 
-        # Compute average loss
-        loss = torch.sum(torch.stack(accumulated_losses))
-        loss /= num_steps
+        assert accumulated_loss is not None
+        num_global_valid_tokens = int(total_global_valid_tokens.item())
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_sum(
-                loss, parallel_dims.get_optional_mesh("loss")
+            global_loss_sum = dist_utils.dist_sum(
+                accumulated_loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
-            global_avg_loss = float(loss.item())
+            global_loss_sum = float(accumulated_loss.item())
+        global_avg_loss = global_loss_sum / num_global_valid_tokens
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 

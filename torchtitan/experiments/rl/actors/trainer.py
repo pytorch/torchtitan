@@ -15,8 +15,7 @@ from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import (
     apply_overrides,
     CommConfig,
@@ -124,7 +123,7 @@ class PolicyTrainer(Actor, Configurable):
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
-        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        self.device = utils.get_local_device()
         device_module.set_device(self.device)
 
         # Enable batch-invariant mode BEFORE init_distributed

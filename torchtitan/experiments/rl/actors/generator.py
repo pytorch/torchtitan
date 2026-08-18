@@ -23,6 +23,7 @@ from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortRece
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
+from torchtitan.distributed.parallel_dims import unfold_dp_axes
 from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
@@ -692,7 +693,7 @@ class VLLMGenerator(Actor, Configurable):
 
     A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied
     between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
-    on the controller side, by blocking new requests until the engine is drained.
+    in the inter-generator router, by blocking new requests until the engine is drained.
 
     Args:
         config: Generator-specific configuration.
@@ -1388,17 +1389,11 @@ class VLLMGenerator(Actor, Configurable):
                         continue
                     raise KeyError(f"{name} is missing SPMD layout metadata")
 
-                mesh = model.parallel_dims.resolve_mesh(layout.axes())
-                if mesh is None:
-                    active_axes = [
-                        axis
-                        for axis in layout.axes()
-                        if model.parallel_dims.get_optional_mesh(axis) is not None
-                    ]
-                    if active_axes:
-                        raise RuntimeError(
-                            f"{name} has active SPMD layout axes but no resolved mesh"
-                        )
+                if (
+                    mesh := model.parallel_dims.get_activated_mesh(
+                        unfold_dp_axes(layout.axes())
+                    )
+                ) is None:
                     continue
 
                 dtensor_model_sd[name] = DTensor.from_local(

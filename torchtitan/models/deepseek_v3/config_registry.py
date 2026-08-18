@@ -6,9 +6,8 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
@@ -159,6 +158,7 @@ def deepseek_v3_16b() -> Trainer.Config:
             local_batch_size=4,
             seq_len=4096,
             steps=1000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",
@@ -178,6 +178,7 @@ def deepseek_v3_16b_hybridep() -> Trainer.Config:
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
     )
+    config.training.disable_cuda_graphs = False
     return config
 
 
@@ -198,6 +199,7 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
         expert_parallel_degree=1,
         enable_sequence_parallel=False,
     )
+    config.training.disable_cuda_graphs = False
     return config
 
 
@@ -228,6 +230,7 @@ def deepseek_v3_671b() -> Trainer.Config:
             local_batch_size=4,
             seq_len=4096,
             steps=10000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",

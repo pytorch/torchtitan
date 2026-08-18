@@ -6,9 +6,8 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import MSELoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -45,6 +44,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             local_batch_size=4,
             max_norm=2.0,
             steps=10,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             prompt_dropout_prob=0.447,
@@ -106,6 +106,7 @@ def flux_dev() -> FluxTrainer.Config:
         training=TrainingConfig(
             local_batch_size=32,
             steps=30000,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             dataset="cc12m-wds",
@@ -156,6 +157,7 @@ def flux_schnell() -> FluxTrainer.Config:
         training=TrainingConfig(
             local_batch_size=64,
             steps=30000,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             dataset="cc12m-wds",

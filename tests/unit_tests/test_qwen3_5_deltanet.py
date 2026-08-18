@@ -10,7 +10,10 @@ from unittest import mock
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.models.common.attention import create_varlen_metadata_for_document
+from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
+    VarlenMetadata,
+)
 
 # Tensor shape suffixes: B batch, L seq len, N heads, K key head dim,
 # V value head dim.
@@ -248,6 +251,31 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             model.norm.weight.fill_(1.0)
         return model
 
+    def _assert_packed_run_matches_per_document(self, model, x, positions, masks):
+        """Packed forward under ``masks`` must equal stitched per-doc forwards.
+
+        The model's varlen conv is FLA (triton/CUDA-only); substitute the
+        per-document torch reference for these CPU runs. The per-document
+        forwards below take the non-varlen conv path, which runs on CPU.
+        """
+        with mock.patch(
+            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
+            _reference_causal_conv1d_varlen,
+        ):
+            actual = model(x, masks)
+
+        expected = torch.empty_like(actual)
+        for batch_idx in range(positions.shape[0]):
+            doc_starts = (positions[batch_idx] == 0).nonzero(as_tuple=True)[0]
+            starts = doc_starts.tolist()
+            ends = starts[1:] + [positions.shape[1]]
+            for start, end in zip(starts, ends, strict=False):
+                expected[batch_idx : batch_idx + 1, start:end] = model(
+                    x[batch_idx : batch_idx + 1, start:end]
+                )
+
+        self.assertTrue(torch.allclose(actual, expected, rtol=0.0, atol=1e-6))
+
     def test_varlen_matches_independent_document_forwards(self):
         torch.manual_seed(42)
         model = self._make_deltanet()
@@ -264,26 +292,81 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             positions,
             include_host_offsets=True,
         )
-        # The model's varlen conv is FLA (triton/CUDA-only); substitute the
-        # per-document torch reference for this CPU run. The per-document
-        # forwards below take the non-varlen conv path, which runs on CPU.
-        with mock.patch(
-            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
-            _reference_causal_conv1d_varlen,
-        ):
-            actual = model(x, attention_masks)
+        self._assert_packed_run_matches_per_document(
+            model, x, positions, attention_masks
+        )
 
-        expected = torch.empty_like(actual)
-        for batch_idx in range(positions.shape[0]):
-            doc_starts = (positions[batch_idx] == 0).nonzero(as_tuple=True)[0]
-            starts = doc_starts.tolist()
-            ends = starts[1:] + [positions.shape[1]]
-            for start, end in zip(starts, ends, strict=False):
-                expected[batch_idx : batch_idx + 1, start:end] = model(
-                    x[batch_idx : batch_idx + 1, start:end]
-                )
+    def test_get_attention_masks_pairs_flex_mask_with_deltanet_offsets(self):
+        """Qwen35Model.get_attention_masks must return the per-consumer mask
+        dict: under flex, a BlockMask ("quadratic_attention") paired with the
+        document offsets ("deltanet"); under varlen, one VarlenMetadata shared
+        by both keys. Each transformer block picks its entry by attn_mask_key.
+        """
+        from torch.nn.attention.flex_attention import BlockMask
 
-        self.assertTrue(torch.allclose(actual, expected, rtol=0.0, atol=1e-6))
+        # torchtitan.models.qwen3_5 imports the FLA (flash-linear-attention)
+        # kernels at module scope. FLA is a triton/CUDA-only optional
+        # dependency, so skip instead of erroring on environments without it.
+        try:
+            from torchtitan.models.qwen3_5 import model_registry
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(
+                f"Qwen3.5 optional dependency unavailable: {exc.name}"
+            ) from exc
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        positions = torch.tensor(
+            [
+                [0, 1, 2, 0, 1],
+                [0, 1, 2, 3, 4],
+            ],
+            dtype=torch.int32,
+            device=device,
+        )
+
+        flex_model = model_registry("debugmodel").model.build()
+        masks = flex_model.get_attention_masks(positions)
+        self.assertIsInstance(masks, dict)
+        self.assertEqual(set(masks.keys()), {"quadratic_attention", "deltanet"})
+        self.assertIsInstance(masks["quadratic_attention"], BlockMask)
+        self.assertIsInstance(masks["deltanet"], VarlenMetadata)
+        # Row 0 packs docs of length 3 and 2; row 1 is one doc of length 5.
+        self.assertEqual(masks["deltanet"].cu_seq_q_host, (0, 3, 5, 10))
+
+        # Each block picks the entry matching its layer type.
+        mask_keys = {layer.attn_mask_key for layer in flex_model.layers.values()}
+        self.assertEqual(mask_keys, {"quadratic_attention", "deltanet"})
+        for layer in flex_model.layers.values():
+            self.assertEqual(
+                layer.attn_mask_key,
+                "quadratic_attention" if layer.full_attn else "deltanet",
+            )
+
+        varlen_model = model_registry("debugmodel", attn_backend="varlen").model.build()
+        varlen_masks = varlen_model.get_attention_masks(positions)
+        self.assertIsInstance(varlen_masks, dict)
+        self.assertIs(varlen_masks["quadratic_attention"], varlen_masks["deltanet"])
+        self.assertIsInstance(varlen_masks["deltanet"], VarlenMetadata)
+        self.assertEqual(varlen_masks["deltanet"].cu_seq_q_host, (0, 3, 5, 10))
+
+        deltanet_only_config = model_registry("debugmodel").model
+        deltanet_only_config.layers = [
+            layer
+            for layer in deltanet_only_config.layers
+            if layer.delta_net is not None
+        ]
+        deltanet_only_model = deltanet_only_config.build()
+        deltanet_only_masks = deltanet_only_model.get_attention_masks(positions)
+        self.assertEqual(
+            set(deltanet_only_masks.keys()),
+            {"quadratic_attention", "deltanet"},
+        )
+        self.assertIsNone(deltanet_only_masks["quadratic_attention"])
+        self.assertIsInstance(deltanet_only_masks["deltanet"], VarlenMetadata)
+        self.assertEqual(
+            deltanet_only_masks["deltanet"].cu_seq_q_host,
+            (0, 3, 5, 10),
+        )
 
     def _assert_fla_varlen_matches_per_document(
         self, backend: str, *, atol: float, rtol: float
@@ -363,6 +446,49 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self._assert_fla_varlen_matches_per_document(
             "fla_fused_recurrent", atol=2e-2, rtol=2e-2
         )
+
+    def test_varlen_offsets_are_fresh_per_deltanet_invocation(self):
+        """Successive DeltaNet invocations must not share FLA's cache key."""
+        torch.manual_seed(42)
+        model = self._make_deltanet()
+        x_BLD = torch.randn(1, 8, 4)
+        positions = torch.tensor(
+            [[0, 1, 2, 0, 1, 2, 3, 4]],
+            dtype=torch.int32,
+        )
+        attention_masks = create_varlen_metadata_for_document(
+            positions,
+            include_host_offsets=True,
+        )
+        captured_cu_seqlens = []
+
+        def record_cu_seqlens(x_BLD, weight, cu_seqlens, cu_seqlens_cpu):
+            captured_cu_seqlens.append(cu_seqlens)
+            return _reference_causal_conv1d_varlen(
+                x_BLD,
+                weight,
+                cu_seqlens,
+                cu_seqlens_cpu,
+            )
+
+        with mock.patch(
+            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
+            side_effect=record_cu_seqlens,
+        ):
+            model(x_BLD, attention_masks)
+            model(x_BLD, attention_masks)
+
+        self.assertEqual(len(captured_cu_seqlens), 6)
+        first_invocation = captured_cu_seqlens[:3]
+        second_invocation = captured_cu_seqlens[3:]
+        self.assertTrue(
+            all(cu_seqlens is first_invocation[0] for cu_seqlens in first_invocation)
+        )
+        self.assertTrue(
+            all(cu_seqlens is second_invocation[0] for cu_seqlens in second_invocation)
+        )
+        self.assertIsNot(first_invocation[0], attention_masks.cu_seq_q)
+        self.assertIsNot(second_invocation[0], first_invocation[0])
 
 
 if __name__ == "__main__":

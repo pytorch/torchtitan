@@ -8,10 +8,10 @@ from typing import cast
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     default_adamw,
+    LRSchedulersContainer,
     OptimizersContainer,
     ParamGroupConfig,
 )
@@ -432,7 +432,12 @@ def qwen3_moe_deepep() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
-        training=TrainingConfig(local_batch_size=2, seq_len=512, steps=10),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=512,
+            steps=10,
+            disable_cuda_graphs=True,
+        ),
         parallelism=ParallelismConfig(expert_parallel_degree=4),
         checkpoint=CheckpointManager.Config(
             interval=1000, last_save_model_only=False, export_dtype="float16"
