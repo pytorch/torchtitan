@@ -5,12 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable, Iterable
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 from torch import nn
 
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
@@ -21,7 +23,10 @@ from torchtitan.models.common.vision_encoder import (
 from torchtitan.models.deepseek_v3.config_registry import (
     model_registry as deepseek_model_registry,
 )
-from torchtitan.models.deepseek_v3.model import Attention as DeepSeekAttention
+from torchtitan.models.deepseek_v3.model import (
+    Attention as DeepSeekAttention,
+    DeepSeekV3Model,
+)
 from torchtitan.models.flux import model_registry as flux_model_registry
 from torchtitan.models.gpt_oss.config_registry import (
     model_registry as gpt_oss_model_registry,
@@ -30,13 +35,17 @@ from torchtitan.models.gpt_oss.model import (
     Attention as GptOssAttention,
     GptOssTransformerBlock,
 )
+from torchtitan.models.kimi_k2_7.model import KimiK25Model
 from torchtitan.models.muse_glimmer import model_registry as muse_model_registry
-from torchtitan.models.muse_glimmer.model import MuseGlimmerTransformerBlock
+from torchtitan.models.muse_glimmer.model import (
+    MuseGlimmerModel,
+    MuseGlimmerTransformerBlock,
+)
 from torchtitan.models.qwen3_5.config_registry import (
     model_registry as qwen35_model_registry,
 )
-from torchtitan.models.qwen3_5.model import GatedDeltaNet, Qwen35Attention
-from torchtitan.observability.tensor_logging import init, set_enabled
+from torchtitan.models.qwen3_5.model import GatedDeltaNet, Qwen35Attention, Qwen35Model
+from torchtitan.observability.tensor_logging import init, register_fwd_bwd, set_enabled
 
 
 class _IdentityRope(nn.Module):
@@ -79,6 +88,29 @@ class _Scale(nn.Module):
         return value * self.factor
 
 
+class _Builds:
+    def __init__(self, module: nn.Module, **attributes) -> None:
+        self.module = module
+        for name, value in attributes.items():
+            setattr(self, name, value)
+
+    def build(self) -> nn.Module:
+        return self.module
+
+
+class _VisionEncoderStub(nn.Module):
+    """Preserve padded patch shape while exposing model-required attributes."""
+
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.patch_embed = nn.Linear(dim, dim, bias=False)
+        self.spatial_merge_unit = 1
+        self.merge_kernel_size = (1, 1)
+
+    def forward(self, pixel_values, *, grid_thw):
+        return pixel_values
+
+
 def _initialize_parameters(module: nn.Module) -> None:
     for parameter in module.parameters():
         nn.init.uniform_(parameter, -0.02, 0.02)
@@ -88,6 +120,8 @@ def _assert_forward_backward_counts(
     module: nn.Module,
     forward: Callable[[], torch.Tensor | tuple[torch.Tensor, ...]],
     expected_base_names: Iterable[str],
+    *,
+    exact_names: bool = True,
 ) -> None:
     runtime = init(module, device=torch.device("cpu"))
     try:
@@ -103,7 +137,10 @@ def _assert_forward_backward_counts(
             for base_name in expected_base_names
             for suffix in ("x", "dx")
         }
-        assert set(snapshot) == expected_names
+        if exact_names:
+            assert set(snapshot) == expected_names
+        else:
+            assert expected_names <= set(snapshot)
         for name in expected_names:
             assert snapshot[name]["counts"][3].item() == 1
             assert snapshot[name]["counts"][1].item() == 0
@@ -246,6 +283,113 @@ def test_shared_vision_block_records_attention_mlp_and_residuals() -> None:
             "post_mlp_residual",
         ),
     )
+
+
+@pytest.mark.parametrize("family", ["qwen35", "kimi", "muse"])
+def test_multimodal_models_record_projected_vision_boundary(family: str) -> None:
+    dim = 8
+    vision_encoder = _VisionEncoderStub(dim)
+
+    if family == "qwen35":
+        config = SimpleNamespace(
+            vision_encoder=_Builds(
+                vision_encoder,
+                spatial_merge_size=1,
+            )
+        )
+        with mock.patch.object(
+            Decoder,
+            "__init__",
+            lambda self, _config: nn.Module.__init__(self),
+        ):
+            model = Qwen35Model(config)
+        pixels = torch.randn(1, 2, dim, requires_grad=True)
+        grid = torch.tensor([[1, 1, 2]])
+        forward = lambda: model._get_vision_embeds(pixels, grid_thw=grid)[0]
+    elif family == "kimi":
+        config = SimpleNamespace(vision_encoder=_Builds(vision_encoder))
+
+        def initialize_kimi_base(self, _config) -> None:
+            nn.Module.__init__(self)
+            # Preserve the inherited input metric emitted by this real method.
+            register_fwd_bwd(self, ["input"])
+
+        with mock.patch.object(DeepSeekV3Model, "__init__", initialize_kimi_base):
+            model = KimiK25Model(config)
+        model.tok_embeddings = nn.Embedding(16, dim)
+        pixels = torch.randn(1, 1, dim, requires_grad=True)
+        grid = torch.tensor([[1, 1, 1]])
+        tokens = torch.tensor([[9, 1]])
+        forward = lambda: model._prepare_multimodal_embeds(
+            tokens,
+            pixel_values=pixels,
+            grid_thw=grid,
+            special_tokens={"image_id": 9, "video_id": 9},
+        )
+    else:
+        config = SimpleNamespace(
+            vision_projection=_Builds(nn.Linear(dim, dim, bias=False)),
+            perception_emb_norm=_Builds(nn.Identity()),
+            vision_encoder=None,
+            vision_adapter=None,
+        )
+        with mock.patch.object(
+            Decoder,
+            "__init__",
+            lambda self, _config: nn.Module.__init__(self),
+        ):
+            model = MuseGlimmerModel(config)
+        hidden = torch.zeros(1, 2, dim)
+        vision_features = torch.randn(1, 1, dim, requires_grad=True)
+        vision_mask = torch.tensor([[True, False]])
+        forward = lambda: model._inject_vision(
+            hidden,
+            vision_features,
+            vision_mask,
+        )
+
+    _assert_forward_backward_counts(
+        model,
+        forward,
+        ("vision_embeddings_after_projection",),
+        exact_names=False,
+    )
+
+
+def test_shared_vision_padding_is_included_in_raw_statistics() -> None:
+    dim = 8
+    linear = lambda: Linear.Config(in_features=dim, out_features=dim, bias=False)
+    attention = VisionAttention.Config(
+        dim=dim,
+        num_heads=2,
+        wq=linear(),
+        wk=linear(),
+        wv=linear(),
+        proj=linear(),
+    ).build()
+    attention.flex_attention = _AllInputsAttention()
+    _initialize_parameters(attention)
+
+    # Item 0 has three patches; item 1 has two plus one stored padding row.
+    hidden = torch.randn(2, 3, dim)
+    hidden[1, 2].zero_()
+    hidden.requires_grad_()
+    runtime = init(attention, device=torch.device("cpu"))
+    try:
+        with set_enabled(True):
+            output = attention(
+                hidden,
+                rope_cache=torch.empty(0),
+                rope_apply=lambda q, k, _cache: (q, k),
+                attention_mask=None,
+            )
+            output.sum().backward()
+
+        snapshot = runtime.snapshot_unreduced_statistics()
+        for name in ("xq", "xk", "xv", "head_out"):
+            assert snapshot[f"{name}.x"]["counts"][2].item() == dim
+    finally:
+        runtime.close()
 
 
 @pytest.mark.parametrize("stream", ["double", "single"])
