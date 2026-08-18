@@ -24,7 +24,6 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask
-
 from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Conv1d, Linear
@@ -100,7 +99,7 @@ def _causal_conv1d_varlen(
     in_types=({"dp": spmd.S(1), "tp": spmd.S(2)}, None, None),
     out_types={"dp": spmd.S(0), "tp": spmd.S(2)},
 )
-def unflatten_to_bld(
+def _unflatten_to_bld(
     tensor: torch.Tensor, batch_size: int, seq_len: int
 ) -> torch.Tensor:
     return tensor.reshape(batch_size, seq_len, -1)
@@ -110,7 +109,7 @@ def unflatten_to_bld(
     in_types=({"dp": spmd.S(0), "tp": spmd.S(2)}, None, None),
     out_types={"dp": spmd.S(1), "tp": spmd.S(2)},
 )
-def fold_bl_dim(tensor: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
+def _fold_bl_dim(tensor: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
     return tensor.reshape(1, batch_size * seq_len, *tensor.shape[2:])
 
 
@@ -433,33 +432,33 @@ class GatedDeltaNet(Module):
         #   xv_BLNV, xz_BLNV: (1, B * L, n_value_heads, value_head_dim)
         #   xa_BLN, xb_BLN: (1, B * L, n_value_heads)
         xq_BLNK = self._causal_conv(
-            fold_bl_dim(self.in_proj_q(x_BLD), B, L),
+            _fold_bl_dim(self.in_proj_q(x_BLD), B, L),
             self.conv_q,
             cu_seqlens,
             cu_seqlens_cpu,
         )
         xq_BLNK = local_head_split(xq_BLNK, self.key_head_dim, dp_shard_dim=1)
         xk_BLNK = self._causal_conv(
-            fold_bl_dim(self.in_proj_k(x_BLD), B, L),
+            _fold_bl_dim(self.in_proj_k(x_BLD), B, L),
             self.conv_k,
             cu_seqlens,
             cu_seqlens_cpu,
         )
         xk_BLNK = local_head_split(xk_BLNK, self.key_head_dim, dp_shard_dim=1)
         xv_BLNV = self._causal_conv(
-            fold_bl_dim(self.in_proj_v(x_BLD), B, L),
+            _fold_bl_dim(self.in_proj_v(x_BLD), B, L),
             self.conv_v,
             cu_seqlens,
             cu_seqlens_cpu,
         )
         xv_BLNV = local_head_split(xv_BLNV, self.value_head_dim, dp_shard_dim=1)
         xz_BLNV = local_head_split(
-            fold_bl_dim(self.in_proj_z(x_BLD), B, L),
+            _fold_bl_dim(self.in_proj_z(x_BLD), B, L),
             self.value_head_dim,
             dp_shard_dim=1,
         )
-        xa_BLN = fold_bl_dim(self.in_proj_a(x_BLD), B, L)
-        xb_BLN = fold_bl_dim(self.in_proj_b(x_BLD), B, L)
+        xa_BLN = _fold_bl_dim(self.in_proj_a(x_BLD), B, L)
+        xb_BLN = _fold_bl_dim(self.in_proj_b(x_BLD), B, L)
 
         # Gating signals have shape (1, B * L, n_value_heads):
         #   g_BLN:    decay rate per head, always negative
@@ -482,7 +481,7 @@ class GatedDeltaNet(Module):
         out_BLNV = self.norm(out_BLNV, xz_BLNV)
 
         # Merge value heads and restore (B, L) from the folded (1, B * L) layout.
-        out_BLD = unflatten_to_bld(out_BLNV, B, L)
+        out_BLD = _unflatten_to_bld(out_BLNV, B, L)
         return self.out_proj(out_BLD)
 
 
