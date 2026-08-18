@@ -59,13 +59,19 @@ from torchtitan.models.common.token_dispatcher import (
 )
 from torchtitan.observability import structured_logger as sl, tensor_logging
 from torchtitan.observability.tensor_logging.runtime import (
-    _wrap_to_include_tensor_logging_calls,
+    _wrap_fwd_bwd_for_tensor_logging_capture,
 )
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
+
+
+_SUPPORTED_TENSOR_LOGGING_PP_SCHEDULES = {
+    "1F1B",
+    "Interleaved1F1B",
+}
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -306,6 +312,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+
+        if (
+            config.metrics.tensor_logging.enabled
+            and parallel_dims.pp_enabled
+            and (
+                bool(config.parallelism.pipeline_parallel_schedule_csv)
+                or config.parallelism.pipeline_parallel_schedule
+                not in _SUPPORTED_TENSOR_LOGGING_PP_SCHEDULES
+            )
+        ):
+            # TODO: validate complete forward/backward metric coverage before
+            # enabling additional pipeline schedules.
+            raise NotImplementedError(
+                "tensor logging currently supports only the 1F1B and "
+                "Interleaved1F1B pipeline schedules"
+            )
 
         # validate dense activation sequence length evenness
         seq_len_divisor = (
@@ -576,11 +598,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.model_parts,
                 device=self.device,
                 publish_filter_regex=tensor_logging_config.publish_filter_regex,
-                public_prefix_by_model_part=(
-                    {model_part: "" for model_part in self.model_parts}
-                    if parallel_dims.pp_enabled
-                    else None
-                ),
+                pp_enabled=parallel_dims.pp_enabled,
             )
 
         self.lr_schedulers = config.lr_scheduler.build(
@@ -644,9 +662,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.fwd_bwd_fn = self._forward_backward_body
         if not config.training.disable_cuda_graphs:
             if self.tensor_logging is not None:
-                # Capture can start on an unselected step. The device flag gates
-                # replay, so selected and unselected steps reuse the same graph.
-                self.fwd_bwd_fn = _wrap_to_include_tensor_logging_calls(self.fwd_bwd_fn)
+                # Warmup and capture may happen on a non-logging step. Keep the
+                # operations in the graph; set_enabled() still controls writes.
+                self.fwd_bwd_fn = _wrap_fwd_bwd_for_tensor_logging_capture(
+                    self.fwd_bwd_fn
+                )
             self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
 
         # Build validator if validation is configured
@@ -907,18 +927,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        if self.tensor_logging is None:
-            return self._train_step(data_iterator)
-        is_tensor_log_step = (
-            self.metrics_processor.should_log(self.step)
-            and self.step % self.config.metrics.tensor_logging.freq == 0
-        )
-        with tensor_logging.set_enabled(is_tensor_log_step):
-            return self._train_step(data_iterator)
-
-    def _train_step(
-        self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
@@ -997,14 +1005,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.lr_schedulers.step()
 
         # log metrics
-        tensor_metrics: dict[str, int | float] = {}
-        if self.tensor_logging is not None and tensor_logging.is_enabled():
-            with sl.log_trace_span("tensor_logging_collect"):
-                tensor_metrics = self.tensor_logging.collect()
         if not should_log:
             return
 
         assert accumulated_loss is not None
+
+        tensor_metrics: dict[str, int | float] = {}
+        if self.tensor_logging is not None and tensor_logging.is_enabled():
+            with sl.log_trace_span("tensor_logging_collect"):
+                tensor_metrics = self.tensor_logging.collect()
 
         with sl.log_trace_span("collect_dist_metrics"):
 
@@ -1089,8 +1098,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 with sl.log_trace_span("step"):
                     self.gc_handler.run(self.step)
 
+                    is_tensor_logging_step = (
+                        self.tensor_logging is not None
+                        and self.metrics_processor.should_log(self.step)
+                        and self.step % config.metrics.tensor_logging.freq == 0
+                    )
                     try:
-                        self.train_step(data_iterator)
+                        with tensor_logging.set_enabled(is_tensor_logging_step):
+                            self.train_step(data_iterator)
                     except DataloaderExhaustedError:
                         logger.warning("Ran out of data; last step was canceled.")
                         break

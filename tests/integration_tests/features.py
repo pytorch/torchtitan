@@ -183,6 +183,29 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module qwen3 --config qwen3_debugmodel_moe",
+                    "--metrics.enable_tensorboard",
+                    "--metrics.log-freq 2",
+                    "--metrics.tensor-logging.enabled",
+                    "--metrics.tensor-logging.freq 2",
+                    "--training.steps 4",
+                    "--training.disable_cuda_graphs",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--compile.enable",
+                    "activation-checkpoint:full",
+                ],
+            ],
+            "Tensor logging with compiled pipeline parallelism",
+            "tensor_logging_pp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--compile.enable",
                 ],
             ],

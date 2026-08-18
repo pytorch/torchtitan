@@ -22,6 +22,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+from torchtitan.observability import tensor_logging
 
 from .sharding import (
     annotate_multimodal_input_spmd_types,
@@ -81,6 +82,11 @@ class KimiK25Model(DeepSeekV3Model):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
+        if self.vision_encoder is not None:
+            tensor_logging.register_fwd_bwd(
+                self,
+                ["vision_embeddings_after_projection"],
+            )
 
     def _prepare_multimodal_embeds(
         self,
@@ -101,6 +107,8 @@ class KimiK25Model(DeepSeekV3Model):
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
+        if self.tok_embeddings is not None:
+            tensor_logging.log_fwd_bwd_stats(self, input=inputs_embeds)
 
         modalities = []
         if pixel_values is not None and grid_thw is not None:
@@ -125,6 +133,10 @@ class KimiK25Model(DeepSeekV3Model):
         # Patches arrive float32; match the encoder's compute dtype for the matmul.
         pixels = pixels.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixels, grid_thw=grid)
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            vision_embeddings_after_projection=vision_embeds,
+        )
         # MoonViT collapses time (temporal pooling) and merges 2x2 spatially, so
         # the token count is (h/kh)*(w/kw), independent of t.
         kh, kw = self.vision_encoder.merge_kernel_size
@@ -204,4 +216,8 @@ class KimiK25Model(DeepSeekV3Model):
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:
             return x
-        return self.lm_head(x) if self.lm_head is not None else x
+        if self.lm_head is None:
+            return x
+        output = self.lm_head(x)
+        tensor_logging.log_fwd_bwd_stats(self.lm_head, output=output)
+        return output

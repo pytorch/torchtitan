@@ -60,7 +60,7 @@ class Attention(nn.Module):
         return self.apply_scores(scores)
 ```
 
-`register()` declares a source-local name. The trainer calls `init()` after model parallelization and optimizer construction, expands each source to its public model path, and assigns every public name a fixed buffer slot. Emitting an unregistered name is an error.
+`register()` declares a short name on one module. The trainer calls `init()` after model parallelization and optimizer construction, joins the module path and short name, and assigns that full name a fixed buffer row. Emitting an unregistered name is an error.
 
 ### Record forward and backward values
 
@@ -133,6 +133,8 @@ Every rank allocates the same slot order. Under PP, ranks that do not own a metr
 
 Ordinary slots count physical observations. A replicated tensor contributes once per rank holding it, so absolute counts include replica multiplicity. Ratios such as `abs_mean`, `zero_frac`, and kurtosis are unchanged by uniform replication.
 
+The LM-head recorder can run more than once per model forward when chunked loss is enabled. With eight loss chunks, `lm_head.output.observation_count` is eight times the count of a once-per-forward boundary; this is per-call accounting, not duplicate recording.
+
 ## Publication filter
 
 `metrics.tensor_logging.publish_filter_regex` is an allowlist over dotted metric names:
@@ -143,18 +145,99 @@ layers.0.attention.xq.x.abs_max
 
 For example, `r"layers\.0\..*\.abs_max$"` accepts `layers.0.attention.xq.x.abs_max`, rejects the same metric under `layers.1`, and `r".*"` publishes everything. Filtering controls what gets logged, not what gets computed, so a narrow filter reduces sink volume but not GPU statistic collection.
 
-## Execution modes
+## Compatibility
 
-- Full and selective activation checkpointing preserve the original forward mutation so recomputation does not double-count statistics.
-- Regional full-graph `torch.compile` uses a device-resident enabled flag, allowing selected and unselected steps to reuse one graph.
-- In-process Graph Trainer tracing and CUDA-graph replay use the live model-owned slots. Separately produced or loaded precompiled artifacts are unsupported because registered sources and live buffers are not portable across artifacts.
-- Pipeline model parts can share global prefixes so names remain model paths such as `layers.7.attention.xq.x`, independent of rank-local part indices.
-- CUDA uses a lazily imported Triton accumulator; CPU uses the eager reference path. ROCm source compatibility is not a hardware-validation claim.
+`✓` supported and tested
+`✗` rejected during setup
+
+```text
+Configuration                                                   Status
+DP / TP / CP / EP                                               ✓
+spmd_types backend                                              ✓
+torch.compile(fullgraph=True)                                   ✓
+Full activation checkpointing                                   ✓
+CUDA graphs                                                     ✓
+Gradient accumulation                                           ✓
+Graph Trainer, in-process and PP disabled                       ✓
+
+DP × CP × TP / EP + FullAC + spmd_types                         ✓
+DP × PP × TP / EP + compile + FullAC + spmd_types               ✓
+
+Pipeline parallel, 1F1B                                         ✓
+Pipeline parallel, Interleaved1F1B                              ✓
+Other pipeline schedules                                        ✗
+Graph Trainer + pipeline parallel (GraphPP)                     ✗
+Graph Trainer precompiled artifacts                             ✗
+```
+
+The first compound row is a previously validated eight-rank eager CP topology: DP-shard 2 × CP 2 × TP 2, with EP 2 carved. The second is the Stage-A eight-rank compiled PP topology: DP-shard 2 × PP 2 × TP 2, with EP 2 carved. Unsupported modes fail during setup rather than publishing incomplete metrics.
+
+The Triton fast path handles tensors whose PyTorch device type is `cuda`, including ROCm's CUDA-compatible PyTorch API. Other device types use the ordinary PyTorch fallback path.
+
+## Execution details
+
+### What happens on a non-logging step?
+
+In eager mode, the logging helper returns before it scans the tensor.
+
+In a compiled or CUDA-captured forward/backward, the logging operation stays in the graph so the same graph can be reused on every step. It reads a device value named `enabled`. When `enabled` is 0, the Triton kernel returns before scanning the tensor or changing the statistic buffers.
+
+Code that builds an optional value before `log_stats()` can still run if that code was included in the compiled graph. For example, `scores.mean(dim=0)` can run even though `log_stats(router, scores=...)` does not update a buffer.
+
+For a CUDA-captured tensor whose layout needs `.contiguous()`, that copy is also part of the captured graph and still runs. The `enabled=0` check prevents the statistics scan and buffer update, not earlier work used to prepare the value.
+
+The packed SUM/MAX all-reduces, CPU derivation, and publication do not run on a non-logging step. They happen in `collect()` after forward/backward and the optimizer step, outside the compiled or captured function.
+
+### Why does changing cadence not create a new graph?
+
+The logging operations stay in the compiled or captured graph. Cadence changes only the scalar tensor `StatisticBuffers.enabled`:
+
+```text
+enabled = 0 -> logging kernel returns without changing buffers
+enabled = 1 -> logging kernel scans the tensor and adds statistics
+```
+
+The graph contains the same operations in both cases, so it can be reused. Cadence does not remove calculations from the graph: code that builds a value for `log_stats()` still runs on every replay.
+
+### Are reductions inside the graph?
+
+No. The compiled or captured function contains forward, backward, and the device-side statistic updates. After that function returns on a logging step, trainer Python calls `collect()`.
+
+`collect()` runs one packed SUM all-reduce, one packed MAX all-reduce, copies the two reduced tensors to CPU, derives scalar metrics, clears the buffers, and returns the metric dictionary. Trainer then passes that dictionary to the normal metrics logger. None of this runs on non-logging steps.
+
+### How are backward statistics recorded?
+
+`log_fwd_bwd_stats()` records `<name>.x` immediately and attaches an autograd hook. During backward, the hook receives the incoming cotangent and an ordered custom operation records `<name>.dx` in that metric's buffer row.
+
+### Why does activation checkpointing not double-count statistics?
+
+Eager FullAC records the original forward. Its recompute context sets a flag that makes `log_stats()` and `log_fwd_bwd_stats()` return before recording the second forward. Under compiled FullAC, the checkpoint policy preserves the mutation operation, so recomputation does not execute the update again.
+
+### Does PP divide metrics by pipeline degree?
+
+No. The stage that owns a metric writes its row. Other stages contribute zero to additive fields and negative infinity to the maximum. WORLD SUM/MAX therefore reproduces the owning stage's values without dividing by PP degree.
+
+Only `1F1B` and `Interleaved1F1B` are supported. Tensor logging rejects every other regular pipeline schedule during setup until a focused test proves complete forward and backward metric coverage.
+
+### Which Graph Trainer modes are supported?
+
+In-process, non-PP Graph Trainer tracing is supported: tensor-logging buffers exist before the lazy trace, and replay uses the same buffers and device cadence flag.
+
+GraphPP is rejected during setup. Its copied FX forward graphs do not yet point at the live statistic buffers, so allowing the run would publish backward rows while silently omitting forward rows.
+
+Separately generated or loaded precompiled artifacts are also rejected: their saved graph has no portable binding to the later process's metric names and live buffers.
+
+### What performance optimizations are used?
+
+- Buffer rows are allocated once during `init()` and reused.
+- On a non-logging compiled or captured step, the device kernel returns before scanning the tensor.
+- The Triton kernel scans contiguous storage. Common transposes and permutations become no-copy views; `.contiguous()` is used only when the layout still has gaps.
+- Every additive field shares one SUM all-reduce and every maximum shares one MAX all-reduce, regardless of how many metrics are registered.
+- The all-reduces and scalar derivation run only on logging steps and outside compiled or captured forward/backward.
 
 ## Current limitations
 
-- GraphPP forward-statistic support is partial because copied FX graphs do not yet preserve every forward buffer mutation.
 - The publication filter does not skip GPU collection.
 - Publication is synchronous with the training step.
-- Separately precompiled Graph Trainer artifacts are unsupported.
+- Unsupported PP schedules, GraphPP, and separately precompiled Graph Trainer artifacts fail during setup.
 - Optional visualizations, asynchronous publication, and additional built-in metrics are follow-up work.

@@ -8,19 +8,23 @@ import torch
 from torch import nn
 
 
-NUMEL = 0
-NONFINITE_COUNT = 1
-ZERO_COUNT = 2
-OBSERVATION_COUNT = 3
+NUMEL_INDEX = 0
+NONFINITE_COUNT_INDEX = 1
+ZERO_COUNT_INDEX = 2
+OBSERVATION_COUNT_INDEX = 3
 
-ABS_SUM = 4
-SQUARE_SUM = 5
-FOURTH_MOMENT_SUM = 6
-SUM_STATISTIC_FIELD_COUNT = 7
+ABS_SUM_INDEX = 4
+SQUARE_SUM_INDEX = 5
+FOURTH_MOMENT_SUM_INDEX = 6
+SUM_STATISTIC_FIELD_COUNT = 7  # Count of indices above, not an index.
 
 
 class StatisticBuffers(nn.Module):
-    """Packed sufficient statistics with one slot per registered metric.
+    """Raw tensor statistics with one row per registered metric.
+
+    `sum_statistics` stores the seven fields combined with SUM. `maxima` stores
+    the field combined with MAX. `enabled` is 1 when this training step should
+    update the rows and 0 when logging operations should leave them unchanged.
 
     Example:
 
@@ -77,18 +81,19 @@ class StatisticBuffers(nn.Module):
         self.maxima.fill_(-torch.inf)
 
 
-def _normalize_tensor_layout(value: torch.Tensor) -> torch.Tensor:
-    """Reorder and collapse dimensions so common strided tensors scan as one view.
+def _view_tensor_in_storage_order(value: torch.Tensor) -> torch.Tensor:
+    """Try to create a contiguous view without copying the tensor.
 
-    Since statistic order is irrelevant, follow storage order and collapse
-    contiguous runs; the caller copies only genuinely strided layouts.
+    Statistics do not depend on element order. Reading common transposes and
+    permutations in storage order avoids a full tensor copy. A slice with gaps
+    can remain noncontiguous; the caller copies that fallback.
 
     Example:
 
         value = torch.empty(2, 3, 4).transpose(0, 1)
         # shape=(3, 2, 4), stride=(4, 12, 1)
-        normalized = _normalize_tensor_layout(value)
-        # shape=(2, 3, 4), stride=(12, 4, 1), no copy
+        scan_value = _view_tensor_in_storage_order(value)
+        # `scan_value` is contiguous and shares storage with `value`.
     """
 
     if value.ndim <= 1:
@@ -154,7 +159,9 @@ def accumulate_tensor_statistics(
     if value.is_cuda:
         from .statistics_triton import accumulate_contiguous_tensor_statistics
 
-        value = _normalize_tensor_layout(value)
+        # The Triton kernel scans contiguous storage. Avoid a copy for common
+        # transposes/permutations; copy only layouts that still contain gaps.
+        value = _view_tensor_in_storage_order(value)
         if not value.is_contiguous():
             value = value.contiguous()
         accumulate_contiguous_tensor_statistics(
@@ -165,12 +172,11 @@ def accumulate_tensor_statistics(
         )
         return
 
-    # CPU is the readable reference path for tests and non-CUDA execution.
     with torch.no_grad():
         if not bool(enabled):
             return
         value = value.detach()
-        sum_statistics[OBSERVATION_COUNT].add_(1)
+        sum_statistics[OBSERVATION_COUNT_INDEX].add_(1)
         if value.numel() == 0:
             return
 
@@ -180,13 +186,15 @@ def accumulate_tensor_statistics(
         absolute = finite_value.abs()
         square = finite_value.square()
 
-        sum_statistics[NUMEL].add_(value.numel())
-        sum_statistics[NONFINITE_COUNT].add_(torch.count_nonzero(~finite))
-        sum_statistics[ZERO_COUNT].add_(torch.count_nonzero(finite & (value == 0)))
+        sum_statistics[NUMEL_INDEX].add_(value.numel())
+        sum_statistics[NONFINITE_COUNT_INDEX].add_(torch.count_nonzero(~finite))
+        sum_statistics[ZERO_COUNT_INDEX].add_(
+            torch.count_nonzero(finite & (value == 0))
+        )
 
-        sum_statistics[ABS_SUM].add_(absolute.sum())
-        sum_statistics[SQUARE_SUM].add_(square.sum())
-        sum_statistics[FOURTH_MOMENT_SUM].add_(square.square().sum())
+        sum_statistics[ABS_SUM_INDEX].add_(absolute.sum())
+        sum_statistics[SQUARE_SUM_INDEX].add_(square.sum())
+        sum_statistics[FOURTH_MOMENT_SUM_INDEX].add_(square.square().sum())
 
         finite_absolute = torch.where(finite, value_fp32.abs(), -torch.inf)
         updated_maximum = torch.maximum(maximum, finite_absolute.amax())

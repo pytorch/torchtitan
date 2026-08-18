@@ -46,6 +46,8 @@ def _common_setup(config):
     compile_config = config.compile
 
     if config.metrics.tensor_logging.enabled:
+        # TODO: create tensor-logging buffers while producing the artifact and
+        # reconnect the loaded graph to the training process's live buffers.
         raise NotImplementedError(
             "tensor logging does not yet support Graph Trainer precompiled artifacts"
         )

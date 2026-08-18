@@ -66,6 +66,7 @@ from torchtitan.config import derive, override
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.sharding import ShardingConfig
 
 __all__ = [
@@ -454,7 +455,9 @@ class FusedSwiGLU(FeedForward):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate, up = torch.einsum("...d,hgd->...hg", x, self.w13).unbind(-1)
-        return self.w2(_fused_silu_and_mul(gate, up))
+        act_out = _fused_silu_and_mul(gate, up)
+        tensor_logging.log_fwd_bwd_stats(self, act_out=act_out)
+        return self.w2(act_out)
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:

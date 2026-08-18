@@ -109,8 +109,19 @@ class GraphTrainer(Trainer):
     def __init__(self, config):
         if (
             config.metrics.tensor_logging.enabled
+            and config.parallelism.pipeline_parallel_degree > 1
+        ):
+            # TODO: bind GraphPP's copied FX forward graphs to the live
+            # tensor-logging buffers. Current GraphPP runs omit forward rows.
+            raise NotImplementedError(
+                "tensor logging does not yet support GraphPP forward statistics"
+            )
+        if (
+            config.metrics.tensor_logging.enabled
             and config.compile.precompile_artifact_dir
         ):
+            # TODO: create tensor-logging buffers while producing the artifact
+            # and reconnect the loaded graph to the training process's buffers.
             raise NotImplementedError(
                 "tensor logging does not yet support Graph Trainer precompiled artifacts"
             )

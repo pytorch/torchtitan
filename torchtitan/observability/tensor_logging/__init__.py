@@ -12,7 +12,7 @@ from .runtime import (
     register,
     register_fwd_bwd,
     set_enabled,
-    should_compute_logged_values,
+    should_run_logging_calls,
     TensorLoggingState,
 )
 
@@ -26,5 +26,5 @@ __all__ = [
     "register",
     "register_fwd_bwd",
     "set_enabled",
-    "should_compute_logged_values",
+    "should_run_logging_calls",
 ]

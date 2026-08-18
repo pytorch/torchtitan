@@ -41,6 +41,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.module import Module
 
 from .rope import MRoPE
@@ -295,6 +296,7 @@ class GatedDeltaNet(Module):
         self.kernel = config.kernel.build()
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
+        tensor_logging.register_fwd_bwd(self, ["head_out"])
 
     @staticmethod
     def _local_map_conv(
@@ -474,6 +476,7 @@ class GatedDeltaNet(Module):
         )
 
         out_BLNV = self.norm(out_BLNV, xz_BLNV)
+        tensor_logging.log_fwd_bwd_stats(self, head_out=out_BLNV)
 
         # Merge value heads and restore (B, L) from the folded (1, B * L) layout.
         out_BLD = unflatten_to_bld(out_BLNV, B, L)
@@ -530,6 +533,19 @@ class Qwen35Attention(BaseAttention):
         self.scaling = self.head_dim**-0.5
 
         self.inner_attention = config.inner_attention.build()
+        tensor_logging.register_fwd_bwd(
+            self,
+            [
+                "xq",
+                "xk",
+                "xv",
+                "xq_normed",
+                "xk_normed",
+                "output_gate",
+                "head_out_pre_gate",
+                "head_out",
+            ],
+        )
 
     def forward(
         self,
@@ -544,10 +560,21 @@ class Qwen35Attention(BaseAttention):
         xq_BLNH, gate_BLNH = xq_gate_BLN2H.chunk(2, dim=-1)
         xk_BLNH = local_head_split(self.wk(x_BLD), self.head_dim)
         xv_BLNH = local_head_split(self.wv(x_BLD), self.head_dim)
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            xq=xq_BLNH,
+            xk=xk_BLNH,
+            xv=xv_BLNH,
+        )
 
         # QK norm (before RoPE)
         xq_BLNH = self.q_norm(xq_BLNH)
         xk_BLNH = self.k_norm(xk_BLNH)
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            xq_normed=xq_BLNH,
+            xk_normed=xk_BLNH,
+        )
 
         # Partial RoPE: only first rotary_dim elements get positional encoding
         assert self.rotary_dim <= self.head_dim
@@ -563,7 +590,7 @@ class Qwen35Attention(BaseAttention):
         xq_BLNH = torch.cat([xq_BLNR, xq_BLNP], dim=-1)
         xk_BLNH = torch.cat([xk_BLNR, xk_BLNP], dim=-1)
 
-        out_BLNH = self.inner_attention(
+        head_out_pre_gate = self.inner_attention(
             xq_BLNH,
             xk_BLNH,
             xv_BLNH,
@@ -573,8 +600,15 @@ class Qwen35Attention(BaseAttention):
         ).contiguous()
 
         # Output gating
-        out_BLNH = out_BLNH * torch.sigmoid(gate_BLNH)
-        out_BLD = out_BLNH.view(B, L, -1)
+        output_gate = torch.sigmoid(gate_BLNH)
+        head_out = head_out_pre_gate * output_gate
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            output_gate=output_gate,
+            head_out_pre_gate=head_out_pre_gate,
+            head_out=head_out,
+        )
+        out_BLD = head_out.view(B, L, -1)
         return self.wo(out_BLD)
 
 
@@ -746,6 +780,10 @@ class Qwen35Model(Decoder):
 
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
+        tensor_logging.register_fwd_bwd(
+            self,
+            ["vision_embeddings_after_projection"],
+        )
 
     def get_attention_masks(
         self,
@@ -836,6 +874,10 @@ class Qwen35Model(Decoder):
         """
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            vision_embeddings_after_projection=vision_embeds,
+        )
 
         merge_unit = self.vision_encoder.spatial_merge_unit
         num_tokens_per_item = grid_thw.prod(-1) // merge_unit
@@ -871,6 +913,8 @@ class Qwen35Model(Decoder):
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
+        if self.tok_embeddings is not None:
+            tensor_logging.log_fwd_bwd_stats(self, input=inputs_embeds)
 
         if pixel_values is not None and grid_thw is not None:
             vision_embeds, num_tokens = self._get_vision_embeds(
@@ -948,4 +992,8 @@ class Qwen35Model(Decoder):
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:
             return x
-        return self.lm_head(x) if self.lm_head is not None else x
+        if self.lm_head is None:
+            return x
+        output = self.lm_head(x)
+        tensor_logging.log_fwd_bwd_stats(self.lm_head, output=output)
+        return output

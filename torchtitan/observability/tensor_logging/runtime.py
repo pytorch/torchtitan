@@ -10,7 +10,7 @@ import contextlib
 import functools
 import math
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from typing import cast, NamedTuple, TypeAlias
 
 import spmd_types as spmd
@@ -23,13 +23,23 @@ from torchtitan.distributed.activation_checkpoint import (
     _is_activation_checkpoint_recompute,
 )
 
-from .statistics import accumulate_tensor_statistics, StatisticBuffers
+from .statistics import (
+    ABS_SUM_INDEX,
+    accumulate_tensor_statistics,
+    FOURTH_MOMENT_SUM_INDEX,
+    NONFINITE_COUNT_INDEX,
+    NUMEL_INDEX,
+    OBSERVATION_COUNT_INDEX,
+    SQUARE_SUM_INDEX,
+    StatisticBuffers,
+    ZERO_COUNT_INDEX,
+)
 
 
 MetricSource: TypeAlias = nn.Module | nn.Parameter
 ReducedBuffers: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
-_REGISTERED_NAMES_ATTR = "_tensor_logging_registered_names"
+_REGISTERED_METRIC_NAMES_ATTR = "_tensor_logging_registered_metric_names"
 _STATISTIC_BUFFER_SLOTS_ATTR = "_tensor_logging_statistic_buffer_slots"
 _active_state: TensorLoggingState | None = None
 _enabled = False
@@ -37,40 +47,46 @@ _include_tensor_logging_calls = False
 
 
 class StatisticBufferSlot(NamedTuple):
-    """Storage assigned to one public metric name during `init`."""
+    """The shared-buffer row used by one registered metric name."""
 
-    sum_statistics: torch.Tensor
-    maximum: torch.Tensor
-    slot_index: torch.Tensor
+    sum_statistics: torch.Tensor  # sum_statistics[row], shape [7]
+    maximum: torch.Tensor  # maxima[row], scalar
+    slot_index: torch.Tensor  # CPU scalar row used by the backward hook
 
 
-def _registered_tensor_names(metric_source: MetricSource) -> list[str] | None:
+def _get_registered_metric_names(metric_source: MetricSource) -> list[str] | None:
+    """Return names registered directly on this module or parameter.
+
+    Example:
+
+        register_fwd_bwd(attention, ["xq"])
+        _get_registered_metric_names(attention)
+        # -> ["xq.x", "xq.dx"]
+    """
+
     return cast(
         list[str] | None,
-        metric_source.__dict__.get(_REGISTERED_NAMES_ATTR),
+        metric_source.__dict__.get(_REGISTERED_METRIC_NAMES_ATTR),
     )
 
 
-def _statistic_buffer_slots(
+def _get_statistic_buffer_slots(
     metric_source: MetricSource,
 ) -> dict[str, StatisticBufferSlot]:
-    # Read this exact source without following `nn.Module` proxy lookup.
+    """Return the shared-buffer row used by each name on this source.
+
+    Example:
+
+        _get_statistic_buffer_slots(attention)["xq.x"]
+        # -> StatisticBufferSlot(..., slot_index=torch.tensor(17))
+    """
+
     slots = metric_source.__dict__.get(_STATISTIC_BUFFER_SLOTS_ATTR)
     if slots is None:
         raise KeyError(
             f"no initialized tensor metrics on {type(metric_source).__name__}"
         )
     return cast(dict[str, StatisticBufferSlot], slots)
-
-
-def _slot(
-    slots: dict[str, StatisticBufferSlot],
-    registered_name: str,
-) -> StatisticBufferSlot:
-    try:
-        return slots[registered_name]
-    except KeyError:
-        raise KeyError(f"unregistered tensor metric: {registered_name}") from None
 
 
 def _local_tensor(value: torch.Tensor) -> torch.Tensor:
@@ -95,10 +111,10 @@ def register(
 
     if _active_state is not None:
         raise RuntimeError("register tensor names before tensor_logging.init()")
-    existing_names = _registered_tensor_names(metric_source)
+    existing_names = _get_registered_metric_names(metric_source)
     if existing_names is None:
         existing_names = []
-        setattr(metric_source, _REGISTERED_NAMES_ATTR, existing_names)
+        setattr(metric_source, _REGISTERED_METRIC_NAMES_ATTR, existing_names)
     existing_names.extend(registered_names)
 
 
@@ -122,13 +138,17 @@ def register_fwd_bwd(
 
 
 @contextlib.contextmanager
-def set_enabled(value: bool) -> Iterator[None]:
-    """Choose whether `log_stats` calls record values in this scope.
+def set_enabled(value: bool) -> Generator[None, None, None]:
+    """Choose whether this training step adds statistics to the buffers.
+
+    In eager code, `False` skips logging calls. In compiled or CUDA-graph code,
+    logging operations stay in the graph, but `enabled=0` makes them return
+    without changing the buffers.
 
     Example:
 
-        with tensor_logging.set_enabled(is_tensor_log_step):
-            loss = train_step(batch)
+        with set_enabled(step % tensor_logging_freq == 0):
+            train_step()
     """
 
     global _enabled
@@ -141,39 +161,28 @@ def set_enabled(value: bool) -> Iterator[None]:
     try:
         yield
     finally:
+        # Restore the setting from before this `with` block. Graph Trainer can
+        # temporarily enable logging while tracing inside an off-cadence step.
         _enabled = previous
         if state is not None:
             with spmd.no_typecheck():
                 state.statistic_buffers.enabled.fill_(previous)
 
 
-@contextlib.contextmanager
-def _include_tensor_logging_calls_for_capture() -> Iterator[None]:
-    """Include device-gated tensor-logging calls in CUDA-graph capture.
-
-    CUDA graph warmup and capture can occur on a non-logging step. The captured
-    graph still needs the recording ops; ``buffers.enabled`` decides at replay
-    time whether they mutate statistics.
-    """
-
-    global _include_tensor_logging_calls
-    previous = _include_tensor_logging_calls
-    _include_tensor_logging_calls = True
-    try:
-        yield
-    finally:
-        _include_tensor_logging_calls = previous
-
-
-def _wrap_to_include_tensor_logging_calls(
+def _wrap_fwd_bwd_for_tensor_logging_capture(
     forward_backward: Callable[..., torch.Tensor],
 ) -> Callable[..., torch.Tensor]:
-    """Keep device-gated tensor-logging calls in CUDA-graph capture."""
+    """Include logging calls in CUDA-graph setup without changing the write flag."""
 
     @functools.wraps(forward_backward)
     def wrapped(*args, **kwargs):
-        with _include_tensor_logging_calls_for_capture():
+        global _include_tensor_logging_calls
+        previous = _include_tensor_logging_calls
+        _include_tensor_logging_calls = True
+        try:
             return forward_backward(*args, **kwargs)
+        finally:
+            _include_tensor_logging_calls = previous
 
     return wrapped
 
@@ -186,15 +195,17 @@ def is_enabled() -> bool:
     return _enabled
 
 
-def should_compute_logged_values() -> bool:
-    """Return whether callsites must compute the optional values they log.
+def should_run_logging_calls() -> bool:
+    """Return whether callsites must execute tensor-logging calls.
 
-    This is also true during compile and CUDA-graph capture on an unselected
-    step so cadence changes reuse one graph; the device flag gates each replay.
+    Returns `False` on an eager non-logging step. Returns `True` while compiling
+    or setting up a CUDA graph so the logging code is included in that graph.
+    The separate `enabled` tensor still prevents buffer writes on non-logging
+    steps.
 
     Example:
 
-        if should_compute_logged_values():
+        if should_run_logging_calls():
             log_stats(router, entropy=compute_router_entropy(scores))
     """
 
@@ -209,106 +220,89 @@ def _is_installed() -> bool:
     return _active_state is not None
 
 
-def _infer_device(model_parts: Sequence[nn.Module]) -> torch.device:
-    for model_part in model_parts:
-        tensor = next(model_part.parameters(), None)
-        if tensor is None:
-            tensor = next(model_part.buffers(), None)
-        if tensor is not None:
-            return tensor.device
-    return torch.device("cpu")
-
-
-def _public_prefix_by_metric_source(
+def _discover_registered_metrics(
     model_parts: Sequence[nn.Module],
-    public_prefix_by_model_part: Mapping[nn.Module, str],
-) -> dict[MetricSource, str]:
-    """Map local modules and parameters to their public metric prefix.
+    *,
+    pp_enabled: bool,
+) -> list[tuple[MetricSource, str, str]]:
+    """Build the full model name for every registered tensor metric.
 
     Example:
 
-        public_prefix_by_model_part = {first_part: "", last_part: ""}
-        # first_part.layers[0] -> "layers.0"
-        # last_part.layers[7]  -> "layers.7"
+        # model.layers[3].attention registered "xq.x"
+        # -> (attention, "xq.x", "layers.3.attention.xq.x")
     """
+    model_part_roots = set(model_parts)
+    source_by_full_name: dict[str, MetricSource] = {}
+    registered_metrics: list[tuple[MetricSource, str, str]] = []
 
-    names: dict[MetricSource, str] = {}
-    default_prefixes = (
-        [""]
-        if len(model_parts) == 1
-        else [f"model_parts.{i}" for i in range(len(model_parts))]
-    )
-    # A split model defaults to local prefixes unless PP supplies global overrides.
-    for model_part, default_prefix in zip(model_parts, default_prefixes, strict=True):
-        model_part_prefix = public_prefix_by_model_part.get(model_part, default_prefix)
+    # Visit each model chunk owned by this rank. Example: `(0, first_part)`
+    # may hold embeddings and layers 0-3; `(1, second_part)` layers 6-7 + head.
+    for model_part_index, model_part in enumerate(model_parts):
+        # Independent non-PP parts need distinct prefixes. PP parts already keep
+        # model paths such as `layers.3`, so they take no prefix.
+        model_part_prefix = (
+            ""
+            if pp_enabled or len(model_parts) == 1
+            else f"model_parts.{model_part_index}"
+        )
+
+        # Find the path of every module inside that chunk. Example:
+        # `("layers.3.attention", attention_module)`.
         for module_name, module in model_part.named_modules():
             module_name = ".".join(
                 part
                 for part in module_name.split(".")
                 if part != "_checkpoint_wrapped_module"
             )
-            name = ".".join(part for part in (model_part_prefix, module_name) if part)
-            names[module] = name
-            for parameter_name, parameter in module.named_parameters(recurse=False):
-                names[parameter] = ".".join(
-                    part for part in (name, parameter_name) if part
-                )
-    return names
-
-
-def _discover_registered_metrics(
-    model_parts: Sequence[nn.Module],
-    public_prefix_by_model_part: Mapping[nn.Module, str],
-) -> list[tuple[MetricSource, str, str]]:
-    """Resolve local registrations to public metric names.
-
-    Each result is `(metric_source, registered_name, public_metric_name)`.
-    Explicit PP roots may share a stage-conditional top-level boundary such as
-    `input.x`; every other duplicate public name is rejected.
-
-    Example:
-
-        # model.layers[3].attention registered "xq.x"
-        # -> (attention, "xq.x", "layers.3.attention.xq.x")
-
-        # `{part: "" for part in parts}` keeps PP names as global model paths.
-    """
-
-    public_prefix_by_source = _public_prefix_by_metric_source(
-        model_parts,
-        public_prefix_by_model_part,
-    )
-    source_by_public_name: dict[str, MetricSource] = {}
-    registered_metrics: list[tuple[MetricSource, str, str]] = []
-
-    for metric_source, source_prefix in public_prefix_by_source.items():
-        for registered_name in _registered_tensor_names(metric_source) or ():
-            public_metric_name = ".".join(
-                part for part in (source_prefix, registered_name) if part
+            module_path = ".".join(
+                part for part in (model_part_prefix, module_name) if part
             )
-            previous_source = source_by_public_name.get(public_metric_name)
-            if previous_source is not None:
-                previous_prefix = public_prefix_by_model_part.get(previous_source)
-                current_prefix = public_prefix_by_model_part.get(metric_source)
-                same_explicit_pp_prefix = (
-                    previous_prefix is not None
-                    and current_prefix is not None
-                    and previous_prefix == current_prefix
+
+            metric_sources: list[tuple[MetricSource, str]] = [(module, module_path)]
+            metric_sources.extend(
+                (
+                    parameter,
+                    ".".join(part for part in (module_path, parameter_name) if part),
                 )
-                if previous_source is metric_source or not same_explicit_pp_prefix:
-                    raise ValueError(
-                        f"tensor metric registered twice: {public_metric_name}"
+                for parameter_name, parameter in module.named_parameters(recurse=False)
+            )
+
+            # A registration can belong to the module itself or one parameter.
+            for metric_source, source_path in metric_sources:
+                for registered_name in (
+                    _get_registered_metric_names(metric_source) or ()
+                ):
+                    full_metric_name = ".".join(
+                        part for part in (source_path, registered_name) if part
                     )
-            else:
-                source_by_public_name[public_metric_name] = metric_source
-            registered_metrics.append(
-                (metric_source, registered_name, public_metric_name)
-            )
+                    previous_source = source_by_full_name.get(full_metric_name)
+
+                    # Copied PP Decoder roots can share `input.x`/`input.dx`.
+                    # Reject every other duplicate full metric name.
+                    copied_pp_root = (
+                        pp_enabled
+                        and previous_source in model_part_roots
+                        and metric_source in model_part_roots
+                        and previous_source is not metric_source
+                    )
+                    if previous_source is not None and not copied_pp_root:
+                        raise ValueError(
+                            f"tensor metric registered twice: {full_metric_name}"
+                        )
+                    source_by_full_name.setdefault(full_metric_name, metric_source)
+                    registered_metrics.append(
+                        (metric_source, registered_name, full_metric_name)
+                    )
     return registered_metrics
 
 
-def _gather_global_metric_names(local_names: set[str]) -> list[str]:
-    """Give every PP rank the same sorted metric names.
+def _gather_pipeline_metric_names(
+    local_metric_names: set[str],
+    *,
+    pp_enabled: bool,
+) -> list[str]:
+    """Return the same sorted metric-name list on every pipeline rank.
 
     Example:
 
@@ -318,15 +312,15 @@ def _gather_global_metric_names(local_names: set[str]) -> list[str]:
             ["layers.0.attn.xq.x", "layers.7.attn.xq.x"]
     """
 
-    if not dist.is_initialized():
-        return sorted(local_names)
+    if not pp_enabled or not dist.is_initialized():
+        return sorted(local_metric_names)
     names_by_rank: list[set[str]] = [set() for _ in range(dist.get_world_size())]
-    dist.all_gather_object(names_by_rank, local_names)
+    dist.all_gather_object(names_by_rank, local_metric_names)
     return sorted(set().union(*names_by_rank))
 
 
 def _derive_metrics_from_statistics(
-    public_metric_name: str,
+    full_metric_name: str,
     sum_statistics: Sequence[float],
     maximum: float,
 ) -> dict[str, int | float]:
@@ -343,21 +337,23 @@ def _derive_metrics_from_statistics(
     """
 
     metrics: dict[str, int | float] = {}
-    numel = int(sum_statistics[0])
-    nonfinite_count = int(sum_statistics[1])
-    zero_count = int(sum_statistics[2])
-    observation_count = int(sum_statistics[3])
+    numel = int(sum_statistics[NUMEL_INDEX])
+    nonfinite_count = int(sum_statistics[NONFINITE_COUNT_INDEX])
+    zero_count = int(sum_statistics[ZERO_COUNT_INDEX])
+    observation_count = int(sum_statistics[OBSERVATION_COUNT_INDEX])
     if observation_count == 0:
         return metrics
     finite_count = numel - nonfinite_count
-    prefix = f"{public_metric_name}."
+    prefix = f"{full_metric_name}."
     metrics[prefix + "numel"] = numel
     metrics[prefix + "nonfinite_count"] = nonfinite_count
     metrics[prefix + "observation_count"] = observation_count
     if finite_count == 0:
         return metrics
 
-    absolute_sum, square_sum, fourth_moment_sum = sum_statistics[4:]
+    absolute_sum = sum_statistics[ABS_SUM_INDEX]
+    square_sum = sum_statistics[SQUARE_SUM_INDEX]
+    fourth_moment_sum = sum_statistics[FOURTH_MOMENT_SUM_INDEX]
     metrics[prefix + "zero_count"] = zero_count
     metrics[prefix + "zero_frac"] = zero_count / finite_count
     if math.isfinite(absolute_sum):
@@ -377,69 +373,83 @@ def _derive_metrics_from_statistics(
 
 
 class TensorLoggingState:
-    """Fixed statistics buffers for one model's registered tensor names.
+    """Hold the names and buffers for one active tensor-logging run.
 
     Example:
 
-        register(module, names)       construction
-                  |
-        init(model_parts)             fixed global slot order
-                  |
-        log_stats(module, values)     update assigned slots
-                  |
-        collect()                     WORLD SUM + MAX -> scalar dict
+        register_fwd_bwd(attention, ["xq"])
+        state = init(model, device=device)
+
+        # If attention is `layers.3.attention`, init may assign:
+        #   layers.3.attention.xq.x  -> row 17
+        #   layers.3.attention.xq.dx -> row 18
+        with set_enabled(True):
+            log_fwd_bwd_stats(attention, xq=xq)
+
+        metrics = state.collect()
+        state.close()
+
+    `collect()` reduces the two shared buffers, computes scalar metrics, applies
+    the publication filter, and clears the buffers. `close()` removes the
+    temporary lookup data added by `init()`.
     """
 
     def __init__(
         self,
         model_parts: Sequence[nn.Module],
         *,
-        device: torch.device | None = None,
+        device: torch.device,
         publish_filter_regex: str = "",
-        public_prefix_by_model_part: Mapping[nn.Module, str] | None = None,
+        pp_enabled: bool = False,
     ) -> None:
-        self._metric_sources: list[MetricSource] = []
         self._publish_filter = (
             re.compile(publish_filter_regex) if publish_filter_regex else None
         )
 
-        public_prefix_by_model_part = public_prefix_by_model_part or {}
+        # Find every registered short name and its full model path.
         registered_metrics = _discover_registered_metrics(
             model_parts,
-            public_prefix_by_model_part,
+            pp_enabled=pp_enabled,
         )
-        # PP stages own different modules but must reduce one shared slot order.
-        self.public_metric_names = _gather_global_metric_names(
-            {public_name for _, _, public_name in registered_metrics}
+
+        # Give every PP rank the same row order for packed reductions.
+        self.full_metric_names = _gather_pipeline_metric_names(
+            {full_name for _, _, full_name in registered_metrics},
+            pp_enabled=pp_enabled,
         )
-        slot_index_by_public_name = {
-            public_name: slot_index
-            for slot_index, public_name in enumerate(self.public_metric_names)
+        slot_index_by_full_name = {
+            full_name: slot_index
+            for slot_index, full_name in enumerate(self.full_metric_names)
         }
 
+        # Allocate the reusable SUM/MAX buffers and CPU row-index tensors.
         self.statistic_buffers = StatisticBuffers(
-            len(self.public_metric_names),
-            device=device or _infer_device(model_parts),
+            len(self.full_metric_names),
+            device=device,
         )
-        # The backward custom op reads these constants with `.item()`; keeping
-        # them on CPU avoids a device synchronization during capture.
         self._slot_indices = torch.arange(
-            len(self.public_metric_names),
+            len(self.full_metric_names),
             dtype=torch.int64,
         )
-        for metric_source, registered_name, public_name in registered_metrics:
-            slots = metric_source.__dict__.get(_STATISTIC_BUFFER_SLOTS_ATTR)
-            if slots is None:
-                slots = {}
-                setattr(metric_source, _STATISTIC_BUFFER_SLOTS_ATTR, slots)
-                self._metric_sources.append(metric_source)
-            slot_index = slot_index_by_public_name[public_name]
-            slots[registered_name] = StatisticBufferSlot(
-                sum_statistics=self.statistic_buffers.sum_statistics[slot_index],
-                maximum=self.statistic_buffers.maxima[slot_index],
-                slot_index=self._slot_indices[slot_index],
+
+        # Build each source's short-name -> shared-buffer-row mapping locally.
+        slots_by_source: dict[MetricSource, dict[str, StatisticBufferSlot]] = {}
+        for metric_source, registered_name, full_name in registered_metrics:
+            source_slots = slots_by_source.setdefault(metric_source, {})
+            row = slot_index_by_full_name[full_name]
+            source_slots[registered_name] = StatisticBufferSlot(
+                sum_statistics=self.statistic_buffers.sum_statistics[row],
+                maximum=self.statistic_buffers.maxima[row],
+                slot_index=self._slot_indices[row],
             )
-        # Module state makes the slabs visible to compile and Graph Trainer.
+
+        # Store each source's name-to-row lookup once.
+        for metric_source, source_slots in slots_by_source.items():
+            setattr(metric_source, _STATISTIC_BUFFER_SLOTS_ATTR, source_slots)
+        self._metric_sources = list(slots_by_source)
+
+        # Register the same shared object on one model part; this does not copy
+        # the buffers or create one set per instrumented module.
         self._buffer_owner = model_parts[0]
         self._buffer_owner.add_module(
             "_tensor_logging_state",
@@ -447,7 +457,7 @@ class TensorLoggingState:
         )
         self._closed = False
 
-    def _accumulate(
+    def _accumulate_tensor_statistics(
         self,
         slot: StatisticBufferSlot,
         value: torch.Tensor,
@@ -470,17 +480,19 @@ class TensorLoggingState:
 
         return {
             metric_name: {
-                "counts": self.statistic_buffers.sum_statistics[index, :4]
+                "counts": self.statistic_buffers.sum_statistics[
+                    index, : OBSERVATION_COUNT_INDEX + 1
+                ]
                 .detach()
                 .cpu()
                 .clone(),
-                "sums": self.statistic_buffers.sum_statistics[index, 4:]
+                "sums": self.statistic_buffers.sum_statistics[index, ABS_SUM_INDEX:]
                 .detach()
                 .cpu()
                 .clone(),
                 "maximum": self.statistic_buffers.maxima[index].detach().cpu().clone(),
             }
-            for index, metric_name in enumerate(self.public_metric_names)
+            for index, metric_name in enumerate(self.full_metric_names)
         }
 
     def _reduce_buffers(self) -> ReducedBuffers:
@@ -500,14 +512,16 @@ class TensorLoggingState:
         """Derive, aggregate, and filter values from reduced buffers."""
 
         # One device-to-host copy per buffer avoids synchronizing per metric.
-        sum_statistics, maxima = (buffer.detach().cpu() for buffer in reduced_buffers)
+        sum_statistics, maxima = reduced_buffers
+        sum_statistics = sum_statistics.detach().cpu()
+        maxima = maxima.detach().cpu()
         sum_statistics_by_slot = cast(list[list[float]], sum_statistics.tolist())
         maxima_by_slot = cast(list[float], maxima.tolist())
         metrics: dict[str, int | float] = {}
-        for slot_index, public_metric_name in enumerate(self.public_metric_names):
+        for slot_index, full_metric_name in enumerate(self.full_metric_names):
             metrics.update(
                 _derive_metrics_from_statistics(
-                    public_metric_name,
+                    full_metric_name,
                     sum_statistics_by_slot[slot_index],
                     maxima_by_slot[slot_index],
                 )
@@ -522,7 +536,7 @@ class TensorLoggingState:
         return metrics
 
     def collect(self) -> dict[str, int | float]:
-        """Reduce, derive, and reset the statistics from the current window."""
+        """Reduce, derive, and reset statistics from this training step."""
 
         reduced_buffers = self._reduce_buffers()
         metrics = self._buffers_to_metrics(reduced_buffers)
@@ -545,9 +559,9 @@ class TensorLoggingState:
 def init(
     model_parts: nn.Module | Iterable[nn.Module],
     *,
-    device: torch.device | None = None,
+    device: torch.device,
     publish_filter_regex: str = "",
-    public_prefix_by_model_part: Mapping[nn.Module, str] | None = None,
+    pp_enabled: bool = False,
 ) -> TensorLoggingState:
     """Assign registered tensor names fixed buffer slots and activate logging.
 
@@ -556,9 +570,9 @@ def init(
 
     Args:
         model_parts: Model or PP model parts containing construction-time registrations.
-        device: Device for fixed statistics buffers; inferred when omitted.
+        device: Device for fixed statistics buffers.
         publish_filter_regex: Allowlist over derived public metric names.
-        public_prefix_by_model_part: Global metric path prefix for each local PP part.
+        pp_enabled: Whether model parts are pipeline chunks with global layer paths.
 
     Example:
 
@@ -577,18 +591,20 @@ def init(
         model_part_list,
         device=device,
         publish_filter_regex=publish_filter_regex,
-        public_prefix_by_model_part=public_prefix_by_model_part,
+        pp_enabled=pp_enabled,
     )
     _active_state = state
     return state
 
 
-def _state() -> TensorLoggingState:
+def _get_state() -> TensorLoggingState:
     if _active_state is None:
         raise RuntimeError("tensor logging is enabled before init()")
     return _active_state
 
 
+# No explicit tensor argument is mutated. The ordered effect below represents
+# the hidden update to the active state's shared statistic buffers.
 @torch.library.custom_op(
     "torchtitan::record_tensor_statistics_cotangent",
     mutates_args=(),
@@ -597,9 +613,16 @@ def _record_tensor_statistics_cotangent(
     value: torch.Tensor,
     slot_index: torch.Tensor,
 ) -> None:
-    """Record one cotangent without exposing mutable buffers to autograd."""
+    """Add one backward cotangent's statistics to its shared-buffer row.
 
-    state = _state()
+    Example:
+
+        # `layers.3.attention.xq.dx` was assigned row 18 during init().
+        _record_tensor_statistics_cotangent(cotangent, torch.tensor(18))
+        # Updates sum_statistics[18] and maxima[18].
+    """
+
+    state = _get_state()
     index = int(slot_index.item())
     buffers = (
         state.statistic_buffers.sum_statistics[index],
@@ -639,12 +662,16 @@ def log_stats(
 
     if _is_activation_checkpoint_recompute():
         return
-    if not should_compute_logged_values():
+    if not should_run_logging_calls():
         return
-    state = _state()
-    slots = _statistic_buffer_slots(metric_source)
+    state = _get_state()
+    slots = _get_statistic_buffer_slots(metric_source)
     for registered_name, value in named_tensors.items():
-        state._accumulate(_slot(slots, registered_name), value)
+        try:
+            slot = slots[registered_name]
+        except KeyError:
+            raise KeyError(f"unregistered tensor metric: {registered_name}") from None
+        state._accumulate_tensor_statistics(slot, value)
 
 
 def log_fwd_bwd_stats(
@@ -666,18 +693,21 @@ def log_fwd_bwd_stats(
         return
     if _is_activation_checkpoint_recompute():
         return
-    if not should_compute_logged_values():
+    if not should_run_logging_calls():
         return
 
-    state = _state()
-    slots = _statistic_buffer_slots(metric_source)
+    state = _get_state()
+    slots = _get_statistic_buffer_slots(metric_source)
     with spmd.no_typecheck():
         for registered_name, value in named_tensors.items():
-            forward_slot = _slot(slots, f"{registered_name}.x")
-            backward_slot = _slot(slots, f"{registered_name}.dx")
+            try:
+                forward_slot = slots[f"{registered_name}.x"]
+                backward_slot = slots[f"{registered_name}.dx"]
+            except KeyError as error:
+                raise KeyError(f"unregistered tensor metric: {error.args[0]}") from None
 
             # Observe forward now; the hook observes the incoming cotangent.
-            state._accumulate(forward_slot, value)
+            state._accumulate_tensor_statistics(forward_slot, value)
 
             def record_cotangent(
                 cotangent: torch.Tensor,

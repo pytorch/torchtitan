@@ -8,6 +8,18 @@ import torch
 import triton
 import triton.language as tl
 
+from . import statistics
+
+
+# Triton kernels may read module globals only when they are constexpr objects.
+NUMEL_INDEX = tl.constexpr(statistics.NUMEL_INDEX)
+NONFINITE_COUNT_INDEX = tl.constexpr(statistics.NONFINITE_COUNT_INDEX)
+ZERO_COUNT_INDEX = tl.constexpr(statistics.ZERO_COUNT_INDEX)
+OBSERVATION_COUNT_INDEX = tl.constexpr(statistics.OBSERVATION_COUNT_INDEX)
+ABS_SUM_INDEX = tl.constexpr(statistics.ABS_SUM_INDEX)
+SQUARE_SUM_INDEX = tl.constexpr(statistics.SQUARE_SUM_INDEX)
+FOURTH_MOMENT_SUM_INDEX = tl.constexpr(statistics.FOURTH_MOMENT_SUM_INDEX)
+
 
 _MAX_PROGRAMS = 1024
 _BLOCK_SIZE = 4096
@@ -107,14 +119,26 @@ def _accumulate_tensor_statistics_triton(
         absolute_maximum = tl.max(tl.where(finite, absolute, -float("inf")))
 
     # Programs summarize disjoint slices; atomics merge the two output groups.
-    tl.atomic_add(sum_statistics_ptr + 1, tl.cast(nonfinite_count, tl.float32))
-    tl.atomic_add(sum_statistics_ptr + 2, tl.cast(zero_count, tl.float32))
+    tl.atomic_add(
+        sum_statistics_ptr + NONFINITE_COUNT_INDEX,
+        tl.cast(nonfinite_count, tl.float32),
+    )
+    tl.atomic_add(
+        sum_statistics_ptr + ZERO_COUNT_INDEX,
+        tl.cast(zero_count, tl.float32),
+    )
     if tl.program_id(0) == 0:
-        tl.atomic_add(sum_statistics_ptr, tl.cast(value_count, tl.float32))
-        tl.atomic_add(sum_statistics_ptr + 3, 1.0)
-    tl.atomic_add(sum_statistics_ptr + 4, absolute_sum)
-    tl.atomic_add(sum_statistics_ptr + 5, square_sum)
-    tl.atomic_add(sum_statistics_ptr + 6, fourth_moment_sum)
+        tl.atomic_add(
+            sum_statistics_ptr + NUMEL_INDEX,
+            tl.cast(value_count, tl.float32),
+        )
+        tl.atomic_add(sum_statistics_ptr + OBSERVATION_COUNT_INDEX, 1.0)
+    tl.atomic_add(sum_statistics_ptr + ABS_SUM_INDEX, absolute_sum)
+    tl.atomic_add(sum_statistics_ptr + SQUARE_SUM_INDEX, square_sum)
+    tl.atomic_add(
+        sum_statistics_ptr + FOURTH_MOMENT_SUM_INDEX,
+        fourth_moment_sum,
+    )
     tl.atomic_max(maximum_ptr, absolute_maximum)
 
 

@@ -279,7 +279,12 @@ class TensorLoggingConfig(Configurable.Config):
     publish_filter_regex: str = (
         r"\.(?:numel|nonfinite_count|abs_mean|square_mean|abs_max)$"
     )
-    """Allowlist for published keys; `r".*abs_max$"` accepts all maxima and `r".*"` accepts all statistics."""
+    """Regex allowlist for final metric names.
+
+    Possible suffixes are `numel`, `nonfinite_count`, `observation_count`,
+    `zero_count`, `zero_frac`, `abs_sum`, `abs_mean`, `square_mean`, `rms`,
+    `kurtosis`, and `abs_max`. Filtering changes only what is published.
+    """
 
     def __post_init__(self) -> None:
         if self.freq <= 0:

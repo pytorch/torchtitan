@@ -30,6 +30,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import multimodal_context
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.module import Module
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
@@ -110,6 +111,7 @@ class Attention(GQAttention):
         # forward's actual parameter name, so renaming this drops the gather.
         bs, seqlen, _ = x_BLD.shape
         xq, xk, xv = self.qkv_linear(x_BLD)
+        tensor_logging.log_fwd_bwd_stats(self, xq=xq, xk=xk, xv=xv)
 
         # QK normalization before RoPE. Query is additionally scaled by a
         # tuned constant (k is only normalized).
@@ -117,6 +119,11 @@ class Attention(GQAttention):
             assert self.q_norm is not None and self.k_norm is not None
             xq = self.q_norm(xq) * self.scale_query_by
             xk = self.k_norm(xk)
+            tensor_logging.log_fwd_bwd_stats(
+                self,
+                xq_normed=xq,
+                xk_normed=xk,
+            )
 
         # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
         if self.use_rope:
@@ -143,6 +150,7 @@ class Attention(GQAttention):
         if self.o_gate is not None:
             output = output * torch.sigmoid(self.o_gate(x_BLD))
 
+        tensor_logging.log_fwd_bwd_stats(self, head_out=output)
         return self.wo(output)
 
 
@@ -167,6 +175,10 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         self.ffn_norm = config.ffn_norm.build()
         self.post_attention_norm = config.post_attention_norm.build()
         self.post_ffn_norm = config.post_ffn_norm.build()
+        tensor_logging.register_fwd_bwd(
+            self,
+            ["attn_stream", "attn_out", "ffn_stream", "ffn_out"],
+        )
 
     def forward(
         self,
@@ -174,11 +186,24 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = x + self.post_attention_norm(
-            self.attention(self.attention_norm(x), attention_masks, positions)
+        attn_stream = x
+        attn_out = self.post_attention_norm(
+            self.attention(self.attention_norm(attn_stream), attention_masks, positions)
         )
-        out = h + self.post_ffn_norm(self.feed_forward(self.ffn_norm(h)))
-        return out
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            attn_stream=attn_stream,
+            attn_out=attn_out,
+        )
+
+        ffn_stream = attn_stream + attn_out
+        ffn_out = self.post_ffn_norm(self.feed_forward(self.ffn_norm(ffn_stream)))
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            ffn_stream=ffn_stream,
+            ffn_out=ffn_out,
+        )
+        return ffn_stream + ffn_out
 
 
 class SoftCappedLinear(Linear):
@@ -355,6 +380,11 @@ class MuseGlimmerModel(Decoder):
         self.vision_adapter = (
             config.vision_adapter.build() if config.vision_adapter is not None else None
         )
+        if self.vision_projection is not None:
+            tensor_logging.register_fwd_bwd(
+                self,
+                ["vision_embeddings_after_projection"],
+            )
 
     def _get_vision_features(
         self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
@@ -424,6 +454,10 @@ class MuseGlimmerModel(Decoder):
         v = self.vision_projection(vision_features)
         v = self.perception_emb_norm(v)
         v = v.squeeze(0).to(h.dtype)
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            vision_embeddings_after_projection=v,
+        )
         # Scatter via integer/slice assignment rather than boolean-mask
         # index_put: the latter has no DTensor sharding rule, the former does.
         # Under TP both ``h`` and ``v`` are Replicate (the embedding output is
@@ -473,6 +507,7 @@ class MuseGlimmerModel(Decoder):
 
             if self.tok_embeddings is not None:
                 h = self.tok_embeddings(tokens)
+                tensor_logging.log_fwd_bwd_stats(self, input=h)
                 # The model owns the encoder: when padded pixel_values are passed,
                 # run encoder->adapter here to produce the features for injection.
                 # The placeholder mask is derived from tokens + special_tokens.
@@ -533,7 +568,11 @@ class MuseGlimmerModel(Decoder):
         # .requires_grad on all stage inputs, which fails on bool kwargs.
         if self._skip_lm_head:
             return h
-        return self.lm_head(h) if self.lm_head is not None else h
+        if self.lm_head is None:
+            return h
+        output = self.lm_head(h)
+        tensor_logging.log_fwd_bwd_stats(self.lm_head, output=output)
+        return output
 
     def get_attention_masks(
         self,

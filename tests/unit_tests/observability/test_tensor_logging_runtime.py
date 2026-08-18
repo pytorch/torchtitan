@@ -6,6 +6,7 @@
 
 import copy
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -16,6 +17,10 @@ from torch import nn
 from torch._dynamo.backends.common import aot_autograd
 from torch._dynamo.utils import counters
 from torch.distributed.tensor import DTensor, init_device_mesh, Replicate, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 from torch.utils.checkpoint import CheckpointPolicy
 from torchtitan.components.metrics import MetricsProcessor
 
@@ -44,7 +49,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3.model import Llama3TransformerBlock
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.observability.tensor_logging import (
-    init,
+    init as tensor_logging_init,
     log_fwd_bwd_stats,
     log_stats,
     register,
@@ -52,13 +57,17 @@ from torchtitan.observability.tensor_logging import (
     set_enabled,
 )
 from torchtitan.observability.tensor_logging.runtime import (
-    _include_tensor_logging_calls_for_capture,
-    should_compute_logged_values,
+    _wrap_fwd_bwd_for_tensor_logging_capture,
+    should_run_logging_calls,
 )
 from torchtitan.observability.tensor_logging.statistics import (
     accumulate_tensor_statistics,
     StatisticBuffers,
 )
+
+
+def init(model_parts, *, device=torch.device("cpu"), **kwargs):
+    return tensor_logging_init(model_parts, device=device, **kwargs)
 
 
 @pytest.fixture
@@ -191,9 +200,9 @@ def test_split_roots_share_logical_root_names_and_slots() -> None:
             register(self.layers[str(layer_id)], ["hidden"])
 
     parts = [PipelinePart(3), PipelinePart(7)]
-    runtime = init(parts, public_prefix_by_model_part={part: "" for part in parts})
+    runtime = init(parts, pp_enabled=True)
     try:
-        assert runtime.public_metric_names == [
+        assert runtime.full_metric_names == [
             "input",
             "layers.3.hidden",
             "layers.7.hidden",
@@ -210,22 +219,28 @@ def test_split_roots_share_logical_root_names_and_slots() -> None:
         runtime.close()
 
 
-def test_capture_context_preserves_device_cadence(monkeypatch) -> None:
+def test_capture_wrapper_preserves_device_cadence(monkeypatch) -> None:
     owner = nn.Module()
     register(owner, ["hidden"])
     runtime = init(owner)
     accumulated_names = []
-    accumulate = runtime._accumulate
+    accumulate = runtime._accumulate_tensor_statistics
 
     def track_accumulate(slot, value):
         accumulated_names.append("hidden")
         accumulate(slot, value)
 
-    monkeypatch.setattr(runtime, "_accumulate", track_accumulate)
+    monkeypatch.setattr(runtime, "_accumulate_tensor_statistics", track_accumulate)
     try:
-        with set_enabled(False), _include_tensor_logging_calls_for_capture():
-            assert should_compute_logged_values()
+
+        def record_hidden() -> torch.Tensor:
             log_stats(owner, hidden=torch.ones(4))
+            return torch.ones(())
+
+        wrapped = _wrap_fwd_bwd_for_tensor_logging_capture(record_hidden)
+        with set_enabled(False):
+            assert not should_run_logging_calls()
+            wrapped()
 
         assert accumulated_names == ["hidden"]
         assert runtime.snapshot_unreduced_statistics()["hidden"]["counts"].tolist() == [
@@ -238,11 +253,54 @@ def test_capture_context_preserves_device_cadence(monkeypatch) -> None:
         runtime.close()
 
 
+def test_nested_enable_scope_restores_python_and_device_flags() -> None:
+    owner = nn.Module()
+    runtime = init(owner)
+    try:
+        with set_enabled(False):
+            assert not should_run_logging_calls()
+            assert runtime.statistic_buffers.enabled.item() == 0
+            with set_enabled(True):
+                assert should_run_logging_calls()
+                assert runtime.statistic_buffers.enabled.item() == 1
+            assert not should_run_logging_calls()
+            assert runtime.statistic_buffers.enabled.item() == 0
+    finally:
+        runtime.close()
+
+
+def test_init_requires_the_buffer_device() -> None:
+    with pytest.raises(TypeError, match="device"):
+        cast(Any, tensor_logging_init)(nn.Module())
+
+
+def test_graph_trainer_rejects_pipeline_tensor_logging_before_setup() -> None:
+    config = SimpleNamespace(
+        metrics=SimpleNamespace(tensor_logging=SimpleNamespace(enabled=True)),
+        parallelism=SimpleNamespace(pipeline_parallel_degree=2),
+        compile=SimpleNamespace(precompile_artifact_dir=""),
+    )
+
+    with pytest.raises(NotImplementedError, match="GraphPP forward statistics"):
+        GraphTrainer(config)
+
+
+def test_graph_trainer_rejects_precompiled_tensor_logging_before_setup() -> None:
+    config = SimpleNamespace(
+        metrics=SimpleNamespace(tensor_logging=SimpleNamespace(enabled=True)),
+        parallelism=SimpleNamespace(pipeline_parallel_degree=1),
+        compile=SimpleNamespace(precompile_artifact_dir="/tmp/artifact"),
+    )
+
+    with pytest.raises(NotImplementedError, match="precompiled artifacts"):
+        GraphTrainer(config)
+
+
 def test_same_owner_duplicate_registration_raises() -> None:
     root = nn.Module()
     register(root, ["value", "value"])
     with pytest.raises(ValueError, match="registered twice: value"):
-        init([root], public_prefix_by_model_part={root: ""})
+        init([root], pp_enabled=True)
 
 
 def test_registration_after_init_is_rejected() -> None:
@@ -801,7 +859,7 @@ def test_graph_trainer_trace_remat_replay_and_cadence_are_exact(
     torch.manual_seed(0)
     module = TinyStatsModule(width=4, track_forward_calls=False).to(device)
     value = torch.randn(3, 4, device=device)
-    runtime = init(module)
+    runtime = init(module, device=torch.device(device))
     buffer_addresses = tuple(
         buffer.data_ptr() for buffer in runtime.statistic_buffers.buffers()
     )
@@ -873,7 +931,7 @@ def test_graph_trainer_production_cache_traces_once_across_cadence() -> None:
     module = TinyStatsModule(width=4, track_forward_calls=False).cuda()
     value = torch.randn(3, 4, device="cuda")
     labels = torch.randn_like(value)
-    runtime = init(module)
+    runtime = init(module, device=torch.device("cuda"))
     trainer = object.__new__(GraphTrainer)
     trainer._traced_step = None
     trainer.tensor_logging = runtime
@@ -930,7 +988,7 @@ def test_graph_trainer_cudagraph_replay_obeys_device_cadence() -> None:
     torch.manual_seed(0)
     module = TinyStatsModule(width=4, track_forward_calls=False).cuda()
     value = torch.randn(3, 4, device="cuda")
-    runtime = init(module)
+    runtime = init(module, device=torch.device("cuda"))
     try:
         traced = _trace_forward_backward_step(module, value)
         _rematerialize_every_forward_node(traced)
@@ -976,7 +1034,7 @@ def test_compile_fullgraph_forward_cadence_has_one_stable_graph() -> None:
         return graph_module.forward
 
     module = CompileForwardStatsModule(width=4).cuda()
-    runtime = init(module)
+    runtime = init(module, device=torch.device("cuda"))
     try:
         compiled = torch.compile(module, backend=record_graph, fullgraph=True)
         value = torch.randn(3, 4, device="cuda", requires_grad=True)
@@ -1008,7 +1066,7 @@ def test_compile_fullgraph_cadence_keeps_one_forward_and_backward_graph() -> Non
     torch.compiler.reset()
     counters.clear()
     module = CompileStatsModule(width=4).cuda()
-    runtime = init(module)
+    runtime = init(module, device=torch.device("cuda"))
     try:
         compiled = torch.compile(
             module,
@@ -1060,7 +1118,7 @@ def test_compile_reuses_one_graph_across_layers_and_validates_without_grad() -> 
 
     layers = nn.ModuleList([CompileStatsModule(width=4).cuda() for _ in range(10)])
     layer_sequence = tuple(layers)
-    runtime = init(layers)
+    runtime = init(layers, device=torch.device("cuda"))
     try:
         for layer in layer_sequence:
             layer.compile(backend=record_graph, fullgraph=True)
@@ -1093,7 +1151,7 @@ def test_compile_reuses_one_graph_across_layers_and_validates_without_grad() -> 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_compile_fullgraph_records_forward_and_cotangent() -> None:
     module = CompileStatsModule(width=4).cuda()
-    runtime = init(module)
+    runtime = init(module, device=torch.device("cuda"))
     try:
         compiled = torch.compile(module, fullgraph=True)
         values = tuple(
@@ -1137,7 +1195,7 @@ def test_compile_fullgraph_with_ac_records_exactly_once(policy) -> None:
             world_size=1,
         ),
     )
-    runtime = init(root)
+    runtime = init(root, device=torch.device("cuda"))
     try:
         value = torch.randn(3, 4, device="cuda", requires_grad=True)
         with set_enabled(True):
@@ -1152,3 +1210,46 @@ def test_compile_fullgraph_with_ac_records_exactly_once(policy) -> None:
     finally:
         runtime.close()
         torch.compiler.reset()
+
+
+class TestPipelineMetricReduction(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @with_comms
+    def test_unowned_pipeline_row_contributes_reduction_identities(self) -> None:
+        owner = nn.Module()
+        rank = dist.get_rank()
+        register(owner, ["value" if rank == 0 else "other"])
+        runtime = tensor_logging_init(
+            owner,
+            device=torch.device(self.device_type),
+            pp_enabled=True,
+        )
+        try:
+            if rank == 0:
+                with set_enabled(True):
+                    log_stats(
+                        owner,
+                        value=torch.tensor(
+                            [0.0, 1.0, -2.0, 3.0],
+                            device=self.device_type,
+                        ),
+                    )
+
+            assert runtime.collect() == {
+                "value.numel": 4,
+                "value.nonfinite_count": 0,
+                "value.observation_count": 1,
+                "value.zero_count": 1,
+                "value.zero_frac": 0.25,
+                "value.abs_sum": 6.0,
+                "value.abs_mean": 1.5,
+                "value.square_mean": 3.5,
+                "value.rms": 3.5**0.5,
+                "value.kurtosis": -1.0,
+                "value.abs_max": 3.0,
+            }
+        finally:
+            runtime.close()
