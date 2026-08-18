@@ -13,10 +13,6 @@ class _CP:
     cp_enabled = True
 
 
-class _NoCP:
-    cp_enabled = False
-
-
 def test_hf_builds_cp_mask_under_cp(monkeypatch):
     monkeypatch.setattr(
         HFTransformerModel, "get_attention_masks", lambda self, positions: "MASK"
@@ -29,20 +25,8 @@ def test_hf_builds_cp_mask_under_cp(monkeypatch):
     assert sharding is None  # HF inherits base None sharding
 
 
-def test_hf_builds_mask_without_cp(monkeypatch):
-    # The mask is now built in `_build_forward_inputs` for all cases (CP and
-    # non-CP), so `forward()` always receives a prebuilt mask.
-    monkeypatch.setattr(
-        HFTransformerModel, "get_attention_masks", lambda self, positions: "MASK"
-    )
-    m = object.__new__(HFTransformerModel)
-    inputs, labels, extra, sharding = m._build_forward_inputs(
-        {"input": 0, "positions": 1}, "labels", parallel_dims=_NoCP()
-    )
-    assert extra["attention_masks"] == "MASK"
-    assert sharding is None
-
-
+# The mask is now built in `_build_forward_inputs` for all cases (CP and
+# non-CP); `parallel_dims` is not read, so one CP case covers both.
 def test_hf_no_mask_when_get_attention_masks_returns_none(monkeypatch):
     monkeypatch.setattr(
         HFTransformerModel, "get_attention_masks", lambda self, positions: None

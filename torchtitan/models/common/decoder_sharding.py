@@ -69,9 +69,9 @@ def dense_sequence_parallel_placement() -> SpmdLayout:
 def decoder_input_sharding() -> dict[str, SpmdLayout]:
     """Default ``input_sharding`` for decoder-only models.
 
-    Mirrors the legacy hardcoded conventions from
-    ``full_dtensor.parallelize_inputs`` / ``annotate_input_spmd_types``:
-    tokens and positions are S(0)@DP, S(1)@CP, R@TP; labels are TP-ignored.
+    The standard decoder convention (formerly hardcoded in the SPMD backends):
+    tokens and positions are S(0)@DP, S(1)@CP, R@TP; labels are S(0)@DP,
+    S(1)@CP, I@TP.
     """
     return {
         "input": dense_activation_placement(tp=spmd.R),

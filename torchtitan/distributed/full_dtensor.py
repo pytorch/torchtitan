@@ -132,7 +132,7 @@ def parallelize_inputs(
     extra_kwargs: dict[str, Any],
     input_sharding: dict[str, SpmdLayout],
 ) -> tuple[DTensor, DTensor, dict[str, Any]]:
-    """Wrap named tensors as DTensors using per-name layouts from input_sharding.
+    """Wrap named tensors as DTensors using per-name layouts from ``input_sharding``.
 
     Inputs are assumed already sharded; this only re-wraps via ``from_local``.
     A tensor without an entry in ``input_sharding`` is fully replicated; a

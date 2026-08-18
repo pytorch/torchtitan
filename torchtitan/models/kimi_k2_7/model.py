@@ -13,10 +13,7 @@ from typing import Any
 
 import spmd_types as spmd
 import torch
-from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
@@ -26,10 +23,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-from .sharding import (
-    annotate_multimodal_input_spmd_types,
-    set_kimi_k2_5_sharding_config,
-)
+from .sharding import multimodal_input_sharding, set_kimi_k2_5_sharding_config
 from .vision_encoder import KimiK25VisionEncoder
 
 
@@ -85,31 +79,21 @@ class KimiK25Model(DeepSeekV3Model):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
 
-    def preprocess_inputs(
+    def _build_forward_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
         *,
         parallel_dims: ParallelDims,
-        device: torch.device,
-        parallelism: ParallelismConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
-        inputs, labels, extra_kwargs, local_ntokens = super().preprocess_inputs(
-            input_dict,
-            labels,
-            parallel_dims=parallel_dims,
-            device=device,
-            parallelism=parallelism,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
+    ]:
+        inputs, labels, extra_kwargs, input_sharding = super()._build_forward_inputs(
+            input_dict, labels, parallel_dims=parallel_dims
         )
-        if parallelism.spmd_backend == "spmd_types":
-            with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
-                annotate_multimodal_input_spmd_types(
-                    pixel_values=extra_kwargs.get("pixel_values"),
-                    grid_thw=extra_kwargs.get("grid_thw"),
-                    pixel_values_videos=extra_kwargs.get("pixel_values_videos"),
-                    grid_thw_videos=extra_kwargs.get("grid_thw_videos"),
-                )
-        return inputs, labels, extra_kwargs, local_ntokens
+        if input_sharding is not None:
+            input_sharding = {**input_sharding, **multimodal_input_sharding()}
+        return inputs, labels, extra_kwargs, input_sharding
 
     def _prepare_multimodal_embeds(
         self,
@@ -201,7 +185,7 @@ class KimiK25Model(DeepSeekV3Model):
         Returns:
             (batch, seq_len, vocab_size) logits.
         """
-        with self.multimodal_context():
+        with multimodal_context():
             if self.tok_embeddings is not None:
                 x = self._prepare_multimodal_embeds(
                     tokens,
