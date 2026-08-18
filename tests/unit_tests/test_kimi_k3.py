@@ -21,13 +21,20 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 
-from torchtitan.models.kimi_k3 import (
-    _kimi_k3_config,
-    _vision_encoder_config,
-    parallelize_kimi_k3,
-)
-from torchtitan.models.kimi_k3.model import KimiK3Model, KimiKDAKernel
-from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
+# FLA is a per-model dependency (kimi_k3/requirements.txt) imported at module
+# scope for the KDA kernel, so skip rather than fail collection without it.
+try:
+    from torchtitan.models.kimi_k3 import (
+        _kimi_k3_config,
+        _vision_encoder_config,
+        parallelize_kimi_k3,
+    )
+    from torchtitan.models.kimi_k3.model import KimiK3Model, KimiKDAKernel
+    from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
+except ModuleNotFoundError as exc:
+    raise unittest.SkipTest(
+        f"Kimi K3 optional dependency unavailable: {exc.name}"
+    ) from exc
 
 
 def _small_model_config(
@@ -52,7 +59,7 @@ def _small_model_config(
         qk_nope_head_dim=16,
         qk_rope_head_dim=16,
         v_head_dim=16,
-        kda_head_dim=16,
+        kda_head_dim=32,
         conv_kernel_size=3,
         dense_hidden_dim=128,
         latent_dim=32,
@@ -139,12 +146,25 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
-    def test_flex_attention_mask(self):
-        config = _small_model_config()
+    def test_multimodal_forward(self):
+        # All-MLA so the forward runs without the CUDA-only KDA kernel; the
+        # KDA path is covered by the FSDP parity test below.
+        config = _small_model_config(full_attention_layers={0, 1})
         model = config.build()
-        positions = torch.arange(4, dtype=torch.int32).unsqueeze(0)
+        model.init_states()
+        positions = torch.arange(6, dtype=torch.int32).unsqueeze(0)
         attention_masks = model.get_attention_masks(positions)
         self.assertIsInstance(attention_masks, BlockMask)
+        with torch.no_grad():
+            logits = model(
+                torch.tensor([[1, 7, 2, 3, 4, 5]]),
+                pixel_values=torch.randn(1, 4, 3 * 2 * 2),
+                grid_thw=torch.tensor([[1, 2, 2]]),
+                special_tokens={"image_id": 7},
+                positions=positions,
+                attention_masks=attention_masks,
+            )
+        self.assertEqual(logits.shape, (1, 6, config.vocab_size))
 
     def test_update_from_config_propagates_moe_force_load_balance(self):
         from torchtitan.config import DebugConfig
@@ -265,10 +285,8 @@ class TestKimiK3FSDP(DTensorTestBase):
     @with_comms
     def test_fsdp_matches_non_distributed_forward_backward(self):
         torch.manual_seed(3)
-        config = _small_model_config(
-            attn_res_block_size=2,
-            full_attention_layers={0, 1},
-        )
+        # Layer 0 is KDA, layer 1 is MLA, so one run covers both attentions.
+        config = _small_model_config(attn_res_block_size=2)
         with torch.device("meta"):
             model = config.build()
         model.to_empty(device=self.device_type)

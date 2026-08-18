@@ -44,14 +44,20 @@ describe the released model.
 
 ## Numerical Parity
 
-End-to-end KL divergence against the Hugging Face implementation (multimodal
-inputs): **1.5370e-6**, with **100% top-1 and top-5 match**.
+`scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` reduces the released
+Hugging Face config to the debug model and compares both implementations on the
+same text+image prompt, each side doing its own preprocessing. Float32 results:
 
-Vision parity: pixel preprocessing max difference **1.192e-7**; projected vision
-features cosine similarity **1.000000** and max difference **2.669e-3**.
+| Stage | Result |
+|-------|--------|
+| Pixel preprocessing | max difference `1.192e-7` |
+| Projected vision features | cosine `1.000000`, max difference `3.152e-3` |
+| MoE routing | `3936 / 3936` expert choices match |
+| Last-token logits | KL `1.8215e-8`, top-1 match, top-5 `5 / 5` |
 
-Test scripts:
+Routed experts always run through the bf16 grouped GEMM, so the float32 logit
+difference is bounded by bf16 rather than by float32.
 
-- `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face vs.
-  TorchTitan comparison
-- `tests/unit_tests/test_kimi_k3.py` -- KDA and FSDP2 correctness
+`tests/unit_tests/test_kimi_k3.py` covers the KDA kernel against a recurrent
+reference, the HuggingFace state-dict round trip, a multimodal forward, and
+FSDP2 forward/backward parity against non-distributed execution.
