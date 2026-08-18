@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -197,6 +198,8 @@ class BaseCheckpointManager(Configurable, ABC):
     save_future: Future | None
     folder: str
     keep_latest_k: int
+    purge_thread: threading.Thread | None
+    purge_queue: queue.Queue[str | None]
     _storage: CheckpointStorage
 
     # A disabled manager returns early from ``__init__`` without setting up any
@@ -276,6 +279,121 @@ class BaseCheckpointManager(Configurable, ABC):
             and dist.get_rank() == 0
             and self._storage.isdir(self.folder)
         )
+
+    @abstractmethod
+    def _parse_step(self, filename: str) -> tuple[int, bool] | None:
+        """Read ``filename`` as a checkpoint directory name.
+
+        Returns the step number and whether the directory is a temporary one
+        that a backend renames into place once a save completes, or ``None``
+        when the name is not one this manager writes. Names a manager does not
+        recognize are left alone rather than deleted.
+        """
+
+    @abstractmethod
+    def _is_valid_checkpoint(self, checkpoint_id: str) -> bool:
+        """Whether ``checkpoint_id`` holds a checkpoint this manager can load.
+
+        A directory whose save was interrupted exists but has no metadata, so
+        resuming from it would fail; this is what keeps it out of
+        ``_find_load_step``.
+        """
+
+    def _find_load_step(self, folder: str = "") -> int:
+        """The highest step in ``folder`` that can actually be loaded.
+
+        Args:
+            folder: Directory to scan. Defaults to ``self.folder``.
+
+        Returns:
+            The step number, or -1 when the folder holds no loadable checkpoint.
+
+        Note:
+            This is not remote friendly: it issues one listdir plus a metadata
+            probe per step folder, each a network round trip on remote (fsspec)
+            storage instead of a single batched listing. Acceptable for now
+            since it only runs once at load time.
+        """
+        folder = folder or self.folder
+        if not self._storage.isdir(folder):
+            return -1
+
+        valid_steps = []
+        for filename in self._storage.listdir(folder):
+            parsed = self._parse_step(filename)
+            if parsed is None:
+                continue
+            step, is_temporary = parsed
+            # A temporary directory may already hold its metadata and so look
+            # complete, but the id we would rebuild from its step -- the
+            # published name -- does not exist yet.
+            if is_temporary:
+                continue
+            if self._is_valid_checkpoint(filesystem.join(folder, filename)):
+                valid_steps.append(step)
+        return max(valid_steps) if valid_steps else -1
+
+    def _purge_stale_checkpoints(self, *, save_pending: bool = False) -> None:
+        """Delete the checkpoints that ``keep_latest_k`` no longer covers.
+
+        Args:
+            save_pending: Whether the caller is about to issue a save that is
+                not on disk yet. A manager that purges *before* saving passes
+                True; one that purges *after* dispatching leaves it False.
+
+        That single fact settles both of the things this method has to get
+        right, because both follow from whether a save is in flight right now.
+
+        Slot accounting. With ``save_pending`` the imminent checkpoint has no
+        directory yet, so a slot is held for it and only k-1 existing ones stay
+        -- the same accounting the config assumes where it rejects
+        ``keep_latest_k == 1`` because "the last one may be in the process of
+        being saved". Without it, the new checkpoint is already on disk and
+        counted, so all k slots go to what is there.
+
+        What counts as occupying a slot. A directory with no metadata cannot be
+        resumed from, so letting it hold a slot would evict one that can. With
+        ``save_pending`` nothing is being written, so every incomplete directory
+        is abandoned and is skipped. Without it the newest directory is the
+        in-flight save -- legitimately incomplete, and about to be the best
+        checkpoint there is -- so completeness is not required.
+        """
+        if not self._should_purge():
+            return
+
+        durable: list[tuple[int, str]] = []
+        abandoned: list[str] = []
+        for filename in self._storage.listdir(self.folder):
+            parsed = self._parse_step(filename)
+            if parsed is None:
+                continue
+            step, is_temporary = parsed
+            path = filesystem.join(self.folder, filename)
+            if is_temporary:
+                abandoned.append(path)
+            elif save_pending and not self._is_valid_checkpoint(path):
+                abandoned.append(path)
+            else:
+                durable.append((step, path))
+
+        durable.sort()
+        retain = self.keep_latest_k - (1 if save_pending else 0)
+        for _, path in durable[:-retain]:
+            assert self.purge_thread is not None
+            self.purge_queue.put(path)
+
+        # Deleted here rather than queued. The reason these are safe to remove
+        # is that no save is in flight, and that is only true at this instant:
+        # a queued delete could land after the next attempt at the same step has
+        # recreated the very directory it names.
+        for path in abandoned:
+            logger.info("Checkpointer is deleting the abandoned %s.", path)
+            try:
+                self._storage.remove(path)
+            except Exception as error:
+                logger.warning(
+                    "Checkpointer failed to delete %s: %s. Skipping.", path, error
+                )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
