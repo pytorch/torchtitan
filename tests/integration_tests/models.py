@@ -10,24 +10,17 @@ import dataclasses
 from tests.integration_tests import OverrideDefinitions
 
 
-def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Use ``backend`` for every variant, or return an unsupported test unchanged."""
-    if backend == "spmd_types" and any(
-        "--module muse_glimmer" in arg for variant in t.override_args for arg in variant
-    ):
-        return t
-
-    test_name = f"{t.test_name}_{backend}"
+def _configure_spmd_backend_and_typecheck(
+    t: OverrideDefinitions,
+) -> OverrideDefinitions:
+    """Configure the SPMD backend and enable typechecking where supported."""
+    # Compile, PP, and explicit AC modes are not compatible with SPMD
+    # typechecking yet; keep those as backend-only coverage.
     new_args = []
     for variant in t.override_args:
-        variant = tuple(
-            arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
-        )
-        prefix = [f"--parallelism.spmd_backend {backend}"]
+        prefix = []
         suffix = []
-        # Compile, PP, and explicit AC modes are not compatible with SPMD
-        # typechecking yet; keep those as backend-only coverage.
-        if backend == "spmd_types" and not any(
+        if not any(
             token in arg
             for arg in variant
             for token in (
@@ -43,7 +36,6 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
     return dataclasses.replace(
         t,
         override_args=tuple(new_args),
-        test_name=test_name,
     )
 
 
@@ -271,17 +263,14 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     # FSDP+TP+EP+PP test into one supported FSDP+EP path. Kimi
                     # DistMuon rejects TP because it produces _StridedShard
                     # storage. PP support follows in the next stack change.
-                    # Do not enable --debug.spmd_typechecking: multimodal pixel
-                    # tensors from the dataloader are not SPMD-annotated yet.
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--parallelism.spmd_backend spmd_types",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--training.steps 1",
                 ],
             ],
-            "Kimi K2.7 DistMuon spmd_types FSDP+EP",
-            "kimi_k2_5_muon_fsdp+ep_spmd_types",
+            "Kimi K2.7 DistMuon FSDP+EP",
+            "kimi_k2_5_muon_fsdp+ep",
             ngpu=4,
         ),
         # Integration Test Cases for Muse Glimmer
@@ -300,4 +289,4 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
     ]
 
-    return [_enable_spmd_backend(t, "spmd_types") for t in model_tests]
+    return [_configure_spmd_backend_and_typecheck(t) for t in model_tests]

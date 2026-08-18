@@ -102,6 +102,7 @@ def _common_setup(config):
         pp=pp,
         ep=parallelism.expert_parallel_degree,
         world_size=world_size,
+        spmd_backend=parallelism.spmd_backend,
     )
     parallel_dims.build_mesh()
 

@@ -36,7 +36,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.utils import set_spmd_backend
+from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
@@ -50,13 +50,14 @@ N_HEADS = 8
 
 
 @contextlib.contextmanager
-def spmd_types_backend():
-    """dist-GEMM only serves this backend; the sharding setup enforces it."""
-    set_spmd_backend("spmd_types")
+def use_spmd_backend(backend: str):
+    """Temporarily select an SPMD backend without leaking test state."""
+    previous_backend = get_spmd_backend()
+    set_spmd_backend(backend)
     try:
         yield
     finally:
-        set_spmd_backend("default")
+        set_spmd_backend(previous_backend)
 
 
 class TestDistGemmAttentionConfig(unittest.TestCase):
@@ -121,9 +122,11 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
         attn = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
         attn = attn.model.layers[0].attention
-        # the default backend is active here, which is exactly what must be refused
-        with self.assertRaisesRegex(ValueError, "requires parallelism.spmd_backend"):
-            set_gqa_attention_sharding(attn, enable_sp=True)
+        with use_spmd_backend("partial_dtensor"):
+            with self.assertRaisesRegex(
+                ValueError, "requires parallelism.spmd_backend"
+            ):
+                set_gqa_attention_sharding(attn, enable_sp=True)
 
     def test_sequence_parallel_disabled_is_rejected(self):
         """The fused GEMMs *are* the SP collectives, so SP off has nothing to fuse
@@ -132,7 +135,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
         attn = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
         attn = attn.model.layers[0].attention
-        with spmd_types_backend():
+        with use_spmd_backend("spmd_types"):
             with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
                 set_gqa_attention_sharding(attn, enable_sp=False)
 
@@ -170,7 +173,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
             .model.layers[0]
             .attention
         )
-        with spmd_types_backend():
+        with use_spmd_backend("spmd_types"):
             set_gqa_attention_sharding(stock, enable_sp=True)
             set_gqa_attention_sharding(fused, enable_sp=True)
 
@@ -225,11 +228,10 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
 
         parallel_dims = self._parallel_dims()
         attn_cfg = llama3_debugmodel_dist_gemm().model_spec.model.layers[0].attention
-        with spmd_types_backend():
+        with use_spmd_backend("spmd_types"):
             set_gqa_attention_sharding(attn_cfg, enable_sp=True)
-
-        attn = attn_cfg.build().to(self.device_type)
-        attn.parallelize(parallel_dims)
+            attn = attn_cfg.build().to(self.device_type)
+            attn.parallelize(parallel_dims)
 
         self.assertIsNone(attn._sharding_config)
         self.assertIsNone(attn.wo._sharding_config.out_src_shardings)
@@ -253,7 +255,6 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
     @with_comms
     def test_matches_stock_feed_forward(self):
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-        from torchtitan.distributed.utils import set_spmd_backend
         from torchtitan.models.common.config_utils import make_ffn_config
 
         R = self.world_size
@@ -304,13 +305,10 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
 
         # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
-        set_spmd_backend("spmd_types")
-        try:
+        with use_spmd_backend("spmd_types"):
             with set_current_spmd_mesh(mesh):
                 x_shard = x.chunk(R, 1)[self.rank].contiguous()
                 out_shard = fused(x_shard)
-        finally:
-            set_spmd_backend("default")
 
         # fused returns this rank's sequence shard of the full-sequence result
         torch.testing.assert_close(
