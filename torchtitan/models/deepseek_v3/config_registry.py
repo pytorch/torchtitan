@@ -19,6 +19,7 @@ from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.trainer import Trainer
 
@@ -120,6 +121,48 @@ def deepseek_v3_debugmodel_mxfp8_grouped_mlp() -> Trainer.Config:
     config = deepseek_v3_debugmodel_mxfp8()
     config.override.imports.append(
         "torchtitan.overrides.mxfp8_grouped_mlp.mxfp8_grouped_experts"
+    )
+    config.training.disable_cuda_graphs = True
+    config.debug.moe_force_load_balance = True
+    return config
+
+
+def _set_routed_experts_pad_multiple(config: Trainer.Config, value: int) -> None:
+    """Retarget the (already converter-swapped) TorchAO token dispatchers.
+
+    ``model_registry`` applies converters eagerly, so the dispatcher configs
+    already exist in the tree; editing ``pad_multiple`` here is equivalent to
+    converting with that value.
+    """
+    nodes = list(config.traverse(RoutedExperts.Config))
+    assert nodes, "no RoutedExperts.Config in the model tree"
+    for _fqn, cfg, _parent, _attr in nodes:
+        cfg.token_dispatcher.pad_multiple = value
+
+
+def deepseek_v3_debugmodel_mxfp8_p256() -> Trainer.Config:
+    # Baseline (unfused MXFP8) arm for the cudnn grouped-MLP A/B pair: same as
+    # deepseek_v3_debugmodel_mxfp8 but with per-expert groups padded to 256 —
+    # the cuDNN FE kernels' FIX_PAD_SIZE. Both arms of any parity run must
+    # share this dispatcher config; the unfused path accepts any multiple of
+    # its own 128 requirement.
+    config = deepseek_v3_debugmodel_mxfp8()
+    _set_routed_experts_pad_multiple(config, 256)
+    return config
+
+
+def deepseek_v3_debugmodel_mxfp8_cudnn_mlp() -> Trainer.Config:
+    # Fused arm of deepseek_v3_debugmodel_mxfp8_p256: the override swaps the
+    # converter-produced MXFP8 inner experts for the cudnn-frontend fused
+    # composite (torchtitan/overrides/cudnn_grouped_mlp.py) when its gates
+    # pass; the converter keeps the dense MXFP8Linear swap and the
+    # pad_multiple=256 token dispatcher. disable_cuda_graphs is required by
+    # the TorchAOTokenDispatcher under EP>1; moe_force_load_balance keeps the
+    # per-rank routed row count fixed so loss-parity runs against the unfused
+    # arm compare a constant R (and avoid cudnn FE JIT churn per new R).
+    config = deepseek_v3_debugmodel_mxfp8_p256()
+    config.override.imports.append(
+        "torchtitan.overrides.cudnn_grouped_mlp.cudnn_mxfp8_grouped_experts"
     )
     config.training.disable_cuda_graphs = True
     config.debug.moe_force_load_balance = True
@@ -263,6 +306,25 @@ def deepseek_v3_16b_mxfp8_grouped_mlp() -> Trainer.Config:
     config = deepseek_v3_16b_mxfp8()
     config.override.imports.append(
         "torchtitan.overrides.mxfp8_grouped_mlp.mxfp8_grouped_experts"
+    )
+    return config
+
+
+def deepseek_v3_16b_mxfp8_p256() -> Trainer.Config:
+    # Baseline (unfused MXFP8) 16B arm for the cudnn grouped-MLP A/B pair:
+    # deepseek_v3_16b_mxfp8 with the dispatcher padded to 256 (cuDNN FE
+    # FIX_PAD_SIZE). Arms of a parity run must share this dispatcher config.
+    config = deepseek_v3_16b_mxfp8()
+    _set_routed_experts_pad_multiple(config, 256)
+    return config
+
+
+def deepseek_v3_16b_mxfp8_cudnn_mlp() -> Trainer.Config:
+    # Fused arm of deepseek_v3_16b_mxfp8_p256; differs ONLY in the override
+    # import.
+    config = deepseek_v3_16b_mxfp8_p256()
+    config.override.imports.append(
+        "torchtitan.overrides.cudnn_grouped_mlp.cudnn_mxfp8_grouped_experts"
     )
     return config
 
