@@ -196,6 +196,7 @@ def muse_glimmer_debugmodel_mm_fsdp2_tp2() -> Trainer.Config:
     )
 
     config = muse_glimmer_debugmodel_mm()
+    _use_spmd_types(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.training.disable_cuda_graphs = True

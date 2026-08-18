@@ -37,6 +37,12 @@ def llama3_debugmodel_compile() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_compile_sac_op() -> Trainer.Config:
+    config = llama3_debugmodel_compile()
+    config.activation_checkpoint = SelectiveAC.Config()
+    return config
+
+
 def llama3_debugmodel_tp2() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=True)

@@ -28,6 +28,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="1d_compile",
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_compile_sac_op],
+            test_descr="1D compile with selective op AC",
+            test_name="1d_compile_sac_op",
+        ),
+        OverrideDefinitions(
             configs=[
                 recipes.llama3_debugmodel_tp2,
                 recipes.llama3_debugmodel_ce_loss_tp2,
