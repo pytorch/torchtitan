@@ -63,7 +63,6 @@ class DAPOLoss(BaseLoss):
         generator_logprobs: torch.Tensor,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
-        global_response_tokens: float | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the per-token clip-higher surrogate loss.
 
@@ -75,8 +74,6 @@ class DAPOLoss(BaseLoss):
             advantages: [B, L] per-token advantages (0.0 for prompt/padding).
             global_valid_tokens: total response tokens with finite generator logprobs
                 across all microbatches and DP ranks; the loss denominator.
-            global_response_tokens: total response tokens before filtering non-finite
-                generator logprobs; the entropy and NaN-fraction denominator.
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
@@ -87,10 +84,8 @@ class DAPOLoss(BaseLoss):
         )
         # A non-finite generator logprob (notably under cudagraph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner
-        # than nan->0, which trains it as if it were on-policy). `response_mask` keeps
-        # the original tokens for response-level metrics.
-        response_mask = loss_mask
-        effective_loss_mask = response_mask & torch.isfinite(generator_logprobs)
+        # than nan->0, which trains it as if it were on-policy).
+        effective_loss_mask = loss_mask & torch.isfinite(generator_logprobs)
         raw_log_ratio = trainer_logprobs - generator_logprobs
         masked_log_ratio = torch.where(
             effective_loss_mask, raw_log_ratio, torch.zeros_like(raw_log_ratio)
@@ -106,11 +101,6 @@ class DAPOLoss(BaseLoss):
         masked_loss = token_loss * effective_loss_mask
         loss_denominator = (
             max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
-        )
-        response_denominator = (
-            max(global_response_tokens, 1)
-            if global_response_tokens is not None
-            else loss_denominator
         )
         loss = masked_loss.sum() / loss_denominator
 
@@ -129,12 +119,6 @@ class DAPOLoss(BaseLoss):
                     * effective_loss_mask
                 ).sum()
                 / loss_denominator,
-                # Fraction of response tokens whose generator logprob is nan (dropped
-                # above; tracked vs the original response_mask).
-                "loss/generator_logprob_nan_frac": (
-                    (~torch.isfinite(generator_logprobs)).float() * response_mask
-                ).sum()
-                / response_denominator,
                 # Mean per-token log-ratio (log p_trainer - log q_generator) over
                 # sampled tokens. This is the k1 Monte-Carlo estimate of -KL(q || p).
                 "bit_wise/logprob_diff/mean": diff_for_metrics.float().sum()
@@ -144,9 +128,9 @@ class DAPOLoss(BaseLoss):
                 ).sum()
                 / loss_denominator,
                 "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
-                # Mean trainer-policy entropy H(p) over response tokens.
-                "trainer/entropy/mean": (token_entropy * response_mask).sum()
-                / response_denominator,
+                # Mean trainer-policy entropy H(p) over tokens used by the loss.
+                "trainer/entropy/mean": (token_entropy * effective_loss_mask).sum()
+                / loss_denominator,
             }
 
         return loss, metrics

@@ -357,7 +357,6 @@ class PolicyTrainer(Actor, Configurable):
         self,
         training_data: list[TrainingMicrobatch],
         num_global_valid_tokens: int,
-        num_global_response_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
@@ -366,8 +365,6 @@ class PolicyTrainer(Actor, Configurable):
                 picks training_data[self.dp_rank].
             num_global_valid_tokens: Total response tokens with finite generator
                 logprobs across all DP ranks and microbatches for this step.
-            num_global_response_tokens: Total response tokens before filtering
-                non-finite generator logprobs.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -412,7 +409,6 @@ class PolicyTrainer(Actor, Configurable):
                     generator_logprobs=generator_logprobs,
                     advantages=advantages,
                     loss_mask=loss_mask,
-                    global_response_tokens=num_global_response_tokens,
                 )
 
             with sl.log_trace_span("model_backward"):

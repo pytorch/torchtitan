@@ -1087,9 +1087,7 @@ class Controller(Configurable):
                     microbatch_metrics = [
                         self._get_rank_0_value(
                             await self.trainer.forward_backward.call(
-                                microbatch,
-                                packed.num_global_valid_tokens,
-                                packed.num_global_response_tokens,
+                                microbatch, packed.num_global_valid_tokens
                             )
                         )
                         for microbatch in packed.microbatches
